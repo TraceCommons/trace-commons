@@ -1,0 +1,10 @@
+[workspace]
+members = ["crates/tracedao-server"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/zmanian/tracedao-server"
+
