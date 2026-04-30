@@ -8,8 +8,8 @@ The hosted TraceDAO server still supports tenant-scoped JSON pilot state under `
 
 This repository owns the production-storage surface:
 
-- `migrations/V1__trace_commons_schema.sql` and `migrations/libsql/V1__trace_commons_schema.sql`, consolidated as this repo's first landing schema for the full Trace Commons relational control plane.
-- `crates/tracedao-server/src/trace_corpus_storage.rs` and `TraceCorpusStore` implementations for PostgreSQL and libSQL.
+- `migrations/V1__trace_commons_schema.sql`, consolidated as this repo's first landing schema for the full Trace Commons relational control plane.
+- `crates/tracedao-server/src/trace_corpus_storage.rs` and the PostgreSQL `TraceCorpusStore` implementation.
 - `crates/tracedao-server/src/trace_artifact_store.rs` and the encrypted local service object-store provider.
 - Optional ingest-service DB dual-write behind `TRACE_COMMONS_DB_DUAL_WRITE=true`.
 - Optional DB-backed tenant policy reads behind `TRACE_COMMONS_DB_TENANT_POLICY_READS=true`.
@@ -43,7 +43,7 @@ The production migration should not replace the local queue/capture semantics. C
 
 ## Storage Boundaries
 
-Use the relational database for metadata, authorization decisions, workflow state, hashes, object references, indexes, and append-only ledgers. Do not store full trace bodies, large benchmark payloads, vector embeddings, or export blobs directly in relational rows unless the deployment is a small libSQL-only single-node pilot.
+Use the relational database for metadata, authorization decisions, workflow state, hashes, object references, indexes, and append-only ledgers. Do not store full trace bodies, large benchmark payloads, vector embeddings, or export blobs directly in relational rows.
 
 Use encrypted object storage for:
 
@@ -73,11 +73,9 @@ This first production-storage slice is now owned by the TraceDAO server repo. It
 TraceDAO server migrations start from this repository's own history:
 
 - PostgreSQL storage lands as `migrations/V1__trace_commons_schema.sql`.
-- libSQL storage lands as `migrations/libsql/V1__trace_commons_schema.sql`.
 - Ironclaw no longer lands Trace Commons relational migrations; its retained
   `migrations/V25__wasm_fuel_limit_bump.sql` belongs to the client/runtime repo.
-- Future server migrations should use the next server-local version number and
-  keep PostgreSQL/libSQL schema changes paired.
+- Future server migrations should use the next server-local version number.
 
 ### PostgreSQL DDL Sketch
 
@@ -414,334 +412,9 @@ CREATE POLICY trace_submissions_tenant_isolation ON trace_submissions
 
 The migration intentionally does not use `FORCE ROW LEVEL SECURITY`, so table owners still bypass policies for safe migrations, backfills, and repairs while the runtime moves to transaction-local tenant context. Before production cutover, every PG-backed Trace Commons store path should set `SELECT set_config('tracedao.trace_tenant_id', $1, true)` inside the operation transaction, and worker roles should get explicit policy variants, not blanket bypass.
 
-### libSQL DDL Sketch
-
-```sql
-CREATE TABLE IF NOT EXISTS trace_tenants (
-    tenant_id TEXT PRIMARY KEY,
-    display_name TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('active', 'suspended', 'retention_only', 'deleted')),
-    data_residency_region TEXT,
-    default_retention_policy_id TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-
-CREATE TABLE IF NOT EXISTS trace_tenant_policies (
-    tenant_id TEXT PRIMARY KEY REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
-    policy_version TEXT NOT NULL,
-    allowed_consent_scopes TEXT NOT NULL DEFAULT '[]',
-    allowed_uses TEXT NOT NULL DEFAULT '[]',
-    updated_by_principal_ref TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-
-CREATE TABLE IF NOT EXISTS trace_access_grants (
-    grant_id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
-    principal_ref TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('contributor', 'reviewer', 'admin', 'export_worker', 'retention_worker', 'revocation_worker', 'vector_worker', 'benchmark_worker', 'process_eval_worker')),
-    allowed_scopes TEXT NOT NULL DEFAULT '[]',
-    allowed_uses TEXT NOT NULL DEFAULT '[]',
-    expires_at TEXT,
-    revoked_at TEXT,
-    created_by TEXT,
-    revoked_by TEXT,
-    reason TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    UNIQUE (tenant_id, principal_ref, role)
-);
-CREATE INDEX IF NOT EXISTS idx_trace_access_grants_principal ON trace_access_grants(tenant_id, principal_ref);
-
-CREATE TABLE IF NOT EXISTS trace_submissions (
-    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
-    submission_id TEXT NOT NULL,
-    trace_id TEXT NOT NULL,
-    auth_principal_ref TEXT NOT NULL,
-    contributor_pseudonym TEXT,
-    submitted_tenant_scope_ref TEXT,
-    schema_version TEXT NOT NULL,
-    consent_policy_version TEXT NOT NULL,
-    consent_scopes TEXT NOT NULL,
-    allowed_uses TEXT NOT NULL,
-    retention_policy_id TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('received', 'accepted', 'quarantined', 'rejected', 'revoked', 'expired', 'purged')),
-    privacy_risk TEXT NOT NULL CHECK (privacy_risk IN ('low', 'medium', 'high')),
-    redaction_pipeline_version TEXT NOT NULL,
-    redaction_hash TEXT NOT NULL,
-    canonical_summary_hash TEXT,
-    submission_score REAL,
-    credit_points_pending TEXT,
-    credit_points_final TEXT,
-    received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    reviewed_at TEXT,
-    review_assigned_to_principal_ref TEXT,
-    review_assigned_at TEXT,
-    review_lease_expires_at TEXT,
-    review_due_at TEXT,
-    revoked_at TEXT,
-    expires_at TEXT,
-    purged_at TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    PRIMARY KEY (tenant_id, submission_id)
-);
-CREATE INDEX IF NOT EXISTS idx_trace_submissions_status_received ON trace_submissions(tenant_id, status, received_at DESC);
-CREATE INDEX IF NOT EXISTS idx_trace_submissions_summary_hash ON trace_submissions(tenant_id, canonical_summary_hash);
-CREATE INDEX IF NOT EXISTS idx_trace_submissions_expires ON trace_submissions(tenant_id, expires_at);
-CREATE INDEX IF NOT EXISTS idx_trace_submissions_contributor ON trace_submissions(tenant_id, contributor_pseudonym);
-CREATE INDEX IF NOT EXISTS idx_trace_submissions_review_lease ON trace_submissions(tenant_id, status, review_lease_expires_at, received_at DESC);
-
-CREATE TABLE IF NOT EXISTS trace_object_refs (
-    object_ref_id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    submission_id TEXT NOT NULL,
-    artifact_kind TEXT NOT NULL CHECK (artifact_kind IN ('submitted_envelope', 'rescrubbed_envelope', 'review_snapshot', 'benchmark_artifact', 'export_artifact', 'worker_intermediate')),
-    object_store TEXT NOT NULL,
-    object_key TEXT NOT NULL,
-    content_sha256 TEXT NOT NULL,
-    encryption_key_ref TEXT NOT NULL,
-    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
-    compression TEXT,
-    created_by_job_id TEXT,
-    valid_from TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    invalidated_at TEXT,
-    deleted_at TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE,
-    UNIQUE (tenant_id, object_ref_id),
-    UNIQUE (tenant_id, submission_id, object_ref_id),
-    UNIQUE (tenant_id, object_store, object_key)
-);
-CREATE INDEX IF NOT EXISTS idx_trace_object_refs_submission ON trace_object_refs(tenant_id, submission_id, artifact_kind);
-
-CREATE TABLE IF NOT EXISTS trace_derived_records (
-    derived_id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    submission_id TEXT NOT NULL,
-    trace_id TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('current', 'invalidated', 'superseded', 'revoked', 'expired')),
-    worker_kind TEXT NOT NULL CHECK (worker_kind IN ('server_rescrub', 'summary', 'duplicate_precheck', 'embedding', 'ranking', 'benchmark_conversion', 'process_evaluation')),
-    worker_version TEXT NOT NULL,
-    input_object_ref_id TEXT,
-    input_hash TEXT NOT NULL,
-    output_object_ref_id TEXT,
-    canonical_summary TEXT,
-    canonical_summary_hash TEXT,
-    task_success TEXT,
-    privacy_risk TEXT CHECK (privacy_risk IS NULL OR privacy_risk IN ('low', 'medium', 'high')),
-    event_count INTEGER,
-    tool_sequence TEXT NOT NULL DEFAULT '[]',
-    tool_categories TEXT NOT NULL DEFAULT '[]',
-    coverage_tags TEXT NOT NULL DEFAULT '[]',
-    duplicate_score REAL,
-    novelty_score REAL,
-    cluster_id TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE,
-    FOREIGN KEY (tenant_id, submission_id, input_object_ref_id) REFERENCES trace_object_refs(tenant_id, submission_id, object_ref_id),
-    FOREIGN KEY (tenant_id, submission_id, output_object_ref_id) REFERENCES trace_object_refs(tenant_id, submission_id, object_ref_id),
-    UNIQUE (tenant_id, submission_id, derived_id)
-);
-CREATE INDEX IF NOT EXISTS idx_trace_derived_current ON trace_derived_records(tenant_id, submission_id, status, worker_kind);
-CREATE INDEX IF NOT EXISTS idx_trace_derived_summary_hash ON trace_derived_records(tenant_id, canonical_summary_hash);
-
-CREATE TABLE IF NOT EXISTS trace_vector_entries (
-    vector_entry_id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    submission_id TEXT NOT NULL,
-    derived_id TEXT NOT NULL,
-    vector_store TEXT NOT NULL,
-    embedding_model TEXT NOT NULL,
-    embedding_dimension INTEGER NOT NULL CHECK (embedding_dimension > 0),
-    embedding_version TEXT NOT NULL,
-    source_projection TEXT NOT NULL CHECK (source_projection IN ('canonical_summary', 'redacted_messages', 'redacted_tool_sequence')),
-    source_hash TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('active', 'invalidated', 'deleted')),
-    nearest_trace_ids TEXT NOT NULL DEFAULT '[]',
-    cluster_id TEXT,
-    duplicate_score REAL,
-    novelty_score REAL,
-    indexed_at TEXT,
-    invalidated_at TEXT,
-    deleted_at TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE,
-    FOREIGN KEY (tenant_id, submission_id, derived_id) REFERENCES trace_derived_records(tenant_id, submission_id, derived_id) ON DELETE CASCADE,
-    UNIQUE (tenant_id, submission_id, vector_entry_id)
-);
-CREATE INDEX IF NOT EXISTS idx_trace_vector_entries_source ON trace_vector_entries(tenant_id, submission_id, status);
-
-CREATE TABLE IF NOT EXISTS trace_audit_events (
-    audit_event_id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
-    actor_principal_ref TEXT NOT NULL,
-    actor_role TEXT NOT NULL,
-    job_id TEXT,
-    submission_id TEXT,
-    object_ref_id TEXT,
-    export_manifest_id TEXT,
-    action TEXT NOT NULL CHECK (action IN ('submit', 'read', 'review', 'credit_mutate', 'revoke', 'export', 'retain', 'purge', 'vector_index', 'benchmark_convert', 'process_evaluate')),
-    reason TEXT,
-    request_id TEXT,
-    decision_inputs_hash TEXT,
-    metadata_kind TEXT NOT NULL DEFAULT 'empty' CHECK (metadata_kind IN ('empty', 'submission', 'review_decision', 'export', 'maintenance')),
-    metadata TEXT NOT NULL DEFAULT '{}',
-    previous_event_hash TEXT,
-    event_hash TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    FOREIGN KEY (tenant_id, submission_id, object_ref_id) REFERENCES trace_object_refs(tenant_id, submission_id, object_ref_id)
-);
-CREATE INDEX IF NOT EXISTS idx_trace_audit_events_target ON trace_audit_events(tenant_id, submission_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_trace_audit_events_action ON trace_audit_events(tenant_id, action, created_at DESC);
-
-CREATE TABLE IF NOT EXISTS trace_credit_ledger (
-    credit_event_id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    submission_id TEXT NOT NULL,
-    trace_id TEXT NOT NULL,
-    credit_account_ref TEXT NOT NULL,
-    event_type TEXT NOT NULL CHECK (event_type IN ('accepted', 'privacy_rejection', 'duplicate_rejection', 'benchmark_conversion', 'regression_catch', 'training_utility', 'reviewer_bonus', 'abuse_penalty')),
-    points_delta TEXT NOT NULL,
-    reason TEXT NOT NULL,
-    external_ref TEXT,
-    actor_principal_ref TEXT NOT NULL,
-    actor_role TEXT NOT NULL,
-    settlement_state TEXT NOT NULL CHECK (settlement_state IN ('pending', 'final', 'reversed')),
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_trace_credit_ledger_account ON trace_credit_ledger(tenant_id, credit_account_ref, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_trace_credit_ledger_submission ON trace_credit_ledger(tenant_id, submission_id);
-
-CREATE TABLE IF NOT EXISTS trace_export_manifests (
-    export_manifest_id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
-    requested_by_principal_ref TEXT NOT NULL,
-    purpose TEXT NOT NULL CHECK (purpose IN ('replay_dataset', 'benchmark_eval', 'ranking_training', 'model_training', 'analytics')),
-    consent_scope_filter TEXT NOT NULL DEFAULT '[]',
-    allowed_use_filter TEXT NOT NULL DEFAULT '[]',
-    review_state_filter TEXT NOT NULL DEFAULT '[]',
-    privacy_risk_filter TEXT NOT NULL DEFAULT '[]',
-    status TEXT NOT NULL CHECK (status IN ('planned', 'running', 'complete', 'failed', 'revoked_invalid', 'expired_invalid')),
-    item_count INTEGER NOT NULL DEFAULT 0,
-    manifest_object_ref_id TEXT,
-    result_object_ref_id TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    completed_at TEXT,
-    invalidated_at TEXT,
-    FOREIGN KEY (tenant_id, manifest_object_ref_id) REFERENCES trace_object_refs(tenant_id, object_ref_id),
-    FOREIGN KEY (tenant_id, result_object_ref_id) REFERENCES trace_object_refs(tenant_id, object_ref_id),
-    UNIQUE (tenant_id, export_manifest_id)
-);
-
-CREATE TABLE IF NOT EXISTS trace_export_manifest_items (
-    export_manifest_id TEXT NOT NULL REFERENCES trace_export_manifests(export_manifest_id) ON DELETE CASCADE,
-    tenant_id TEXT NOT NULL,
-    submission_id TEXT NOT NULL,
-    derived_id TEXT,
-    object_ref_id TEXT,
-    vector_entry_id TEXT,
-    source_status_at_export TEXT NOT NULL,
-    source_hash_at_export TEXT NOT NULL,
-    revoked_after_export_at TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    PRIMARY KEY (export_manifest_id, tenant_id, submission_id),
-    FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE,
-    FOREIGN KEY (tenant_id, submission_id, derived_id) REFERENCES trace_derived_records(tenant_id, submission_id, derived_id),
-    FOREIGN KEY (tenant_id, submission_id, object_ref_id) REFERENCES trace_object_refs(tenant_id, submission_id, object_ref_id),
-    FOREIGN KEY (tenant_id, submission_id, vector_entry_id) REFERENCES trace_vector_entries(tenant_id, submission_id, vector_entry_id)
-);
-
-CREATE TABLE IF NOT EXISTS trace_benchmark_artifacts (
-    benchmark_artifact_id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    submission_id TEXT NOT NULL,
-    derived_id TEXT,
-    benchmark_kind TEXT NOT NULL CHECK (benchmark_kind IN ('replay', 'process_eval', 'regression_case', 'ranking_pair')),
-    artifact_version TEXT NOT NULL,
-    object_ref_id TEXT NOT NULL,
-    requirements_hash TEXT,
-    status TEXT NOT NULL CHECK (status IN ('candidate', 'approved', 'published', 'invalidated', 'deleted')),
-    created_by_job_id TEXT,
-    published_export_manifest_id TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    invalidated_at TEXT,
-    deleted_at TEXT,
-    FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE,
-    FOREIGN KEY (tenant_id, submission_id, derived_id) REFERENCES trace_derived_records(tenant_id, submission_id, derived_id),
-    FOREIGN KEY (tenant_id, submission_id, object_ref_id) REFERENCES trace_object_refs(tenant_id, submission_id, object_ref_id),
-    FOREIGN KEY (tenant_id, published_export_manifest_id) REFERENCES trace_export_manifests(tenant_id, export_manifest_id)
-);
-
-CREATE TABLE IF NOT EXISTS trace_tombstones (
-    tombstone_id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
-    submission_id TEXT NOT NULL,
-    trace_id TEXT,
-    redaction_hash TEXT,
-    canonical_summary_hash TEXT,
-    reason TEXT NOT NULL,
-    first_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    effective_at TEXT NOT NULL,
-    retain_until TEXT,
-    created_by_principal_ref TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    UNIQUE (tenant_id, submission_id)
-);
-CREATE INDEX IF NOT EXISTS idx_trace_tombstones_hashes ON trace_tombstones(tenant_id, redaction_hash, canonical_summary_hash);
-
-CREATE TABLE IF NOT EXISTS trace_retention_jobs (
-    tenant_id TEXT NOT NULL,
-    retention_job_id TEXT NOT NULL,
-    purpose TEXT NOT NULL,
-    dry_run INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    requested_by_principal_ref TEXT NOT NULL,
-    requested_by_role TEXT NOT NULL,
-    purge_expired_before TEXT,
-    prune_export_cache INTEGER NOT NULL DEFAULT 1,
-    max_export_age_hours INTEGER,
-    audit_event_id TEXT,
-    action_counts TEXT NOT NULL DEFAULT '{}',
-    selected_revoked_count INTEGER NOT NULL DEFAULT 0,
-    selected_expired_count INTEGER NOT NULL DEFAULT 0,
-    started_at TEXT,
-    completed_at TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    PRIMARY KEY (tenant_id, retention_job_id),
-    FOREIGN KEY (tenant_id) REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_trace_retention_jobs_created ON trace_retention_jobs(tenant_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_trace_retention_jobs_status ON trace_retention_jobs(tenant_id, status, updated_at DESC);
-
-CREATE TABLE IF NOT EXISTS trace_retention_job_items (
-    tenant_id TEXT NOT NULL,
-    retention_job_id TEXT NOT NULL,
-    submission_id TEXT NOT NULL,
-    action TEXT NOT NULL,
-    status TEXT NOT NULL,
-    reason TEXT NOT NULL,
-    action_counts TEXT NOT NULL DEFAULT '{}',
-    verified_at TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    PRIMARY KEY (tenant_id, retention_job_id, submission_id, action),
-    FOREIGN KEY (tenant_id, retention_job_id) REFERENCES trace_retention_jobs(tenant_id, retention_job_id) ON DELETE CASCADE,
-    FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_trace_retention_job_items_submission ON trace_retention_job_items(tenant_id, submission_id, created_at DESC);
-```
-
 ### Rust Store Contract Shape
 
-The Rust contract now lives in `crates/tracedao-server/src/trace_corpus_storage.rs`. `TraceCorpusStore` is part of the server crate's `Database` facade because both PostgreSQL and libSQL implementations now live in this repository. `crates/tracedao-server/src/bin/tracedao-ingest.rs` still serves file-backed pilot responses by default, but it can mirror submit/review/credit/revoke mutations into the configured DB for dark-launch verification, including reasoned privileged revocation tombstones and revoke audit rows, and uses DB-backed reviewer reads for durable review leases. Claim-next and claim-batch stay reviewer queue ergonomics slices: they do not broaden review decision authority, and they only claim available quarantined tenant rows before lease/audit persistence.
+The Rust contract now lives in `crates/tracedao-server/src/trace_corpus_storage.rs`. `TraceCorpusStore` is part of the server crate's `Database` facade and is backed by PostgreSQL in this repository. `crates/tracedao-server/src/bin/tracedao-ingest.rs` still serves file-backed pilot responses by default, but it can mirror submit/review/credit/revoke mutations into the configured DB for dark-launch verification, including reasoned privileged revocation tombstones and revoke audit rows, and uses DB-backed reviewer reads for durable review leases. Claim-next and claim-batch stay reviewer queue ergonomics slices: they do not broaden review decision authority, and they only claim available quarantined tenant rows before lease/audit persistence.
 
 The first implementation-facing shape should stay close to:
 
@@ -938,7 +611,7 @@ non-revoked source submission.
 |--------|---------|
 | `vector_entry_id` | Stable id shared with vector DB. |
 | `tenant_id`, `submission_id`, `derived_id` | Source linkage. |
-| `vector_store` | Backend alias: pgvector, libSQL vector index, Qdrant, etc. |
+| `vector_store` | Backend alias: pgvector, PostgreSQL vector index, Qdrant, etc. |
 | `embedding_model`, `embedding_dimension`, `embedding_version` | Rebuild metadata. |
 | `source_projection` | `canonical_summary`, `redacted_messages`, `redacted_tool_sequence`. |
 | `source_hash` | Hash of embedded redacted projection. |
@@ -1017,7 +690,7 @@ Do not mutate historical ledger rows. Materialized credit totals can be cached s
 
 Every export item needs an audit event or an audit batch event with a cryptographic item list hash. The pilot replay, benchmark, and ranker export paths already write a deterministic source-list hash into both the exported artifact/manifest and the mirrored audit `decision_inputs_hash`; benchmark and ranker exports also persist file-backed provenance manifests, and replay dataset exports promote that hash plus item-level source snapshots into durable DB manifests.
 
-The consolidated Trace Commons migration implements the compact `trace_export_manifests` control row for replay dataset exports in both PostgreSQL and libSQL. It stores tenant id, export manifest id, artifact kind, purpose, audit event id, source submission ids, source-list hash, item count, generation time, and invalidation/deletion timestamps. It also includes `trace_export_manifest_items` rows for each replay export source, durable `trace_retention_jobs` and `trace_retention_job_items` rows, durable review lease fields on `trace_submissions`, revocation-propagation rows, tenant-access grants, and export access grant/job rows. Replay, benchmark conversion, ranker-candidate, and ranker-pair export call sites now mirror one-shot grants and running/complete job state into these tables, with required DB mirror mode failing closed if the durable job row cannot be started or completed.
+The consolidated Trace Commons migration implements the compact `trace_export_manifests` control row for replay dataset exports in PostgreSQL. It stores tenant id, export manifest id, artifact kind, purpose, audit event id, source submission ids, source-list hash, item count, generation time, and invalidation/deletion timestamps. It also includes `trace_export_manifest_items` rows for each replay export source, durable `trace_retention_jobs` and `trace_retention_job_items` rows, durable review lease fields on `trace_submissions`, revocation-propagation rows, tenant-access grants, and export access grant/job rows. Replay, benchmark conversion, ranker-candidate, and ranker-pair export call sites now mirror one-shot grants and running/complete job state into these tables, with required DB mirror mode failing closed if the durable job row cannot be started or completed.
 
 ### Benchmark Artifacts
 
@@ -1113,23 +786,21 @@ Retention jobs must be resumable and must verify that tenant, policy, consent, a
 | `item_count`, `last_error` | Result count or bounded failure reason. |
 | `metadata_json` | Safe job metadata only. |
 
-Export grants and jobs must stay tenant-scoped and idempotent. PostgreSQL enables RLS on both tables; libSQL enforces tenant isolation through every `TraceCorpusStore` query and targeted store tests.
+Export grants and jobs must stay tenant-scoped and idempotent. PostgreSQL RLS is the production tenant-isolation boundary for these tables.
 
-## PostgreSQL and libSQL Parity Notes
+## PostgreSQL Operational Notes
 
-PostgreSQL should be the production control plane for multi-tenant service deployments. Use native UUIDs, enums or checked text, JSONB for small metadata projections, GIN indexes for tags/scopes, row-level security for tenant isolation, and transactional migration support. If vectors stay in Postgres, use pgvector for approved redacted embeddings; otherwise keep vector metadata in Postgres and use an external vector store for payload/search.
+PostgreSQL is the TraceDAO server control plane for multi-tenant service deployments. Use native UUIDs, enums or checked text, JSONB for small metadata projections, GIN indexes for tags/scopes, row-level security for tenant isolation, and transactional migration support. If vectors stay in Postgres, use pgvector for approved redacted embeddings; otherwise keep vector metadata in Postgres and use an external vector store for payload/search.
 
-libSQL remains useful for local development, tests, and small deployments. It can mirror the same logical schema with text UUIDs, checked text enums, JSON text, integer booleans, FTS5 where needed, and `libsql_vector_idx` only for local vector workflows. Because libSQL does not provide PostgreSQL-style row-level security, tenant isolation must be enforced by repository methods, query builders, and integration tests that prove every call site supplies `tenant_id`.
+PostgreSQL rules:
 
-Parity rules:
-
-- Keep table names, logical columns, status values, and state transitions identical.
-- Store timestamps as timestamptz in PostgreSQL and RFC3339 UTC text in libSQL.
-- Use numeric/decimal for credit in PostgreSQL; use integer minor units or text decimal in libSQL to avoid float drift in ledgers.
-- Treat arrays as join tables when query correctness matters across both backends. JSON arrays are acceptable only for non-authoritative display metadata.
-- Put redacted envelope bodies and large artifacts in object storage for both backends. libSQL should not become the object store except in tests.
-- Keep object refs and vector metadata in DB; keep object payloads in encrypted object storage; keep vector payloads in vector DB or backend-specific vector index.
-- Implement DB trait operations at the server crate facade first, then add PostgreSQL and libSQL implementations together.
+- Keep table names, logical columns, status values, and state transitions stable across migrations.
+- Store timestamps as timestamptz.
+- Use numeric/decimal for credit to avoid float drift in ledgers.
+- Treat arrays as join tables when query correctness matters. JSON arrays are acceptable only for non-authoritative display metadata.
+- Put redacted envelope bodies and large artifacts in encrypted object storage.
+- Keep object refs and vector metadata in DB; keep object payloads in encrypted object storage; keep vector payloads in vector DB or a dedicated PostgreSQL vector index.
+- Implement DB trait operations at the server crate facade first, then extend `PgBackend`.
 
 ## Rollout Plan
 
@@ -1248,9 +919,7 @@ Promotion-gate smoke checks:
 Implementation checklist for the first real storage migration:
 
 - Add one PostgreSQL Trace Commons DDL migration in this server repo. Completed as `migrations/V1__trace_commons_schema.sql`.
-- Add the paired libSQL schema migration in this server repo. Completed as `migrations/libsql/V1__trace_commons_schema.sql`.
-- Keep future PostgreSQL/libSQL migration versions paired within the server repo.
-- Keep `TraceCorpusStore` inside the server crate's `Database` facade. Completed with both `PgBackend` and `LibSqlBackend` implementations in this repository.
+- Keep `TraceCorpusStore` inside the server crate's `Database` facade. Completed with the `PgBackend` implementation in this repository.
 - Keep DB writes behind a dark-launch or dual-write flag until parity checks pass. Completed with `TRACE_COMMONS_DB_DUAL_WRITE=true`.
 - After parity checks pass, promote critical writes with `TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES=true` so DB mirror failures fail closed instead of creating file-only accepted submissions, credit events, export provenance, or audit/content-read rows.
 - Keep DB reads behind surface-specific rollout flags until parity checks pass. Contributor credit/status reads are gated by `TRACE_COMMONS_DB_CONTRIBUTOR_READS=true`, reviewer metadata reads by `TRACE_COMMONS_DB_REVIEWER_READS=true`, replay export selection by `TRACE_COMMONS_DB_REPLAY_EXPORT_READS=true`, and audit event reads by `TRACE_COMMONS_DB_AUDIT_READS=true`.
@@ -1262,14 +931,13 @@ Implementation checklist for the first real storage migration:
 Test checklist for the same branch:
 
 - PostgreSQL migration test applies all migrations on an empty database and on a pre-Trace-Commons database.
-- libSQL migration test applies the server-owned libSQL migration on an empty in-memory database and on a database initialized before the Trace Commons migration.
-- Backend parity tests insert the same logical submission, object ref, audit event, credit event, derived record, vector entry, export manifest, export manifest item, and tombstone through the server store trait for both backends. libSQL coverage exists; PostgreSQL integration coverage still needs an available test database.
-- Tenant-isolation tests seed duplicate `submission_id`, `trace_id`, `canonical_summary_hash`, and contributor pseudonym under two tenants and prove all public store methods filter by tenant. Implemented for the libSQL store contract, PostgreSQL store facade, and ingest DB mirror path, including rejection coverage for export manifest items and derived records that try to link cross-tenant object, derived, or vector refs.
+- PostgreSQL integration tests insert logical submissions, object refs, audit events, credit events, derived records, vector entries, export manifests, export manifest items, policies, grants, jobs, and tombstones through the server store trait when an available test database is configured.
+- Tenant-isolation tests seed duplicate `submission_id`, `trace_id`, `canonical_summary_hash`, and contributor pseudonym under two tenants and prove all public store methods filter by tenant. Implemented for the PostgreSQL store facade and ingest DB mirror path, including rejection coverage for export manifest items and derived records that try to link cross-tenant object, derived, or vector refs.
 - Handler-level tests drive the future ingest/review/revoke/export callers, not only helper predicates, and assert each mocked DB/object/vector call receives `tenant_id`, `actor_principal_ref`, and `submission_id`. Implemented for submit/review/credit/revoke dual-write, DB-backed export selection, and maintenance-triggered vector metadata indexing.
 - Revocation and retention propagation tests prove tombstone-first ordering and invalidation of submissions, derived rows, vectors, benchmark artifacts, exports, and credit settlement. Current coverage verifies DB tombstone/status plus object-ref, derived-row, vector-entry, replay export manifest/item invalidation, exact delayed-credit settlement reversal for newly discovered and already file-marked revocations, service-local submitted/review/vector/benchmark/ranker object-payload deletion, and retention-expired DB submission/object/derived/export invalidation; broader benchmark settlement tests remain future work.
 - Retention tests run dry-run, policy-change, legal-hold, retry, and resumed-job paths before any destructive object/vector deletion path is enabled.
 - Export tests prove revoked, quarantined, rejected, expired, and out-of-scope submissions cannot enter new manifests, and existing manifests are invalidated after source revocation.
-- Security tests verify PostgreSQL RLS with `tracedao.trace_tenant_id` and libSQL query scoping with same ids across tenants.
+- Security tests verify PostgreSQL RLS with `tracedao.trace_tenant_id` across tenants.
 - Migration rollback tests prove DB-first reads can be disabled without deleting rows and that audit/tombstone rows remain append-only.
 
 ## Rollback
@@ -1310,9 +978,9 @@ PostgreSQL policy model:
 - Give service-worker roles narrow policies for only their job type.
 - Keep admin cross-tenant access behind explicit system-scope methods that always emit audit events.
 
-libSQL policy model:
+Repository guardrails:
 
-- No implicit RLS. Every repository method takes `tenant_id` and includes it in predicates.
+- RLS is the primary tenant boundary, but every repository method still takes `tenant_id` and includes it in predicates.
 - Avoid generic "get by id" helpers for tenant-scoped tables.
 - Integration tests must seed same UUIDs across two tenants and prove cross-tenant reads, writes, review decisions, revocations, exports, and credit queries cannot cross the tenant boundary.
 
@@ -1325,7 +993,7 @@ Tenant isolation tests:
 - Same `submission_id`, `trace_id`, `canonical_summary_hash`, and contributor pseudonym can exist in two tenants without collisions.
 - DB-backed queries include tenant predicates at the caller level, not just in low-level helpers.
 - PostgreSQL RLS tests run with `tracedao.trace_tenant_id` set to tenant A and confirm tenant B rows are invisible.
-- libSQL integration tests use a shared database with two tenants and assert every public repository method scopes by tenant.
+- PostgreSQL integration tests use a shared database with two tenants and assert public repository methods scope by tenant and RLS context.
 
 Revocation propagation tests:
 
@@ -1345,7 +1013,7 @@ Caller-level regression tests should drive the actual handlers or store facades 
 When this plan becomes code:
 
 - Add server DB facade methods before backend-specific implementations.
-- Implement PostgreSQL and libSQL migrations together.
+- Implement PostgreSQL migrations in the server repo.
 - Keep all new writes behind feature flags until dual-write verification exists.
 - Update `FEATURE_PARITY.md` only if user-visible Trace Commons status changes.
 - Update `docs/internal/trace-commons.md` if endpoint behavior, threat model, or MVP caveats change.

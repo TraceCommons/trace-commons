@@ -1,12 +1,10 @@
-#![cfg(feature = "postgres")]
-
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use secrecy::{ExposeSecret, SecretString};
 use tokio::time::{Duration, sleep};
 use tokio_postgres::NoTls;
-use tracedao_server::config::{DatabaseBackend, DatabaseConfig, SslMode};
+use tracedao_server::config::{DatabaseConfig, SslMode};
 use tracedao_server::db::{Database, TraceCorpusRlsDiagnostics, postgres::PgBackend};
 use tracedao_server::trace_corpus_storage::{
     TenantScopedTraceObjectRef, TraceAuditAction, TraceAuditEventWrite, TraceAuditSafeMetadata,
@@ -32,13 +30,9 @@ fn postgres_test_config() -> Option<DatabaseConfig> {
         .ok()?;
 
     Some(DatabaseConfig {
-        backend: DatabaseBackend::Postgres,
         url: SecretString::from(url),
         pool_size: 4,
         ssl_mode: SslMode::Prefer,
-        libsql_path: None,
-        libsql_url: None,
-        libsql_auth_token: None,
     })
 }
 

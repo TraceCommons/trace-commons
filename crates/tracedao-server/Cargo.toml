@@ -6,11 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[features]
-default = ["libsql"]
-libsql = ["dep:libsql"]
-postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
-
 [dependencies]
 aes-gcm = "0.10"
 anyhow = "1"
@@ -18,14 +13,12 @@ async-trait = "0.1"
 axum = "0.8"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
-deadpool-postgres = { version = "0.14", optional = true }
+deadpool-postgres = "0.14"
 dotenvy = "0.15"
 dirs = "6"
 hex = "0.4"
 hkdf = "0.12"
-ironclaw = { path = "../../../..", default-features = false }
 jsonwebtoken = "9"
-libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 secrecy = { version = "0.10", features = ["serde"] }
@@ -34,7 +27,8 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
-tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"], optional = true }
+tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
+tracedao-protocol = { path = "../tracedao-protocol" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }

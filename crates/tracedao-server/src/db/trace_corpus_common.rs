@@ -27,12 +27,6 @@ pub(crate) fn enum_from_storage<T: DeserializeOwned>(
     })
 }
 
-pub(crate) fn parse_uuid(value: &str, field: &str) -> Result<Uuid, DatabaseError> {
-    value.parse::<Uuid>().map_err(|e| {
-        DatabaseError::Serialization(format!("invalid trace uuid in {field}: {value:?}: {e}"))
-    })
-}
-
 pub(crate) fn audit_action_for_status(status: TraceCorpusStatus) -> TraceAuditAction {
     match status {
         TraceCorpusStatus::Accepted

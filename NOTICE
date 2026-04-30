@@ -1,0 +1,7 @@
+TraceDAO Server
+
+This repository was initially extracted from Ironclaw's `gecko-pass` worktree.
+See `imports/ironclaw-server/SOURCE.md` for the source snapshot and extraction
+mapping.
+
+TraceDAO Server is distributed under MIT OR Apache-2.0.
