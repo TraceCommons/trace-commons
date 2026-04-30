@@ -10,13 +10,10 @@ object storage, and the production database schema.
 ## Current Extraction Status
 
 This is a bridge extraction from Ironclaw's `gecko-pass` worktree. The hosted
-server now owns its database and object-storage surface locally: the
-`TraceCorpusStore` trait, PostgreSQL/libSQL backends, server migrations,
-RLS diagnostics, and encrypted artifact-store provider code live in this repo.
-
-The remaining temporary Ironclaw path dependency is only for the shared
-contribution envelope/protocol compatibility surface while those DTOs move into
-a small independent TraceCommons protocol crate.
+server now owns its database, object-storage, and shared protocol surface
+locally: the `TraceCorpusStore` trait, PostgreSQL backend, server migrations,
+RLS diagnostics, encrypted artifact-store provider code, contribution envelope
+DTOs, status DTOs, and deterministic redaction helpers live in this repo.
 
 ## Binaries
 
@@ -26,6 +23,7 @@ a small independent TraceCommons protocol crate.
 
 ## Repository Layout
 
+- `crates/trace-commons-protocol`: shared TraceCommons protocol DTOs and redaction helpers.
 - `crates/trace-commons-server`: Rust server binaries.
 - `migrations`: TraceCommons server database schema, renumbered as this repo's
   first migration.
@@ -38,9 +36,9 @@ From this repository:
 
 ```bash
 cargo check -p trace-commons-server --bins
-cargo test -p trace-commons-server --test trace_corpus_storage_contract --test trace_corpus_db_store
+cargo test -p trace-commons-server --test trace_corpus_storage_contract --test trace_corpus_pg_store
 ```
 
-The bridge dependency points at the adjacent Ironclaw checkout for protocol
-compatibility only. Once protocol types are extracted, this repo should build
-without an Ironclaw path dependency.
+This repo now builds without an Ironclaw path dependency. Ironclaw should depend
+on the shared `trace-commons-protocol` crate when the client-side integration is
+rewired.
