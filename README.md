@@ -9,11 +9,14 @@ object storage, and the production database schema.
 
 ## Current Extraction Status
 
-This is a bridge extraction from Ironclaw's `gecko-pass` worktree. The server
-binaries are present here and temporarily depend on the local Ironclaw crate for
-shared protocol, storage, database, and artifact-store types. That keeps the
-first split honest and buildable locally while the next pass moves shared
-TraceCommons protocol types into a small independent crate.
+This is a bridge extraction from Ironclaw's `gecko-pass` worktree. The hosted
+server now owns its database and object-storage surface locally: the
+`TraceCorpusStore` trait, PostgreSQL/libSQL backends, server migrations,
+RLS diagnostics, and encrypted artifact-store provider code live in this repo.
+
+The remaining temporary Ironclaw path dependency is only for the shared
+contribution envelope/protocol compatibility surface while those DTOs move into
+a small independent TraceCommons protocol crate.
 
 ## Binaries
 
@@ -35,8 +38,9 @@ From this repository:
 
 ```bash
 cargo check -p trace-commons-server --bins
+cargo test -p trace-commons-server --test trace_corpus_storage_contract --test trace_corpus_db_store
 ```
 
-The bridge dependency points at the adjacent Ironclaw checkout. Once protocol
-types are extracted, this repo should build without an Ironclaw path dependency.
-
+The bridge dependency points at the adjacent Ironclaw checkout for protocol
+compatibility only. Once protocol types are extracted, this repo should build
+without an Ironclaw path dependency.

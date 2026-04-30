@@ -14,13 +14,6 @@ use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router, extract::Path as AxumPath, extract::State};
 use chrono::{DateTime, Duration, Utc};
-use ironclaw::config::{DatabaseBackend, DatabaseConfig};
-use ironclaw::db::{Database, TraceCorpusRlsDiagnostics};
-use ironclaw::secrets::SecretsCrypto;
-use ironclaw::trace_artifact_store::{
-    EncryptedTraceArtifactReceipt, LocalEncryptedTraceArtifactStore, TraceArtifactKind,
-    TraceArtifactStore,
-};
 use ironclaw::trace_contribution::{
     ConsentScope, EmbeddingAnalysisMetadata, ProcessEvalRating, ProcessEvaluationLabels,
     ResidualPiiRisk, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse, TraceContributionEnvelope,
@@ -28,7 +21,21 @@ use ironclaw::trace_contribution::{
     TraceValueScorecard, apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
     rescrub_trace_envelope, retention_policy_for_allowed_use, retention_policy_for_trace,
 };
-use ironclaw::trace_corpus_storage::{
+use jsonwebtoken::errors::ErrorKind as JwtErrorKind;
+use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use secrecy::{ExposeSecret, SecretString};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tokio::net::TcpListener;
+use trace_commons_server::config::{DatabaseBackend, DatabaseConfig};
+use trace_commons_server::db::{Database, TraceCorpusRlsDiagnostics};
+use trace_commons_server::secrets::SecretsCrypto;
+use trace_commons_server::trace_artifact_store::{
+    EncryptedTraceArtifactReceipt, LocalEncryptedTraceArtifactStore, TraceArtifactKind,
+    TraceArtifactStore,
+};
+use trace_commons_server::trace_corpus_storage::{
     TraceArtifactInvalidationCounts as StorageTraceArtifactInvalidationCounts,
     TraceAuditAction as StorageTraceAuditAction,
     TraceAuditEventRecord as StorageTraceAuditEventRecord,
@@ -87,13 +94,6 @@ use ironclaw::trace_corpus_storage::{
     TraceVectorEntryWrite as StorageTraceVectorEntryWrite,
     TraceWorkerKind as StorageTraceWorkerKind,
 };
-use jsonwebtoken::errors::ErrorKind as JwtErrorKind;
-use jsonwebtoken::{Algorithm, DecodingKey, Validation};
-use secrecy::{ExposeSecret, SecretString};
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use tokio::net::TcpListener;
 use uuid::Uuid;
 
 const DEFAULT_BIND: &str = "127.0.0.1:3907";
@@ -735,7 +735,7 @@ impl TraceArtifactStore for DisabledRemoteTraceArtifactStore {
         &self,
         _expected_tenant_storage_ref: &str,
         _receipt: &EncryptedTraceArtifactReceipt,
-    ) -> anyhow::Result<ironclaw::trace_artifact_store::EncryptedTraceArtifact> {
+    ) -> anyhow::Result<trace_commons_server::trace_artifact_store::EncryptedTraceArtifact> {
         Err(self.disabled_error())
     }
 
@@ -1694,7 +1694,7 @@ async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<Arc<dyn Data
         DatabaseBackend::LibSql => {
             let path = std::env::var("LIBSQL_PATH")
                 .map(PathBuf::from)
-                .unwrap_or_else(|_| ironclaw::config::default_libsql_path());
+                .unwrap_or_else(|_| trace_commons_server::config::default_libsql_path());
             let path = path.to_string_lossy().into_owned();
             let turso_url = std::env::var("LIBSQL_URL").ok();
             let turso_token = std::env::var("LIBSQL_AUTH_TOKEN").ok();
@@ -1711,7 +1711,7 @@ async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<Arc<dyn Data
             DatabaseConfig::from_postgres_url(&url, pool_size)
         }
     };
-    let db = ironclaw::db::connect_from_config(&config)
+    let db = trace_commons_server::db::connect_from_config(&config)
         .await
         .context("failed to connect Trace Commons DB dual-write mirror")?;
     tracing::info!(backend = %backend, "Trace Commons DB dual-write mirror enabled");
@@ -11458,11 +11458,13 @@ async fn mirror_submission_to_db_with_options(
         status: storage_derived_status(record.status),
         worker_kind: StorageTraceWorkerKind::DuplicatePrecheck,
         worker_version: "trace_commons_ingest_v1".to_string(),
-        input_object_ref: Some(ironclaw::trace_corpus_storage::TenantScopedTraceObjectRef {
-            tenant_id: record.tenant_id.clone(),
-            submission_id: record.submission_id,
-            object_ref_id,
-        }),
+        input_object_ref: Some(
+            trace_commons_server::trace_corpus_storage::TenantScopedTraceObjectRef {
+                tenant_id: record.tenant_id.clone(),
+                submission_id: record.submission_id,
+                object_ref_id,
+            },
+        ),
         input_hash: content_sha256,
         output_object_ref: None,
         canonical_summary: Some(derived_record.canonical_summary.clone()),
@@ -12987,18 +12989,20 @@ async fn mirror_process_evaluation_to_db(
         worker_kind: StorageTraceWorkerKind::ProcessEvaluation,
         worker_version: process_evaluation_worker_version,
         input_object_ref: input_object_ref_id.map(|object_ref_id| {
-            ironclaw::trace_corpus_storage::TenantScopedTraceObjectRef {
+            trace_commons_server::trace_corpus_storage::TenantScopedTraceObjectRef {
                 tenant_id: record.tenant_id.clone(),
                 submission_id: record.submission_id,
                 object_ref_id,
             }
         }),
         input_hash: input_hash.to_string(),
-        output_object_ref: Some(ironclaw::trace_corpus_storage::TenantScopedTraceObjectRef {
-            tenant_id: record.tenant_id.clone(),
-            submission_id: record.submission_id,
-            object_ref_id: output_object_ref_id,
-        }),
+        output_object_ref: Some(
+            trace_commons_server::trace_corpus_storage::TenantScopedTraceObjectRef {
+                tenant_id: record.tenant_id.clone(),
+                submission_id: record.submission_id,
+                object_ref_id: output_object_ref_id,
+            },
+        ),
         canonical_summary: Some(canonical_summary_for_embedding(envelope)),
         canonical_summary_hash: Some(
             envelope
@@ -20816,8 +20820,8 @@ mod tests {
     use ironclaw::trace_contribution::{
         DeterministicTraceRedactor, RecordedTraceContributionOptions, TraceRedactor,
     };
-    use ironclaw::trace_corpus_storage::TraceRevocationPropagationTargetKind as StorageTraceRevocationPropagationTargetKind;
-    use ironclaw::trace_corpus_storage::{
+    use trace_commons_server::trace_corpus_storage::TraceRevocationPropagationTargetKind as StorageTraceRevocationPropagationTargetKind;
+    use trace_commons_server::trace_corpus_storage::{
         TraceCorpusStore, TraceRevocationPropagationItemWrite, TraceTenantAccessGrantRole,
         TraceTenantAccessGrantStatus, TraceTenantAccessGrantWrite,
     };
@@ -21610,7 +21614,7 @@ mod tests {
     }
 
     fn test_artifact_store(root: &Path) -> Arc<LocalEncryptedTraceArtifactStore> {
-        let key = ironclaw::secrets::keychain::generate_master_key_hex();
+        let key = trace_commons_server::secrets::keychain::generate_master_key_hex();
         let crypto = SecretsCrypto::new(SecretString::from(key)).expect("test crypto");
         Arc::new(LocalEncryptedTraceArtifactStore::new(root, crypto))
     }
@@ -23509,7 +23513,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn privileged_revocation_body_reason_is_persisted_to_file_audit_and_db() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -24052,8 +24056,8 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn submit_enforces_db_backed_tenant_policy_when_enabled() {
-        use ironclaw::db::libsql::LibSqlBackend;
-        use ironclaw::trace_corpus_storage::TraceTenantPolicyWrite;
+        use trace_commons_server::db::libsql::LibSqlBackend;
+        use trace_commons_server::trace_corpus_storage::TraceTenantPolicyWrite;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -24111,7 +24115,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn tenant_access_grants_authorize_and_scope_submit_tokens() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -24214,7 +24218,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn tenant_access_grants_bind_signed_claim_issuer_audience_and_subject() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -24397,7 +24401,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn admin_can_manage_tenant_access_grants() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -24632,7 +24636,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn tenant_access_grants_gate_privileged_routes() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -24817,7 +24821,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn admin_can_manage_db_backed_tenant_policy() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -24956,7 +24960,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn db_backed_tenant_policy_controls_export_surfaces() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -25064,7 +25068,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn export_policy_filters_sources_without_required_allowed_use() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -25182,7 +25186,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn required_tenant_policy_blocks_exports_without_policy_row() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -25271,7 +25275,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn worker_roles_are_scoped_to_trace_job_surfaces() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -25768,7 +25772,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn revocation_propagation_worker_processes_tenant_scoped_due_items() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -25974,7 +25978,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn revocation_propagation_worker_reverses_credit_settlement_through_credit_view() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -26120,7 +26124,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn revocation_worker_deletes_service_local_object_payload_and_marks_ref_deleted() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_root = temp.path().join("service-local-objects");
@@ -26349,7 +26353,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn revocation_worker_invalidates_exact_vector_entry_target() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -26522,7 +26526,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn vector_payload_object_delete_records_physical_delete_receipt() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_root = temp.path().join("service-local-vector-objects");
@@ -26697,7 +26701,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn revocation_worker_deletes_service_local_benchmark_and_ranker_artifact_payloads() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_root = temp.path().join("service-local-derived-export-objects");
@@ -26954,7 +26958,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn vector_payload_object_delete_rejects_mismatched_payload_tenant_storage_ref() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_root = temp.path().join("service-local-vector-mismatched-objects");
@@ -27136,7 +27140,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn vector_payload_object_delete_rejects_mismatched_object_ref_key_ref() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_root = temp.path().join("service-local-vector-key-ref-mismatch");
@@ -27340,7 +27344,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn object_primary_submit_writes_no_plaintext_envelope_body() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_root = temp.path().join("service-object-store");
@@ -27413,7 +27417,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn object_primary_submit_review_can_roll_out_per_tenant() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_root = temp.path().join("tenant-service-object-store");
@@ -27510,7 +27514,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn object_primary_replay_export_reads_object_ref_without_plaintext_body() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_root = temp.path().join("replay-service-object-store");
@@ -27626,7 +27630,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn object_primary_review_writes_review_snapshot_without_plaintext_body() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_root = temp.path().join("review-service-object-store");
@@ -27732,7 +27736,7 @@ mod tests {
     #[tokio::test]
     async fn object_primary_maintenance_purge_deletes_submitted_envelope_object_without_plaintext_body()
      {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_root = temp.path().join("service-object-store");
@@ -27855,7 +27859,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn submit_dual_writes_to_db_mirror_when_configured() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -27998,7 +28002,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn required_db_mirror_writes_fail_closed_on_submission_mirror_failure() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -28059,7 +28063,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn required_db_mirror_writes_fail_closed_on_delayed_credit_mirror_failure() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -28138,7 +28142,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn required_db_mirror_writes_fail_closed_on_export_provenance_mirror_failure() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -28265,7 +28269,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn required_db_mirror_writes_fail_closed_on_benchmark_lifecycle_mirror_failure() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -28367,7 +28371,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn required_db_mirror_writes_roll_back_partial_export_mirror_rows_on_item_failure() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -28472,7 +28476,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn required_db_mirror_writes_roll_back_export_publication_on_audit_failure() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -28594,7 +28598,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn required_db_mirror_writes_clean_export_object_store_artifacts_on_provenance_failure() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_root = temp.path().join("service-object-store");
@@ -28704,7 +28708,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn revocation_tombstone_records_hashes_and_blocks_reingest() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -28851,7 +28855,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn submit_rejects_reingest_matching_db_revocation_tombstone_without_file_tombstone() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -28925,7 +28929,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn ranking_utility_credit_preserves_db_event_type() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -29006,7 +29010,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn utility_credit_worker_appends_idempotent_credit_for_accepted_traces() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -29100,7 +29104,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn utility_credit_worker_rejects_sources_without_required_allowed_use() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -29162,7 +29166,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn db_backed_tenant_policy_blocks_disallowed_utility_credit_use() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -29227,7 +29231,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn delayed_credit_append_can_use_db_metadata_without_file_record() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -29299,7 +29303,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn revoked_trace_delayed_credit_is_excluded_from_db_backed_totals() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -29400,7 +29404,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn contributor_credit_status_can_read_from_db_mirror_when_enabled() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -29506,7 +29510,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn contributor_credit_db_reads_can_roll_out_per_tenant() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -30110,7 +30114,7 @@ mod tests {
     #[tokio::test]
     async fn review_lease_claim_next_claims_prioritized_available_traces() {
         use chrono::SecondsFormat;
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -30250,7 +30254,7 @@ mod tests {
     #[tokio::test]
     async fn review_lease_claim_batch_claims_bounded_prioritized_available_traces() {
         use chrono::SecondsFormat;
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -30401,7 +30405,7 @@ mod tests {
     #[tokio::test]
     async fn db_backed_review_leases_are_claimed_released_and_enforced() {
         use chrono::SecondsFormat;
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -31097,7 +31101,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn db_backed_tenant_policy_blocks_process_evaluation_source_without_evaluation_use() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -31169,7 +31173,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn process_evaluation_utility_credit_mirrors_to_db_contributor_events() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -32787,7 +32791,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn benchmark_and_ranker_exports_revalidate_db_source_status_before_publish() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -32906,7 +32910,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn benchmark_and_ranker_exports_can_require_active_submitted_object_refs() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -33359,7 +33363,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_discovered_revocations_update_db_mirror_and_invalidate_artifacts() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -33583,7 +33587,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_repairs_db_revocation_for_already_revoked_file_records() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -33884,7 +33888,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_expiration_updates_db_mirror_and_invalidates_artifacts() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -34024,7 +34028,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_purge_updates_db_mirror_status_and_invalidates_refs() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -34152,7 +34156,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_purge_writes_durable_retention_job_ledger() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -34303,7 +34307,7 @@ mod tests {
     #[tokio::test]
     async fn admin_can_list_durable_retention_jobs_and_items() {
         use axum::extract::Query;
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -34458,7 +34462,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_purge_deletes_service_local_object_store_and_invalidates_refs() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_root = temp.path().join("service-object-store");
@@ -34837,7 +34841,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_can_backfill_file_backed_records_to_db_mirror() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let file_state = test_state(temp.path().to_path_buf());
@@ -35195,7 +35199,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn vector_index_writes_service_local_worker_intermediate_payload_object_ref() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_root = temp.path().join("service-object-store");
@@ -35356,7 +35360,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn vector_index_scores_fuzzy_neighbors_from_redacted_summaries() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -35468,7 +35472,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_backfill_isolates_bad_file_backed_submissions() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let file_state = test_state(temp.path().to_path_buf());
@@ -35588,7 +35592,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_reconciliation_reports_missing_ledger_and_audit_event_ids() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -35697,7 +35701,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_reconciliation_reports_current_retention_ledger_gaps() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -35814,7 +35818,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_reconciliation_reports_export_items_missing_object_refs() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -35889,7 +35893,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_reconciliation_reports_active_exports_with_ineligible_sources() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -36017,7 +36021,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_reconciliation_clean_gate_accepts_empty_clean_report() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -36060,7 +36064,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_reconciliation_clean_gate_requires_reconciliation_request() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -36104,7 +36108,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_reconciliation_can_fail_closed_on_blocking_gaps() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -36174,7 +36178,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_reconciliation_splits_db_export_manifest_counts_by_kind() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -36255,7 +36259,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_reconciliation_reports_db_derived_records_missing_in_files() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -36325,7 +36329,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_reconciliation_reports_derived_status_and_hash_mismatches() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -36416,7 +36420,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_reconciliation_reports_missing_eligible_vector_entries() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -36474,7 +36478,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_reconciliation_reports_unreadable_active_object_refs() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -36552,7 +36556,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_reconciliation_reports_hash_mismatched_active_object_refs() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -36630,7 +36634,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_reconciliation_reports_key_ref_mismatched_active_object_refs() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_root = temp.path().join("service-local-reconcile-key-ref");
@@ -36739,7 +36743,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn reviewer_metadata_reads_can_use_db_mirror_without_file_records() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -37013,7 +37017,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn replay_export_can_select_from_db_mirror_without_file_metadata() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -37071,7 +37075,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn replay_export_can_require_active_db_object_ref_for_body_reads() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -37150,7 +37154,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn replay_export_marks_started_job_failed_when_body_read_fails() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -37229,7 +37233,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn replay_export_can_read_encrypted_artifact_from_db_object_ref_without_file_objects() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_root = temp.path().join("encrypted-artifacts");
@@ -37316,7 +37320,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn replay_export_reads_service_local_object_store_ref_without_file_objects() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_root = temp.path().join("service-object-store");
@@ -37419,7 +37423,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn replay_export_rejects_service_local_object_ref_with_mismatched_key_ref() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_root = temp.path().join("service-object-store-key-ref-mismatch");
@@ -37543,7 +37547,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn review_decision_reads_service_local_object_ref_when_db_reviewer_reads_enabled() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_root = temp.path().join("review-service-object-store");
@@ -37685,7 +37689,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn review_decision_can_use_db_metadata_without_file_record() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -37801,7 +37805,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn review_decision_can_require_active_db_object_ref_for_body_reads() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -37872,7 +37876,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn replay_export_mirrors_manifest_metadata_to_db() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -38031,7 +38035,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn revocation_invalidates_db_export_manifest_metadata() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -38129,7 +38133,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn db_only_revocation_requires_original_contributor_or_reviewer() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -38212,7 +38216,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn replay_export_mirrors_item_metadata_and_revocation_invalidates_items() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -38318,7 +38322,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn reviewer_can_list_db_export_manifest_metadata() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -38563,7 +38567,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn benchmark_and_ranker_exports_write_service_local_object_refs() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_root = temp.path().join("service-object-store");
@@ -38734,7 +38738,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn object_primary_derived_exports_skip_plaintext_files_and_keep_db_object_refs() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_root = temp.path().join("service-object-store");
@@ -39063,7 +39067,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn benchmark_lifecycle_rejects_service_local_artifact_with_mismatched_body_tenant() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_root = temp
@@ -39201,7 +39205,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn replay_export_uses_db_object_ref_after_review_status_change() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -39286,7 +39290,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn audit_events_can_read_from_db_mirror_when_enabled() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -39553,7 +39557,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn admin_operational_summary_reports_safe_rollout_counts() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -39756,7 +39760,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn derived_worker_exports_append_per_source_content_read_audits() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -39898,7 +39902,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn vector_index_filters_sources_by_eddsa_signed_claim_allowed_uses() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -40029,7 +40033,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn vector_index_filters_sources_by_tenant_policy_allowed_uses() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -40107,7 +40111,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn vector_index_requires_readable_active_submitted_object_ref() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -40556,7 +40560,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_can_verify_db_audit_chain() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
@@ -40662,7 +40666,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn maintenance_detects_db_audit_projection_tampering() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use trace_commons_server::db::libsql::LibSqlBackend;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_temp = tempfile::tempdir().expect("db temp dir");
