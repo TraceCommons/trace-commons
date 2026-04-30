@@ -22,16 +22,17 @@
 - Reviewer/admin APIs, maintenance workers, and export/benchmark/ranker worker
   routes.
 
-## Temporary Bridge
+## Remaining Temporary Bridge
 
 The first repo split intentionally keeps `tracedao-server` dependent on the
-local Ironclaw crate. This avoids rewriting the protocol and storage layers
-while the server ownership boundary is created. The next extraction pass should:
+local Ironclaw crate for the shared contribution envelope/protocol compatibility
+surface. Database storage, object refs, RLS diagnostics, and encrypted
+artifact-store code are now server-owned in this repo.
+
+The next extraction pass should:
 
 1. Move contribution envelope, auth claim, status, and policy DTOs into a shared
    `tracedao-protocol` crate.
-2. Move server storage traits and database implementations into this repo.
-3. Leave Ironclaw depending only on the shared protocol crate plus remote client
+2. Leave Ironclaw depending only on the shared protocol crate plus remote client
    helpers.
-4. Remove the Ironclaw path dependency from `crates/tracedao-server/Cargo.toml`.
-
+3. Remove the Ironclaw path dependency from `crates/tracedao-server/Cargo.toml`.

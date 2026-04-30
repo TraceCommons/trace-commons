@@ -511,85 +511,85 @@ CREATE INDEX idx_trace_revocation_propagation_target
 
 ALTER TABLE trace_tenants ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_tenants
-    USING (tenant_id = current_setting('ironclaw.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('ironclaw.trace_tenant_id', true));
+    USING (tenant_id = current_setting('tracedao.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('tracedao.trace_tenant_id', true));
 
 ALTER TABLE trace_tenant_policies ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_tenant_policies
-    USING (tenant_id = current_setting('ironclaw.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('ironclaw.trace_tenant_id', true));
+    USING (tenant_id = current_setting('tracedao.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('tracedao.trace_tenant_id', true));
 
 ALTER TABLE trace_tenant_access_grants ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_tenant_access_grants
-    USING (tenant_id = current_setting('ironclaw.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('ironclaw.trace_tenant_id', true));
+    USING (tenant_id = current_setting('tracedao.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('tracedao.trace_tenant_id', true));
 
 ALTER TABLE trace_submissions ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_submissions
-    USING (tenant_id = current_setting('ironclaw.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('ironclaw.trace_tenant_id', true));
+    USING (tenant_id = current_setting('tracedao.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('tracedao.trace_tenant_id', true));
 
 ALTER TABLE trace_object_refs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_object_refs
-    USING (tenant_id = current_setting('ironclaw.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('ironclaw.trace_tenant_id', true));
+    USING (tenant_id = current_setting('tracedao.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('tracedao.trace_tenant_id', true));
 
 ALTER TABLE trace_derived_records ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_derived_records
-    USING (tenant_id = current_setting('ironclaw.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('ironclaw.trace_tenant_id', true));
+    USING (tenant_id = current_setting('tracedao.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('tracedao.trace_tenant_id', true));
 
 ALTER TABLE trace_vector_entries ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_vector_entries
-    USING (tenant_id = current_setting('ironclaw.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('ironclaw.trace_tenant_id', true));
+    USING (tenant_id = current_setting('tracedao.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('tracedao.trace_tenant_id', true));
 
 ALTER TABLE trace_export_manifests ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_export_manifests
-    USING (tenant_id = current_setting('ironclaw.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('ironclaw.trace_tenant_id', true));
+    USING (tenant_id = current_setting('tracedao.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('tracedao.trace_tenant_id', true));
 
 ALTER TABLE trace_export_manifest_items ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_export_manifest_items
-    USING (tenant_id = current_setting('ironclaw.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('ironclaw.trace_tenant_id', true));
+    USING (tenant_id = current_setting('tracedao.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('tracedao.trace_tenant_id', true));
 
 ALTER TABLE trace_audit_events ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_audit_events
-    USING (tenant_id = current_setting('ironclaw.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('ironclaw.trace_tenant_id', true));
+    USING (tenant_id = current_setting('tracedao.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('tracedao.trace_tenant_id', true));
 
 ALTER TABLE trace_credit_ledger ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_credit_ledger
-    USING (tenant_id = current_setting('ironclaw.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('ironclaw.trace_tenant_id', true));
+    USING (tenant_id = current_setting('tracedao.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('tracedao.trace_tenant_id', true));
 
 ALTER TABLE trace_tombstones ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_tombstones
-    USING (tenant_id = current_setting('ironclaw.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('ironclaw.trace_tenant_id', true));
+    USING (tenant_id = current_setting('tracedao.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('tracedao.trace_tenant_id', true));
 
 ALTER TABLE trace_retention_jobs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_retention_jobs
-    USING (tenant_id = current_setting('ironclaw.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('ironclaw.trace_tenant_id', true));
+    USING (tenant_id = current_setting('tracedao.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('tracedao.trace_tenant_id', true));
 
 ALTER TABLE trace_retention_job_items ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_retention_job_items
-    USING (tenant_id = current_setting('ironclaw.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('ironclaw.trace_tenant_id', true));
+    USING (tenant_id = current_setting('tracedao.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('tracedao.trace_tenant_id', true));
 
 ALTER TABLE trace_export_access_grants ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_export_access_grants
-    USING (tenant_id = current_setting('ironclaw.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('ironclaw.trace_tenant_id', true));
+    USING (tenant_id = current_setting('tracedao.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('tracedao.trace_tenant_id', true));
 
 ALTER TABLE trace_export_jobs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_export_jobs
-    USING (tenant_id = current_setting('ironclaw.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('ironclaw.trace_tenant_id', true));
+    USING (tenant_id = current_setting('tracedao.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('tracedao.trace_tenant_id', true));
 
 ALTER TABLE trace_revocation_propagation_items ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_revocation_propagation_items
-    USING (tenant_id = current_setting('ironclaw.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('ironclaw.trace_tenant_id', true));
+    USING (tenant_id = current_setting('tracedao.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('tracedao.trace_tenant_id', true));

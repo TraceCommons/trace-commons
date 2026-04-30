@@ -51,15 +51,15 @@ These are the next independent production slices that can be staffed in parallel
 
 ## Current Gecko-Pass Status
 
-As of the `gecko-pass` branch, Trace Commons has moved beyond the local-only MVP into a dark-launch production-storage bridge:
+As of the server split, Trace Commons has moved beyond the local-only MVP into a server-owned dark-launch production-storage path:
 
 - Local capture remains opt-in, local-first, and redaction-first. Raw recorded traces still must not leave the client.
 - Autonomous clients now have first-pass queue diagnostics/status: CLI `traces queue-status` reports scoped readiness, bearer-token environment presence, queue/hold counts, typed retry/manual-review/policy hold counts, next retry time, durable flush/status-sync telemetry, last compaction reclaimed count, duplicate-envelope, orphan-hold-sidecar, and malformed-envelope quarantine removals, safe warning aggregates for schema-version/consent-policy/redaction-pipeline/trace-card-redaction-pipeline mismatches and malformed envelopes, sanitized failure classes, sanitized held-reason counts, and local credit summary fields; queue writes use atomic temp-file replacement and malformed active queue files are quarantined locally so valid later envelopes still submit. The authenticated web API exposes scoped queue/held counts, durable telemetry, safe warning aggregates, and sanitized held entries without exposing envelope bodies or raw observed mismatch values.
 - Periodic credit notices now run through CLI, web, post-turn runtime, and the periodic queue worker path, including delayed ledger deltas and credit-event counts without surfacing trace bodies or central corpus rows. CLI and authenticated web clients can also acknowledge the current local credit fingerprint or snooze notices for a bounded number of hours.
 - Signed upload-claim auth supports EdDSA/Ed25519 public-key verification through default or `kid`-selected keys and JSON/file/guarded-HTTPS keysets with optional activation windows and safe active/inactive/managed key-count diagnostics, while HS256 claims and static tokens remain internal bridge paths. A managed-EdDSA-required gate now accepts only active managed-keyset claims with issuer/audience checks; autonomous clients can fetch short-lived EdDSA upload claims from guarded tenant issuers, the repo includes a standalone Ed25519-only issuer MVP for those claims, and ingestion services can refresh guarded remote issuer-managed Ed25519 keysets live after startup with last-good preservation and optional max-stale fail-closed enforcement.
 - The private ingestion service still serves file-backed pilot APIs by default, but can dual-write metadata through `TRACE_COMMONS_DB_DUAL_WRITE=true`.
-- PostgreSQL and libSQL schema slices exist through the current Trace Commons storage work: core corpus rows, object refs, derived records, vector metadata, audit events, credit ledger rows, tombstones, retention/export metadata, compact replay export manifests, and replay export item snapshots.
-- `TraceCorpusStore` exists behind the shared database abstraction with backend implementations and libSQL-focused parity coverage.
+- PostgreSQL and libSQL schema slices are owned by this server repo: core corpus rows, object refs, derived records, vector metadata, audit events, credit ledger rows, tombstones, retention/export metadata, compact replay export manifests, and replay export item snapshots.
+- `TraceCorpusStore` exists behind the server crate's database facade with backend implementations and libSQL-focused parity coverage.
 - Optional DB-backed read flags now cover contributor credit/status, reviewer metadata, replay export selection, and audit event reads.
 - Reviewer/admin review ergonomics now include `POST /v1/review/leases/claim-next`, `POST /v1/review/leases/claim-batch`, `ironclaw traces review-lease-claim-next`, and `ironclaw traces review-lease-claim-batch`, which claim the next or a bounded batch of available quarantined traces for the authenticated tenant/principal using escalation/SLA priority ordering, DB-backed lease state, and typed claim audit rows; this remains a reviewer-read dark-launch slice, not a broad production assignment system.
 - The encrypted local artifact sidecar stores submitted redacted envelopes, and DB-backed replay export resolves bodies through a shared policy/audit helper that verifies active DB object refs, tenant scope, artifact kind, and content hash for file-backed objects or encrypted artifacts. Production-shaped object-primary modes can now skip plaintext submit/review bodies, replay-export body fallback, and benchmark/ranker derived export files when the matching DB/object-store guards are enabled.
@@ -69,7 +69,7 @@ As of the `gecko-pass` branch, Trace Commons has moved beyond the local-only MVP
 - Durable tenant access grant storage now exists for issuer-authorized principals and hosted-agent multitenant permissioning, including role, consent/use allow-lists, issuer/audience/subject attribution, expiry, revocation fields, tenant-scoped admin create/list/revoke APIs and CLI helpers, and tenant-scoped PostgreSQL RLS/libSQL predicates. When `TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS=true`, trace submission, contributor credit/status readback, reviewer/audit reads, review mutations, dataset/export paths, non-revocation worker mutations, maintenance, and admin ledger/observability reads are denied without an active exact-role grant for the authenticated principal. Grant scopes/uses narrow the effective request policy, while revocation/self-delete, revocation propagation, config-status, tenant-policy admin, and grant-management routes remain available for deprovisioning and recovery.
 - Revocation, retention expiration, and maintenance-discovered file tombstones already invalidate DB-mirrored submission status, object refs, derived records, vector metadata, replay export manifests, and replay export item rows. Revocation-propagation credit-settlement items now reverse exact delayed-credit ledger rows with deterministic negative settlement events. Non-dry-run physical purge and revocation-propagation object-payload items can now mark only exact physically deleted service-local submitted/review envelope object refs with `deleted_at`; revocation-propagation object deletes also record durable physical-delete receipt rows with evidence hashes for exact service-local submitted/review envelope, vector worker-intermediate, benchmark artifact, and ranker export provenance payload targets. Vector worker payloads now carry deterministic local redacted-summary feature embeddings in encrypted worker-intermediate objects, and exact vector-entry invalidation is available across PostgreSQL/libSQL. Remote object deletion and unsupported artifact payload deletion remain future work.
 
-The main remaining gap is production ownership: file-backed serving is still the compatibility path, encrypted artifacts are still local rather than service-owned object storage, PostgreSQL RLS/central policy is not yet the active trust boundary, and vector, benchmark, ranking, retention, and audit systems are not yet complete production workers.
+The main remaining gap is production rollout hardening: file-backed serving is still the compatibility path, encrypted artifacts are still local rather than remote service-owned object storage, PostgreSQL RLS/central policy is not yet the active trust boundary, and vector, benchmark, ranking, retention, and audit systems are not yet complete production workers.
 
 ## Operator Finish-Line Checks
 
@@ -109,7 +109,7 @@ Dependencies:
 
 - Existing local redaction envelope contract.
 - File-backed pilot store under `TRACE_COMMONS_DATA_DIR`.
-- Current PostgreSQL/libSQL migrations and shared `TraceCorpusStore`.
+- Current server-owned PostgreSQL/libSQL migrations and server-owned `TraceCorpusStore`.
 
 Verification gates:
 
@@ -188,10 +188,10 @@ can now read those policies from the TraceCorpusStore behind
 `TRACE_COMMONS_DB_TENANT_POLICY_READS`, and worker tokens now have scoped
 export, retention, vector, and benchmark route gates; fuller RBAC/ABAC remains
 future work.
-The PostgreSQL store now sets `ironclaw.trace_tenant_id` transaction-locally around
+The PostgreSQL store now sets `tracedao.trace_tenant_id` transaction-locally around
 tenant-scoped Trace Commons operations while retaining explicit `tenant_id`
 predicates. This is an incremental guardrail only: table owners, superusers, and
-roles with `BYPASSRLS` can still bypass the consolidated V26 policies until production role
+roles with `BYPASSRLS` can still bypass the server-owned V1 policies until production role
 ownership and/or forced RLS are settled.
 
 Scope:

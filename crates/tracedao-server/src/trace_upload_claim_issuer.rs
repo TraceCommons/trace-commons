@@ -18,12 +18,12 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use ironclaw::config::{DatabaseBackend, DatabaseConfig};
-use ironclaw::db::Database;
-use ironclaw::trace_contribution::{ConsentScope, TraceAllowedUse};
-use ironclaw::trace_corpus_storage::{
+use crate::config::{DatabaseBackend, DatabaseConfig};
+use crate::db::Database;
+use crate::trace_corpus_storage::{
     TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
 };
+use ironclaw::trace_contribution::{ConsentScope, TraceAllowedUse};
 
 pub const TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION: &str =
     "ironclaw.trace_upload_claim_request.v1";
@@ -182,7 +182,7 @@ async fn trace_upload_claim_issuer_db_from_env() -> anyhow::Result<Arc<dyn Datab
         DatabaseBackend::LibSql => {
             let path = std::env::var("LIBSQL_PATH")
                 .map(PathBuf::from)
-                .unwrap_or_else(|_| ironclaw::config::default_libsql_path());
+                .unwrap_or_else(|_| crate::config::default_libsql_path());
             let path = path.to_string_lossy().into_owned();
             let turso_url = std::env::var("LIBSQL_URL").ok();
             let turso_token = std::env::var("LIBSQL_AUTH_TOKEN").ok();
@@ -199,7 +199,7 @@ async fn trace_upload_claim_issuer_db_from_env() -> anyhow::Result<Arc<dyn Datab
             DatabaseConfig::from_postgres_url(&url, pool_size)
         }
     };
-    let db = ironclaw::db::connect_from_config(&config)
+    let db = crate::db::connect_from_config(&config)
         .await
         .context("failed to connect Trace upload-claim issuer tenant grant DB")?;
     tracing::info!(backend = %backend, "Trace upload-claim issuer tenant grant DB enabled");
@@ -822,11 +822,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use ironclaw::trace_contribution::{ConsentScope, TraceAllowedUse};
-    use ironclaw::trace_corpus_storage::{
+    use crate::trace_corpus_storage::{
         TraceCorpusStore, TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole,
         TraceTenantAccessGrantStatus, TraceTenantAccessGrantWrite,
     };
+    use ironclaw::trace_contribution::{ConsentScope, TraceAllowedUse};
 
     const TEST_EDDSA_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIAGfN68ko7YyCGJMb3lHVwTn5aiUtbIsAclIx/lX0p2R\n-----END PRIVATE KEY-----\n";
     const TEST_EDDSA_PUBLIC_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAMnniSMeHZrdoe3gkL7ZeHmG7vAg65c5TqaBd71B2qDw=\n-----END PUBLIC KEY-----\n";
@@ -974,7 +974,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn claim_issuer_requires_active_tenant_access_grant_through_router() {
-        use ironclaw::db::libsql::LibSqlBackend;
+        use crate::db::libsql::LibSqlBackend;
 
         let db_temp = tempfile::tempdir().expect("db temp dir");
         let db_path = db_temp.path().join("trace-upload-claim-issuer-grants.db");
