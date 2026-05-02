@@ -391,6 +391,128 @@ pub struct TraceCreditAccountSettlementLineItem {
     pub near_outbox_id: Option<Uuid>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceUtilityAttestationWrite {
+    pub tenant_id: String,
+    pub attestation_id: Uuid,
+    pub event_type: TraceCreditEventType,
+    pub use_category: String,
+    pub policy_version: String,
+    pub evidence_hash: String,
+    pub external_ref_hash: String,
+    pub source_submission_ids: Vec<Uuid>,
+    pub actor_principal_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceUtilityAttestationRecord {
+    pub tenant_id: String,
+    pub attestation_id: Uuid,
+    pub event_type: TraceCreditEventType,
+    pub use_category: String,
+    pub policy_version: String,
+    pub evidence_hash: String,
+    pub external_ref_hash: String,
+    pub source_submission_ids: Vec<Uuid>,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceCreditSettlementBatchWrite {
+    pub tenant_id: String,
+    pub settlement_batch_id: Uuid,
+    pub policy_version: String,
+    pub status: TraceCreditSettlementBatchStatus,
+    pub reason_hash: String,
+    pub source_credit_event_ids: Vec<Uuid>,
+    pub source_submission_ids: Vec<Uuid>,
+    pub source_list_hash: String,
+    pub settled_credit_points: String,
+    pub settled_credit_micros: i64,
+    pub line_items: Vec<TraceCreditAccountSettlementLineItem>,
+    pub near_contract_id: Option<String>,
+    pub ranking_model_version: Option<String>,
+    pub ranking_target_use: Option<String>,
+    pub ranking_calibration_run_id: Option<Uuid>,
+    pub ranking_calibration_report_hash: Option<String>,
+    pub ranking_credit_events_excluded_count: u32,
+    pub actor_principal_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceCreditSettlementBatchRecord {
+    pub tenant_id: String,
+    pub settlement_batch_id: Uuid,
+    pub policy_version: String,
+    pub status: TraceCreditSettlementBatchStatus,
+    pub reason_hash: String,
+    pub source_credit_event_ids: Vec<Uuid>,
+    pub source_submission_ids: Vec<Uuid>,
+    pub source_list_hash: String,
+    pub settled_credit_points: String,
+    pub settled_credit_micros: i64,
+    pub line_items: Vec<TraceCreditAccountSettlementLineItem>,
+    pub near_contract_id: Option<String>,
+    pub ranking_model_version: Option<String>,
+    pub ranking_target_use: Option<String>,
+    pub ranking_calibration_run_id: Option<Uuid>,
+    pub ranking_calibration_report_hash: Option<String>,
+    pub ranking_credit_events_excluded_count: u32,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceCreditHoldWrite {
+    pub tenant_id: String,
+    pub hold_id: Uuid,
+    pub credit_account_ref: String,
+    pub credit_account_hash: String,
+    pub reason: TraceCreditHoldReason,
+    pub reason_hash: String,
+    pub actor_principal_ref: String,
+    pub released_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceCreditHoldRecord {
+    pub tenant_id: String,
+    pub hold_id: Uuid,
+    pub credit_account_ref: String,
+    pub credit_account_hash: String,
+    pub reason: TraceCreditHoldReason,
+    pub reason_hash: String,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+    pub released_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceNearCreditOutboxItemWrite {
+    pub tenant_id: String,
+    pub near_outbox_id: Uuid,
+    pub settlement_batch_id: Uuid,
+    pub credit_account_hash: String,
+    pub near_call_json: serde_json::Value,
+    pub status: TraceCreditSettlementNearStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceNearCreditOutboxItemRecord {
+    pub tenant_id: String,
+    pub near_outbox_id: Uuid,
+    pub settlement_batch_id: Uuid,
+    pub credit_account_hash: String,
+    pub near_call_json: serde_json::Value,
+    pub status: TraceCreditSettlementNearStatus,
+    pub created_at: DateTime<Utc>,
+    pub submitted_at: Option<DateTime<Utc>>,
+    pub near_transaction_hash: Option<String>,
+    pub last_error_hash: Option<String>,
+    pub confirmed_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceSubmissionWrite {
     pub tenant_id: String,
@@ -1508,6 +1630,55 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         credit_event: TraceCreditEventWrite,
     ) -> Result<(), DatabaseError>;
+
+    async fn upsert_trace_utility_attestation(
+        &self,
+        attestation: TraceUtilityAttestationWrite,
+    ) -> Result<TraceUtilityAttestationRecord, DatabaseError>;
+
+    async fn list_trace_utility_attestations(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceUtilityAttestationRecord>, DatabaseError>;
+
+    async fn upsert_trace_credit_settlement_batch(
+        &self,
+        batch: TraceCreditSettlementBatchWrite,
+    ) -> Result<TraceCreditSettlementBatchRecord, DatabaseError>;
+
+    async fn list_trace_credit_settlement_batches(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceCreditSettlementBatchRecord>, DatabaseError>;
+
+    async fn upsert_trace_credit_hold(
+        &self,
+        hold: TraceCreditHoldWrite,
+    ) -> Result<TraceCreditHoldRecord, DatabaseError>;
+
+    async fn list_trace_credit_holds(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceCreditHoldRecord>, DatabaseError>;
+
+    async fn upsert_trace_near_credit_outbox_item(
+        &self,
+        item: TraceNearCreditOutboxItemWrite,
+    ) -> Result<TraceNearCreditOutboxItemRecord, DatabaseError>;
+
+    async fn list_trace_near_credit_outbox_items(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceNearCreditOutboxItemRecord>, DatabaseError>;
+
+    async fn update_trace_near_credit_outbox_status(
+        &self,
+        tenant_id: &str,
+        near_outbox_id: Uuid,
+        status: TraceCreditSettlementNearStatus,
+        near_transaction_hash: Option<String>,
+        last_error_hash: Option<String>,
+    ) -> Result<Option<TraceNearCreditOutboxItemRecord>, DatabaseError>;
 
     async fn write_trace_tombstone(
         &self,

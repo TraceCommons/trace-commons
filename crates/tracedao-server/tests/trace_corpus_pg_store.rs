@@ -6,12 +6,16 @@ use tracedao_server::config::{DatabaseConfig, SslMode};
 use tracedao_server::db::{Database, postgres::PgBackend};
 use tracedao_server::error::DatabaseError;
 use tracedao_server::trace_corpus_storage::{
-    TraceCorpusStatus, TraceCorpusStore, TraceDerivedRecordWrite, TraceDerivedStatus,
-    TraceExportManifestItemWrite, TraceExportManifestMirrorWrite, TraceExportManifestWrite,
-    TraceObjectArtifactKind, TraceObjectRefWrite, TraceRankingCalibrationRunWrite,
-    TraceRankingFeatureWrite, TraceRankingLabelOutcome, TraceRankingLabelSource,
-    TraceRankingLabelWrite, TraceRankingModelStatus, TraceRankingModelVersionWrite,
-    TraceRankingPredictionWrite, TraceRankingUtilityCategory, TraceSubmissionWrite,
+    TraceCorpusStatus, TraceCorpusStore, TraceCreditAccountSettlementLineItem,
+    TraceCreditEventType, TraceCreditEventWrite, TraceCreditHoldReason, TraceCreditHoldWrite,
+    TraceCreditSettlementBatchStatus, TraceCreditSettlementBatchWrite,
+    TraceCreditSettlementNearStatus, TraceCreditSettlementState, TraceDerivedRecordWrite,
+    TraceDerivedStatus, TraceExportManifestItemWrite, TraceExportManifestMirrorWrite,
+    TraceExportManifestWrite, TraceNearCreditOutboxItemWrite, TraceObjectArtifactKind,
+    TraceObjectRefWrite, TraceRankingCalibrationRunWrite, TraceRankingFeatureWrite,
+    TraceRankingLabelOutcome, TraceRankingLabelSource, TraceRankingLabelWrite,
+    TraceRankingModelStatus, TraceRankingModelVersionWrite, TraceRankingPredictionWrite,
+    TraceRankingUtilityCategory, TraceSubmissionWrite, TraceUtilityAttestationWrite,
     TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
     TraceWorkerKind,
 };
@@ -622,6 +626,218 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
             .expect("list beta ranking calibration runs")
             .is_empty(),
         "ranking calibration runs must stay tenant scoped"
+    );
+
+    cleanup_tenant(&backend, &tenant_alpha).await;
+    cleanup_tenant(&backend, &tenant_beta).await;
+}
+
+#[tokio::test]
+async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_alpha = format!("pg-settlement-alpha-{}", Uuid::new_v4());
+    let tenant_beta = format!("pg-settlement-beta-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    let trace_id = Uuid::new_v4();
+    for tenant_id in [&tenant_alpha, &tenant_beta] {
+        let mut submission = sample_submission(tenant_id, submission_id);
+        submission.trace_id = trace_id;
+        submission.allowed_uses = vec!["ranking_model_training".to_string()];
+        backend
+            .upsert_trace_submission(submission)
+            .await
+            .expect("insert settlement source submission");
+    }
+
+    let credit_event_id = Uuid::new_v4();
+    backend
+        .append_trace_credit_event(TraceCreditEventWrite {
+            credit_event_id,
+            tenant_id: tenant_alpha.clone(),
+            submission_id,
+            trace_id,
+            credit_account_ref: "principal:settlement-account".to_string(),
+            event_type: TraceCreditEventType::RankingUtility,
+            points_delta: "1.250000".to_string(),
+            reason: "ranking settlement control-plane test".to_string(),
+            external_ref: Some("ranker:settlement-control-plane".to_string()),
+            actor_principal_ref: "principal:ranker-worker".to_string(),
+            actor_role: "utility_worker".to_string(),
+            settlement_state: TraceCreditSettlementState::Pending,
+        })
+        .await
+        .expect("insert settlement source credit event");
+
+    let attestation_id = Uuid::new_v4();
+    let attestation = backend
+        .upsert_trace_utility_attestation(TraceUtilityAttestationWrite {
+            tenant_id: tenant_alpha.clone(),
+            attestation_id,
+            event_type: TraceCreditEventType::RankingUtility,
+            use_category: "ranking".to_string(),
+            policy_version: "trace-credit-policy-v3".to_string(),
+            evidence_hash: "sha256:settlement-attestation-evidence".to_string(),
+            external_ref_hash: "sha256:settlement-attestation-ref".to_string(),
+            source_submission_ids: vec![submission_id],
+            actor_principal_ref: "principal:ranker-worker".to_string(),
+        })
+        .await
+        .expect("upsert utility attestation");
+    assert_eq!(attestation.attestation_id, attestation_id);
+    assert_eq!(attestation.event_type, TraceCreditEventType::RankingUtility);
+
+    let hold_id = Uuid::new_v4();
+    let hold = backend
+        .upsert_trace_credit_hold(TraceCreditHoldWrite {
+            tenant_id: tenant_alpha.clone(),
+            hold_id,
+            credit_account_ref: "principal:settlement-account".to_string(),
+            credit_account_hash: "sha256:settlement-account".to_string(),
+            reason: TraceCreditHoldReason::AttestationDispute,
+            reason_hash: "sha256:settlement-hold-reason".to_string(),
+            actor_principal_ref: "principal:admin".to_string(),
+            released_at: None,
+        })
+        .await
+        .expect("upsert credit hold");
+    assert_eq!(hold.hold_id, hold_id);
+    assert_eq!(hold.reason, TraceCreditHoldReason::AttestationDispute);
+
+    let settlement_batch_id = Uuid::new_v4();
+    let source_list_hash = "sha256:settlement-source-list".to_string();
+    let settlement = backend
+        .upsert_trace_credit_settlement_batch(TraceCreditSettlementBatchWrite {
+            tenant_id: tenant_alpha.clone(),
+            settlement_batch_id,
+            policy_version: "trace-credit-policy-v3".to_string(),
+            status: TraceCreditSettlementBatchStatus::Finalized,
+            reason_hash: "sha256:settlement-reason".to_string(),
+            source_credit_event_ids: vec![credit_event_id],
+            source_submission_ids: vec![submission_id],
+            source_list_hash: source_list_hash.clone(),
+            settled_credit_points: "1.250000".to_string(),
+            settled_credit_micros: 1_250_000,
+            line_items: vec![TraceCreditAccountSettlementLineItem {
+                credit_account_ref: "principal:settlement-account".to_string(),
+                credit_account_hash: "sha256:settlement-account".to_string(),
+                settled_credit_delta_micros: 1_250_000,
+                source_credit_event_ids: vec![credit_event_id],
+                source_submission_ids: vec![submission_id],
+                source_list_hash: source_list_hash.clone(),
+                near_status: TraceCreditSettlementNearStatus::Pending,
+                near_outbox_id: Some(Uuid::nil()),
+            }],
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: Some("trace-ranker-settlement-v3".to_string()),
+            ranking_target_use: Some("ranking_model_training".to_string()),
+            ranking_calibration_run_id: Some(Uuid::new_v4()),
+            ranking_calibration_report_hash: Some(
+                "sha256:settlement-calibration-report".to_string(),
+            ),
+            ranking_credit_events_excluded_count: 0,
+            actor_principal_ref: "principal:admin".to_string(),
+        })
+        .await
+        .expect("upsert settlement batch");
+    assert_eq!(settlement.settlement_batch_id, settlement_batch_id);
+    assert_eq!(settlement.line_items.len(), 1);
+    assert_eq!(
+        settlement.ranking_model_version.as_deref(),
+        Some("trace-ranker-settlement-v3")
+    );
+
+    let near_outbox_id = Uuid::new_v4();
+    let near_item = backend
+        .upsert_trace_near_credit_outbox_item(TraceNearCreditOutboxItemWrite {
+            tenant_id: tenant_alpha.clone(),
+            near_outbox_id,
+            settlement_batch_id,
+            credit_account_hash: "sha256:settlement-account".to_string(),
+            near_call_json: serde_json::json!({
+                "contract_id": "trace-credits.testnet",
+                "method_name": "settle_credit_receipt",
+                "args": {
+                    "settlement_batch_id": settlement_batch_id,
+                    "credit_account_hash": "sha256:settlement-account"
+                },
+                "idempotency_key": "sha256:settlement-near-call"
+            }),
+            status: TraceCreditSettlementNearStatus::Pending,
+        })
+        .await
+        .expect("upsert NEAR outbox item");
+    assert_eq!(near_item.near_outbox_id, near_outbox_id);
+    assert_eq!(near_item.status, TraceCreditSettlementNearStatus::Pending);
+
+    let updated = backend
+        .update_trace_near_credit_outbox_status(
+            &tenant_alpha,
+            near_outbox_id,
+            TraceCreditSettlementNearStatus::Submitted,
+            Some("near-public-tx-hash".to_string()),
+            None,
+        )
+        .await
+        .expect("update NEAR outbox item")
+        .expect("updated item exists");
+    assert_eq!(updated.status, TraceCreditSettlementNearStatus::Submitted);
+    assert_eq!(
+        updated.near_transaction_hash.as_deref(),
+        Some("near-public-tx-hash")
+    );
+    assert!(updated.submitted_at.is_some());
+
+    assert_eq!(
+        backend
+            .list_trace_utility_attestations(&tenant_alpha)
+            .await
+            .expect("list alpha attestations")
+            .len(),
+        1
+    );
+    assert_eq!(
+        backend
+            .list_trace_credit_holds(&tenant_alpha)
+            .await
+            .expect("list alpha holds")
+            .len(),
+        1
+    );
+    assert_eq!(
+        backend
+            .list_trace_credit_settlement_batches(&tenant_alpha)
+            .await
+            .expect("list alpha settlement batches")
+            .len(),
+        1
+    );
+    assert_eq!(
+        backend
+            .list_trace_near_credit_outbox_items(&tenant_alpha)
+            .await
+            .expect("list alpha NEAR outbox")
+            .len(),
+        1
+    );
+    assert!(
+        backend
+            .list_trace_credit_settlement_batches(&tenant_beta)
+            .await
+            .expect("list beta settlement batches")
+            .is_empty(),
+        "settlement batches must stay tenant scoped"
+    );
+    assert!(
+        backend
+            .list_trace_near_credit_outbox_items(&tenant_beta)
+            .await
+            .expect("list beta NEAR outbox")
+            .is_empty(),
+        "NEAR outbox items must stay tenant scoped"
     );
 
     cleanup_tenant(&backend, &tenant_alpha).await;
