@@ -30,6 +30,7 @@ use trace_commons_protocol::trace_contribution::{
 };
 use trace_commons_server::config::DatabaseConfig;
 use trace_commons_server::db::{Database, TraceCorpusRlsDiagnostics};
+use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
 use trace_commons_server::secrets::SecretsCrypto;
 use trace_commons_server::trace_artifact_store::{
     EncryptedTraceArtifactReceipt, LocalEncryptedTraceArtifactStore, TraceArtifactKind,
@@ -42,9 +43,13 @@ use trace_commons_server::trace_corpus_storage::{
     TraceAuditEventWrite as StorageTraceAuditEventWrite,
     TraceAuditSafeMetadata as StorageTraceAuditSafeMetadata,
     TraceCorpusStatus as StorageTraceCorpusStatus,
+    TraceCreditAccountSettlementLineItem as StorageTraceCreditAccountSettlementLineItem,
     TraceCreditEventRecord as StorageTraceCreditEventRecord,
     TraceCreditEventType as StorageTraceCreditEventType,
     TraceCreditEventWrite as StorageTraceCreditEventWrite,
+    TraceCreditHoldReason as StorageTraceCreditHoldReason,
+    TraceCreditSettlementBatchStatus as StorageTraceCreditSettlementBatchStatus,
+    TraceCreditSettlementNearStatus as StorageTraceCreditSettlementNearStatus,
     TraceCreditSettlementState as StorageTraceCreditSettlementState,
     TraceDerivedRecord as StorageTraceDerivedRecord,
     TraceDerivedRecordWrite as StorageTraceDerivedRecordWrite,
@@ -1886,6 +1891,22 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/v1/admin/config-status", get(config_status_handler))
         .route("/v1/admin/maintenance", post(maintenance_handler))
         .route(
+            "/v1/admin/credit-settlements",
+            get(credit_settlements_handler).post(credit_settlement_handler),
+        )
+        .route(
+            "/v1/admin/credit-holds",
+            get(credit_holds_handler).post(credit_hold_handler),
+        )
+        .route(
+            "/v1/admin/credit-attestations",
+            get(credit_attestations_handler),
+        )
+        .route(
+            "/v1/admin/near-credit-outbox",
+            get(near_credit_outbox_handler),
+        )
+        .route(
             "/v1/workers/retention-maintenance",
             post(retention_maintenance_handler),
         )
@@ -1895,6 +1916,14 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route("/v1/workers/vector-index", post(vector_index_handler))
         .route("/v1/workers/utility-credit", post(utility_credit_handler))
+        .route(
+            "/v1/workers/utility-attestations",
+            post(utility_attestation_handler),
+        )
+        .route(
+            "/v1/workers/near-credit-outbox/mark-status",
+            post(mark_near_credit_outbox_status_handler),
+        )
         .route(
             "/v1/workers/process-evaluation",
             post(process_evaluation_worker_handler),
@@ -4320,11 +4349,18 @@ async fn credit_handler(
     )
     .await
     .map_err(internal_error)?;
+    let settlement_batches = read_all_credit_settlement_batches(&state.root, tenant.tenant_id())
+        .map_err(internal_error)?;
+    let credit_holds =
+        read_all_credit_holds(&state.root, tenant.tenant_id()).map_err(internal_error)?;
     Ok(Json(
-        TraceCommonsTenantCreditResponse::from_records_and_events(
+        TraceCommonsTenantCreditResponse::from_records_events_and_settlements(
             tenant.tenant_id().to_string(),
+            tenant.principal_ref(),
             credit_view.records,
             &credit_view.credit_events,
+            &settlement_batches,
+            &credit_holds,
         ),
     ))
 }
@@ -4805,6 +4841,134 @@ struct TraceUtilityCreditJobResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct TraceUtilityAttestationRequest {
+    event_type: TraceCreditLedgerEventType,
+    credit_points_delta: f32,
+    use_category: String,
+    policy_version: String,
+    evidence_hash: String,
+    reason: String,
+    external_ref: String,
+    source_submission_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceUtilityAttestationRecord {
+    attestation_id: Uuid,
+    tenant_id: String,
+    tenant_storage_ref: String,
+    event_type: TraceCreditLedgerEventType,
+    use_category: String,
+    policy_version: String,
+    evidence_hash: String,
+    external_ref_hash: String,
+    source_submission_ids: Vec<Uuid>,
+    actor_principal_ref: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceUtilityAttestationResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    attestation_id: Uuid,
+    event_type: TraceCreditLedgerEventType,
+    requested_count: usize,
+    appended_count: usize,
+    skipped_existing_count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceCreditSettlementRunRequest {
+    #[serde(default)]
+    dry_run: bool,
+    policy_version: String,
+    reason: String,
+    #[serde(default)]
+    near_contract_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceCreditSettlementBatchRecord {
+    settlement_batch_id: Uuid,
+    tenant_id: String,
+    tenant_storage_ref: String,
+    policy_version: String,
+    status: StorageTraceCreditSettlementBatchStatus,
+    reason_hash: String,
+    source_credit_event_ids: Vec<Uuid>,
+    source_submission_ids: Vec<Uuid>,
+    source_list_hash: String,
+    settled_credit_points: f32,
+    settled_credit_micros: i64,
+    line_items: Vec<StorageTraceCreditAccountSettlementLineItem>,
+    near_contract_id: Option<String>,
+    actor_principal_ref: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceNearCreditOutboxItem {
+    near_outbox_id: Uuid,
+    tenant_id: String,
+    tenant_storage_ref: String,
+    settlement_batch_id: Uuid,
+    credit_account_hash: String,
+    near_call: NearCreditReceiptCall,
+    status: StorageTraceCreditSettlementNearStatus,
+    created_at: DateTime<Utc>,
+    submitted_at: Option<DateTime<Utc>>,
+    near_transaction_hash: Option<String>,
+    last_error_hash: Option<String>,
+    confirmed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceNearCreditOutboxStatusRequest {
+    near_outbox_id: Uuid,
+    status: StorageTraceCreditSettlementNearStatus,
+    #[serde(default)]
+    near_transaction_hash: Option<String>,
+    #[serde(default)]
+    error_detail: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceCreditHoldRequest {
+    credit_account_ref: String,
+    reason: StorageTraceCreditHoldReason,
+    reason_detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceCreditHoldRecord {
+    hold_id: Uuid,
+    tenant_id: String,
+    tenant_storage_ref: String,
+    credit_account_ref: String,
+    credit_account_hash: String,
+    reason: StorageTraceCreditHoldReason,
+    reason_hash: String,
+    actor_principal_ref: String,
+    created_at: DateTime<Utc>,
+    released_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceCreditSettlementRunResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    settlement_batch_id: Uuid,
+    dry_run: bool,
+    policy_version: String,
+    source_list_hash: String,
+    settled_source_event_count: usize,
+    settled_account_count: usize,
+    settled_credit_points: f32,
+    near_outbox_item_count: usize,
+}
+
+#[derive(Debug, Deserialize)]
 struct TraceProcessEvaluationJobRequest {
     submission_id: Uuid,
     process_evaluation: ProcessEvaluationLabels,
@@ -5092,6 +5256,545 @@ async fn utility_credit_handler(
         appended_count: counts.appended,
         skipped_existing_count: counts.skipped_existing,
     }))
+}
+
+async fn utility_attestation_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceUtilityAttestationRequest>,
+) -> ApiResult<Json<TraceUtilityAttestationResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_utility_operator(&tenant)?;
+    if !body.event_type.is_utility_job_type() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "utility attestations support regression_catch, training_utility, or ranking_utility",
+        ));
+    }
+    if !body.credit_points_delta.is_finite() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit_points_delta must be finite",
+        ));
+    }
+    if body.credit_points_delta.abs() > MAX_DELAYED_CREDIT_POINTS_DELTA {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit_points_delta exceeds the delayed credit policy limit",
+        ));
+    }
+    let use_category = body.use_category.trim().to_string();
+    if use_category.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "utility attestations require use_category",
+        ));
+    }
+    let policy_version = body.policy_version.trim().to_string();
+    if policy_version.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "utility attestations require policy_version",
+        ));
+    }
+    let evidence_hash = body.evidence_hash.trim().to_string();
+    if !evidence_hash.starts_with("sha256:") {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "utility attestations require sha256 evidence_hash",
+        ));
+    }
+    let reason = body.reason.trim().to_string();
+    if reason.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "utility attestations require a non-empty reason",
+        ));
+    }
+    let external_ref = body.external_ref.trim().to_string();
+    if external_ref.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "utility attestations require external_ref",
+        ));
+    }
+    if body.source_submission_ids.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "utility attestations require at least one source submission",
+        ));
+    }
+
+    let existing =
+        read_all_utility_attestations(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    if let Some(attestation) = existing.iter().find(|attestation| {
+        attestation.external_ref_hash == sha256_prefixed(&external_ref)
+            && attestation.event_type == body.event_type
+    }) {
+        return Ok(Json(TraceUtilityAttestationResponse {
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            attestation_id: attestation.attestation_id,
+            event_type: body.event_type,
+            requested_count: body.source_submission_ids.len(),
+            appended_count: 0,
+            skipped_existing_count: body.source_submission_ids.len(),
+        }));
+    }
+
+    let required_uses = utility_credit_required_allowed_uses(body.event_type);
+    let tenant_policy =
+        tenant_utility_credit_policy_for_request(state.as_ref(), &tenant, required_uses).await?;
+    let unique_submission_ids = body
+        .source_submission_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut sources = Vec::with_capacity(unique_submission_ids.len());
+    for submission_id in &unique_submission_ids {
+        let submission = read_utility_submission_record(state.as_ref(), &tenant, *submission_id)
+            .await
+            .map_err(internal_error)?
+            .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
+        if submission.status != TraceCorpusStatus::Accepted {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "utility attestations can only reference accepted trace submissions",
+            ));
+        }
+        if !record_matches_utility_credit_policy_abac(
+            &submission,
+            &tenant,
+            tenant_policy.as_ref(),
+            required_uses,
+        ) {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "trace utility attestation source is not allowed for this utility use",
+            ));
+        }
+        sources.push(AutomaticUtilityCreditSource {
+            submission_id: submission.submission_id,
+            trace_id: submission.trace_id,
+            auth_principal_ref: submission.auth_principal_ref,
+        });
+    }
+
+    let counts = append_automatic_utility_credit_events_once_with_counts(
+        state.as_ref(),
+        &tenant,
+        AutomaticUtilityCreditConfig {
+            idempotency_label: body.event_type.utility_idempotency_label(),
+            idempotency_ref: Some(external_ref.clone()),
+            event_type: body.event_type,
+            credit_points_delta: body.credit_points_delta,
+            reason,
+            external_ref: external_ref.clone(),
+        },
+        sources,
+    )
+    .await
+    .map_err(internal_error)?;
+
+    let attestation = TraceUtilityAttestationRecord {
+        attestation_id: Uuid::new_v4(),
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        event_type: body.event_type,
+        use_category,
+        policy_version,
+        evidence_hash,
+        external_ref_hash: sha256_prefixed(&external_ref),
+        source_submission_ids: unique_submission_ids.clone(),
+        actor_principal_ref: tenant.principal_ref.clone(),
+        created_at: Utc::now(),
+    };
+    append_utility_attestation(&state.root, &tenant.tenant_id, &attestation)
+        .map_err(internal_error)?;
+
+    Ok(Json(TraceUtilityAttestationResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        attestation_id: attestation.attestation_id,
+        event_type: body.event_type,
+        requested_count: unique_submission_ids.len(),
+        appended_count: counts.appended,
+        skipped_existing_count: counts.skipped_existing,
+    }))
+}
+
+async fn credit_settlement_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceCreditSettlementRunRequest>,
+) -> ApiResult<Json<TraceCreditSettlementRunResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let policy_version = body.policy_version.trim().to_string();
+    if policy_version.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit settlement requires policy_version",
+        ));
+    }
+    let reason = body.reason.trim().to_string();
+    if reason.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit settlement requires a non-empty reason",
+        ));
+    }
+    let near_contract_id = body
+        .near_contract_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|contract_id| !contract_id.is_empty())
+        .map(ToOwned::to_owned);
+
+    let records =
+        read_all_submission_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let records_by_submission = records
+        .iter()
+        .map(|record| (record.submission_id, record))
+        .collect::<BTreeMap<_, _>>();
+    let existing_batches = read_all_credit_settlement_batches(&state.root, &tenant.tenant_id)
+        .map_err(internal_error)?;
+    let held_credit_accounts =
+        active_credit_hold_account_refs(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let already_settled_event_ids = existing_batches
+        .iter()
+        .filter(|batch| batch.status == StorageTraceCreditSettlementBatchStatus::Finalized)
+        .flat_map(|batch| batch.source_credit_event_ids.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let credit_events =
+        read_all_credit_events(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let mut selected_events = credit_events
+        .into_iter()
+        .filter(|event| trace_credit_event_type_is_settlement_eligible(event.event_type))
+        .filter(|event| event.credit_points_delta > 0.0)
+        .filter(|event| !already_settled_event_ids.contains(&event.event_id))
+        .filter(|event| {
+            records_by_submission
+                .get(&event.submission_id)
+                .is_some_and(|record| {
+                    record.status == TraceCorpusStatus::Accepted
+                        && delayed_credit_applies_to_record(record)
+                })
+        })
+        .filter(|event| !held_credit_accounts.contains(&event.auth_principal_ref))
+        .collect::<Vec<_>>();
+    selected_events.sort_by_key(|event| event.event_id);
+
+    let source_credit_event_ids = selected_events
+        .iter()
+        .map(|event| event.event_id)
+        .collect::<Vec<_>>();
+    let source_submission_ids = selected_events
+        .iter()
+        .map(|event| event.submission_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let source_list_hash = source_credit_event_ids_hash(&policy_version, &source_credit_event_ids);
+    let settlement_batch_id = Uuid::new_v4();
+    let tenant_storage_ref = tenant_storage_ref(&tenant.tenant_id);
+    let reason_hash = sha256_prefixed(&reason);
+    let mut grouped = BTreeMap::<String, Vec<TraceCommonsCreditLedgerRecord>>::new();
+    for event in selected_events {
+        grouped
+            .entry(event.auth_principal_ref.clone())
+            .or_default()
+            .push(event);
+    }
+
+    let mut line_items = Vec::with_capacity(grouped.len());
+    let mut near_outbox_items = Vec::new();
+    for (credit_account_ref, events) in grouped {
+        let settled_credit_micros = events
+            .iter()
+            .map(|event| credit_delta_micros(event.credit_points_delta))
+            .sum::<i64>();
+        if settled_credit_micros <= 0 {
+            continue;
+        }
+        let source_credit_event_ids = events
+            .iter()
+            .map(|event| event.event_id)
+            .collect::<Vec<_>>();
+        let source_submission_ids = events
+            .iter()
+            .map(|event| event.submission_id)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let item_source_list_hash =
+            source_credit_event_ids_hash(&policy_version, &source_credit_event_ids);
+        let credit_account_hash = sha256_prefixed(&credit_account_ref);
+        let near_outbox_id = if near_contract_id.is_some() && !body.dry_run {
+            Some(Uuid::new_v4())
+        } else {
+            None
+        };
+        let near_status = if near_contract_id.is_some() {
+            StorageTraceCreditSettlementNearStatus::Pending
+        } else {
+            StorageTraceCreditSettlementNearStatus::Disabled
+        };
+        if let (Some(contract_id), Some(near_outbox_id)) = (&near_contract_id, near_outbox_id) {
+            let receipt = NearCreditReceipt {
+                settlement_batch_id,
+                credit_account_hash: credit_account_hash.clone(),
+                policy_version: policy_version.clone(),
+                source_list_hash: item_source_list_hash.clone(),
+                attestation_hash: sha256_prefixed(&format!(
+                    "trace-credit-attestation:v1:{item_source_list_hash}"
+                )),
+                amount_micros: settled_credit_micros,
+                issuer_signature_hash: sha256_prefixed(&format!(
+                    "trace-credit-settlement:v1:{settlement_batch_id}:{item_source_list_hash}"
+                )),
+            };
+            let near_call = NearCreditReceiptCall::settle(contract_id, receipt)
+                .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+            near_outbox_items.push(TraceNearCreditOutboxItem {
+                near_outbox_id,
+                tenant_id: tenant.tenant_id.clone(),
+                tenant_storage_ref: tenant_storage_ref.clone(),
+                settlement_batch_id,
+                credit_account_hash: credit_account_hash.clone(),
+                near_call,
+                status: StorageTraceCreditSettlementNearStatus::Pending,
+                created_at: Utc::now(),
+                submitted_at: None,
+                near_transaction_hash: None,
+                last_error_hash: None,
+                confirmed_at: None,
+            });
+        }
+        line_items.push(StorageTraceCreditAccountSettlementLineItem {
+            credit_account_ref,
+            credit_account_hash,
+            settled_credit_delta_micros: settled_credit_micros,
+            source_credit_event_ids,
+            source_submission_ids,
+            source_list_hash: item_source_list_hash,
+            near_status,
+            near_outbox_id,
+        });
+    }
+
+    let settled_credit_micros = line_items
+        .iter()
+        .map(|item| item.settled_credit_delta_micros)
+        .sum::<i64>();
+    let settled_credit_points = settled_credit_micros as f32 / 1_000_000.0;
+    if !body.dry_run && !line_items.is_empty() {
+        let batch = TraceCreditSettlementBatchRecord {
+            settlement_batch_id,
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref.clone(),
+            policy_version: policy_version.clone(),
+            status: StorageTraceCreditSettlementBatchStatus::Finalized,
+            reason_hash,
+            source_credit_event_ids: source_credit_event_ids.clone(),
+            source_submission_ids: source_submission_ids.clone(),
+            source_list_hash: source_list_hash.clone(),
+            settled_credit_points,
+            settled_credit_micros,
+            line_items: line_items.clone(),
+            near_contract_id: near_contract_id.clone(),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            created_at: Utc::now(),
+        };
+        append_credit_settlement_batch(&state.root, &tenant.tenant_id, &batch)
+            .map_err(internal_error)?;
+        for item in &near_outbox_items {
+            append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item)
+                .map_err(internal_error)?;
+        }
+    }
+
+    Ok(Json(TraceCreditSettlementRunResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref,
+        settlement_batch_id,
+        dry_run: body.dry_run,
+        policy_version,
+        source_list_hash,
+        settled_source_event_count: source_credit_event_ids.len(),
+        settled_account_count: line_items.len(),
+        settled_credit_points,
+        near_outbox_item_count: near_outbox_items.len(),
+    }))
+}
+
+async fn credit_settlements_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<TraceCreditSettlementBatchRecord>>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let batches = read_all_credit_settlement_batches(&state.root, &tenant.tenant_id)
+        .map_err(internal_error)?;
+    Ok(Json(batches))
+}
+
+async fn credit_hold_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceCreditHoldRequest>,
+) -> ApiResult<Json<TraceCreditHoldRecord>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let credit_account_ref = body.credit_account_ref.trim().to_string();
+    if credit_account_ref.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit holds require credit_account_ref",
+        ));
+    }
+    let reason_detail = body.reason_detail.trim().to_string();
+    if reason_detail.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit holds require reason_detail",
+        ));
+    }
+    let hold = TraceCreditHoldRecord {
+        hold_id: Uuid::new_v4(),
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        credit_account_ref: credit_account_ref.clone(),
+        credit_account_hash: sha256_prefixed(&credit_account_ref),
+        reason: body.reason,
+        reason_hash: sha256_prefixed(&reason_detail),
+        actor_principal_ref: tenant.principal_ref.clone(),
+        created_at: Utc::now(),
+        released_at: None,
+    };
+    append_credit_hold(&state.root, &tenant.tenant_id, &hold).map_err(internal_error)?;
+    Ok(Json(hold))
+}
+
+async fn credit_holds_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<TraceCreditHoldRecord>>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let holds = read_all_credit_holds(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    Ok(Json(holds))
+}
+
+async fn credit_attestations_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<TraceUtilityAttestationRecord>>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let attestations =
+        read_all_utility_attestations(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    Ok(Json(attestations))
+}
+
+async fn near_credit_outbox_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<TraceNearCreditOutboxItem>>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let items = read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)
+        .map_err(internal_error)?;
+    Ok(Json(items))
+}
+
+async fn mark_near_credit_outbox_status_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceNearCreditOutboxStatusRequest>,
+) -> ApiResult<Json<TraceNearCreditOutboxItem>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_utility_operator(&tenant)?;
+    let status = body.status;
+    if !matches!(
+        status,
+        StorageTraceCreditSettlementNearStatus::Submitted
+            | StorageTraceCreditSettlementNearStatus::Confirmed
+            | StorageTraceCreditSettlementNearStatus::Failed
+    ) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "NEAR credit outbox workers may mark submitted, confirmed, or failed status",
+        ));
+    }
+
+    let near_transaction_hash = body
+        .near_transaction_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    if matches!(
+        status,
+        StorageTraceCreditSettlementNearStatus::Submitted
+            | StorageTraceCreditSettlementNearStatus::Confirmed
+    ) && near_transaction_hash.is_none()
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "submitted or confirmed NEAR credit outbox status requires near_transaction_hash",
+        ));
+    }
+    if near_transaction_hash
+        .as_deref()
+        .is_some_and(|hash| hash.len() > 256)
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "near_transaction_hash is too long",
+        ));
+    }
+
+    let last_error_hash = if status == StorageTraceCreditSettlementNearStatus::Failed {
+        let error_detail = body
+            .error_detail
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                api_error(
+                    StatusCode::BAD_REQUEST,
+                    "failed status requires error_detail",
+                )
+            })?;
+        Some(sha256_prefixed(error_detail))
+    } else {
+        None
+    };
+    let updated = update_near_credit_outbox_item_status(
+        &state.root,
+        &tenant.tenant_id,
+        body.near_outbox_id,
+        status,
+        near_transaction_hash,
+        last_error_hash,
+        Utc::now(),
+    )
+    .map_err(internal_error)?
+    .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "NEAR credit outbox item not found"))?;
+    Ok(Json(updated))
+}
+
+fn trace_credit_event_type_is_settlement_eligible(event_type: TraceCreditLedgerEventType) -> bool {
+    matches!(
+        event_type,
+        TraceCreditLedgerEventType::BenchmarkConversion
+            | TraceCreditLedgerEventType::RegressionCatch
+            | TraceCreditLedgerEventType::TrainingUtility
+            | TraceCreditLedgerEventType::RankingUtility
+    )
 }
 
 fn delayed_credit_required_allowed_uses(
@@ -14618,6 +15321,55 @@ fn ensure_credit_event_tenant(
     Ok(())
 }
 
+fn utility_attestations_path(root: &Path, tenant_id: &str) -> PathBuf {
+    let tenant_key = tenant_storage_key(tenant_id);
+    root.join("tenants")
+        .join(tenant_key)
+        .join("utility_attestations")
+        .join("attestations.jsonl")
+}
+
+fn append_utility_attestation(
+    root: &Path,
+    tenant_id: &str,
+    attestation: &TraceUtilityAttestationRecord,
+) -> anyhow::Result<()> {
+    let path = utility_attestations_path(root, tenant_id);
+    append_jsonl_record(&path, attestation, "utility attestation")
+}
+
+fn read_all_utility_attestations(
+    root: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<Vec<TraceUtilityAttestationRecord>> {
+    let path = utility_attestations_path(root, tenant_id);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut attestations: Vec<TraceUtilityAttestationRecord> =
+        read_jsonl_records(&path, "utility attestation")?;
+    for attestation in &attestations {
+        ensure_utility_attestation_tenant(attestation, tenant_id)?;
+    }
+    attestations.sort_by_key(|attestation| attestation.created_at);
+    Ok(attestations)
+}
+
+fn ensure_utility_attestation_tenant(
+    attestation: &TraceUtilityAttestationRecord,
+    tenant_id: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        attestation.tenant_id == tenant_id,
+        "utility attestation tenant mismatch"
+    );
+    anyhow::ensure!(
+        attestation.tenant_storage_ref == tenant_storage_ref(tenant_id),
+        "utility attestation tenant storage ref mismatch"
+    );
+    Ok(())
+}
+
 fn remove_credit_event_by_id(root: &Path, tenant_id: &str, event_id: Uuid) -> anyhow::Result<bool> {
     let path = credit_ledger_path(root, tenant_id);
     if !path.exists() {
@@ -14632,6 +15384,259 @@ fn remove_credit_event_by_id(root: &Path, tenant_id: &str, event_id: Uuid) -> an
     rewrite_jsonl_file(&path, &events, "credit ledger")
         .with_context(|| format!("failed to rewrite credit ledger {}", path.display()))?;
     Ok(true)
+}
+
+fn credit_settlement_batches_path(root: &Path, tenant_id: &str) -> PathBuf {
+    let tenant_key = tenant_storage_key(tenant_id);
+    root.join("tenants")
+        .join(tenant_key)
+        .join("credit_settlements")
+        .join("batches.jsonl")
+}
+
+fn append_credit_settlement_batch(
+    root: &Path,
+    tenant_id: &str,
+    batch: &TraceCreditSettlementBatchRecord,
+) -> anyhow::Result<()> {
+    let path = credit_settlement_batches_path(root, tenant_id);
+    append_jsonl_record(&path, batch, "credit settlement batch")
+}
+
+fn read_all_credit_settlement_batches(
+    root: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<Vec<TraceCreditSettlementBatchRecord>> {
+    let path = credit_settlement_batches_path(root, tenant_id);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut batches: Vec<TraceCreditSettlementBatchRecord> =
+        read_jsonl_records(&path, "credit settlement batch")?;
+    for batch in &batches {
+        ensure_credit_settlement_batch_tenant(batch, tenant_id)?;
+    }
+    batches.sort_by_key(|batch| batch.created_at);
+    Ok(batches)
+}
+
+fn ensure_credit_settlement_batch_tenant(
+    batch: &TraceCreditSettlementBatchRecord,
+    tenant_id: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        batch.tenant_id == tenant_id,
+        "trace credit settlement tenant mismatch"
+    );
+    anyhow::ensure!(
+        batch.tenant_storage_ref == tenant_storage_ref(tenant_id),
+        "trace credit settlement tenant storage ref mismatch"
+    );
+    Ok(())
+}
+
+fn credit_holds_path(root: &Path, tenant_id: &str) -> PathBuf {
+    let tenant_key = tenant_storage_key(tenant_id);
+    root.join("tenants")
+        .join(tenant_key)
+        .join("credit_holds")
+        .join("holds.jsonl")
+}
+
+fn append_credit_hold(
+    root: &Path,
+    tenant_id: &str,
+    hold: &TraceCreditHoldRecord,
+) -> anyhow::Result<()> {
+    let path = credit_holds_path(root, tenant_id);
+    append_jsonl_record(&path, hold, "credit hold")
+}
+
+fn read_all_credit_holds(
+    root: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<Vec<TraceCreditHoldRecord>> {
+    let path = credit_holds_path(root, tenant_id);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut holds: Vec<TraceCreditHoldRecord> = read_jsonl_records(&path, "credit hold")?;
+    for hold in &holds {
+        ensure_credit_hold_tenant(hold, tenant_id)?;
+    }
+    holds.sort_by_key(|hold| hold.created_at);
+    Ok(holds)
+}
+
+fn ensure_credit_hold_tenant(hold: &TraceCreditHoldRecord, tenant_id: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        hold.tenant_id == tenant_id,
+        "trace credit hold tenant mismatch"
+    );
+    anyhow::ensure!(
+        hold.tenant_storage_ref == tenant_storage_ref(tenant_id),
+        "trace credit hold tenant storage ref mismatch"
+    );
+    Ok(())
+}
+
+fn active_credit_hold_account_refs(
+    root: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<BTreeSet<String>> {
+    Ok(read_all_credit_holds(root, tenant_id)?
+        .into_iter()
+        .filter(|hold| hold.released_at.is_none())
+        .map(|hold| hold.credit_account_ref)
+        .collect())
+}
+
+fn near_credit_outbox_path(root: &Path, tenant_id: &str) -> PathBuf {
+    let tenant_key = tenant_storage_key(tenant_id);
+    root.join("tenants")
+        .join(tenant_key)
+        .join("near_credit_outbox")
+        .join("items.jsonl")
+}
+
+fn append_near_credit_outbox_item(
+    root: &Path,
+    tenant_id: &str,
+    item: &TraceNearCreditOutboxItem,
+) -> anyhow::Result<()> {
+    let path = near_credit_outbox_path(root, tenant_id);
+    append_jsonl_record(&path, item, "NEAR credit outbox item")
+}
+
+fn read_all_near_credit_outbox_items(
+    root: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<Vec<TraceNearCreditOutboxItem>> {
+    let path = near_credit_outbox_path(root, tenant_id);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut items: Vec<TraceNearCreditOutboxItem> =
+        read_jsonl_records(&path, "NEAR credit outbox item")?;
+    for item in &items {
+        ensure_near_credit_outbox_item_tenant(item, tenant_id)?;
+    }
+    items.sort_by_key(|item| item.created_at);
+    Ok(items)
+}
+
+fn update_near_credit_outbox_item_status(
+    root: &Path,
+    tenant_id: &str,
+    near_outbox_id: Uuid,
+    status: StorageTraceCreditSettlementNearStatus,
+    near_transaction_hash: Option<String>,
+    last_error_hash: Option<String>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Option<TraceNearCreditOutboxItem>> {
+    let path = near_credit_outbox_path(root, tenant_id);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut items = read_all_near_credit_outbox_items(root, tenant_id)?;
+    let mut updated = None;
+    for item in &mut items {
+        if item.near_outbox_id != near_outbox_id {
+            continue;
+        }
+        item.status = status;
+        if near_transaction_hash.is_some() {
+            item.near_transaction_hash = near_transaction_hash.clone();
+        }
+        if item.submitted_at.is_none()
+            && matches!(
+                status,
+                StorageTraceCreditSettlementNearStatus::Submitted
+                    | StorageTraceCreditSettlementNearStatus::Confirmed
+            )
+        {
+            item.submitted_at = Some(now);
+        }
+        if status == StorageTraceCreditSettlementNearStatus::Confirmed {
+            item.confirmed_at = Some(now);
+            item.last_error_hash = None;
+        }
+        if status == StorageTraceCreditSettlementNearStatus::Failed {
+            item.last_error_hash = last_error_hash.clone();
+            item.confirmed_at = None;
+        }
+        if status == StorageTraceCreditSettlementNearStatus::Submitted {
+            item.last_error_hash = None;
+            item.confirmed_at = None;
+        }
+        updated = Some(item.clone());
+        break;
+    }
+    if updated.is_some() {
+        rewrite_jsonl_file(&path, &items, "NEAR credit outbox item")
+            .with_context(|| format!("failed to rewrite NEAR credit outbox {}", path.display()))?;
+    }
+    Ok(updated)
+}
+
+fn ensure_near_credit_outbox_item_tenant(
+    item: &TraceNearCreditOutboxItem,
+    tenant_id: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        item.tenant_id == tenant_id,
+        "NEAR credit outbox tenant mismatch"
+    );
+    anyhow::ensure!(
+        item.tenant_storage_ref == tenant_storage_ref(tenant_id),
+        "NEAR credit outbox tenant storage ref mismatch"
+    );
+    Ok(())
+}
+
+fn append_jsonl_record<T: Serialize>(path: &Path, value: &T, label: &str) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {label} dir {}", parent.display()))?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("failed to open {label} {}", path.display()))?;
+    let line =
+        serde_json::to_string(value).with_context(|| format!("failed to serialize {label}"))?;
+    writeln!(file, "{line}").with_context(|| format!("failed to append {label} {}", path.display()))
+}
+
+fn read_jsonl_records<T: DeserializeOwned>(path: &Path, label: &str) -> anyhow::Result<Vec<T>> {
+    let body = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {label} {}", path.display()))?;
+    let mut records = Vec::new();
+    for (index, line) in body.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let record = serde_json::from_str(line).with_context(|| {
+            format!(
+                "failed to parse {label} {} line {}",
+                path.display(),
+                index + 1
+            )
+        })?;
+        records.push(record);
+    }
+    Ok(records)
+}
+
+fn source_credit_event_ids_hash(policy_version: &str, source_credit_event_ids: &[Uuid]) -> String {
+    let mut payload = format!("trace_credit_settlement:{policy_version}");
+    for event_id in source_credit_event_ids {
+        payload.push('\n');
+        payload.push_str(&event_id.to_string());
+    }
+    sha256_prefixed(&payload)
 }
 
 fn write_revocation(root: &Path, tombstone: &TraceCommonsRevocation) -> anyhow::Result<()> {
@@ -20109,13 +21114,23 @@ struct TraceCommonsTenantCreditResponse {
     credit_points_final: f32,
     credit_points_ledger: f32,
     credit_points_total: f32,
+    credit_points_estimated: f32,
+    credit_points_pending_ledger: f32,
+    credit_points_settled: f32,
+    credit_points_reversed: f32,
+    credit_points_held: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_settlement_batch_id: Option<Uuid>,
 }
 
 impl TraceCommonsTenantCreditResponse {
-    fn from_records_and_events(
+    fn from_records_events_and_settlements(
         tenant_id: String,
+        principal_ref: &str,
         records: Vec<TraceCommonsSubmissionRecord>,
         credit_events: &[TraceCommonsCreditLedgerRecord],
+        settlement_batches: &[TraceCreditSettlementBatchRecord],
+        credit_holds: &[TraceCreditHoldRecord],
     ) -> Self {
         let mut response = Self {
             tenant_storage_ref: tenant_storage_ref(&tenant_id),
@@ -20129,6 +21144,12 @@ impl TraceCommonsTenantCreditResponse {
             credit_points_final: 0.0,
             credit_points_ledger: 0.0,
             credit_points_total: 0.0,
+            credit_points_estimated: 0.0,
+            credit_points_pending_ledger: 0.0,
+            credit_points_settled: 0.0,
+            credit_points_reversed: 0.0,
+            credit_points_held: 0.0,
+            last_settlement_batch_id: None,
         };
 
         let delayed_credit_eligible_submission_ids = records
@@ -20142,6 +21163,7 @@ impl TraceCommonsTenantCreditResponse {
                 TraceCorpusStatus::Accepted => {
                     response.accepted += 1;
                     response.credit_points_pending += record.credit_points_pending;
+                    response.credit_points_estimated += record.credit_points_pending;
                     response.credit_points_final += record.credit_points_final.unwrap_or(0.0);
                 }
                 TraceCorpusStatus::Quarantined => response.quarantined += 1,
@@ -20151,11 +21173,54 @@ impl TraceCommonsTenantCreditResponse {
             }
         }
 
-        response.credit_points_ledger = credit_events
+        let visible_settlements = settlement_batches
+            .iter()
+            .filter(|batch| batch.status == StorageTraceCreditSettlementBatchStatus::Finalized)
+            .flat_map(|batch| {
+                batch.line_items.iter().filter_map(move |item| {
+                    (item.credit_account_ref == principal_ref
+                        || item.credit_account_ref == legacy_principal_ref())
+                    .then_some((batch.settlement_batch_id, item))
+                })
+            })
+            .collect::<Vec<_>>();
+        let settled_credit_event_ids = visible_settlements
+            .iter()
+            .flat_map(|(_, item)| item.source_credit_event_ids.iter().copied())
+            .collect::<BTreeSet<_>>();
+        response.credit_points_settled = visible_settlements
+            .iter()
+            .map(|(_, item)| item.settled_credit_delta_micros as f32 / 1_000_000.0)
+            .sum();
+        response.last_settlement_batch_id = visible_settlements
+            .iter()
+            .map(|(batch_id, _)| *batch_id)
+            .last();
+        let held_account_refs = credit_holds
+            .iter()
+            .filter(|hold| hold.released_at.is_none())
+            .filter(|hold| {
+                hold.credit_account_ref == principal_ref
+                    || hold.credit_account_ref == legacy_principal_ref()
+            })
+            .map(|hold| hold.credit_account_ref.as_str())
+            .collect::<BTreeSet<_>>();
+        response.credit_points_held = credit_events
             .iter()
             .filter(|event| delayed_credit_eligible_submission_ids.contains(&event.submission_id))
+            .filter(|event| !settled_credit_event_ids.contains(&event.event_id))
+            .filter(|event| held_account_refs.contains(event.auth_principal_ref.as_str()))
             .map(|event| event.credit_points_delta)
             .sum();
+        response.credit_points_pending_ledger = credit_events
+            .iter()
+            .filter(|event| delayed_credit_eligible_submission_ids.contains(&event.submission_id))
+            .filter(|event| !settled_credit_event_ids.contains(&event.event_id))
+            .filter(|event| !held_account_refs.contains(event.auth_principal_ref.as_str()))
+            .map(|event| event.credit_points_delta)
+            .sum();
+        response.credit_points_ledger =
+            response.credit_points_pending_ledger + response.credit_points_settled;
         response.credit_points_total = response.credit_points_final + response.credit_points_ledger;
         response
     }
@@ -24700,6 +25765,11 @@ mod tests {
                 ConsentScope::BenchmarkOnly,
                 ConsentScope::RankingTraining,
             ];
+            envelope.trace_card.allowed_uses = vec![
+                TraceAllowedUse::Evaluation,
+                TraceAllowedUse::BenchmarkGeneration,
+                TraceAllowedUse::RankingModelTraining,
+            ];
             envelope.value.submission_score = 0.9 - (index as f32 * 0.1);
             let _ = submit_trace_handler(
                 State(state.clone()),
@@ -25004,9 +26074,17 @@ mod tests {
         let state = test_state(temp.path().to_path_buf());
         let mut revoked = sample_envelope().await;
         make_metadata_only_low_risk(&mut revoked);
+        revoked.trace_card.allowed_uses = vec![
+            TraceAllowedUse::Evaluation,
+            TraceAllowedUse::BenchmarkGeneration,
+        ];
         let revoked_id = revoked.submission_id;
         let mut kept = sample_envelope().await;
         make_metadata_only_low_risk(&mut kept);
+        kept.trace_card.allowed_uses = vec![
+            TraceAllowedUse::Evaluation,
+            TraceAllowedUse::BenchmarkGeneration,
+        ];
         let kept_id = kept.submission_id;
 
         let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(revoked))
@@ -27759,6 +28837,298 @@ mod tests {
                         && explanation.contains("excluded because the trace is revoked")
                 })
         );
+    }
+
+    #[tokio::test]
+    async fn admin_credit_settlement_finalizes_pending_utility_once_and_enqueues_near_receipt() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.75,
+                reason: Some("frontier lab training utility attested".to_string()),
+                external_ref: Some("lab-attestation:batch-42".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+
+        let Json(dry_run) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: true,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "preview canary settlement".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+            }),
+        )
+        .await
+        .expect("admin can dry-run settlement");
+        assert!(dry_run.dry_run);
+        assert_eq!(dry_run.settled_source_event_count, 1);
+        assert_eq!(dry_run.settled_credit_points, 1.75);
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement reads")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads")
+                .is_empty()
+        );
+
+        let Json(finalized) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "finalize canary settlement".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+            }),
+        )
+        .await
+        .expect("admin can finalize settlement");
+        assert!(!finalized.dry_run);
+        assert_eq!(finalized.settled_source_event_count, 1);
+        assert_eq!(finalized.settled_credit_points, 1.75);
+        assert_eq!(finalized.near_outbox_item_count, 1);
+
+        let Json(retry) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "retry canary settlement".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+            }),
+        )
+        .await
+        .expect("settlement retry is idempotent");
+        assert_eq!(retry.settled_source_event_count, 0);
+        assert_eq!(retry.near_outbox_item_count, 0);
+
+        let Json(credit) = credit_handler(State(state.clone()), auth_headers("token-a"))
+            .await
+            .expect("credit summary succeeds");
+        assert_eq!(credit.credit_points_pending_ledger, 0.0);
+        assert_eq!(credit.credit_points_settled, 1.75);
+        assert_eq!(credit.credit_points_total, 1.75);
+        assert_eq!(
+            credit.last_settlement_batch_id,
+            Some(finalized.settlement_batch_id)
+        );
+
+        let batches =
+            read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].source_credit_event_ids, vec![event.event_id]);
+
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox[0].near_call.method_name, "settle_credit_receipt");
+        let outbox_json = serde_json::to_string(&outbox[0]).expect("outbox serializes");
+        assert!(!outbox_json.contains("frontier lab training utility attested"));
+        assert!(!outbox_json.contains("token-a"));
+
+        let Json(submitted) = mark_near_credit_outbox_status_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxStatusRequest {
+                near_outbox_id: outbox[0].near_outbox_id,
+                status: StorageTraceCreditSettlementNearStatus::Submitted,
+                near_transaction_hash: Some("near-public-tx-hash-1".to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect("utility worker can mark NEAR receipt submitted");
+        assert_eq!(
+            submitted.status,
+            StorageTraceCreditSettlementNearStatus::Submitted
+        );
+        assert_eq!(
+            submitted.near_transaction_hash.as_deref(),
+            Some("near-public-tx-hash-1")
+        );
+        assert!(submitted.submitted_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn admin_credit_hold_blocks_settlement_and_moves_points_to_held_projection() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.25,
+                reason: Some("training utility under review".to_string()),
+                external_ref: Some("lab-attestation:held-batch".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+
+        let Json(hold) = credit_hold_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditHoldRequest {
+                credit_account_ref: event.auth_principal_ref.clone(),
+                reason: StorageTraceCreditHoldReason::AttestationDispute,
+                reason_detail: "lab attestation under dispute".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can place credit hold");
+        assert_eq!(hold.credit_account_ref, event.auth_principal_ref);
+        assert_eq!(hold.reason_hash.len(), "sha256:".len() + 64);
+
+        let Json(settlement) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "held account settlement attempt".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+            }),
+        )
+        .await
+        .expect("settlement skips held account");
+        assert_eq!(settlement.settled_source_event_count, 0);
+        assert_eq!(settlement.near_outbox_item_count, 0);
+
+        let Json(credit) = credit_handler(State(state), auth_headers("token-a"))
+            .await
+            .expect("credit summary succeeds");
+        assert_eq!(credit.credit_points_pending_ledger, 0.0);
+        assert_eq!(credit.credit_points_held, 1.25);
+        assert_eq!(credit.credit_points_settled, 0.0);
+        assert_eq!(credit.credit_points_total, 0.0);
+    }
+
+    #[tokio::test]
+    async fn utility_attestation_records_hash_only_evidence_and_appends_credit_once() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(attestation) = utility_attestation_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceUtilityAttestationRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 2.0,
+                use_category: "frontier_lab_training".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                evidence_hash:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_string(),
+                reason: "frontier lab accepted batch".to_string(),
+                external_ref: "frontier-lab:batch-9000".to_string(),
+                source_submission_ids: vec![submission_id],
+            }),
+        )
+        .await
+        .expect("utility worker can attest training utility");
+        assert_eq!(attestation.appended_count, 1);
+        assert_eq!(attestation.skipped_existing_count, 0);
+
+        let Json(retry) = utility_attestation_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceUtilityAttestationRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 2.0,
+                use_category: "frontier_lab_training".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                evidence_hash:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_string(),
+                reason: "frontier lab accepted batch retry".to_string(),
+                external_ref: "frontier-lab:batch-9000".to_string(),
+                source_submission_ids: vec![submission_id],
+            }),
+        )
+        .await
+        .expect("utility attestation retry is idempotent");
+        assert_eq!(retry.attestation_id, attestation.attestation_id);
+        assert_eq!(retry.appended_count, 0);
+        assert_eq!(retry.skipped_existing_count, 1);
+
+        let attestations =
+            read_all_utility_attestations(temp.path(), "tenant-a").expect("attestation reads");
+        assert_eq!(attestations.len(), 1);
+        assert_eq!(attestations[0].source_submission_ids, vec![submission_id]);
+        assert_eq!(
+            attestations[0].external_ref_hash.len(),
+            "sha256:".len() + 64
+        );
+        let serialized = serde_json::to_string(&attestations[0]).expect("attestation serializes");
+        assert!(!serialized.contains("frontier lab accepted batch"));
+        assert!(!serialized.contains("frontier-lab:batch-9000"));
+
+        let credit_events = read_all_credit_events(temp.path(), "tenant-a").expect("credit reads");
+        assert_eq!(credit_events.len(), 1);
+        assert_eq!(
+            credit_events[0].event_type,
+            TraceCreditLedgerEventType::TrainingUtility
+        );
+        assert_eq!(credit_events[0].credit_points_delta, 2.0);
     }
 
     #[tokio::test]

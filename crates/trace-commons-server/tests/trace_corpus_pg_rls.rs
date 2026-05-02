@@ -732,6 +732,10 @@ async fn assert_trace_rls_policies_installed(backend: &PgBackend) {
         "trace_export_access_grants".to_string(),
         "trace_export_jobs".to_string(),
         "trace_revocation_propagation_items".to_string(),
+        "trace_utility_attestations".to_string(),
+        "trace_credit_settlement_batches".to_string(),
+        "trace_credit_holds".to_string(),
+        "trace_near_credit_outbox".to_string(),
     ];
     let client = backend.pool().get().await.expect("get policy connection");
     let rows = client
@@ -2463,7 +2467,7 @@ async fn pg_trace_corpus_rls_diagnostics_report_policy_coverage() {
         .await
         .expect("read RLS diagnostics")
         .expect("PostgreSQL reports RLS diagnostics");
-    assert_eq!(diagnostics.expected_table_count, 16);
+    assert_eq!(diagnostics.expected_table_count, 21);
     assert_eq!(diagnostics.policy_installed_count, 16);
     assert_eq!(diagnostics.rls_enabled_count, 16);
     assert!(diagnostics.missing_policy_tables.is_empty());
