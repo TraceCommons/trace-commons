@@ -747,6 +747,15 @@ ironclaw traces worker-utility-credit \
 
 The worker route is intentionally limited to `regression_catch`, `training_utility`, and `ranking_utility`; it is not for `reviewer_bonus` or `abuse_penalty`.
 
+Settlement treats `ranking_utility` as model-derived credit. A settlement run
+without `ranking_model_version` excludes pending ranking utility events from the
+source list. A settlement run that provides `ranking_model_version` uses
+`ranking_target_use` or defaults it to `ranking_model_training`, then requires
+the latest matching calibration run for the request `policy_version` to be
+`promotable`; otherwise the settlement fails with a conflict instead of settling
+ranking-derived credit. Finalized batches record the calibration run id and
+report hash used for the gate.
+
 Contributors can read only their own append-only central credit events:
 
 ```http
