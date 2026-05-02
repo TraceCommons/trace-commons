@@ -2,10 +2,12 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use tracedao_server::trace_corpus_storage::{
-    TenantScopedTraceObjectRef, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCreditEventType,
-    TraceDerivedRecord, TraceDerivedStatus, TraceExportManifestItemInvalidationReason,
-    TraceExportManifestItemRecord, TraceExportManifestRecord, TraceObjectArtifactKind,
-    TraceObjectRefRecord, TraceReviewLeaseAuditAction, TraceSubmissionWrite, TraceTombstoneRecord,
+    TenantScopedTraceObjectRef, TraceAuditSafeMetadata, TraceCorpusStatus,
+    TraceCreditAccountSettlementLineItem, TraceCreditEventType, TraceCreditHoldReason,
+    TraceCreditSettlementBatchStatus, TraceCreditSettlementNearStatus, TraceDerivedRecord,
+    TraceDerivedStatus, TraceExportManifestItemInvalidationReason, TraceExportManifestItemRecord,
+    TraceExportManifestRecord, TraceObjectArtifactKind, TraceObjectRefRecord,
+    TraceReviewLeaseAuditAction, TraceSubmissionWrite, TraceTombstoneRecord,
     TraceVectorEntryRecord, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
     TraceWorkerKind,
 };
@@ -136,6 +138,35 @@ fn process_evaluation_audit_metadata_is_hash_and_count_only() {
     assert!(json.get("evaluator_version").is_none());
     assert!(json.get("labels").is_none());
     assert!(json.get("utility_external_ref").is_none());
+}
+
+#[test]
+fn credit_settlement_contract_uses_typed_states_and_hash_only_near_metadata() {
+    let line_item = TraceCreditAccountSettlementLineItem {
+        credit_account_ref: "principal_sha256:account".to_string(),
+        credit_account_hash: "sha256:account".to_string(),
+        settled_credit_delta_micros: 1_250_000,
+        source_credit_event_ids: vec![Uuid::from_u128(0x11)],
+        source_submission_ids: vec![Uuid::from_u128(0x12)],
+        source_list_hash: "sha256:sources".to_string(),
+        near_status: TraceCreditSettlementNearStatus::Pending,
+        near_outbox_id: Some(Uuid::from_u128(0x13)),
+    };
+    let json = serde_json::to_value(line_item).unwrap();
+
+    assert_eq!(json["near_status"], "pending");
+    assert_eq!(json["credit_account_hash"], "sha256:account");
+    assert!(json.get("raw_contributor_identity").is_none());
+    assert!(json.get("trace_body").is_none());
+
+    assert_eq!(
+        serde_json::to_value(TraceCreditSettlementBatchStatus::DryRun).unwrap(),
+        "dry_run"
+    );
+    assert_eq!(
+        serde_json::to_value(TraceCreditHoldReason::DuplicateClusterUnderReview).unwrap(),
+        "duplicate_cluster_under_review"
+    );
 }
 
 #[test]

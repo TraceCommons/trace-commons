@@ -14,6 +14,25 @@ server now owns its database, object-storage, and shared protocol surface
 locally: the `TraceCorpusStore` trait, PostgreSQL backend, server migrations,
 RLS diagnostics, encrypted artifact-store provider code, contribution envelope
 DTOs, status DTOs, and deterministic redaction helpers live in this repo.
+It also owns the first server-side Trace Credits settlement surface: hash-only
+utility attestations, admin-triggered dry-run/final settlement batches, credit
+holds, contributor pending/settled/held projections, and a NEAR non-transferable
+credit receipt outbox.
+
+## Trace Credits
+
+Trace Credits are non-transferable account credits backed by reviewed utility
+evidence. Uploads and ranker scores do not settle credit directly. Utility
+workers record hash-only attestations for accepted traces, admins run settlement
+batches, and optional NEAR receipt calls are queued only after off-chain
+settlement finalizes.
+
+The NEAR path is intentionally an outbox of deterministic method-call payloads
+for a non-transferable receipt contract. Workers mark outbox items submitted,
+confirmed, or failed after contract submission. The server ledger remains
+authoritative; NEAR payloads contain batch ids, account hashes, source-list
+hashes, policy versions, amounts, and issuer-signature hashes, never trace
+bodies or raw contributor identity.
 
 ## Binaries
 

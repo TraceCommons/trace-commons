@@ -31,6 +31,10 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_export_access_grants",
     "trace_export_jobs",
     "trace_revocation_propagation_items",
+    "trace_utility_attestations",
+    "trace_credit_settlement_batches",
+    "trace_credit_holds",
+    "trace_near_credit_outbox",
 ];
 
 impl PgBackend {
@@ -83,6 +87,26 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _tracedao_migrations (version, name) VALUES ($1, $2)",
                     &[&1_i32, &"trace_commons_schema"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _tracedao_migrations WHERE version = $1",
+                &[&2_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V2__trace_credit_settlement.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _tracedao_migrations (version, name) VALUES ($1, $2)",
+                    &[&2_i32, &"trace_credit_settlement"],
                 )
                 .await?;
         }

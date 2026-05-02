@@ -119,6 +119,48 @@ pub enum TraceCreditSettlementState {
     Reversed,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceCreditSettlementBatchStatus {
+    DryRun,
+    Finalized,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceCreditSettlementNearStatus {
+    Disabled,
+    Pending,
+    Submitted,
+    Confirmed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceCreditHoldReason {
+    DuplicateClusterUnderReview,
+    PrivacyRiskUnderReview,
+    SuspectedAbuse,
+    RevocationPropagation,
+    AttestationDispute,
+    PolicyMigration,
+    LegalCompliance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceCreditAccountSettlementLineItem {
+    pub credit_account_ref: String,
+    pub credit_account_hash: String,
+    pub settled_credit_delta_micros: i64,
+    pub source_credit_event_ids: Vec<Uuid>,
+    pub source_submission_ids: Vec<Uuid>,
+    pub source_list_hash: String,
+    pub near_status: TraceCreditSettlementNearStatus,
+    pub near_outbox_id: Option<Uuid>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceSubmissionWrite {
     pub tenant_id: String,
