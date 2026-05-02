@@ -43,10 +43,13 @@ feature hashes, model predictions, lab/reviewer labels, and calibration runs
 that record aggregate error, confidence, threshold policy, reason codes, and a
 hash-only report digest. Admins can inspect calibration reports and persisted
 runs before deciding which predictions are trustworthy enough to influence
-settlement policy. With the DB mirror configured, ranking evidence and
-calibration runs are dual-written to PostgreSQL and
-`TRACE_COMMONS_DB_REVIEWER_READS=true` serves admin ranking lists, calibration
-reports, and calibration-run history from the tenant-scoped DB mirror.
+settlement policy. Settlement excludes `ranking_utility` credit events unless
+the settlement request names a ranking model version with a latest promotable
+calibration run for the same policy and target use. With the DB mirror
+configured, ranking evidence and calibration runs are dual-written to
+PostgreSQL and `TRACE_COMMONS_DB_REVIEWER_READS=true` serves admin ranking
+lists, calibration reports, and calibration-run history from the tenant-scoped
+DB mirror.
 
 ## Binaries
 

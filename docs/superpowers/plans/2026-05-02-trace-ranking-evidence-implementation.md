@@ -89,3 +89,16 @@
 - [x] Mirror calibration runs to PostgreSQL under DB dual-write and serve them from the DB mirror under DB reviewer reads.
 - [x] Include calibration runs in Trace Commons RLS diagnostics.
 - [x] Add caller-level route coverage and PostgreSQL store coverage.
+
+### Task 7: Settlement Calibration Gate
+
+**Files:**
+- Modify: `crates/tracedao-server/src/bin/tracedao-ingest.rs`
+- Modify: `README.md`
+- Modify: `docs/trace-commons.md`
+- Modify: `docs/trace-commons-storage.md`
+
+- [x] Exclude `ranking_utility` events from settlement unless the request names a ranking model version.
+- [x] Require the latest matching calibration run for the named model, target use, and settlement policy to be promotable before settling ranking utility.
+- [x] Include calibration-run id/report hash and excluded ranking-event count in settlement responses and finalized batch records.
+- [x] Add caller-level settlement coverage for no-gate exclusion, missing-calibration conflict, and promotable-calibration inclusion.

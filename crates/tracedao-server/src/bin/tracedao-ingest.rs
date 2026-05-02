@@ -4934,6 +4934,10 @@ struct TraceCreditSettlementRunRequest {
     reason: String,
     #[serde(default)]
     near_contract_id: Option<String>,
+    #[serde(default)]
+    ranking_model_version: Option<String>,
+    #[serde(default)]
+    ranking_target_use: Option<TraceAllowedUse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4951,6 +4955,16 @@ struct TraceCreditSettlementBatchRecord {
     settled_credit_micros: i64,
     line_items: Vec<StorageTraceCreditAccountSettlementLineItem>,
     near_contract_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ranking_model_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ranking_target_use: Option<TraceAllowedUse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ranking_calibration_run_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ranking_calibration_report_hash: Option<String>,
+    #[serde(default)]
+    ranking_credit_events_excluded_count: usize,
     actor_principal_ref: String,
     created_at: DateTime<Utc>,
 }
@@ -5014,6 +5028,11 @@ struct TraceCreditSettlementRunResponse {
     settled_account_count: usize,
     settled_credit_points: f32,
     near_outbox_item_count: usize,
+    ranking_model_version: Option<String>,
+    ranking_target_use: Option<TraceAllowedUse>,
+    ranking_calibration_run_id: Option<Uuid>,
+    ranking_calibration_report_hash: Option<String>,
+    ranking_credit_events_excluded_count: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5684,6 +5703,28 @@ async fn credit_settlement_handler(
         .map(str::trim)
         .filter(|contract_id| !contract_id.is_empty())
         .map(ToOwned::to_owned);
+    let ranking_model_version = match body.ranking_model_version.as_deref().map(str::trim) {
+        Some("") => {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "credit settlement ranking_model_version cannot be empty",
+            ));
+        }
+        Some(model_version) => Some(validate_ranking_identifier(
+            model_version,
+            "ranking_model_version",
+        )?),
+        None => None,
+    };
+    if body.ranking_target_use.is_some() && ranking_model_version.is_none() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit settlement ranking_target_use requires ranking_model_version",
+        ));
+    }
+    let ranking_target_use = body
+        .ranking_target_use
+        .unwrap_or(TraceAllowedUse::RankingModelTraining);
 
     let records =
         read_all_submission_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
@@ -5702,7 +5743,7 @@ async fn credit_settlement_handler(
         .collect::<BTreeSet<_>>();
     let credit_events =
         read_all_credit_events(&state.root, &tenant.tenant_id).map_err(internal_error)?;
-    let mut selected_events = credit_events
+    let candidate_events = credit_events
         .into_iter()
         .filter(|event| trace_credit_event_type_is_settlement_eligible(event.event_type))
         .filter(|event| event.credit_points_delta > 0.0)
@@ -5716,6 +5757,35 @@ async fn credit_settlement_handler(
                 })
         })
         .filter(|event| !held_credit_accounts.contains(&event.auth_principal_ref))
+        .collect::<Vec<_>>();
+    let ranking_candidate_count = candidate_events
+        .iter()
+        .filter(|event| event.event_type == TraceCreditLedgerEventType::RankingUtility)
+        .count();
+    let ranking_calibration_gate = if ranking_candidate_count > 0 {
+        ranking_settlement_calibration_gate(
+            state.as_ref(),
+            &tenant,
+            &policy_version,
+            ranking_model_version.as_deref(),
+            ranking_target_use,
+        )
+        .await?
+    } else {
+        None
+    };
+    let ranking_credit_events_excluded_count =
+        if ranking_candidate_count > 0 && ranking_calibration_gate.is_none() {
+            ranking_candidate_count
+        } else {
+            0
+        };
+    let mut selected_events = candidate_events
+        .into_iter()
+        .filter(|event| {
+            event.event_type != TraceCreditLedgerEventType::RankingUtility
+                || ranking_calibration_gate.is_some()
+        })
         .collect::<Vec<_>>();
     selected_events.sort_by_key(|event| event.event_id);
 
@@ -5837,6 +5907,19 @@ async fn credit_settlement_handler(
             settled_credit_micros,
             line_items: line_items.clone(),
             near_contract_id: near_contract_id.clone(),
+            ranking_model_version: ranking_calibration_gate
+                .as_ref()
+                .map(|gate| gate.model_version.clone()),
+            ranking_target_use: ranking_calibration_gate
+                .as_ref()
+                .map(|gate| gate.target_use),
+            ranking_calibration_run_id: ranking_calibration_gate
+                .as_ref()
+                .map(|gate| gate.calibration_run_id),
+            ranking_calibration_report_hash: ranking_calibration_gate
+                .as_ref()
+                .map(|gate| gate.report_hash.clone()),
+            ranking_credit_events_excluded_count,
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
         };
@@ -5859,6 +5942,19 @@ async fn credit_settlement_handler(
         settled_account_count: line_items.len(),
         settled_credit_points,
         near_outbox_item_count: near_outbox_items.len(),
+        ranking_model_version: ranking_calibration_gate
+            .as_ref()
+            .map(|gate| gate.model_version.clone()),
+        ranking_target_use: ranking_calibration_gate
+            .as_ref()
+            .map(|gate| gate.target_use),
+        ranking_calibration_run_id: ranking_calibration_gate
+            .as_ref()
+            .map(|gate| gate.calibration_run_id),
+        ranking_calibration_report_hash: ranking_calibration_gate
+            .as_ref()
+            .map(|gate| gate.report_hash.clone()),
+        ranking_credit_events_excluded_count,
     }))
 }
 
@@ -7145,6 +7241,55 @@ fn ranking_calibration_run_report_hash(record: &TraceRankingCalibrationRunRecord
         payload.push_str(reason);
     }
     sha256_prefixed(&payload)
+}
+
+#[derive(Debug, Clone)]
+struct RankingSettlementCalibrationGate {
+    model_version: String,
+    target_use: TraceAllowedUse,
+    calibration_run_id: Uuid,
+    report_hash: String,
+}
+
+async fn ranking_settlement_calibration_gate(
+    state: &AppState,
+    tenant: &TenantAuth,
+    policy_version: &str,
+    model_version: Option<&str>,
+    target_use: TraceAllowedUse,
+) -> ApiResult<Option<RankingSettlementCalibrationGate>> {
+    let Some(model_version) = model_version else {
+        return Ok(None);
+    };
+    let calibration_runs = read_ranking_calibration_runs_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let Some(run) = calibration_runs
+        .into_iter()
+        .filter(|run| {
+            run.model_version == model_version
+                && run.target_use == target_use
+                && run.policy_version == policy_version
+        })
+        .max_by_key(|run| run.created_at)
+    else {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "ranking utility settlement requires a calibration run for the requested model, target use, and policy",
+        ));
+    };
+    if !run.promotable {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "ranking utility settlement requires a promotable calibration run",
+        ));
+    }
+    Ok(Some(RankingSettlementCalibrationGate {
+        model_version: run.model_version,
+        target_use: run.target_use,
+        calibration_run_id: run.calibration_run_id,
+        report_hash: run.report_hash,
+    }))
 }
 
 fn average_i128(sum: i128, count: usize) -> Option<i64> {
@@ -30533,6 +30678,8 @@ mod tests {
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "preview canary settlement".to_string(),
                 near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
             }),
         )
         .await
@@ -30559,6 +30706,8 @@ mod tests {
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "finalize canary settlement".to_string(),
                 near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
             }),
         )
         .await
@@ -30576,6 +30725,8 @@ mod tests {
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "retry canary settlement".to_string(),
                 near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
             }),
         )
         .await
@@ -30628,6 +30779,198 @@ mod tests {
             Some("near-public-tx-hash-1")
         );
         assert!(submitted.submitted_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn credit_settlement_requires_promotable_calibration_for_ranking_utility() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("ranking submission succeeds");
+
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::RankingUtility,
+                credit_points_delta: 1.25,
+                reason: Some("ranker utility selected source".to_string()),
+                external_ref: Some("ranker:needs-calibration".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append ranking utility credit");
+
+        let Json(no_model_gate) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: true,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "ranking settlement without model gate".to_string(),
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("settlement without ranking model gate succeeds but excludes ranking utility");
+        assert_eq!(no_model_gate.settled_source_event_count, 0);
+        assert_eq!(no_model_gate.ranking_credit_events_excluded_count, 1);
+
+        let missing_calibration = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: true,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "ranking settlement with missing calibration".to_string(),
+                near_contract_id: None,
+                ranking_model_version: Some("trace-ranker-settlement-v1".to_string()),
+                ranking_target_use: Some(TraceAllowedUse::RankingModelTraining),
+            }),
+        )
+        .await
+        .expect_err("named ranking model must have a promotable calibration run");
+        assert_eq!(missing_calibration.0, StatusCode::CONFLICT);
+
+        let Json(model) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-settlement-v1".to_string(),
+                feature_schema_version: "ranking-features-settlement-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:ranking-training-settlement".to_string(),
+                calibration_dataset_hash: "sha256:ranking-calibration-settlement".to_string(),
+                model_artifact_hash: "sha256:ranking-model-artifact-settlement".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can register ranking settlement model");
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                feature_schema_version: model.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:ranking-feature-settlement".to_string(),
+                feature_names_hash: "sha256:ranking-feature-names-settlement".to_string(),
+                source_feature_hash: "sha256:ranking-source-feature-settlement".to_string(),
+                duplicate_score: Some(0.05),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.88),
+                coverage_tags: vec!["tool:terminal".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking feature");
+        let Json(_) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: model.model_version.clone(),
+                feature_schema_version: model.feature_schema_version.clone(),
+                prediction_policy_version: "trace-credit-policy-v1".to_string(),
+                feature_vector_hash: feature.feature_vector_hash.clone(),
+                predicted_utility_micros: 1_250_000,
+                uncertainty_micros: 250_000,
+                confidence: 0.9,
+                risk_penalty_micros: 0,
+                novelty_bonus_micros: 0,
+                explanation_codes: vec!["ranking_pair_utility".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking prediction");
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_300_000,
+                evidence_hash: "sha256:ranking-frontier-evidence-settlement".to_string(),
+                external_ref: "private-ranking-calibration-ref".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking label");
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: model.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                evaluation_dataset_hash: "sha256:ranking-eval-dataset-settlement".to_string(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable ranking calibration");
+        assert!(calibration.promotable);
+
+        let Json(finalized) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "ranking settlement with calibrated model".to_string(),
+                near_contract_id: None,
+                ranking_model_version: Some(model.model_version.clone()),
+                ranking_target_use: Some(TraceAllowedUse::RankingModelTraining),
+            }),
+        )
+        .await
+        .expect("promotable calibrated ranking model allows ranking utility settlement");
+        assert_eq!(finalized.settled_source_event_count, 1);
+        assert_eq!(finalized.ranking_credit_events_excluded_count, 0);
+        assert_eq!(
+            finalized.ranking_calibration_run_id,
+            Some(calibration.calibration_run_id)
+        );
+        assert_eq!(
+            finalized.ranking_calibration_report_hash,
+            Some(calibration.report_hash.clone())
+        );
+
+        let batches =
+            read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].source_credit_event_ids, vec![event.event_id]);
+        assert_eq!(
+            batches[0].ranking_calibration_run_id,
+            Some(calibration.calibration_run_id)
+        );
+        assert_eq!(
+            batches[0].ranking_calibration_report_hash,
+            Some(calibration.report_hash)
+        );
     }
 
     #[tokio::test]
@@ -30685,6 +31028,8 @@ mod tests {
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "held account settlement attempt".to_string(),
                 near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
             }),
         )
         .await
