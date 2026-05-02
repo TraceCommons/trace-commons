@@ -4,7 +4,7 @@
 
 **Goal:** Build the first durable evidence substrate for robust Trace Credits ranking.
 
-**Architecture:** Add typed, hash-only ranking records for model versions, feature vectors, model predictions, frontier/reviewer labels, and calibration reporting. Keep raw trace bodies, lab notes, and private external refs out of ranking records; route writes through worker/admin endpoints and mirror the schema in PostgreSQL with RLS.
+**Architecture:** Add typed, hash-only ranking records for model versions, feature vectors, model predictions, frontier/reviewer labels, calibration reporting, and persisted calibration runs. Keep raw trace bodies, lab notes, and private external refs out of ranking records; route writes through worker/admin endpoints and mirror the schema in PostgreSQL with RLS.
 
 **Tech Stack:** Rust, Axum handlers, tenant-scoped JSONL pilot storage, PostgreSQL migrations, serde contracts, caller-level route tests.
 
@@ -69,3 +69,23 @@
 - [x] Mirror ranking endpoint writes into the DB when `TRACE_COMMONS_DB_DUAL_WRITE=true`; fail closed under `TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES=true`.
 - [x] Serve admin ranking evidence lists and calibration reports from the DB mirror under `TRACE_COMMONS_DB_REVIEWER_READS=true`.
 - [x] Add Postgres store coverage and a caller-level DB mirror/read integration canary for ranking routes.
+
+### Task 6: Persisted Calibration Runs
+
+**Files:**
+- Create: `migrations/V4__trace_ranking_calibration_runs.sql`
+- Modify: `crates/tracedao-server/src/trace_corpus_storage.rs`
+- Modify: `crates/tracedao-server/src/db/postgres.rs`
+- Modify: `crates/tracedao-server/src/db/trace_corpus_pg.rs`
+- Modify: `crates/tracedao-server/src/bin/tracedao-ingest.rs`
+- Modify: `crates/tracedao-server/tests/trace_corpus_pg_store.rs`
+- Modify: `crates/tracedao-server/tests/trace_corpus_pg_rls.rs`
+- Modify: `README.md`
+- Modify: `docs/trace-commons.md`
+- Modify: `docs/trace-commons-storage.md`
+
+- [x] Add a persisted calibration-run record with model version, target use, policy version, evaluation dataset hash, joined counts, aggregate error metrics, confidence threshold, promotion threshold, reason codes, and a hash-only report digest.
+- [x] Add a worker route for writing calibration runs and an admin route for listing calibration-run history.
+- [x] Mirror calibration runs to PostgreSQL under DB dual-write and serve them from the DB mirror under DB reviewer reads.
+- [x] Include calibration runs in Trace Commons RLS diagnostics.
+- [x] Add caller-level route coverage and PostgreSQL store coverage.

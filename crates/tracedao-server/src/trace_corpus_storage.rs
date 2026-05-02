@@ -328,6 +328,57 @@ pub struct TraceRankingLabelRecord {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceRankingCalibrationRunWrite {
+    pub tenant_id: String,
+    pub calibration_run_id: Uuid,
+    pub model_version: String,
+    pub target_use: String,
+    pub policy_version: String,
+    pub evaluation_dataset_hash: String,
+    pub prediction_count: u32,
+    pub label_count: u32,
+    pub joined_label_prediction_count: u32,
+    pub average_predicted_utility_micros: Option<i64>,
+    pub average_label_utility_delta_micros: Option<i64>,
+    pub average_absolute_error_micros: Option<i64>,
+    pub mean_signed_error_micros: Option<i64>,
+    pub low_confidence_prediction_count: u32,
+    pub confidence_threshold: f32,
+    pub min_label_count: u32,
+    pub max_average_absolute_error_micros: i64,
+    pub promotable: bool,
+    pub reason_codes: Vec<String>,
+    pub report_hash: String,
+    pub actor_principal_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceRankingCalibrationRunRecord {
+    pub tenant_id: String,
+    pub calibration_run_id: Uuid,
+    pub model_version: String,
+    pub target_use: String,
+    pub policy_version: String,
+    pub evaluation_dataset_hash: String,
+    pub prediction_count: u32,
+    pub label_count: u32,
+    pub joined_label_prediction_count: u32,
+    pub average_predicted_utility_micros: Option<i64>,
+    pub average_label_utility_delta_micros: Option<i64>,
+    pub average_absolute_error_micros: Option<i64>,
+    pub mean_signed_error_micros: Option<i64>,
+    pub low_confidence_prediction_count: u32,
+    pub confidence_threshold: f32,
+    pub min_label_count: u32,
+    pub max_average_absolute_error_micros: i64,
+    pub promotable: bool,
+    pub reason_codes: Vec<String>,
+    pub report_hash: String,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TraceCreditAccountSettlementLineItem {
     pub credit_account_ref: String,
@@ -1374,6 +1425,16 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceRankingLabelRecord>, DatabaseError>;
+
+    async fn upsert_trace_ranking_calibration_run(
+        &self,
+        run: TraceRankingCalibrationRunWrite,
+    ) -> Result<TraceRankingCalibrationRunRecord, DatabaseError>;
+
+    async fn list_trace_ranking_calibration_runs(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingCalibrationRunRecord>, DatabaseError>;
 
     async fn upsert_trace_export_manifest(
         &self,
