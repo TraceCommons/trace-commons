@@ -187,6 +187,148 @@ pub enum TraceRankingLabelOutcome {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingModelVersionWrite {
+    pub tenant_id: String,
+    pub model_version: String,
+    pub feature_schema_version: String,
+    pub policy_version: String,
+    pub status: TraceRankingModelStatus,
+    pub training_dataset_hash: String,
+    pub calibration_dataset_hash: String,
+    pub model_artifact_hash: String,
+    pub actor_principal_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingModelVersionRecord {
+    pub tenant_id: String,
+    pub model_version: String,
+    pub feature_schema_version: String,
+    pub policy_version: String,
+    pub status: TraceRankingModelStatus,
+    pub training_dataset_hash: String,
+    pub calibration_dataset_hash: String,
+    pub model_artifact_hash: String,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceRankingFeatureWrite {
+    pub tenant_id: String,
+    pub ranking_feature_id: Uuid,
+    pub submission_id: Uuid,
+    pub trace_id: Uuid,
+    pub target_use: String,
+    pub feature_schema_version: String,
+    pub feature_vector_hash: String,
+    pub feature_names_hash: String,
+    pub source_feature_hash: String,
+    pub duplicate_score: Option<f32>,
+    pub novelty_score: Option<f32>,
+    pub privacy_risk_score: Option<f32>,
+    pub quality_score: Option<f32>,
+    pub coverage_tags: Vec<String>,
+    pub actor_principal_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceRankingFeatureRecord {
+    pub tenant_id: String,
+    pub ranking_feature_id: Uuid,
+    pub submission_id: Uuid,
+    pub trace_id: Uuid,
+    pub target_use: String,
+    pub feature_schema_version: String,
+    pub feature_vector_hash: String,
+    pub feature_names_hash: String,
+    pub source_feature_hash: String,
+    pub duplicate_score: Option<f32>,
+    pub novelty_score: Option<f32>,
+    pub privacy_risk_score: Option<f32>,
+    pub quality_score: Option<f32>,
+    pub coverage_tags: Vec<String>,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceRankingPredictionWrite {
+    pub tenant_id: String,
+    pub ranking_prediction_id: Uuid,
+    pub submission_id: Uuid,
+    pub trace_id: Uuid,
+    pub target_use: String,
+    pub model_version: String,
+    pub feature_schema_version: String,
+    pub prediction_policy_version: String,
+    pub feature_vector_hash: String,
+    pub predicted_utility_micros: i64,
+    pub uncertainty_micros: i64,
+    pub confidence: f32,
+    pub risk_penalty_micros: i64,
+    pub novelty_bonus_micros: i64,
+    pub settlement_score_micros: i64,
+    pub explanation_codes: Vec<String>,
+    pub actor_principal_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceRankingPredictionRecord {
+    pub tenant_id: String,
+    pub ranking_prediction_id: Uuid,
+    pub submission_id: Uuid,
+    pub trace_id: Uuid,
+    pub target_use: String,
+    pub model_version: String,
+    pub feature_schema_version: String,
+    pub prediction_policy_version: String,
+    pub feature_vector_hash: String,
+    pub predicted_utility_micros: i64,
+    pub uncertainty_micros: i64,
+    pub confidence: f32,
+    pub risk_penalty_micros: i64,
+    pub novelty_bonus_micros: i64,
+    pub settlement_score_micros: i64,
+    pub explanation_codes: Vec<String>,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingLabelWrite {
+    pub tenant_id: String,
+    pub ranking_label_id: Uuid,
+    pub submission_id: Uuid,
+    pub trace_id: Uuid,
+    pub target_use: String,
+    pub label_source: TraceRankingLabelSource,
+    pub utility_category: TraceRankingUtilityCategory,
+    pub label_outcome: TraceRankingLabelOutcome,
+    pub utility_delta_micros: i64,
+    pub evidence_hash: String,
+    pub external_ref_hash: String,
+    pub actor_principal_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingLabelRecord {
+    pub tenant_id: String,
+    pub ranking_label_id: Uuid,
+    pub submission_id: Uuid,
+    pub trace_id: Uuid,
+    pub target_use: String,
+    pub label_source: TraceRankingLabelSource,
+    pub utility_category: TraceRankingUtilityCategory,
+    pub label_outcome: TraceRankingLabelOutcome,
+    pub utility_delta_micros: i64,
+    pub evidence_hash: String,
+    pub external_ref_hash: String,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TraceCreditAccountSettlementLineItem {
     pub credit_account_ref: String,
     pub credit_account_hash: String,
@@ -1192,6 +1334,46 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceVectorEntryRecord>, DatabaseError>;
+
+    async fn upsert_trace_ranking_model_version(
+        &self,
+        model_version: TraceRankingModelVersionWrite,
+    ) -> Result<TraceRankingModelVersionRecord, DatabaseError>;
+
+    async fn list_trace_ranking_model_versions(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingModelVersionRecord>, DatabaseError>;
+
+    async fn upsert_trace_ranking_feature(
+        &self,
+        feature: TraceRankingFeatureWrite,
+    ) -> Result<TraceRankingFeatureRecord, DatabaseError>;
+
+    async fn list_trace_ranking_features(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingFeatureRecord>, DatabaseError>;
+
+    async fn upsert_trace_ranking_prediction(
+        &self,
+        prediction: TraceRankingPredictionWrite,
+    ) -> Result<TraceRankingPredictionRecord, DatabaseError>;
+
+    async fn list_trace_ranking_predictions(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingPredictionRecord>, DatabaseError>;
+
+    async fn upsert_trace_ranking_label(
+        &self,
+        label: TraceRankingLabelWrite,
+    ) -> Result<TraceRankingLabelRecord, DatabaseError>;
+
+    async fn list_trace_ranking_labels(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingLabelRecord>, DatabaseError>;
 
     async fn upsert_trace_export_manifest(
         &self,

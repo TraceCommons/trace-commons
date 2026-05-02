@@ -69,9 +69,17 @@ use trace_commons_server::trace_corpus_storage::{
     TraceObjectArtifactKind as StorageTraceObjectArtifactKind,
     TraceObjectRefRecord as StorageTraceObjectRefRecord,
     TraceObjectRefWrite as StorageTraceObjectRefWrite,
+    TraceRankingFeatureRecord as StorageTraceRankingFeatureRecord,
+    TraceRankingFeatureWrite as StorageTraceRankingFeatureWrite,
     TraceRankingLabelOutcome as StorageTraceRankingLabelOutcome,
+    TraceRankingLabelRecord as StorageTraceRankingLabelRecord,
     TraceRankingLabelSource as StorageTraceRankingLabelSource,
+    TraceRankingLabelWrite as StorageTraceRankingLabelWrite,
     TraceRankingModelStatus as StorageTraceRankingModelStatus,
+    TraceRankingModelVersionRecord as StorageTraceRankingModelVersionRecord,
+    TraceRankingModelVersionWrite as StorageTraceRankingModelVersionWrite,
+    TraceRankingPredictionRecord as StorageTraceRankingPredictionRecord,
+    TraceRankingPredictionWrite as StorageTraceRankingPredictionWrite,
     TraceRankingUtilityCategory as StorageTraceRankingUtilityCategory,
     TraceRetentionJobItemAction as StorageTraceRetentionJobItemAction,
     TraceRetentionJobItemRecord as StorageTraceRetentionJobItemRecord,
@@ -5991,7 +5999,8 @@ async fn ranking_model_version_handler(
         actor_principal_ref: tenant.principal_ref.clone(),
         created_at: Utc::now(),
     };
-    append_ranking_model_version(&state.root, &tenant.tenant_id, &record)
+    append_ranking_model_version_with_db_mirror(state.as_ref(), &tenant, &record)
+        .await
         .map_err(internal_error)?;
     Ok(Json(record))
 }
@@ -6002,8 +6011,9 @@ async fn ranking_model_versions_handler(
 ) -> ApiResult<Json<Vec<TraceRankingModelVersionRecord>>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
-    let records =
-        read_all_ranking_model_versions(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let records = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     Ok(Json(records))
 }
 
@@ -6053,7 +6063,9 @@ async fn ranking_feature_handler(
         actor_principal_ref: tenant.principal_ref.clone(),
         created_at: Utc::now(),
     };
-    append_ranking_feature(&state.root, &tenant.tenant_id, &record).map_err(internal_error)?;
+    append_ranking_feature_with_db_mirror(state.as_ref(), &tenant, &record)
+        .await
+        .map_err(internal_error)?;
     Ok(Json(record))
 }
 
@@ -6063,8 +6075,9 @@ async fn ranking_features_handler(
 ) -> ApiResult<Json<Vec<TraceRankingFeatureRecord>>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
-    let records =
-        read_all_ranking_features(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let records = read_ranking_features_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     Ok(Json(records))
 }
 
@@ -6119,7 +6132,9 @@ async fn ranking_prediction_handler(
         actor_principal_ref: tenant.principal_ref.clone(),
         created_at: Utc::now(),
     };
-    append_ranking_prediction(&state.root, &tenant.tenant_id, &record).map_err(internal_error)?;
+    append_ranking_prediction_with_db_mirror(state.as_ref(), &tenant, &record)
+        .await
+        .map_err(internal_error)?;
     Ok(Json(record))
 }
 
@@ -6129,8 +6144,9 @@ async fn ranking_predictions_handler(
 ) -> ApiResult<Json<Vec<TraceRankingPredictionRecord>>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
-    let records =
-        read_all_ranking_predictions(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let records = read_ranking_predictions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     Ok(Json(records))
 }
 
@@ -6178,7 +6194,9 @@ async fn ranking_label_handler(
         actor_principal_ref: tenant.principal_ref.clone(),
         created_at: Utc::now(),
     };
-    append_ranking_label(&state.root, &tenant.tenant_id, &record).map_err(internal_error)?;
+    append_ranking_label_with_db_mirror(state.as_ref(), &tenant, &record)
+        .await
+        .map_err(internal_error)?;
     Ok(Json(record))
 }
 
@@ -6188,8 +6206,9 @@ async fn ranking_labels_handler(
 ) -> ApiResult<Json<Vec<TraceRankingLabelRecord>>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
-    let records =
-        read_all_ranking_labels(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let records = read_ranking_labels_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     Ok(Json(records))
 }
 
@@ -6199,13 +6218,18 @@ async fn ranking_calibration_report_handler(
 ) -> ApiResult<Json<TraceRankingCalibrationReport>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
-    let model_versions =
-        read_all_ranking_model_versions(&state.root, &tenant.tenant_id).map_err(internal_error)?;
-    let features =
-        read_all_ranking_features(&state.root, &tenant.tenant_id).map_err(internal_error)?;
-    let predictions =
-        read_all_ranking_predictions(&state.root, &tenant.tenant_id).map_err(internal_error)?;
-    let labels = read_all_ranking_labels(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let features = read_ranking_features_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let predictions = read_ranking_predictions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let labels = read_ranking_labels_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     Ok(Json(ranking_calibration_report(
         &tenant.tenant_id,
         model_versions.len(),
@@ -6213,6 +6237,368 @@ async fn ranking_calibration_report_handler(
         &predictions,
         &labels,
     )))
+}
+
+async fn append_ranking_model_version_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    record: &TraceRankingModelVersionRecord,
+) -> anyhow::Result<()> {
+    let mirror_result = mirror_ranking_model_version_to_db(state, record).await;
+    if state.require_db_mirror_writes {
+        if let Err(error) = &mirror_result {
+            tracing::warn!(%error, model_version = %record.model_version, "Trace Commons DB dual-write ranking model version mirror failed");
+        }
+        enforce_db_mirror_write_result(state, "ranking model version", mirror_result)?;
+        append_ranking_model_version(&state.root, &tenant.tenant_id, record)?;
+        return Ok(());
+    }
+    append_ranking_model_version(&state.root, &tenant.tenant_id, record)?;
+    if let Err(error) = &mirror_result {
+        tracing::warn!(%error, model_version = %record.model_version, "Trace Commons DB dual-write ranking model version mirror failed");
+    }
+    enforce_db_mirror_write_result(state, "ranking model version", mirror_result)
+}
+
+async fn append_ranking_feature_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    record: &TraceRankingFeatureRecord,
+) -> anyhow::Result<()> {
+    let mirror_result = mirror_ranking_feature_to_db(state, record).await;
+    if state.require_db_mirror_writes {
+        if let Err(error) = &mirror_result {
+            tracing::warn!(%error, ranking_feature_id = %record.ranking_feature_id, "Trace Commons DB dual-write ranking feature mirror failed");
+        }
+        enforce_db_mirror_write_result(state, "ranking feature", mirror_result)?;
+        append_ranking_feature(&state.root, &tenant.tenant_id, record)?;
+        return Ok(());
+    }
+    append_ranking_feature(&state.root, &tenant.tenant_id, record)?;
+    if let Err(error) = &mirror_result {
+        tracing::warn!(%error, ranking_feature_id = %record.ranking_feature_id, "Trace Commons DB dual-write ranking feature mirror failed");
+    }
+    enforce_db_mirror_write_result(state, "ranking feature", mirror_result)
+}
+
+async fn append_ranking_prediction_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    record: &TraceRankingPredictionRecord,
+) -> anyhow::Result<()> {
+    let mirror_result = mirror_ranking_prediction_to_db(state, record).await;
+    if state.require_db_mirror_writes {
+        if let Err(error) = &mirror_result {
+            tracing::warn!(%error, ranking_prediction_id = %record.ranking_prediction_id, "Trace Commons DB dual-write ranking prediction mirror failed");
+        }
+        enforce_db_mirror_write_result(state, "ranking prediction", mirror_result)?;
+        append_ranking_prediction(&state.root, &tenant.tenant_id, record)?;
+        return Ok(());
+    }
+    append_ranking_prediction(&state.root, &tenant.tenant_id, record)?;
+    if let Err(error) = &mirror_result {
+        tracing::warn!(%error, ranking_prediction_id = %record.ranking_prediction_id, "Trace Commons DB dual-write ranking prediction mirror failed");
+    }
+    enforce_db_mirror_write_result(state, "ranking prediction", mirror_result)
+}
+
+async fn append_ranking_label_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    record: &TraceRankingLabelRecord,
+) -> anyhow::Result<()> {
+    let mirror_result = mirror_ranking_label_to_db(state, record).await;
+    if state.require_db_mirror_writes {
+        if let Err(error) = &mirror_result {
+            tracing::warn!(%error, ranking_label_id = %record.ranking_label_id, "Trace Commons DB dual-write ranking label mirror failed");
+        }
+        enforce_db_mirror_write_result(state, "ranking label", mirror_result)?;
+        append_ranking_label(&state.root, &tenant.tenant_id, record)?;
+        return Ok(());
+    }
+    append_ranking_label(&state.root, &tenant.tenant_id, record)?;
+    if let Err(error) = &mirror_result {
+        tracing::warn!(%error, ranking_label_id = %record.ranking_label_id, "Trace Commons DB dual-write ranking label mirror failed");
+    }
+    enforce_db_mirror_write_result(state, "ranking label", mirror_result)
+}
+
+async fn mirror_ranking_model_version_to_db(
+    state: &AppState,
+    record: &TraceRankingModelVersionRecord,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    db.upsert_trace_ranking_model_version(StorageTraceRankingModelVersionWrite {
+        tenant_id: record.tenant_id.clone(),
+        model_version: record.model_version.clone(),
+        feature_schema_version: record.feature_schema_version.clone(),
+        policy_version: record.policy_version.clone(),
+        status: record.status,
+        training_dataset_hash: record.training_dataset_hash.clone(),
+        calibration_dataset_hash: record.calibration_dataset_hash.clone(),
+        model_artifact_hash: record.model_artifact_hash.clone(),
+        actor_principal_ref: record.actor_principal_ref.clone(),
+    })
+    .await
+    .context("failed to mirror ranking model version to DB")?;
+    Ok(())
+}
+
+async fn mirror_ranking_feature_to_db(
+    state: &AppState,
+    record: &TraceRankingFeatureRecord,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    db.upsert_trace_ranking_feature(StorageTraceRankingFeatureWrite {
+        tenant_id: record.tenant_id.clone(),
+        ranking_feature_id: record.ranking_feature_id,
+        submission_id: record.submission_id,
+        trace_id: record.trace_id,
+        target_use: serde_storage_string(&record.target_use)?,
+        feature_schema_version: record.feature_schema_version.clone(),
+        feature_vector_hash: record.feature_vector_hash.clone(),
+        feature_names_hash: record.feature_names_hash.clone(),
+        source_feature_hash: record.source_feature_hash.clone(),
+        duplicate_score: record.duplicate_score,
+        novelty_score: record.novelty_score,
+        privacy_risk_score: record.privacy_risk_score,
+        quality_score: record.quality_score,
+        coverage_tags: record.coverage_tags.clone(),
+        actor_principal_ref: record.actor_principal_ref.clone(),
+    })
+    .await
+    .context("failed to mirror ranking feature to DB")?;
+    Ok(())
+}
+
+async fn mirror_ranking_prediction_to_db(
+    state: &AppState,
+    record: &TraceRankingPredictionRecord,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    db.upsert_trace_ranking_prediction(StorageTraceRankingPredictionWrite {
+        tenant_id: record.tenant_id.clone(),
+        ranking_prediction_id: record.ranking_prediction_id,
+        submission_id: record.submission_id,
+        trace_id: record.trace_id,
+        target_use: serde_storage_string(&record.target_use)?,
+        model_version: record.model_version.clone(),
+        feature_schema_version: record.feature_schema_version.clone(),
+        prediction_policy_version: record.prediction_policy_version.clone(),
+        feature_vector_hash: record.feature_vector_hash.clone(),
+        predicted_utility_micros: record.predicted_utility_micros,
+        uncertainty_micros: record.uncertainty_micros,
+        confidence: record.confidence,
+        risk_penalty_micros: record.risk_penalty_micros,
+        novelty_bonus_micros: record.novelty_bonus_micros,
+        settlement_score_micros: record.settlement_score_micros,
+        explanation_codes: record.explanation_codes.clone(),
+        actor_principal_ref: record.actor_principal_ref.clone(),
+    })
+    .await
+    .context("failed to mirror ranking prediction to DB")?;
+    Ok(())
+}
+
+async fn mirror_ranking_label_to_db(
+    state: &AppState,
+    record: &TraceRankingLabelRecord,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    db.upsert_trace_ranking_label(StorageTraceRankingLabelWrite {
+        tenant_id: record.tenant_id.clone(),
+        ranking_label_id: record.ranking_label_id,
+        submission_id: record.submission_id,
+        trace_id: record.trace_id,
+        target_use: serde_storage_string(&record.target_use)?,
+        label_source: record.label_source,
+        utility_category: record.utility_category,
+        label_outcome: record.label_outcome,
+        utility_delta_micros: record.utility_delta_micros,
+        evidence_hash: record.evidence_hash.clone(),
+        external_ref_hash: record.external_ref_hash.clone(),
+        actor_principal_ref: record.actor_principal_ref.clone(),
+    })
+    .await
+    .context("failed to mirror ranking label to DB")?;
+    Ok(())
+}
+
+async fn read_ranking_model_versions_for_admin(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceRankingModelVersionRecord>> {
+    if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("TRACE_COMMONS_DB_REVIEWER_READS is enabled without a DB mirror")?;
+        return Ok(db
+            .list_trace_ranking_model_versions(&tenant.tenant_id)
+            .await
+            .context("failed to read ranking model versions from DB mirror")?
+            .into_iter()
+            .map(ranking_model_version_from_storage)
+            .collect());
+    }
+    read_all_ranking_model_versions(&state.root, &tenant.tenant_id)
+}
+
+async fn read_ranking_features_for_admin(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceRankingFeatureRecord>> {
+    if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("TRACE_COMMONS_DB_REVIEWER_READS is enabled without a DB mirror")?;
+        return db
+            .list_trace_ranking_features(&tenant.tenant_id)
+            .await
+            .context("failed to read ranking features from DB mirror")?
+            .into_iter()
+            .map(ranking_feature_from_storage)
+            .collect();
+    }
+    read_all_ranking_features(&state.root, &tenant.tenant_id)
+}
+
+async fn read_ranking_predictions_for_admin(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceRankingPredictionRecord>> {
+    if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("TRACE_COMMONS_DB_REVIEWER_READS is enabled without a DB mirror")?;
+        return db
+            .list_trace_ranking_predictions(&tenant.tenant_id)
+            .await
+            .context("failed to read ranking predictions from DB mirror")?
+            .into_iter()
+            .map(ranking_prediction_from_storage)
+            .collect();
+    }
+    read_all_ranking_predictions(&state.root, &tenant.tenant_id)
+}
+
+async fn read_ranking_labels_for_admin(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceRankingLabelRecord>> {
+    if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("TRACE_COMMONS_DB_REVIEWER_READS is enabled without a DB mirror")?;
+        return db
+            .list_trace_ranking_labels(&tenant.tenant_id)
+            .await
+            .context("failed to read ranking labels from DB mirror")?
+            .into_iter()
+            .map(ranking_label_from_storage)
+            .collect();
+    }
+    read_all_ranking_labels(&state.root, &tenant.tenant_id)
+}
+
+fn ranking_model_version_from_storage(
+    record: StorageTraceRankingModelVersionRecord,
+) -> TraceRankingModelVersionRecord {
+    TraceRankingModelVersionRecord {
+        tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
+        tenant_id: record.tenant_id,
+        model_version: record.model_version,
+        feature_schema_version: record.feature_schema_version,
+        policy_version: record.policy_version,
+        status: record.status,
+        training_dataset_hash: record.training_dataset_hash,
+        calibration_dataset_hash: record.calibration_dataset_hash,
+        model_artifact_hash: record.model_artifact_hash,
+        actor_principal_ref: record.actor_principal_ref,
+        created_at: record.created_at,
+    }
+}
+
+fn ranking_feature_from_storage(
+    record: StorageTraceRankingFeatureRecord,
+) -> anyhow::Result<TraceRankingFeatureRecord> {
+    Ok(TraceRankingFeatureRecord {
+        tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
+        tenant_id: record.tenant_id,
+        ranking_feature_id: record.ranking_feature_id,
+        submission_id: record.submission_id,
+        trace_id: record.trace_id,
+        target_use: storage_string_as(&record.target_use, "ranking target_use")?,
+        feature_schema_version: record.feature_schema_version,
+        feature_vector_hash: record.feature_vector_hash,
+        feature_names_hash: record.feature_names_hash,
+        source_feature_hash: record.source_feature_hash,
+        duplicate_score: record.duplicate_score,
+        novelty_score: record.novelty_score,
+        privacy_risk_score: record.privacy_risk_score,
+        quality_score: record.quality_score,
+        coverage_tags: record.coverage_tags,
+        actor_principal_ref: record.actor_principal_ref,
+        created_at: record.created_at,
+    })
+}
+
+fn ranking_prediction_from_storage(
+    record: StorageTraceRankingPredictionRecord,
+) -> anyhow::Result<TraceRankingPredictionRecord> {
+    Ok(TraceRankingPredictionRecord {
+        tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
+        tenant_id: record.tenant_id,
+        ranking_prediction_id: record.ranking_prediction_id,
+        submission_id: record.submission_id,
+        trace_id: record.trace_id,
+        target_use: storage_string_as(&record.target_use, "ranking target_use")?,
+        model_version: record.model_version,
+        feature_schema_version: record.feature_schema_version,
+        prediction_policy_version: record.prediction_policy_version,
+        feature_vector_hash: record.feature_vector_hash,
+        predicted_utility_micros: record.predicted_utility_micros,
+        uncertainty_micros: record.uncertainty_micros,
+        confidence: record.confidence,
+        risk_penalty_micros: record.risk_penalty_micros,
+        novelty_bonus_micros: record.novelty_bonus_micros,
+        settlement_score_micros: record.settlement_score_micros,
+        explanation_codes: record.explanation_codes,
+        actor_principal_ref: record.actor_principal_ref,
+        created_at: record.created_at,
+    })
+}
+
+fn ranking_label_from_storage(
+    record: StorageTraceRankingLabelRecord,
+) -> anyhow::Result<TraceRankingLabelRecord> {
+    Ok(TraceRankingLabelRecord {
+        tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
+        tenant_id: record.tenant_id,
+        ranking_label_id: record.ranking_label_id,
+        submission_id: record.submission_id,
+        trace_id: record.trace_id,
+        target_use: storage_string_as(&record.target_use, "ranking target_use")?,
+        label_source: record.label_source,
+        utility_category: record.utility_category,
+        label_outcome: record.label_outcome,
+        utility_delta_micros: record.utility_delta_micros,
+        evidence_hash: record.evidence_hash,
+        external_ref_hash: record.external_ref_hash,
+        actor_principal_ref: record.actor_principal_ref,
+        created_at: record.created_at,
+    })
 }
 
 async fn read_ranking_source_submission(
@@ -22653,9 +23039,55 @@ mod tests {
     use trace_commons_protocol::trace_contribution::{
         DeterministicTraceRedactor, RecordedTraceContributionOptions, TraceRedactor,
     };
+    use trace_commons_server::db::postgres::PgBackend;
+    use trace_commons_server::trace_corpus_storage::TraceCorpusStore;
 
     fn test_state(root: PathBuf) -> Arc<AppState> {
         test_state_with_options(root, None, None, false, false, false, false)
+    }
+
+    async fn postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
+        let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .ok()?;
+        let config = DatabaseConfig {
+            url: SecretString::from(url),
+            pool_size: 4,
+            ssl_mode: trace_commons_server::config::SslMode::Prefer,
+        };
+        let backend = match PgBackend::new(&config).await {
+            Ok(backend) => Arc::new(backend),
+            Err(error) => {
+                eprintln!("skipping: database unavailable ({error})");
+                return None;
+            }
+        };
+        if let Err(error) = backend.run_migrations().await {
+            eprintln!("skipping: migrations failed ({error})");
+            return None;
+        }
+        Some(backend)
+    }
+
+    async fn cleanup_pg_trace_tenant(backend: &PgBackend, tenant_id: &str) {
+        let mut client = backend.pool().get().await.expect("get cleanup connection");
+        let tx = client
+            .transaction()
+            .await
+            .expect("start cleanup transaction");
+        tx.execute(
+            "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+            &[&tenant_id],
+        )
+        .await
+        .expect("set cleanup tenant context");
+        let _ = tx
+            .execute(
+                "DELETE FROM trace_tenants WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
+            .await;
+        tx.commit().await.expect("commit cleanup transaction");
     }
 
     fn test_state_with_options(
@@ -30034,6 +30466,165 @@ mod tests {
         let labels_json = serde_json::to_string(&labels).expect("labels serialize");
         assert!(!labels_json.contains("private-frontier-lab-batch-123"));
         assert!(!labels_json.contains("trace body"));
+    }
+
+    #[tokio::test]
+    async fn ranking_evidence_routes_mirror_and_read_from_db_when_reviewer_reads_are_enabled() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(&backend, "tenant-a").await;
+        assert!(
+            backend
+                .list_trace_ranking_model_versions("tenant-a")
+                .await
+                .expect("check clean DB ranking models")
+                .is_empty(),
+            "ranking route DB test requires a clean tenant before writes"
+        );
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state =
+            test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
+                temp.path().to_path_buf(),
+                Some(db_mirror),
+                None,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                BTreeMap::new(),
+                false,
+                false,
+                true,
+                false,
+            );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission mirrors into DB");
+
+        let Json(model) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-db-v1".to_string(),
+                feature_schema_version: "ranking-features-db-v1".to_string(),
+                policy_version: "trace-credit-policy-db-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:training-set-db".to_string(),
+                calibration_dataset_hash: "sha256:calibration-set-db".to_string(),
+                model_artifact_hash: "sha256:model-artifact-db".to_string(),
+            }),
+        )
+        .await
+        .expect("admin registers ranking model version");
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                feature_schema_version: model.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:feature-vector-db".to_string(),
+                feature_names_hash: "sha256:feature-names-db".to_string(),
+                source_feature_hash: "sha256:redacted-summary-features-db".to_string(),
+                duplicate_score: Some(0.04),
+                novelty_score: Some(0.93),
+                privacy_risk_score: Some(0.01),
+                quality_score: Some(0.9),
+                coverage_tags: vec!["tool:terminal".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker writes ranking feature");
+        let Json(_) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                model_version: model.model_version.clone(),
+                feature_schema_version: model.feature_schema_version.clone(),
+                prediction_policy_version: "trace-credit-policy-db-v1".to_string(),
+                feature_vector_hash: feature.feature_vector_hash.clone(),
+                predicted_utility_micros: 2_100_000,
+                uncertainty_micros: 250_000,
+                confidence: 0.87,
+                risk_penalty_micros: 25_000,
+                novelty_bonus_micros: 100_000,
+                explanation_codes: vec!["novel_tool_success".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker writes ranking prediction");
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 2_450_000,
+                evidence_hash: "sha256:frontier-lab-evidence-db".to_string(),
+                external_ref: "private-frontier-lab-db-batch".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker writes ranking label");
+
+        assert_eq!(
+            backend
+                .list_trace_ranking_model_versions("tenant-a")
+                .await
+                .expect("read DB ranking models")
+                .len(),
+            1,
+            "route writes must mirror model versions into DB"
+        );
+        assert_eq!(
+            backend
+                .list_trace_ranking_labels("tenant-a")
+                .await
+                .expect("read DB ranking labels")
+                .len(),
+            1,
+            "route writes must mirror labels into DB"
+        );
+
+        let _ = std::fs::remove_file(ranking_model_versions_path(temp.path(), "tenant-a"));
+        let _ = std::fs::remove_file(ranking_features_path(temp.path(), "tenant-a"));
+        let _ = std::fs::remove_file(ranking_predictions_path(temp.path(), "tenant-a"));
+        let _ = std::fs::remove_file(ranking_labels_path(temp.path(), "tenant-a"));
+
+        let Json(models) =
+            ranking_model_versions_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin lists DB ranking models");
+        assert_eq!(models.len(), 1);
+        let Json(report) =
+            ranking_calibration_report_handler(State(state), auth_headers("admin-token-a"))
+                .await
+                .expect("admin reads DB ranking calibration");
+        assert_eq!(report.joined_label_prediction_count, 1);
+        assert_eq!(report.average_absolute_error_micros, Some(350_000));
+
+        cleanup_pg_trace_tenant(&backend, "tenant-a").await;
     }
 
     #[tokio::test]
