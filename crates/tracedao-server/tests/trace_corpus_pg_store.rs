@@ -8,9 +8,11 @@ use tracedao_server::error::DatabaseError;
 use tracedao_server::trace_corpus_storage::{
     TraceCorpusStatus, TraceCorpusStore, TraceDerivedRecordWrite, TraceDerivedStatus,
     TraceExportManifestItemWrite, TraceExportManifestMirrorWrite, TraceExportManifestWrite,
-    TraceObjectArtifactKind, TraceObjectRefWrite, TraceSubmissionWrite,
-    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-    TraceWorkerKind,
+    TraceObjectArtifactKind, TraceObjectRefWrite, TraceRankingFeatureWrite,
+    TraceRankingLabelOutcome, TraceRankingLabelSource, TraceRankingLabelWrite,
+    TraceRankingModelStatus, TraceRankingModelVersionWrite, TraceRankingPredictionWrite,
+    TraceRankingUtilityCategory, TraceSubmissionWrite, TraceVectorEntrySourceProjection,
+    TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWorkerKind,
 };
 use uuid::Uuid;
 
@@ -416,6 +418,166 @@ async fn pg_store_invalidates_exact_vector_entry_with_tenant_submission_scope() 
         .await
         .expect("repeat exact vector invalidation");
     assert_eq!(idempotent, 0);
+
+    cleanup_tenant(&backend, &tenant_alpha).await;
+    cleanup_tenant(&backend, &tenant_beta).await;
+}
+
+#[tokio::test]
+async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_alpha = format!("pg-ranking-alpha-{}", Uuid::new_v4());
+    let tenant_beta = format!("pg-ranking-beta-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    let trace_id = Uuid::new_v4();
+    for tenant_id in [&tenant_alpha, &tenant_beta] {
+        let mut submission = sample_submission(tenant_id, submission_id);
+        submission.trace_id = trace_id;
+        submission.allowed_uses = vec!["model_training".to_string()];
+        backend
+            .upsert_trace_submission(submission)
+            .await
+            .expect("insert accepted ranking source");
+    }
+
+    let model = backend
+        .upsert_trace_ranking_model_version(TraceRankingModelVersionWrite {
+            tenant_id: tenant_alpha.clone(),
+            model_version: "trace-ranker-v2".to_string(),
+            feature_schema_version: "ranking-features-v2".to_string(),
+            policy_version: "trace-credit-policy-v2".to_string(),
+            status: TraceRankingModelStatus::Candidate,
+            training_dataset_hash: "sha256:training-dataset".to_string(),
+            calibration_dataset_hash: "sha256:calibration-dataset".to_string(),
+            model_artifact_hash: "sha256:model-artifact".to_string(),
+            actor_principal_ref: "principal:ranker-admin".to_string(),
+        })
+        .await
+        .expect("upsert ranking model version");
+    assert_eq!(model.model_version, "trace-ranker-v2");
+
+    let feature_id = Uuid::new_v4();
+    let feature = backend
+        .upsert_trace_ranking_feature(TraceRankingFeatureWrite {
+            tenant_id: tenant_alpha.clone(),
+            ranking_feature_id: feature_id,
+            submission_id,
+            trace_id,
+            target_use: "model_training".to_string(),
+            feature_schema_version: model.feature_schema_version.clone(),
+            feature_vector_hash: "sha256:feature-vector".to_string(),
+            feature_names_hash: "sha256:feature-names".to_string(),
+            source_feature_hash: "sha256:redacted-summary-features".to_string(),
+            duplicate_score: Some(0.02),
+            novelty_score: Some(0.91),
+            privacy_risk_score: Some(0.01),
+            quality_score: Some(0.88),
+            coverage_tags: vec!["tool:terminal".to_string(), "outcome:success".to_string()],
+            actor_principal_ref: "principal:ranker-worker".to_string(),
+        })
+        .await
+        .expect("upsert ranking feature");
+    assert_eq!(feature.ranking_feature_id, feature_id);
+    assert_eq!(
+        feature.coverage_tags,
+        vec!["tool:terminal", "outcome:success"]
+    );
+
+    let prediction_id = Uuid::new_v4();
+    let prediction = backend
+        .upsert_trace_ranking_prediction(TraceRankingPredictionWrite {
+            tenant_id: tenant_alpha.clone(),
+            ranking_prediction_id: prediction_id,
+            submission_id,
+            trace_id,
+            target_use: "model_training".to_string(),
+            model_version: model.model_version.clone(),
+            feature_schema_version: model.feature_schema_version.clone(),
+            prediction_policy_version: "trace-credit-policy-v2".to_string(),
+            feature_vector_hash: feature.feature_vector_hash.clone(),
+            predicted_utility_micros: 2_100_000,
+            uncertainty_micros: 300_000,
+            confidence: 0.82,
+            risk_penalty_micros: 50_000,
+            novelty_bonus_micros: 125_000,
+            settlement_score_micros: 2_175_000,
+            explanation_codes: vec!["novel_tool_success".to_string()],
+            actor_principal_ref: "principal:ranker-worker".to_string(),
+        })
+        .await
+        .expect("upsert ranking prediction");
+    assert_eq!(prediction.ranking_prediction_id, prediction_id);
+    assert_eq!(prediction.settlement_score_micros, 2_175_000);
+
+    let label = backend
+        .upsert_trace_ranking_label(TraceRankingLabelWrite {
+            tenant_id: tenant_alpha.clone(),
+            ranking_label_id: Uuid::new_v4(),
+            submission_id,
+            trace_id,
+            target_use: "model_training".to_string(),
+            label_source: TraceRankingLabelSource::FrontierLab,
+            utility_category: TraceRankingUtilityCategory::ModelTraining,
+            label_outcome: TraceRankingLabelOutcome::Useful,
+            utility_delta_micros: 2_500_000,
+            evidence_hash: "sha256:frontier-evidence".to_string(),
+            external_ref_hash: "sha256:frontier-private-ref".to_string(),
+            actor_principal_ref: "principal:ranker-worker".to_string(),
+        })
+        .await
+        .expect("upsert ranking label");
+    let idempotent_label = backend
+        .upsert_trace_ranking_label(TraceRankingLabelWrite {
+            tenant_id: tenant_alpha.clone(),
+            ranking_label_id: Uuid::new_v4(),
+            submission_id,
+            trace_id,
+            target_use: "model_training".to_string(),
+            label_source: TraceRankingLabelSource::FrontierLab,
+            utility_category: TraceRankingUtilityCategory::ModelTraining,
+            label_outcome: TraceRankingLabelOutcome::Useful,
+            utility_delta_micros: 2_500_000,
+            evidence_hash: "sha256:frontier-evidence".to_string(),
+            external_ref_hash: "sha256:frontier-private-ref".to_string(),
+            actor_principal_ref: "principal:ranker-worker".to_string(),
+        })
+        .await
+        .expect("repeat ranking label upsert is idempotent");
+    assert_eq!(idempotent_label.ranking_label_id, label.ranking_label_id);
+
+    let alpha_models = backend
+        .list_trace_ranking_model_versions(&tenant_alpha)
+        .await
+        .expect("list alpha ranking models");
+    let alpha_features = backend
+        .list_trace_ranking_features(&tenant_alpha)
+        .await
+        .expect("list alpha ranking features");
+    let alpha_predictions = backend
+        .list_trace_ranking_predictions(&tenant_alpha)
+        .await
+        .expect("list alpha ranking predictions");
+    let alpha_labels = backend
+        .list_trace_ranking_labels(&tenant_alpha)
+        .await
+        .expect("list alpha ranking labels");
+    assert_eq!(alpha_models.len(), 1);
+    assert_eq!(alpha_features.len(), 1);
+    assert_eq!(alpha_predictions.len(), 1);
+    assert_eq!(alpha_labels.len(), 1);
+
+    assert!(
+        backend
+            .list_trace_ranking_labels(&tenant_beta)
+            .await
+            .expect("list beta ranking labels")
+            .is_empty(),
+        "ranking evidence must stay tenant scoped"
+    );
 
     cleanup_tenant(&backend, &tenant_alpha).await;
     cleanup_tenant(&backend, &tenant_beta).await;

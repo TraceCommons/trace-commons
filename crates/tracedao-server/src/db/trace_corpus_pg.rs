@@ -21,6 +21,10 @@ use crate::trace_corpus_storage::{
     TraceExportManifestItemInvalidationReason, TraceExportManifestItemRecord,
     TraceExportManifestItemWrite, TraceExportManifestMirrorWrite, TraceExportManifestRecord,
     TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
+    TraceRankingFeatureRecord, TraceRankingFeatureWrite, TraceRankingLabelOutcome,
+    TraceRankingLabelRecord, TraceRankingLabelSource, TraceRankingLabelWrite,
+    TraceRankingModelStatus, TraceRankingModelVersionRecord, TraceRankingModelVersionWrite,
+    TraceRankingPredictionRecord, TraceRankingPredictionWrite, TraceRankingUtilityCategory,
     TraceRetentionJobItemAction, TraceRetentionJobItemRecord, TraceRetentionJobItemStatus,
     TraceRetentionJobItemWrite, TraceRetentionJobRecord, TraceRetentionJobStatus,
     TraceRetentionJobWrite, TraceRevocationPropagationAction, TraceRevocationPropagationItemRecord,
@@ -81,6 +85,29 @@ const TRACE_TENANT_ACCESS_GRANT_COLUMNS: &str = "\
     tenant_id, grant_id, principal_ref, role, status, allowed_consent_scopes, allowed_uses, \
     issuer, audience, subject, issued_at, expires_at, revoked_at, created_by_principal_ref, \
     revoked_by_principal_ref, reason, metadata_json, created_at, updated_at";
+
+const TRACE_RANKING_MODEL_VERSION_COLUMNS: &str = "\
+    tenant_id, model_version, feature_schema_version, policy_version, status, \
+    training_dataset_hash, calibration_dataset_hash, model_artifact_hash, \
+    actor_principal_ref, created_at";
+
+const TRACE_RANKING_FEATURE_COLUMNS: &str = "\
+    tenant_id, ranking_feature_id, submission_id, trace_id, target_use, \
+    feature_schema_version, feature_vector_hash, feature_names_hash, source_feature_hash, \
+    duplicate_score, novelty_score, privacy_risk_score, quality_score, coverage_tags, \
+    actor_principal_ref, created_at";
+
+const TRACE_RANKING_PREDICTION_COLUMNS: &str = "\
+    tenant_id, ranking_prediction_id, submission_id, trace_id, target_use, model_version, \
+    feature_schema_version, prediction_policy_version, feature_vector_hash, \
+    predicted_utility_micros, uncertainty_micros, confidence, risk_penalty_micros, \
+    novelty_bonus_micros, settlement_score_micros, explanation_codes, actor_principal_ref, \
+    created_at";
+
+const TRACE_RANKING_LABEL_COLUMNS: &str = "\
+    tenant_id, ranking_label_id, submission_id, trace_id, target_use, label_source, \
+    utility_category, label_outcome, utility_delta_micros, evidence_hash, external_ref_hash, \
+    actor_principal_ref, created_at";
 
 async fn ensure_pg_object_ref_belongs_to_submission(
     tx: &Transaction<'_>,
@@ -410,6 +437,103 @@ fn row_to_vector_entry(row: &Row) -> Result<TraceVectorEntryRecord, DatabaseErro
         deleted_at: row.get("deleted_at"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+    })
+}
+
+fn row_to_ranking_model_version(
+    row: &Row,
+) -> Result<TraceRankingModelVersionRecord, DatabaseError> {
+    let status: String = row.get("status");
+    Ok(TraceRankingModelVersionRecord {
+        tenant_id: row.get("tenant_id"),
+        model_version: row.get("model_version"),
+        feature_schema_version: row.get("feature_schema_version"),
+        policy_version: row.get("policy_version"),
+        status: enum_from_storage::<TraceRankingModelStatus>(&status, "TraceRankingModelStatus")?,
+        training_dataset_hash: row.get("training_dataset_hash"),
+        calibration_dataset_hash: row.get("calibration_dataset_hash"),
+        model_artifact_hash: row.get("model_artifact_hash"),
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn row_to_ranking_feature(row: &Row) -> Result<TraceRankingFeatureRecord, DatabaseError> {
+    let coverage_tags: serde_json::Value = row.get("coverage_tags");
+    Ok(TraceRankingFeatureRecord {
+        tenant_id: row.get("tenant_id"),
+        ranking_feature_id: row.get("ranking_feature_id"),
+        submission_id: row.get("submission_id"),
+        trace_id: row.get("trace_id"),
+        target_use: row.get("target_use"),
+        feature_schema_version: row.get("feature_schema_version"),
+        feature_vector_hash: row.get("feature_vector_hash"),
+        feature_names_hash: row.get("feature_names_hash"),
+        source_feature_hash: row.get("source_feature_hash"),
+        duplicate_score: row.get("duplicate_score"),
+        novelty_score: row.get("novelty_score"),
+        privacy_risk_score: row.get("privacy_risk_score"),
+        quality_score: row.get("quality_score"),
+        coverage_tags: json_array_strings(coverage_tags, "ranking_features.coverage_tags")?,
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn row_to_ranking_prediction(row: &Row) -> Result<TraceRankingPredictionRecord, DatabaseError> {
+    let explanation_codes: serde_json::Value = row.get("explanation_codes");
+    Ok(TraceRankingPredictionRecord {
+        tenant_id: row.get("tenant_id"),
+        ranking_prediction_id: row.get("ranking_prediction_id"),
+        submission_id: row.get("submission_id"),
+        trace_id: row.get("trace_id"),
+        target_use: row.get("target_use"),
+        model_version: row.get("model_version"),
+        feature_schema_version: row.get("feature_schema_version"),
+        prediction_policy_version: row.get("prediction_policy_version"),
+        feature_vector_hash: row.get("feature_vector_hash"),
+        predicted_utility_micros: row.get("predicted_utility_micros"),
+        uncertainty_micros: row.get("uncertainty_micros"),
+        confidence: row.get("confidence"),
+        risk_penalty_micros: row.get("risk_penalty_micros"),
+        novelty_bonus_micros: row.get("novelty_bonus_micros"),
+        settlement_score_micros: row.get("settlement_score_micros"),
+        explanation_codes: json_array_strings(
+            explanation_codes,
+            "ranking_predictions.explanation_codes",
+        )?,
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn row_to_ranking_label(row: &Row) -> Result<TraceRankingLabelRecord, DatabaseError> {
+    let label_source: String = row.get("label_source");
+    let utility_category: String = row.get("utility_category");
+    let label_outcome: String = row.get("label_outcome");
+    Ok(TraceRankingLabelRecord {
+        tenant_id: row.get("tenant_id"),
+        ranking_label_id: row.get("ranking_label_id"),
+        submission_id: row.get("submission_id"),
+        trace_id: row.get("trace_id"),
+        target_use: row.get("target_use"),
+        label_source: enum_from_storage::<TraceRankingLabelSource>(
+            &label_source,
+            "TraceRankingLabelSource",
+        )?,
+        utility_category: enum_from_storage::<TraceRankingUtilityCategory>(
+            &utility_category,
+            "TraceRankingUtilityCategory",
+        )?,
+        label_outcome: enum_from_storage::<TraceRankingLabelOutcome>(
+            &label_outcome,
+            "TraceRankingLabelOutcome",
+        )?,
+        utility_delta_micros: row.get("utility_delta_micros"),
+        evidence_hash: row.get("evidence_hash"),
+        external_ref_hash: row.get("external_ref_hash"),
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
     })
 }
 
@@ -1646,6 +1770,326 @@ impl TraceCorpusStore for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
         let records = rows.iter().map(row_to_vector_entry).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_ranking_model_version(
+        &self,
+        model_version: TraceRankingModelVersionWrite,
+    ) -> Result<TraceRankingModelVersionRecord, DatabaseError> {
+        self.ensure_trace_tenant(&model_version.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx =
+            Self::begin_trace_tenant_transaction(&mut client, &model_version.tenant_id).await?;
+        let status = enum_to_storage(model_version.status)?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_ranking_model_versions (
+                        tenant_id, model_version, feature_schema_version, policy_version,
+                        status, training_dataset_hash, calibration_dataset_hash,
+                        model_artifact_hash, actor_principal_ref
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                     ON CONFLICT (tenant_id, model_version) DO UPDATE SET
+                        feature_schema_version = excluded.feature_schema_version,
+                        policy_version = excluded.policy_version,
+                        status = excluded.status,
+                        training_dataset_hash = excluded.training_dataset_hash,
+                        calibration_dataset_hash = excluded.calibration_dataset_hash,
+                        model_artifact_hash = excluded.model_artifact_hash,
+                        actor_principal_ref = excluded.actor_principal_ref
+                     RETURNING {TRACE_RANKING_MODEL_VERSION_COLUMNS}"
+                ),
+                &[
+                    &model_version.tenant_id,
+                    &model_version.model_version,
+                    &model_version.feature_schema_version,
+                    &model_version.policy_version,
+                    &status,
+                    &model_version.training_dataset_hash,
+                    &model_version.calibration_dataset_hash,
+                    &model_version.model_artifact_hash,
+                    &model_version.actor_principal_ref,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_ranking_model_version(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_ranking_model_versions(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingModelVersionRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_RANKING_MODEL_VERSION_COLUMNS}
+                     FROM trace_ranking_model_versions
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, model_version ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_ranking_model_version).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_ranking_feature(
+        &self,
+        feature: TraceRankingFeatureWrite,
+    ) -> Result<TraceRankingFeatureRecord, DatabaseError> {
+        self.ensure_trace_tenant(&feature.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &feature.tenant_id).await?;
+        let coverage_tags = serde_json::to_value(&feature.coverage_tags).map_err(|e| {
+            DatabaseError::Serialization(format!("trace ranking coverage_tags encode failed: {e}"))
+        })?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_ranking_features (
+                        tenant_id, ranking_feature_id, submission_id, trace_id, target_use,
+                        feature_schema_version, feature_vector_hash, feature_names_hash,
+                        source_feature_hash, duplicate_score, novelty_score, privacy_risk_score,
+                        quality_score, coverage_tags, actor_principal_ref
+                     ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+                     )
+                     ON CONFLICT (tenant_id, ranking_feature_id) DO UPDATE SET
+                        submission_id = excluded.submission_id,
+                        trace_id = excluded.trace_id,
+                        target_use = excluded.target_use,
+                        feature_schema_version = excluded.feature_schema_version,
+                        feature_vector_hash = excluded.feature_vector_hash,
+                        feature_names_hash = excluded.feature_names_hash,
+                        source_feature_hash = excluded.source_feature_hash,
+                        duplicate_score = excluded.duplicate_score,
+                        novelty_score = excluded.novelty_score,
+                        privacy_risk_score = excluded.privacy_risk_score,
+                        quality_score = excluded.quality_score,
+                        coverage_tags = excluded.coverage_tags,
+                        actor_principal_ref = excluded.actor_principal_ref
+                     RETURNING {TRACE_RANKING_FEATURE_COLUMNS}"
+                ),
+                &[
+                    &feature.tenant_id,
+                    &feature.ranking_feature_id,
+                    &feature.submission_id,
+                    &feature.trace_id,
+                    &feature.target_use,
+                    &feature.feature_schema_version,
+                    &feature.feature_vector_hash,
+                    &feature.feature_names_hash,
+                    &feature.source_feature_hash,
+                    &feature.duplicate_score,
+                    &feature.novelty_score,
+                    &feature.privacy_risk_score,
+                    &feature.quality_score,
+                    &coverage_tags,
+                    &feature.actor_principal_ref,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_ranking_feature(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_ranking_features(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingFeatureRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_RANKING_FEATURE_COLUMNS}
+                     FROM trace_ranking_features
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, ranking_feature_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_ranking_feature).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_ranking_prediction(
+        &self,
+        prediction: TraceRankingPredictionWrite,
+    ) -> Result<TraceRankingPredictionRecord, DatabaseError> {
+        self.ensure_trace_tenant(&prediction.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &prediction.tenant_id).await?;
+        let explanation_codes =
+            serde_json::to_value(&prediction.explanation_codes).map_err(|e| {
+                DatabaseError::Serialization(format!(
+                    "trace ranking explanation_codes encode failed: {e}"
+                ))
+            })?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_ranking_predictions (
+                        tenant_id, ranking_prediction_id, submission_id, trace_id, target_use,
+                        model_version, feature_schema_version, prediction_policy_version,
+                        feature_vector_hash, predicted_utility_micros, uncertainty_micros,
+                        confidence, risk_penalty_micros, novelty_bonus_micros,
+                        settlement_score_micros, explanation_codes, actor_principal_ref
+                     ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+                     )
+                     ON CONFLICT (tenant_id, ranking_prediction_id) DO UPDATE SET
+                        submission_id = excluded.submission_id,
+                        trace_id = excluded.trace_id,
+                        target_use = excluded.target_use,
+                        model_version = excluded.model_version,
+                        feature_schema_version = excluded.feature_schema_version,
+                        prediction_policy_version = excluded.prediction_policy_version,
+                        feature_vector_hash = excluded.feature_vector_hash,
+                        predicted_utility_micros = excluded.predicted_utility_micros,
+                        uncertainty_micros = excluded.uncertainty_micros,
+                        confidence = excluded.confidence,
+                        risk_penalty_micros = excluded.risk_penalty_micros,
+                        novelty_bonus_micros = excluded.novelty_bonus_micros,
+                        settlement_score_micros = excluded.settlement_score_micros,
+                        explanation_codes = excluded.explanation_codes,
+                        actor_principal_ref = excluded.actor_principal_ref
+                     RETURNING {TRACE_RANKING_PREDICTION_COLUMNS}"
+                ),
+                &[
+                    &prediction.tenant_id,
+                    &prediction.ranking_prediction_id,
+                    &prediction.submission_id,
+                    &prediction.trace_id,
+                    &prediction.target_use,
+                    &prediction.model_version,
+                    &prediction.feature_schema_version,
+                    &prediction.prediction_policy_version,
+                    &prediction.feature_vector_hash,
+                    &prediction.predicted_utility_micros,
+                    &prediction.uncertainty_micros,
+                    &prediction.confidence,
+                    &prediction.risk_penalty_micros,
+                    &prediction.novelty_bonus_micros,
+                    &prediction.settlement_score_micros,
+                    &explanation_codes,
+                    &prediction.actor_principal_ref,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_ranking_prediction(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_ranking_predictions(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingPredictionRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_RANKING_PREDICTION_COLUMNS}
+                     FROM trace_ranking_predictions
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, ranking_prediction_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_ranking_prediction).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_ranking_label(
+        &self,
+        label: TraceRankingLabelWrite,
+    ) -> Result<TraceRankingLabelRecord, DatabaseError> {
+        self.ensure_trace_tenant(&label.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &label.tenant_id).await?;
+        let label_source = enum_to_storage(label.label_source)?;
+        let utility_category = enum_to_storage(label.utility_category)?;
+        let label_outcome = enum_to_storage(label.label_outcome)?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_ranking_labels (
+                        tenant_id, ranking_label_id, submission_id, trace_id, target_use,
+                        label_source, utility_category, label_outcome, utility_delta_micros,
+                        evidence_hash, external_ref_hash, actor_principal_ref
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                     ON CONFLICT (tenant_id, submission_id, target_use, label_source, external_ref_hash)
+                     DO UPDATE SET
+                        trace_id = excluded.trace_id,
+                        utility_category = excluded.utility_category,
+                        label_outcome = excluded.label_outcome,
+                        utility_delta_micros = excluded.utility_delta_micros,
+                        evidence_hash = excluded.evidence_hash,
+                        actor_principal_ref = excluded.actor_principal_ref
+                     RETURNING {TRACE_RANKING_LABEL_COLUMNS}"
+                ),
+                &[
+                    &label.tenant_id,
+                    &label.ranking_label_id,
+                    &label.submission_id,
+                    &label.trace_id,
+                    &label.target_use,
+                    &label_source,
+                    &utility_category,
+                    &label_outcome,
+                    &label.utility_delta_micros,
+                    &label.evidence_hash,
+                    &label.external_ref_hash,
+                    &label.actor_principal_ref,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_ranking_label(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_ranking_labels(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingLabelRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_RANKING_LABEL_COLUMNS}
+                     FROM trace_ranking_labels
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, ranking_label_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_ranking_label).collect();
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         records
     }

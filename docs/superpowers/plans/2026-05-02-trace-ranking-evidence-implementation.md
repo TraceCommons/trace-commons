@@ -52,3 +52,20 @@
 - [x] Document the ranking evidence and calibration API surface.
 - [x] Run focused tests, broad ingest tests, bin check, and diff hygiene.
 - [x] Commit and push the PR update.
+
+### Task 5: DB-Backed Runtime Ranking Evidence
+
+**Files:**
+- Modify: `crates/tracedao-server/src/trace_corpus_storage.rs`
+- Modify: `crates/tracedao-server/src/db/trace_corpus_pg.rs`
+- Modify: `crates/tracedao-server/src/bin/tracedao-ingest.rs`
+- Modify: `crates/tracedao-server/tests/trace_corpus_pg_store.rs`
+- Modify: `README.md`
+- Modify: `docs/trace-commons.md`
+- Modify: `docs/trace-commons-storage.md`
+
+- [x] Add store write/read structs and trait methods for ranking model versions, feature records, prediction records, and labels.
+- [x] Implement PostgreSQL upsert/list methods with tenant-scoped RLS context and idempotent frontier/reviewer labels.
+- [x] Mirror ranking endpoint writes into the DB when `TRACE_COMMONS_DB_DUAL_WRITE=true`; fail closed under `TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES=true`.
+- [x] Serve admin ranking evidence lists and calibration reports from the DB mirror under `TRACE_COMMONS_DB_REVIEWER_READS=true`.
+- [x] Add Postgres store coverage and a caller-level DB mirror/read integration canary for ranking routes.
