@@ -14,13 +14,17 @@ use crate::error::DatabaseError;
 use crate::trace_corpus_storage::{
     TenantScopedTraceObjectRef, TraceArtifactInvalidationCounts, TraceAuditEventRecord,
     TraceAuditEventWrite, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCorpusStore,
-    TraceCreditEventRecord, TraceCreditEventWrite, TraceCreditSettlementState, TraceDerivedRecord,
+    TraceCreditEventRecord, TraceCreditEventType, TraceCreditEventWrite, TraceCreditHoldReason,
+    TraceCreditHoldRecord, TraceCreditHoldWrite, TraceCreditSettlementBatchRecord,
+    TraceCreditSettlementBatchStatus, TraceCreditSettlementBatchWrite,
+    TraceCreditSettlementNearStatus, TraceCreditSettlementState, TraceDerivedRecord,
     TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportAccessGrantRecord,
     TraceExportAccessGrantStatus, TraceExportAccessGrantWrite, TraceExportJobRecord,
     TraceExportJobStatus, TraceExportJobStatusUpdate, TraceExportJobWrite,
     TraceExportManifestItemInvalidationReason, TraceExportManifestItemRecord,
     TraceExportManifestItemWrite, TraceExportManifestMirrorWrite, TraceExportManifestRecord,
-    TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
+    TraceExportManifestWrite, TraceNearCreditOutboxItemRecord, TraceNearCreditOutboxItemWrite,
+    TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
     TraceRankingCalibrationRunRecord, TraceRankingCalibrationRunWrite, TraceRankingFeatureRecord,
     TraceRankingFeatureWrite, TraceRankingLabelOutcome, TraceRankingLabelRecord,
     TraceRankingLabelSource, TraceRankingLabelWrite, TraceRankingModelStatus,
@@ -34,9 +38,9 @@ use crate::trace_corpus_storage::{
     TraceRevocationPropagationTargetKind, TraceSubmissionRecord, TraceSubmissionWrite,
     TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
     TraceTenantAccessGrantWrite, TraceTenantPolicyRecord, TraceTenantPolicyWrite,
-    TraceTombstoneRecord, TraceTombstoneWrite, TraceVectorEntryRecord,
-    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-    TraceWorkerKind,
+    TraceTombstoneRecord, TraceTombstoneWrite, TraceUtilityAttestationRecord,
+    TraceUtilityAttestationWrite, TraceVectorEntryRecord, TraceVectorEntrySourceProjection,
+    TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWorkerKind,
 };
 
 const TRACE_OBJECT_REF_COLUMNS: &str = "\
@@ -81,6 +85,25 @@ const TRACE_EXPORT_JOB_COLUMNS: &str = "\
     tenant_id, export_job_id, grant_id, caller_principal_ref, requested_dataset_kind, \
     purpose, max_item_cap, status, requested_at, started_at, finished_at, expires_at, \
     result_manifest_id, item_count, last_error, metadata_json, created_at, updated_at";
+
+const TRACE_UTILITY_ATTESTATION_COLUMNS: &str = "\
+    tenant_id, attestation_id, event_type, use_category, policy_version, evidence_hash, \
+    external_ref_hash, source_submission_ids, actor_principal_ref, created_at";
+
+const TRACE_CREDIT_SETTLEMENT_BATCH_COLUMNS: &str = "\
+    tenant_id, settlement_batch_id, policy_version, status, reason_hash, \
+    source_credit_event_ids, source_submission_ids, source_list_hash, settled_credit_points, \
+    settled_credit_micros, line_items_json, near_contract_id, ranking_model_version, \
+    ranking_target_use, ranking_calibration_run_id, ranking_calibration_report_hash, \
+    ranking_credit_events_excluded_count, actor_principal_ref, created_at";
+
+const TRACE_CREDIT_HOLD_COLUMNS: &str = "\
+    tenant_id, hold_id, credit_account_ref, credit_account_hash, reason, reason_hash, \
+    actor_principal_ref, created_at, released_at";
+
+const TRACE_NEAR_CREDIT_OUTBOX_COLUMNS: &str = "\
+    tenant_id, near_outbox_id, settlement_batch_id, credit_account_hash, near_call_json, \
+    status, created_at, submitted_at, near_transaction_hash, last_error_hash, confirmed_at";
 
 const TRACE_TENANT_ACCESS_GRANT_COLUMNS: &str = "\
     tenant_id, grant_id, principal_ref, role, status, allowed_consent_scopes, allowed_uses, \
@@ -373,6 +396,97 @@ fn row_to_credit_event(row: &Row) -> Result<TraceCreditEventRecord, DatabaseErro
     })
 }
 
+fn row_to_utility_attestation(row: &Row) -> Result<TraceUtilityAttestationRecord, DatabaseError> {
+    let event_type: String = row.get("event_type");
+    Ok(TraceUtilityAttestationRecord {
+        tenant_id: row.get("tenant_id"),
+        attestation_id: row.get("attestation_id"),
+        event_type: enum_from_storage::<TraceCreditEventType>(&event_type, "TraceCreditEventType")?,
+        use_category: row.get("use_category"),
+        policy_version: row.get("policy_version"),
+        evidence_hash: row.get("evidence_hash"),
+        external_ref_hash: row.get("external_ref_hash"),
+        source_submission_ids: row.get("source_submission_ids"),
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn row_to_credit_settlement_batch(
+    row: &Row,
+) -> Result<TraceCreditSettlementBatchRecord, DatabaseError> {
+    let status: String = row.get("status");
+    let line_items_json: serde_json::Value = row.get("line_items_json");
+    Ok(TraceCreditSettlementBatchRecord {
+        tenant_id: row.get("tenant_id"),
+        settlement_batch_id: row.get("settlement_batch_id"),
+        policy_version: row.get("policy_version"),
+        status: enum_from_storage::<TraceCreditSettlementBatchStatus>(
+            &status,
+            "TraceCreditSettlementBatchStatus",
+        )?,
+        reason_hash: row.get("reason_hash"),
+        source_credit_event_ids: row.get("source_credit_event_ids"),
+        source_submission_ids: row.get("source_submission_ids"),
+        source_list_hash: row.get("source_list_hash"),
+        settled_credit_points: row.get("settled_credit_points"),
+        settled_credit_micros: row.get("settled_credit_micros"),
+        line_items: serde_json::from_value(line_items_json).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace credit settlement line_items_json decode failed: {e}"
+            ))
+        })?,
+        near_contract_id: row.get("near_contract_id"),
+        ranking_model_version: row.get("ranking_model_version"),
+        ranking_target_use: row.get("ranking_target_use"),
+        ranking_calibration_run_id: row.get("ranking_calibration_run_id"),
+        ranking_calibration_report_hash: row.get("ranking_calibration_report_hash"),
+        ranking_credit_events_excluded_count: row_i32_to_u32(
+            row,
+            "ranking_credit_events_excluded_count",
+        )?,
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn row_to_credit_hold(row: &Row) -> Result<TraceCreditHoldRecord, DatabaseError> {
+    let reason: String = row.get("reason");
+    Ok(TraceCreditHoldRecord {
+        tenant_id: row.get("tenant_id"),
+        hold_id: row.get("hold_id"),
+        credit_account_ref: row.get("credit_account_ref"),
+        credit_account_hash: row.get("credit_account_hash"),
+        reason: enum_from_storage::<TraceCreditHoldReason>(&reason, "TraceCreditHoldReason")?,
+        reason_hash: row.get("reason_hash"),
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
+        released_at: row.get("released_at"),
+    })
+}
+
+fn row_to_near_credit_outbox_item(
+    row: &Row,
+) -> Result<TraceNearCreditOutboxItemRecord, DatabaseError> {
+    let status: String = row.get("status");
+    Ok(TraceNearCreditOutboxItemRecord {
+        tenant_id: row.get("tenant_id"),
+        near_outbox_id: row.get("near_outbox_id"),
+        settlement_batch_id: row.get("settlement_batch_id"),
+        credit_account_hash: row.get("credit_account_hash"),
+        near_call_json: row.get("near_call_json"),
+        status: enum_from_storage::<TraceCreditSettlementNearStatus>(
+            &status,
+            "TraceCreditSettlementNearStatus",
+        )?,
+        created_at: row.get("created_at"),
+        submitted_at: row.get("submitted_at"),
+        near_transaction_hash: row.get("near_transaction_hash"),
+        last_error_hash: row.get("last_error_hash"),
+        confirmed_at: row.get("confirmed_at"),
+    })
+}
+
 fn row_to_derived_record(row: &Row) -> Result<TraceDerivedRecord, DatabaseError> {
     let status: String = row.get("status");
     let worker_kind: String = row.get("worker_kind");
@@ -548,9 +662,7 @@ fn row_to_ranking_label(row: &Row) -> Result<TraceRankingLabelRecord, DatabaseEr
 
 fn row_i32_to_u32(row: &Row, column: &str) -> Result<u32, DatabaseError> {
     row.get::<_, i32>(column).try_into().map_err(|e| {
-        DatabaseError::Serialization(format!(
-            "invalid trace_ranking_calibration_runs.{column} column value: {e}"
-        ))
+        DatabaseError::Serialization(format!("invalid unsigned {column} column value: {e}"))
     })
 }
 
@@ -2904,6 +3016,353 @@ impl TraceCorpusStore for PgBackend {
         .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(())
+    }
+
+    async fn upsert_trace_utility_attestation(
+        &self,
+        attestation: TraceUtilityAttestationWrite,
+    ) -> Result<TraceUtilityAttestationRecord, DatabaseError> {
+        self.ensure_trace_tenant(&attestation.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &attestation.tenant_id).await?;
+        let event_type = enum_to_storage(attestation.event_type)?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_utility_attestations (
+                        tenant_id, attestation_id, event_type, use_category, policy_version,
+                        evidence_hash, external_ref_hash, source_submission_ids, actor_principal_ref
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                     ON CONFLICT (tenant_id, event_type, external_ref_hash) DO UPDATE SET
+                        use_category = excluded.use_category,
+                        policy_version = excluded.policy_version,
+                        evidence_hash = excluded.evidence_hash,
+                        source_submission_ids = excluded.source_submission_ids,
+                        actor_principal_ref = excluded.actor_principal_ref
+                     RETURNING {TRACE_UTILITY_ATTESTATION_COLUMNS}"
+                ),
+                &[
+                    &attestation.tenant_id,
+                    &attestation.attestation_id,
+                    &event_type,
+                    &attestation.use_category,
+                    &attestation.policy_version,
+                    &attestation.evidence_hash,
+                    &attestation.external_ref_hash,
+                    &attestation.source_submission_ids,
+                    &attestation.actor_principal_ref,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_utility_attestation(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_utility_attestations(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceUtilityAttestationRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_UTILITY_ATTESTATION_COLUMNS}
+                     FROM trace_utility_attestations
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, attestation_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_utility_attestation).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_credit_settlement_batch(
+        &self,
+        batch: TraceCreditSettlementBatchWrite,
+    ) -> Result<TraceCreditSettlementBatchRecord, DatabaseError> {
+        self.ensure_trace_tenant(&batch.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &batch.tenant_id).await?;
+        let status = enum_to_storage(batch.status)?;
+        let line_items_json = serde_json::to_value(&batch.line_items).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace credit settlement line_items_json encode failed: {e}"
+            ))
+        })?;
+        let ranking_credit_events_excluded_count =
+            i32::try_from(batch.ranking_credit_events_excluded_count).map_err(|e| {
+                DatabaseError::Serialization(format!(
+                    "trace credit settlement excluded ranking count exceeds PostgreSQL integer range: {e}"
+                ))
+            })?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_credit_settlement_batches (
+                        tenant_id, settlement_batch_id, policy_version, status, reason_hash,
+                        source_credit_event_ids, source_submission_ids, source_list_hash,
+                        settled_credit_points, settled_credit_micros, line_items_json,
+                        near_contract_id, ranking_model_version, ranking_target_use,
+                        ranking_calibration_run_id, ranking_calibration_report_hash,
+                        ranking_credit_events_excluded_count, actor_principal_ref
+                     ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                        $17, $18
+                     )
+                     ON CONFLICT (tenant_id, settlement_batch_id) DO UPDATE SET
+                        policy_version = excluded.policy_version,
+                        status = excluded.status,
+                        reason_hash = excluded.reason_hash,
+                        source_credit_event_ids = excluded.source_credit_event_ids,
+                        source_submission_ids = excluded.source_submission_ids,
+                        source_list_hash = excluded.source_list_hash,
+                        settled_credit_points = excluded.settled_credit_points,
+                        settled_credit_micros = excluded.settled_credit_micros,
+                        line_items_json = excluded.line_items_json,
+                        near_contract_id = excluded.near_contract_id,
+                        ranking_model_version = excluded.ranking_model_version,
+                        ranking_target_use = excluded.ranking_target_use,
+                        ranking_calibration_run_id = excluded.ranking_calibration_run_id,
+                        ranking_calibration_report_hash = excluded.ranking_calibration_report_hash,
+                        ranking_credit_events_excluded_count = excluded.ranking_credit_events_excluded_count,
+                        actor_principal_ref = excluded.actor_principal_ref
+                     RETURNING {TRACE_CREDIT_SETTLEMENT_BATCH_COLUMNS}"
+                ),
+                &[
+                    &batch.tenant_id,
+                    &batch.settlement_batch_id,
+                    &batch.policy_version,
+                    &status,
+                    &batch.reason_hash,
+                    &batch.source_credit_event_ids,
+                    &batch.source_submission_ids,
+                    &batch.source_list_hash,
+                    &batch.settled_credit_points,
+                    &batch.settled_credit_micros,
+                    &line_items_json,
+                    &batch.near_contract_id,
+                    &batch.ranking_model_version,
+                    &batch.ranking_target_use,
+                    &batch.ranking_calibration_run_id,
+                    &batch.ranking_calibration_report_hash,
+                    &ranking_credit_events_excluded_count,
+                    &batch.actor_principal_ref,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_credit_settlement_batch(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_credit_settlement_batches(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceCreditSettlementBatchRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_CREDIT_SETTLEMENT_BATCH_COLUMNS}
+                     FROM trace_credit_settlement_batches
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, settlement_batch_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_credit_settlement_batch).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_credit_hold(
+        &self,
+        hold: TraceCreditHoldWrite,
+    ) -> Result<TraceCreditHoldRecord, DatabaseError> {
+        self.ensure_trace_tenant(&hold.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &hold.tenant_id).await?;
+        let reason = enum_to_storage(hold.reason)?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_credit_holds (
+                        tenant_id, hold_id, credit_account_ref, credit_account_hash, reason,
+                        reason_hash, actor_principal_ref, released_at
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                     ON CONFLICT (tenant_id, hold_id) DO UPDATE SET
+                        credit_account_ref = excluded.credit_account_ref,
+                        credit_account_hash = excluded.credit_account_hash,
+                        reason = excluded.reason,
+                        reason_hash = excluded.reason_hash,
+                        actor_principal_ref = excluded.actor_principal_ref,
+                        released_at = excluded.released_at
+                     RETURNING {TRACE_CREDIT_HOLD_COLUMNS}"
+                ),
+                &[
+                    &hold.tenant_id,
+                    &hold.hold_id,
+                    &hold.credit_account_ref,
+                    &hold.credit_account_hash,
+                    &reason,
+                    &hold.reason_hash,
+                    &hold.actor_principal_ref,
+                    &hold.released_at,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_credit_hold(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_credit_holds(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceCreditHoldRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_CREDIT_HOLD_COLUMNS}
+                     FROM trace_credit_holds
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, hold_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_credit_hold).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_near_credit_outbox_item(
+        &self,
+        item: TraceNearCreditOutboxItemWrite,
+    ) -> Result<TraceNearCreditOutboxItemRecord, DatabaseError> {
+        self.ensure_trace_tenant(&item.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &item.tenant_id).await?;
+        let status = enum_to_storage(item.status)?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_near_credit_outbox (
+                        tenant_id, near_outbox_id, settlement_batch_id, credit_account_hash,
+                        near_call_json, status
+                     ) VALUES ($1, $2, $3, $4, $5, $6)
+                     ON CONFLICT (tenant_id, near_outbox_id) DO UPDATE SET
+                        settlement_batch_id = excluded.settlement_batch_id,
+                        credit_account_hash = excluded.credit_account_hash,
+                        near_call_json = excluded.near_call_json,
+                        status = excluded.status
+                     RETURNING {TRACE_NEAR_CREDIT_OUTBOX_COLUMNS}"
+                ),
+                &[
+                    &item.tenant_id,
+                    &item.near_outbox_id,
+                    &item.settlement_batch_id,
+                    &item.credit_account_hash,
+                    &item.near_call_json,
+                    &status,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_near_credit_outbox_item(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_near_credit_outbox_items(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceNearCreditOutboxItemRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_NEAR_CREDIT_OUTBOX_COLUMNS}
+                     FROM trace_near_credit_outbox
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, near_outbox_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_near_credit_outbox_item).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn update_trace_near_credit_outbox_status(
+        &self,
+        tenant_id: &str,
+        near_outbox_id: Uuid,
+        status: TraceCreditSettlementNearStatus,
+        near_transaction_hash: Option<String>,
+        last_error_hash: Option<String>,
+    ) -> Result<Option<TraceNearCreditOutboxItemRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let status_storage = enum_to_storage(status)?;
+        let row = tx
+            .query_opt(
+                &format!(
+                    "UPDATE trace_near_credit_outbox
+                     SET status = $3,
+                         near_transaction_hash = COALESCE($4, near_transaction_hash),
+                         submitted_at = CASE
+                            WHEN submitted_at IS NULL AND $3 IN ('submitted', 'confirmed')
+                            THEN NOW()
+                            ELSE submitted_at
+                         END,
+                         confirmed_at = CASE
+                            WHEN $3 = 'confirmed' THEN NOW()
+                            WHEN $3 IN ('submitted', 'failed') THEN NULL
+                            ELSE confirmed_at
+                         END,
+                         last_error_hash = CASE
+                            WHEN $3 = 'failed' THEN $5
+                            WHEN $3 IN ('submitted', 'confirmed') THEN NULL
+                            ELSE last_error_hash
+                         END
+                     WHERE tenant_id = $1 AND near_outbox_id = $2
+                     RETURNING {TRACE_NEAR_CREDIT_OUTBOX_COLUMNS}"
+                ),
+                &[
+                    &tenant_id,
+                    &near_outbox_id,
+                    &status_storage,
+                    &near_transaction_hash,
+                    &last_error_hash,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row
+            .as_ref()
+            .map(row_to_near_credit_outbox_item)
+            .transpose()?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
     }
 
     async fn write_trace_tombstone(

@@ -48,7 +48,11 @@ use trace_commons_server::trace_corpus_storage::{
     TraceCreditEventType as StorageTraceCreditEventType,
     TraceCreditEventWrite as StorageTraceCreditEventWrite,
     TraceCreditHoldReason as StorageTraceCreditHoldReason,
+    TraceCreditHoldRecord as StorageTraceCreditHoldRecord,
+    TraceCreditHoldWrite as StorageTraceCreditHoldWrite,
+    TraceCreditSettlementBatchRecord as StorageTraceCreditSettlementBatchRecord,
     TraceCreditSettlementBatchStatus as StorageTraceCreditSettlementBatchStatus,
+    TraceCreditSettlementBatchWrite as StorageTraceCreditSettlementBatchWrite,
     TraceCreditSettlementNearStatus as StorageTraceCreditSettlementNearStatus,
     TraceCreditSettlementState as StorageTraceCreditSettlementState,
     TraceDerivedRecord as StorageTraceDerivedRecord,
@@ -66,6 +70,8 @@ use trace_commons_server::trace_corpus_storage::{
     TraceExportManifestMirrorWrite as StorageTraceExportManifestMirrorWrite,
     TraceExportManifestRecord as StorageTraceExportManifestRecord,
     TraceExportManifestWrite as StorageTraceExportManifestWrite,
+    TraceNearCreditOutboxItemRecord as StorageTraceNearCreditOutboxItemRecord,
+    TraceNearCreditOutboxItemWrite as StorageTraceNearCreditOutboxItemWrite,
     TraceObjectArtifactKind as StorageTraceObjectArtifactKind,
     TraceObjectRefRecord as StorageTraceObjectRefRecord,
     TraceObjectRefWrite as StorageTraceObjectRefWrite,
@@ -107,6 +113,8 @@ use trace_commons_server::trace_corpus_storage::{
     TraceTenantPolicyWrite as StorageTraceTenantPolicyWrite,
     TraceTombstoneRecord as StorageTraceTombstoneRecord,
     TraceTombstoneWrite as StorageTraceTombstoneWrite,
+    TraceUtilityAttestationRecord as StorageTraceUtilityAttestationRecord,
+    TraceUtilityAttestationWrite as StorageTraceUtilityAttestationWrite,
     TraceVectorEntryRecord as StorageTraceVectorEntryRecord,
     TraceVectorEntrySourceProjection as StorageTraceVectorEntrySourceProjection,
     TraceVectorEntryStatus as StorageTraceVectorEntryStatus,
@@ -5576,8 +5584,9 @@ async fn utility_attestation_handler(
         ));
     }
 
-    let existing =
-        read_all_utility_attestations(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let existing = read_utility_attestations_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     if let Some(attestation) = existing.iter().find(|attestation| {
         attestation.external_ref_hash == sha256_prefixed(&external_ref)
             && attestation.event_type == body.event_type
@@ -5662,7 +5671,8 @@ async fn utility_attestation_handler(
         actor_principal_ref: tenant.principal_ref.clone(),
         created_at: Utc::now(),
     };
-    append_utility_attestation(&state.root, &tenant.tenant_id, &attestation)
+    append_utility_attestation_with_db_mirror(state.as_ref(), &tenant, &attestation)
+        .await
         .map_err(internal_error)?;
 
     Ok(Json(TraceUtilityAttestationResponse {
@@ -5726,23 +5736,28 @@ async fn credit_settlement_handler(
         .ranking_target_use
         .unwrap_or(TraceAllowedUse::RankingModelTraining);
 
-    let records =
-        read_all_submission_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let records = read_reviewer_metadata_view(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?
+        .records;
     let records_by_submission = records
         .iter()
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
-    let existing_batches = read_all_credit_settlement_batches(&state.root, &tenant.tenant_id)
+    let existing_batches = read_credit_settlement_batches_for_admin(state.as_ref(), &tenant)
+        .await
         .map_err(internal_error)?;
-    let held_credit_accounts =
-        active_credit_hold_account_refs(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let held_credit_accounts = active_credit_hold_account_refs_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     let already_settled_event_ids = existing_batches
         .iter()
         .filter(|batch| batch.status == StorageTraceCreditSettlementBatchStatus::Finalized)
         .flat_map(|batch| batch.source_credit_event_ids.iter().copied())
         .collect::<BTreeSet<_>>();
-    let credit_events =
-        read_all_credit_events(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let credit_events = read_credit_events_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     let candidate_events = credit_events
         .into_iter()
         .filter(|event| trace_credit_event_type_is_settlement_eligible(event.event_type))
@@ -5923,10 +5938,12 @@ async fn credit_settlement_handler(
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
         };
-        append_credit_settlement_batch(&state.root, &tenant.tenant_id, &batch)
+        append_credit_settlement_batch_with_db_mirror(state.as_ref(), &tenant, &batch)
+            .await
             .map_err(internal_error)?;
         for item in &near_outbox_items {
-            append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item)
+            append_near_credit_outbox_item_with_db_mirror(state.as_ref(), &tenant, item)
+                .await
                 .map_err(internal_error)?;
         }
     }
@@ -5964,7 +5981,8 @@ async fn credit_settlements_handler(
 ) -> ApiResult<Json<Vec<TraceCreditSettlementBatchRecord>>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
-    let batches = read_all_credit_settlement_batches(&state.root, &tenant.tenant_id)
+    let batches = read_credit_settlement_batches_for_admin(state.as_ref(), &tenant)
+        .await
         .map_err(internal_error)?;
     Ok(Json(batches))
 }
@@ -6002,7 +6020,9 @@ async fn credit_hold_handler(
         created_at: Utc::now(),
         released_at: None,
     };
-    append_credit_hold(&state.root, &tenant.tenant_id, &hold).map_err(internal_error)?;
+    append_credit_hold_with_db_mirror(state.as_ref(), &tenant, &hold)
+        .await
+        .map_err(internal_error)?;
     Ok(Json(hold))
 }
 
@@ -6012,7 +6032,9 @@ async fn credit_holds_handler(
 ) -> ApiResult<Json<Vec<TraceCreditHoldRecord>>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
-    let holds = read_all_credit_holds(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let holds = read_credit_holds_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     Ok(Json(holds))
 }
 
@@ -6022,8 +6044,9 @@ async fn credit_attestations_handler(
 ) -> ApiResult<Json<Vec<TraceUtilityAttestationRecord>>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
-    let attestations =
-        read_all_utility_attestations(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let attestations = read_utility_attestations_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     Ok(Json(attestations))
 }
 
@@ -6033,7 +6056,8 @@ async fn near_credit_outbox_handler(
 ) -> ApiResult<Json<Vec<TraceNearCreditOutboxItem>>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
-    let items = read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)
+    let items = read_near_credit_outbox_items_for_admin(state.as_ref(), &tenant)
+        .await
         .map_err(internal_error)?;
     Ok(Json(items))
 }
@@ -6101,18 +6125,530 @@ async fn mark_near_credit_outbox_status_handler(
     } else {
         None
     };
-    let updated = update_near_credit_outbox_item_status(
-        &state.root,
-        &tenant.tenant_id,
+    let updated = update_near_credit_outbox_item_status_with_db_mirror(
+        state.as_ref(),
+        &tenant,
         body.near_outbox_id,
         status,
         near_transaction_hash,
         last_error_hash,
-        Utc::now(),
     )
+    .await
     .map_err(internal_error)?
     .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "NEAR credit outbox item not found"))?;
     Ok(Json(updated))
+}
+
+async fn append_utility_attestation_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    attestation: &TraceUtilityAttestationRecord,
+) -> anyhow::Result<()> {
+    let mirror_result = mirror_utility_attestation_to_db(state, attestation).await;
+    if state.require_db_mirror_writes {
+        if let Err(error) = &mirror_result {
+            tracing::warn!(%error, attestation_id = %attestation.attestation_id, "Trace Commons DB dual-write utility attestation mirror failed");
+        }
+        enforce_db_mirror_write_result(state, "utility attestation", mirror_result)?;
+        append_utility_attestation(&state.root, &tenant.tenant_id, attestation)?;
+        return Ok(());
+    }
+    append_utility_attestation(&state.root, &tenant.tenant_id, attestation)?;
+    if let Err(error) = &mirror_result {
+        tracing::warn!(%error, attestation_id = %attestation.attestation_id, "Trace Commons DB dual-write utility attestation mirror failed");
+    }
+    enforce_db_mirror_write_result(state, "utility attestation", mirror_result)
+}
+
+async fn append_credit_settlement_batch_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    batch: &TraceCreditSettlementBatchRecord,
+) -> anyhow::Result<()> {
+    let mirror_result = mirror_credit_settlement_batch_to_db(state, batch).await;
+    if state.require_db_mirror_writes {
+        if let Err(error) = &mirror_result {
+            tracing::warn!(%error, settlement_batch_id = %batch.settlement_batch_id, "Trace Commons DB dual-write credit settlement mirror failed");
+        }
+        enforce_db_mirror_write_result(state, "credit settlement batch", mirror_result)?;
+        append_credit_settlement_batch(&state.root, &tenant.tenant_id, batch)?;
+        return Ok(());
+    }
+    append_credit_settlement_batch(&state.root, &tenant.tenant_id, batch)?;
+    if let Err(error) = &mirror_result {
+        tracing::warn!(%error, settlement_batch_id = %batch.settlement_batch_id, "Trace Commons DB dual-write credit settlement mirror failed");
+    }
+    enforce_db_mirror_write_result(state, "credit settlement batch", mirror_result)
+}
+
+async fn append_credit_hold_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    hold: &TraceCreditHoldRecord,
+) -> anyhow::Result<()> {
+    let mirror_result = mirror_credit_hold_to_db(state, hold).await;
+    if state.require_db_mirror_writes {
+        if let Err(error) = &mirror_result {
+            tracing::warn!(%error, hold_id = %hold.hold_id, "Trace Commons DB dual-write credit hold mirror failed");
+        }
+        enforce_db_mirror_write_result(state, "credit hold", mirror_result)?;
+        append_credit_hold(&state.root, &tenant.tenant_id, hold)?;
+        return Ok(());
+    }
+    append_credit_hold(&state.root, &tenant.tenant_id, hold)?;
+    if let Err(error) = &mirror_result {
+        tracing::warn!(%error, hold_id = %hold.hold_id, "Trace Commons DB dual-write credit hold mirror failed");
+    }
+    enforce_db_mirror_write_result(state, "credit hold", mirror_result)
+}
+
+async fn append_near_credit_outbox_item_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    item: &TraceNearCreditOutboxItem,
+) -> anyhow::Result<()> {
+    let mirror_result = mirror_near_credit_outbox_item_to_db(state, item).await;
+    if state.require_db_mirror_writes {
+        if let Err(error) = &mirror_result {
+            tracing::warn!(%error, near_outbox_id = %item.near_outbox_id, "Trace Commons DB dual-write NEAR credit outbox mirror failed");
+        }
+        enforce_db_mirror_write_result(state, "NEAR credit outbox item", mirror_result)?;
+        append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item)?;
+        return Ok(());
+    }
+    append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item)?;
+    if let Err(error) = &mirror_result {
+        tracing::warn!(%error, near_outbox_id = %item.near_outbox_id, "Trace Commons DB dual-write NEAR credit outbox mirror failed");
+    }
+    enforce_db_mirror_write_result(state, "NEAR credit outbox item", mirror_result)
+}
+
+async fn update_near_credit_outbox_item_status_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    near_outbox_id: Uuid,
+    status: StorageTraceCreditSettlementNearStatus,
+    near_transaction_hash: Option<String>,
+    last_error_hash: Option<String>,
+) -> anyhow::Result<Option<TraceNearCreditOutboxItem>> {
+    let now = Utc::now();
+    if state.require_db_mirror_writes {
+        let db_updated = mirror_near_credit_outbox_item_status_to_db(
+            state,
+            &tenant.tenant_id,
+            near_outbox_id,
+            status,
+            near_transaction_hash.clone(),
+            last_error_hash.clone(),
+        )
+        .await
+        .context("required Trace Commons DB mirror write failed: NEAR credit outbox status")?;
+        if state.db_mirror.is_none() {
+            anyhow::bail!(
+                "TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES requires TRACE_COMMONS_DB_DUAL_WRITE for NEAR credit outbox status"
+            );
+        }
+        let file_updated = update_near_credit_outbox_item_status(
+            &state.root,
+            &tenant.tenant_id,
+            near_outbox_id,
+            status,
+            near_transaction_hash,
+            last_error_hash,
+            now,
+        )?;
+        return Ok(file_updated.or(db_updated));
+    }
+
+    let file_updated = update_near_credit_outbox_item_status(
+        &state.root,
+        &tenant.tenant_id,
+        near_outbox_id,
+        status,
+        near_transaction_hash.clone(),
+        last_error_hash.clone(),
+        now,
+    )?;
+    let mirror_result = mirror_near_credit_outbox_item_status_to_db(
+        state,
+        &tenant.tenant_id,
+        near_outbox_id,
+        status,
+        near_transaction_hash,
+        last_error_hash,
+    )
+    .await;
+    if let Err(error) = &mirror_result {
+        tracing::warn!(%error, %near_outbox_id, "Trace Commons DB dual-write NEAR credit outbox status mirror failed");
+    }
+    let db_updated = mirror_result.unwrap_or(None);
+    Ok(file_updated.or(db_updated))
+}
+
+async fn mirror_utility_attestation_to_db(
+    state: &AppState,
+    attestation: &TraceUtilityAttestationRecord,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    db.upsert_trace_utility_attestation(StorageTraceUtilityAttestationWrite {
+        tenant_id: attestation.tenant_id.clone(),
+        attestation_id: attestation.attestation_id,
+        event_type: storage_credit_event_type(attestation.event_type),
+        use_category: attestation.use_category.clone(),
+        policy_version: attestation.policy_version.clone(),
+        evidence_hash: attestation.evidence_hash.clone(),
+        external_ref_hash: attestation.external_ref_hash.clone(),
+        source_submission_ids: attestation.source_submission_ids.clone(),
+        actor_principal_ref: attestation.actor_principal_ref.clone(),
+    })
+    .await
+    .context("failed to mirror utility attestation to DB")?;
+    Ok(())
+}
+
+async fn mirror_credit_settlement_batch_to_db(
+    state: &AppState,
+    batch: &TraceCreditSettlementBatchRecord,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    db.upsert_trace_credit_settlement_batch(credit_settlement_batch_to_storage_write(batch)?)
+        .await
+        .context("failed to mirror credit settlement batch to DB")?;
+    Ok(())
+}
+
+async fn mirror_credit_hold_to_db(
+    state: &AppState,
+    hold: &TraceCreditHoldRecord,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    db.upsert_trace_credit_hold(StorageTraceCreditHoldWrite {
+        tenant_id: hold.tenant_id.clone(),
+        hold_id: hold.hold_id,
+        credit_account_ref: hold.credit_account_ref.clone(),
+        credit_account_hash: hold.credit_account_hash.clone(),
+        reason: hold.reason,
+        reason_hash: hold.reason_hash.clone(),
+        actor_principal_ref: hold.actor_principal_ref.clone(),
+        released_at: hold.released_at,
+    })
+    .await
+    .context("failed to mirror credit hold to DB")?;
+    Ok(())
+}
+
+async fn mirror_near_credit_outbox_item_to_db(
+    state: &AppState,
+    item: &TraceNearCreditOutboxItem,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    db.upsert_trace_near_credit_outbox_item(near_credit_outbox_item_to_storage_write(item)?)
+        .await
+        .context("failed to mirror NEAR credit outbox item to DB")?;
+    Ok(())
+}
+
+async fn mirror_near_credit_outbox_item_status_to_db(
+    state: &AppState,
+    tenant_id: &str,
+    near_outbox_id: Uuid,
+    status: StorageTraceCreditSettlementNearStatus,
+    near_transaction_hash: Option<String>,
+    last_error_hash: Option<String>,
+) -> anyhow::Result<Option<TraceNearCreditOutboxItem>> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(None);
+    };
+    db.update_trace_near_credit_outbox_status(
+        tenant_id,
+        near_outbox_id,
+        status,
+        near_transaction_hash,
+        last_error_hash,
+    )
+    .await
+    .context("failed to mirror NEAR credit outbox status to DB")?
+    .map(near_credit_outbox_item_from_storage)
+    .transpose()
+}
+
+async fn read_credit_events_for_admin(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceCommonsCreditLedgerRecord>> {
+    if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("TRACE_COMMONS_DB_REVIEWER_READS is enabled without a DB mirror")?;
+        let mut events = Vec::new();
+        for event in db
+            .list_trace_credit_events(&tenant.tenant_id)
+            .await
+            .context("failed to read Trace Commons credit events from DB mirror")?
+        {
+            let owner_principal_ref = event.credit_account_ref.clone();
+            if let Some(event) =
+                trace_commons_credit_event_from_storage(event, &owner_principal_ref)?
+            {
+                events.push(event);
+            }
+        }
+        return Ok(events);
+    }
+    read_all_credit_events(&state.root, &tenant.tenant_id)
+}
+
+async fn read_utility_attestations_for_admin(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceUtilityAttestationRecord>> {
+    if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("TRACE_COMMONS_DB_REVIEWER_READS is enabled without a DB mirror")?;
+        return db
+            .list_trace_utility_attestations(&tenant.tenant_id)
+            .await
+            .context("failed to read utility attestations from DB mirror")?
+            .into_iter()
+            .map(utility_attestation_from_storage)
+            .collect();
+    }
+    read_all_utility_attestations(&state.root, &tenant.tenant_id)
+}
+
+async fn read_credit_settlement_batches_for_admin(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceCreditSettlementBatchRecord>> {
+    if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("TRACE_COMMONS_DB_REVIEWER_READS is enabled without a DB mirror")?;
+        return db
+            .list_trace_credit_settlement_batches(&tenant.tenant_id)
+            .await
+            .context("failed to read credit settlement batches from DB mirror")?
+            .into_iter()
+            .map(credit_settlement_batch_from_storage)
+            .collect();
+    }
+    read_all_credit_settlement_batches(&state.root, &tenant.tenant_id)
+}
+
+async fn read_credit_holds_for_admin(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceCreditHoldRecord>> {
+    if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("TRACE_COMMONS_DB_REVIEWER_READS is enabled without a DB mirror")?;
+        return Ok(db
+            .list_trace_credit_holds(&tenant.tenant_id)
+            .await
+            .context("failed to read credit holds from DB mirror")?
+            .into_iter()
+            .map(credit_hold_from_storage)
+            .collect());
+    }
+    read_all_credit_holds(&state.root, &tenant.tenant_id)
+}
+
+async fn active_credit_hold_account_refs_for_admin(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<BTreeSet<String>> {
+    Ok(read_credit_holds_for_admin(state, tenant)
+        .await?
+        .into_iter()
+        .filter(|hold| hold.released_at.is_none())
+        .map(|hold| hold.credit_account_ref)
+        .collect())
+}
+
+async fn read_near_credit_outbox_items_for_admin(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceNearCreditOutboxItem>> {
+    if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("TRACE_COMMONS_DB_REVIEWER_READS is enabled without a DB mirror")?;
+        return db
+            .list_trace_near_credit_outbox_items(&tenant.tenant_id)
+            .await
+            .context("failed to read NEAR credit outbox items from DB mirror")?
+            .into_iter()
+            .map(near_credit_outbox_item_from_storage)
+            .collect();
+    }
+    read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)
+}
+
+fn utility_attestation_from_storage(
+    record: StorageTraceUtilityAttestationRecord,
+) -> anyhow::Result<TraceUtilityAttestationRecord> {
+    let event_type = trace_credit_event_type_from_storage(record.event_type)
+        .context("DB utility attestation has non-utility event_type")?;
+    Ok(TraceUtilityAttestationRecord {
+        attestation_id: record.attestation_id,
+        tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
+        tenant_id: record.tenant_id,
+        event_type,
+        use_category: record.use_category,
+        policy_version: record.policy_version,
+        evidence_hash: record.evidence_hash,
+        external_ref_hash: record.external_ref_hash,
+        source_submission_ids: record.source_submission_ids,
+        actor_principal_ref: record.actor_principal_ref,
+        created_at: record.created_at,
+    })
+}
+
+fn credit_settlement_batch_to_storage_write(
+    record: &TraceCreditSettlementBatchRecord,
+) -> anyhow::Result<StorageTraceCreditSettlementBatchWrite> {
+    let ranking_target_use = record
+        .ranking_target_use
+        .as_ref()
+        .map(serde_storage_string)
+        .transpose()?;
+    let ranking_credit_events_excluded_count =
+        u32::try_from(record.ranking_credit_events_excluded_count).with_context(|| {
+            format!(
+                "ranking_credit_events_excluded_count is too large for settlement batch {}",
+                record.settlement_batch_id
+            )
+        })?;
+    Ok(StorageTraceCreditSettlementBatchWrite {
+        tenant_id: record.tenant_id.clone(),
+        settlement_batch_id: record.settlement_batch_id,
+        policy_version: record.policy_version.clone(),
+        status: record.status,
+        reason_hash: record.reason_hash.clone(),
+        source_credit_event_ids: record.source_credit_event_ids.clone(),
+        source_submission_ids: record.source_submission_ids.clone(),
+        source_list_hash: record.source_list_hash.clone(),
+        settled_credit_points: format!("{:.6}", record.settled_credit_points),
+        settled_credit_micros: record.settled_credit_micros,
+        line_items: record.line_items.clone(),
+        near_contract_id: record.near_contract_id.clone(),
+        ranking_model_version: record.ranking_model_version.clone(),
+        ranking_target_use,
+        ranking_calibration_run_id: record.ranking_calibration_run_id,
+        ranking_calibration_report_hash: record.ranking_calibration_report_hash.clone(),
+        ranking_credit_events_excluded_count,
+        actor_principal_ref: record.actor_principal_ref.clone(),
+    })
+}
+
+fn credit_settlement_batch_from_storage(
+    record: StorageTraceCreditSettlementBatchRecord,
+) -> anyhow::Result<TraceCreditSettlementBatchRecord> {
+    let settled_credit_points = record
+        .settled_credit_points
+        .parse::<f32>()
+        .with_context(|| {
+            format!(
+                "failed to parse settled_credit_points for settlement batch {}",
+                record.settlement_batch_id
+            )
+        })?;
+    anyhow::ensure!(
+        settled_credit_points.is_finite(),
+        "settled_credit_points is not finite for settlement batch {}",
+        record.settlement_batch_id
+    );
+    let ranking_target_use = record
+        .ranking_target_use
+        .as_deref()
+        .map(|target_use| storage_string_as(target_use, "credit settlement ranking_target_use"))
+        .transpose()?;
+    Ok(TraceCreditSettlementBatchRecord {
+        settlement_batch_id: record.settlement_batch_id,
+        tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
+        tenant_id: record.tenant_id,
+        policy_version: record.policy_version,
+        status: record.status,
+        reason_hash: record.reason_hash,
+        source_credit_event_ids: record.source_credit_event_ids,
+        source_submission_ids: record.source_submission_ids,
+        source_list_hash: record.source_list_hash,
+        settled_credit_points,
+        settled_credit_micros: record.settled_credit_micros,
+        line_items: record.line_items,
+        near_contract_id: record.near_contract_id,
+        ranking_model_version: record.ranking_model_version,
+        ranking_target_use,
+        ranking_calibration_run_id: record.ranking_calibration_run_id,
+        ranking_calibration_report_hash: record.ranking_calibration_report_hash,
+        ranking_credit_events_excluded_count: record.ranking_credit_events_excluded_count as usize,
+        actor_principal_ref: record.actor_principal_ref,
+        created_at: record.created_at,
+    })
+}
+
+fn credit_hold_from_storage(record: StorageTraceCreditHoldRecord) -> TraceCreditHoldRecord {
+    TraceCreditHoldRecord {
+        hold_id: record.hold_id,
+        tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
+        tenant_id: record.tenant_id,
+        credit_account_ref: record.credit_account_ref,
+        credit_account_hash: record.credit_account_hash,
+        reason: record.reason,
+        reason_hash: record.reason_hash,
+        actor_principal_ref: record.actor_principal_ref,
+        created_at: record.created_at,
+        released_at: record.released_at,
+    }
+}
+
+fn near_credit_outbox_item_to_storage_write(
+    item: &TraceNearCreditOutboxItem,
+) -> anyhow::Result<StorageTraceNearCreditOutboxItemWrite> {
+    Ok(StorageTraceNearCreditOutboxItemWrite {
+        tenant_id: item.tenant_id.clone(),
+        near_outbox_id: item.near_outbox_id,
+        settlement_batch_id: item.settlement_batch_id,
+        credit_account_hash: item.credit_account_hash.clone(),
+        near_call_json: serde_json::to_value(&item.near_call)
+            .context("failed to serialize NEAR credit outbox call")?,
+        status: item.status,
+    })
+}
+
+fn near_credit_outbox_item_from_storage(
+    record: StorageTraceNearCreditOutboxItemRecord,
+) -> anyhow::Result<TraceNearCreditOutboxItem> {
+    Ok(TraceNearCreditOutboxItem {
+        near_outbox_id: record.near_outbox_id,
+        tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
+        tenant_id: record.tenant_id,
+        settlement_batch_id: record.settlement_batch_id,
+        credit_account_hash: record.credit_account_hash,
+        near_call: serde_json::from_value(record.near_call_json)
+            .context("failed to deserialize NEAR credit outbox call")?,
+        status: record.status,
+        created_at: record.created_at,
+        submitted_at: record.submitted_at,
+        near_transaction_hash: record.near_transaction_hash,
+        last_error_hash: record.last_error_hash,
+        confirmed_at: record.confirmed_at,
+    })
 }
 
 async fn ranking_model_version_handler(
@@ -16987,17 +17523,6 @@ fn ensure_credit_hold_tenant(hold: &TraceCreditHoldRecord, tenant_id: &str) -> a
         "trace credit hold tenant storage ref mismatch"
     );
     Ok(())
-}
-
-fn active_credit_hold_account_refs(
-    root: &Path,
-    tenant_id: &str,
-) -> anyhow::Result<BTreeSet<String>> {
-    Ok(read_all_credit_holds(root, tenant_id)?
-        .into_iter()
-        .filter(|hold| hold.released_at.is_none())
-        .map(|hold| hold.credit_account_ref)
-        .collect())
 }
 
 fn near_credit_outbox_path(root: &Path, tenant_id: &str) -> PathBuf {
@@ -31044,6 +31569,160 @@ mod tests {
         assert_eq!(credit.credit_points_held, 1.25);
         assert_eq!(credit.credit_points_settled, 0.0);
         assert_eq!(credit.credit_points_total, 0.0);
+    }
+
+    #[tokio::test]
+    async fn credit_control_plane_admin_reads_require_db_when_reviewer_reads_are_enabled() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            false,
+            true,
+            false,
+            false,
+        );
+
+        let error = credit_holds_handler(State(state), auth_headers("admin-token-a"))
+            .await
+            .expect_err("DB reviewer reads must not silently fall back to files");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn credit_control_plane_required_db_mirror_blocks_hold_writes_without_db() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+        let error = credit_hold_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditHoldRequest {
+                credit_account_ref: "principal:held-account".to_string(),
+                reason: StorageTraceCreditHoldReason::AttestationDispute,
+                reason_detail: "review required before settlement".to_string(),
+            }),
+        )
+        .await
+        .expect_err("required DB mirror writes must reject file-only credit holds");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn credit_control_plane_dual_writes_and_reads_postgres_when_enabled() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            true,
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission mirrors to DB");
+
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.5,
+                reason: Some("frontier training utility".to_string()),
+                external_ref: Some("frontier:db-settlement".to_string()),
+            }),
+        )
+        .await
+        .expect("credit event mirrors to DB");
+
+        let Json(finalized) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "DB-backed settlement".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("settlement mirrors to DB");
+        assert_eq!(finalized.settled_source_event_count, 1);
+
+        let db_batches = backend
+            .list_trace_credit_settlement_batches("tenant-a")
+            .await
+            .expect("DB settlement batches read");
+        assert_eq!(db_batches.len(), 1);
+        assert_eq!(db_batches[0].source_credit_event_ids, vec![event.event_id]);
+
+        let Json(listed_batches) =
+            credit_settlements_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin settlement list reads from DB");
+        assert_eq!(listed_batches.len(), 1);
+        assert_eq!(
+            listed_batches[0].settlement_batch_id,
+            finalized.settlement_batch_id
+        );
+
+        let Json(outbox) =
+            near_credit_outbox_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin NEAR outbox reads from DB");
+        assert_eq!(outbox.len(), 1);
+        let Json(submitted) = mark_near_credit_outbox_status_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxStatusRequest {
+                near_outbox_id: outbox[0].near_outbox_id,
+                status: StorageTraceCreditSettlementNearStatus::Submitted,
+                near_transaction_hash: Some("near-db-tx-hash-1".to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect("NEAR outbox status mirrors to DB");
+        assert_eq!(
+            submitted.status,
+            StorageTraceCreditSettlementNearStatus::Submitted
+        );
+
+        let db_outbox = backend
+            .list_trace_near_credit_outbox_items("tenant-a")
+            .await
+            .expect("DB NEAR outbox reads");
+        assert_eq!(
+            db_outbox[0].status,
+            StorageTraceCreditSettlementNearStatus::Submitted
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
 
     #[tokio::test]
