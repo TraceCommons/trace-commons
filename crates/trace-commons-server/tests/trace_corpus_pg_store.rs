@@ -8,11 +8,12 @@ use trace_commons_server::error::DatabaseError;
 use trace_commons_server::trace_corpus_storage::{
     TraceCorpusStatus, TraceCorpusStore, TraceDerivedRecordWrite, TraceDerivedStatus,
     TraceExportManifestItemWrite, TraceExportManifestMirrorWrite, TraceExportManifestWrite,
-    TraceObjectArtifactKind, TraceObjectRefWrite, TraceRankingFeatureWrite,
-    TraceRankingLabelOutcome, TraceRankingLabelSource, TraceRankingLabelWrite,
-    TraceRankingModelStatus, TraceRankingModelVersionWrite, TraceRankingPredictionWrite,
-    TraceRankingUtilityCategory, TraceSubmissionWrite, TraceVectorEntrySourceProjection,
-    TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWorkerKind,
+    TraceObjectArtifactKind, TraceObjectRefWrite, TraceRankingCalibrationRunWrite,
+    TraceRankingFeatureWrite, TraceRankingLabelOutcome, TraceRankingLabelSource,
+    TraceRankingLabelWrite, TraceRankingModelStatus, TraceRankingModelVersionWrite,
+    TraceRankingPredictionWrite, TraceRankingUtilityCategory, TraceSubmissionWrite,
+    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
+    TraceWorkerKind,
 };
 use uuid::Uuid;
 
@@ -549,6 +550,37 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
         .expect("repeat ranking label upsert is idempotent");
     assert_eq!(idempotent_label.ranking_label_id, label.ranking_label_id);
 
+    let calibration_run_id = Uuid::new_v4();
+    let calibration_run = backend
+        .upsert_trace_ranking_calibration_run(TraceRankingCalibrationRunWrite {
+            tenant_id: tenant_alpha.clone(),
+            calibration_run_id,
+            model_version: model.model_version.clone(),
+            target_use: "model_training".to_string(),
+            policy_version: "trace-credit-policy-v2".to_string(),
+            evaluation_dataset_hash: "sha256:calibration-eval-dataset".to_string(),
+            prediction_count: 1,
+            label_count: 1,
+            joined_label_prediction_count: 1,
+            average_predicted_utility_micros: Some(2_100_000),
+            average_label_utility_delta_micros: Some(2_500_000),
+            average_absolute_error_micros: Some(400_000),
+            mean_signed_error_micros: Some(-400_000),
+            low_confidence_prediction_count: 0,
+            confidence_threshold: 0.5,
+            min_label_count: 1,
+            max_average_absolute_error_micros: 500_000,
+            promotable: true,
+            reason_codes: Vec::new(),
+            report_hash: "sha256:ranking-calibration-report".to_string(),
+            actor_principal_ref: "principal:ranker-worker".to_string(),
+        })
+        .await
+        .expect("upsert ranking calibration run");
+    assert_eq!(calibration_run.calibration_run_id, calibration_run_id);
+    assert_eq!(calibration_run.mean_signed_error_micros, Some(-400_000));
+    assert!(calibration_run.promotable);
+
     let alpha_models = backend
         .list_trace_ranking_model_versions(&tenant_alpha)
         .await
@@ -565,10 +597,15 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
         .list_trace_ranking_labels(&tenant_alpha)
         .await
         .expect("list alpha ranking labels");
+    let alpha_calibration_runs = backend
+        .list_trace_ranking_calibration_runs(&tenant_alpha)
+        .await
+        .expect("list alpha ranking calibration runs");
     assert_eq!(alpha_models.len(), 1);
     assert_eq!(alpha_features.len(), 1);
     assert_eq!(alpha_predictions.len(), 1);
     assert_eq!(alpha_labels.len(), 1);
+    assert_eq!(alpha_calibration_runs.len(), 1);
 
     assert!(
         backend
@@ -577,6 +614,14 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
             .expect("list beta ranking labels")
             .is_empty(),
         "ranking evidence must stay tenant scoped"
+    );
+    assert!(
+        backend
+            .list_trace_ranking_calibration_runs(&tenant_beta)
+            .await
+            .expect("list beta ranking calibration runs")
+            .is_empty(),
+        "ranking calibration runs must stay tenant scoped"
     );
 
     cleanup_tenant(&backend, &tenant_alpha).await;

@@ -19,8 +19,9 @@ utility attestations, admin-triggered dry-run/final settlement batches, credit
 holds, contributor pending/settled/held projections, and a NEAR non-transferable
 credit receipt outbox. The next ranking substrate is also server-owned: model
 version records, hash-only feature records, prediction records, frontier/reviewer
-labels, calibration reports, and PostgreSQL-backed ranking evidence reads/writes
-behind the same DB mirror cutover gates.
+labels, calibration reports, persisted model-promotion calibration runs, and
+PostgreSQL-backed ranking evidence reads/writes behind the same DB mirror
+cutover gates.
 
 ## Trace Credits
 
@@ -38,11 +39,14 @@ hashes, policy versions, amounts, and issuer-signature hashes, never trace
 bodies or raw contributor identity.
 
 Ranking evidence is stored separately from settlement. Workers can register
-feature hashes, model predictions, and lab/reviewer labels; admins can inspect
-the calibration report before deciding which predictions are trustworthy enough
-to influence settlement policy. With the DB mirror configured, ranking evidence
-is dual-written to PostgreSQL and `TRACE_COMMONS_DB_REVIEWER_READS=true` serves
-admin ranking lists and calibration reports from the tenant-scoped DB mirror.
+feature hashes, model predictions, lab/reviewer labels, and calibration runs
+that record aggregate error, confidence, threshold policy, reason codes, and a
+hash-only report digest. Admins can inspect calibration reports and persisted
+runs before deciding which predictions are trustworthy enough to influence
+settlement policy. With the DB mirror configured, ranking evidence and
+calibration runs are dual-written to PostgreSQL and
+`TRACE_COMMONS_DB_REVIEWER_READS=true` serves admin ranking lists, calibration
+reports, and calibration-run history from the tenant-scoped DB mirror.
 
 ## Binaries
 

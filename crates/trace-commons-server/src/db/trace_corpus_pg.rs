@@ -21,13 +21,14 @@ use crate::trace_corpus_storage::{
     TraceExportManifestItemInvalidationReason, TraceExportManifestItemRecord,
     TraceExportManifestItemWrite, TraceExportManifestMirrorWrite, TraceExportManifestRecord,
     TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
-    TraceRankingFeatureRecord, TraceRankingFeatureWrite, TraceRankingLabelOutcome,
-    TraceRankingLabelRecord, TraceRankingLabelSource, TraceRankingLabelWrite,
-    TraceRankingModelStatus, TraceRankingModelVersionRecord, TraceRankingModelVersionWrite,
-    TraceRankingPredictionRecord, TraceRankingPredictionWrite, TraceRankingUtilityCategory,
-    TraceRetentionJobItemAction, TraceRetentionJobItemRecord, TraceRetentionJobItemStatus,
-    TraceRetentionJobItemWrite, TraceRetentionJobRecord, TraceRetentionJobStatus,
-    TraceRetentionJobWrite, TraceRevocationPropagationAction, TraceRevocationPropagationItemRecord,
+    TraceRankingCalibrationRunRecord, TraceRankingCalibrationRunWrite, TraceRankingFeatureRecord,
+    TraceRankingFeatureWrite, TraceRankingLabelOutcome, TraceRankingLabelRecord,
+    TraceRankingLabelSource, TraceRankingLabelWrite, TraceRankingModelStatus,
+    TraceRankingModelVersionRecord, TraceRankingModelVersionWrite, TraceRankingPredictionRecord,
+    TraceRankingPredictionWrite, TraceRankingUtilityCategory, TraceRetentionJobItemAction,
+    TraceRetentionJobItemRecord, TraceRetentionJobItemStatus, TraceRetentionJobItemWrite,
+    TraceRetentionJobRecord, TraceRetentionJobStatus, TraceRetentionJobWrite,
+    TraceRevocationPropagationAction, TraceRevocationPropagationItemRecord,
     TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget,
     TraceRevocationPropagationTargetKind, TraceSubmissionRecord, TraceSubmissionWrite,
@@ -108,6 +109,14 @@ const TRACE_RANKING_LABEL_COLUMNS: &str = "\
     tenant_id, ranking_label_id, submission_id, trace_id, target_use, label_source, \
     utility_category, label_outcome, utility_delta_micros, evidence_hash, external_ref_hash, \
     actor_principal_ref, created_at";
+
+const TRACE_RANKING_CALIBRATION_RUN_COLUMNS: &str = "\
+    tenant_id, calibration_run_id, model_version, target_use, policy_version, \
+    evaluation_dataset_hash, prediction_count, label_count, joined_label_prediction_count, \
+    average_predicted_utility_micros, average_label_utility_delta_micros, \
+    average_absolute_error_micros, mean_signed_error_micros, low_confidence_prediction_count, \
+    confidence_threshold, min_label_count, max_average_absolute_error_micros, promotable, \
+    reason_codes, report_hash, actor_principal_ref, created_at";
 
 async fn ensure_pg_object_ref_belongs_to_submission(
     tx: &Transaction<'_>,
@@ -532,6 +541,44 @@ fn row_to_ranking_label(row: &Row) -> Result<TraceRankingLabelRecord, DatabaseEr
         utility_delta_micros: row.get("utility_delta_micros"),
         evidence_hash: row.get("evidence_hash"),
         external_ref_hash: row.get("external_ref_hash"),
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn row_i32_to_u32(row: &Row, column: &str) -> Result<u32, DatabaseError> {
+    row.get::<_, i32>(column).try_into().map_err(|e| {
+        DatabaseError::Serialization(format!(
+            "invalid trace_ranking_calibration_runs.{column} column value: {e}"
+        ))
+    })
+}
+
+fn row_to_ranking_calibration_run(
+    row: &Row,
+) -> Result<TraceRankingCalibrationRunRecord, DatabaseError> {
+    let reason_codes: serde_json::Value = row.get("reason_codes");
+    Ok(TraceRankingCalibrationRunRecord {
+        tenant_id: row.get("tenant_id"),
+        calibration_run_id: row.get("calibration_run_id"),
+        model_version: row.get("model_version"),
+        target_use: row.get("target_use"),
+        policy_version: row.get("policy_version"),
+        evaluation_dataset_hash: row.get("evaluation_dataset_hash"),
+        prediction_count: row_i32_to_u32(row, "prediction_count")?,
+        label_count: row_i32_to_u32(row, "label_count")?,
+        joined_label_prediction_count: row_i32_to_u32(row, "joined_label_prediction_count")?,
+        average_predicted_utility_micros: row.get("average_predicted_utility_micros"),
+        average_label_utility_delta_micros: row.get("average_label_utility_delta_micros"),
+        average_absolute_error_micros: row.get("average_absolute_error_micros"),
+        mean_signed_error_micros: row.get("mean_signed_error_micros"),
+        low_confidence_prediction_count: row_i32_to_u32(row, "low_confidence_prediction_count")?,
+        confidence_threshold: row.get("confidence_threshold"),
+        min_label_count: row_i32_to_u32(row, "min_label_count")?,
+        max_average_absolute_error_micros: row.get("max_average_absolute_error_micros"),
+        promotable: row.get("promotable"),
+        reason_codes: json_array_strings(reason_codes, "ranking_calibration_runs.reason_codes")?,
+        report_hash: row.get("report_hash"),
         actor_principal_ref: row.get("actor_principal_ref"),
         created_at: row.get("created_at"),
     })
@@ -2090,6 +2137,136 @@ impl TraceCorpusStore for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
         let records = rows.iter().map(row_to_ranking_label).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_ranking_calibration_run(
+        &self,
+        run: TraceRankingCalibrationRunWrite,
+    ) -> Result<TraceRankingCalibrationRunRecord, DatabaseError> {
+        self.ensure_trace_tenant(&run.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &run.tenant_id).await?;
+        let prediction_count = i32::try_from(run.prediction_count).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace ranking calibration prediction_count exceeds PostgreSQL integer range: {e}"
+            ))
+        })?;
+        let label_count = i32::try_from(run.label_count).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace ranking calibration label_count exceeds PostgreSQL integer range: {e}"
+            ))
+        })?;
+        let joined_label_prediction_count =
+            i32::try_from(run.joined_label_prediction_count).map_err(|e| {
+                DatabaseError::Serialization(format!(
+                    "trace ranking calibration joined_label_prediction_count exceeds PostgreSQL integer range: {e}"
+                ))
+            })?;
+        let low_confidence_prediction_count =
+            i32::try_from(run.low_confidence_prediction_count).map_err(|e| {
+                DatabaseError::Serialization(format!(
+                    "trace ranking calibration low_confidence_prediction_count exceeds PostgreSQL integer range: {e}"
+                ))
+            })?;
+        let min_label_count = i32::try_from(run.min_label_count).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace ranking calibration min_label_count exceeds PostgreSQL integer range: {e}"
+            ))
+        })?;
+        let reason_codes = serde_json::to_value(&run.reason_codes).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace ranking calibration reason_codes encode failed: {e}"
+            ))
+        })?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_ranking_calibration_runs (
+                        tenant_id, calibration_run_id, model_version, target_use, policy_version,
+                        evaluation_dataset_hash, prediction_count, label_count,
+                        joined_label_prediction_count, average_predicted_utility_micros,
+                        average_label_utility_delta_micros, average_absolute_error_micros,
+                        mean_signed_error_micros, low_confidence_prediction_count,
+                        confidence_threshold, min_label_count, max_average_absolute_error_micros,
+                        promotable, reason_codes, report_hash, actor_principal_ref
+                     ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                        $17, $18, $19, $20, $21
+                     )
+                     ON CONFLICT (tenant_id, calibration_run_id) DO UPDATE SET
+                        model_version = excluded.model_version,
+                        target_use = excluded.target_use,
+                        policy_version = excluded.policy_version,
+                        evaluation_dataset_hash = excluded.evaluation_dataset_hash,
+                        prediction_count = excluded.prediction_count,
+                        label_count = excluded.label_count,
+                        joined_label_prediction_count = excluded.joined_label_prediction_count,
+                        average_predicted_utility_micros = excluded.average_predicted_utility_micros,
+                        average_label_utility_delta_micros = excluded.average_label_utility_delta_micros,
+                        average_absolute_error_micros = excluded.average_absolute_error_micros,
+                        mean_signed_error_micros = excluded.mean_signed_error_micros,
+                        low_confidence_prediction_count = excluded.low_confidence_prediction_count,
+                        confidence_threshold = excluded.confidence_threshold,
+                        min_label_count = excluded.min_label_count,
+                        max_average_absolute_error_micros = excluded.max_average_absolute_error_micros,
+                        promotable = excluded.promotable,
+                        reason_codes = excluded.reason_codes,
+                        report_hash = excluded.report_hash,
+                        actor_principal_ref = excluded.actor_principal_ref
+                     RETURNING {TRACE_RANKING_CALIBRATION_RUN_COLUMNS}"
+                ),
+                &[
+                    &run.tenant_id,
+                    &run.calibration_run_id,
+                    &run.model_version,
+                    &run.target_use,
+                    &run.policy_version,
+                    &run.evaluation_dataset_hash,
+                    &prediction_count,
+                    &label_count,
+                    &joined_label_prediction_count,
+                    &run.average_predicted_utility_micros,
+                    &run.average_label_utility_delta_micros,
+                    &run.average_absolute_error_micros,
+                    &run.mean_signed_error_micros,
+                    &low_confidence_prediction_count,
+                    &run.confidence_threshold,
+                    &min_label_count,
+                    &run.max_average_absolute_error_micros,
+                    &run.promotable,
+                    &reason_codes,
+                    &run.report_hash,
+                    &run.actor_principal_ref,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_ranking_calibration_run(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_ranking_calibration_runs(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingCalibrationRunRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_RANKING_CALIBRATION_RUN_COLUMNS}
+                     FROM trace_ranking_calibration_runs
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, calibration_run_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_ranking_calibration_run).collect();
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         records
     }

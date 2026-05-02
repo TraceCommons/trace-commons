@@ -69,6 +69,8 @@ use trace_commons_server::trace_corpus_storage::{
     TraceObjectArtifactKind as StorageTraceObjectArtifactKind,
     TraceObjectRefRecord as StorageTraceObjectRefRecord,
     TraceObjectRefWrite as StorageTraceObjectRefWrite,
+    TraceRankingCalibrationRunRecord as StorageTraceRankingCalibrationRunRecord,
+    TraceRankingCalibrationRunWrite as StorageTraceRankingCalibrationRunWrite,
     TraceRankingFeatureRecord as StorageTraceRankingFeatureRecord,
     TraceRankingFeatureWrite as StorageTraceRankingFeatureWrite,
     TraceRankingLabelOutcome as StorageTraceRankingLabelOutcome,
@@ -213,6 +215,9 @@ const TRACE_REVIEW_DUE_AFTER_HOURS: i64 = 24;
 const TRACE_REVIEW_OVERDUE_AFTER_HOURS: i64 = 72;
 const TRACE_REVIEW_HIGH_RISK_URGENT_AFTER_HOURS: i64 = 4;
 const TRACE_EXPORT_ONE_SHOT_GRANT_TTL_SECONDS: i64 = 300;
+const TRACE_RANKING_DEFAULT_MIN_LABEL_COUNT: usize = 25;
+const TRACE_RANKING_DEFAULT_CONFIDENCE_THRESHOLD: f32 = 0.5;
+const TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS: i64 = 1_000_000;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -1933,6 +1938,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(ranking_calibration_report_handler),
         )
         .route(
+            "/v1/admin/ranking/calibration-runs",
+            get(ranking_calibration_runs_handler),
+        )
+        .route(
             "/v1/workers/retention-maintenance",
             post(retention_maintenance_handler),
         )
@@ -1959,6 +1968,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(ranking_prediction_handler),
         )
         .route("/v1/workers/ranking/labels", post(ranking_label_handler))
+        .route(
+            "/v1/workers/ranking/calibration-runs",
+            post(ranking_calibration_run_handler),
+        )
         .route(
             "/v1/workers/process-evaluation",
             post(process_evaluation_worker_handler),
@@ -5150,6 +5163,44 @@ struct TraceRankingCalibrationReport {
 }
 
 #[derive(Debug, Deserialize)]
+struct TraceRankingCalibrationRunRequest {
+    model_version: String,
+    target_use: TraceAllowedUse,
+    policy_version: String,
+    evaluation_dataset_hash: String,
+    min_label_count: Option<usize>,
+    confidence_threshold: Option<f32>,
+    max_average_absolute_error_micros: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceRankingCalibrationRunRecord {
+    calibration_run_id: Uuid,
+    tenant_id: String,
+    tenant_storage_ref: String,
+    model_version: String,
+    target_use: TraceAllowedUse,
+    policy_version: String,
+    evaluation_dataset_hash: String,
+    prediction_count: usize,
+    label_count: usize,
+    joined_label_prediction_count: usize,
+    average_predicted_utility_micros: Option<i64>,
+    average_label_utility_delta_micros: Option<i64>,
+    average_absolute_error_micros: Option<i64>,
+    mean_signed_error_micros: Option<i64>,
+    low_confidence_prediction_count: usize,
+    confidence_threshold: f32,
+    min_label_count: usize,
+    max_average_absolute_error_micros: i64,
+    promotable: bool,
+    reason_codes: Vec<String>,
+    report_hash: String,
+    actor_principal_ref: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
 struct TraceProcessEvaluationJobRequest {
     submission_id: Uuid,
     process_evaluation: ProcessEvaluationLabels,
@@ -6239,6 +6290,92 @@ async fn ranking_calibration_report_handler(
     )))
 }
 
+async fn ranking_calibration_run_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceRankingCalibrationRunRequest>,
+) -> ApiResult<Json<TraceRankingCalibrationRunRecord>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_utility_operator(&tenant)?;
+    let model_version = validate_ranking_identifier(&body.model_version, "model_version")?;
+    let policy_version = validate_ranking_identifier(&body.policy_version, "policy_version")?;
+    let evaluation_dataset_hash =
+        validate_sha256_hash(&body.evaluation_dataset_hash, "evaluation_dataset_hash")?;
+    let confidence_threshold = body
+        .confidence_threshold
+        .unwrap_or(TRACE_RANKING_DEFAULT_CONFIDENCE_THRESHOLD);
+    validate_unit_score(confidence_threshold, "confidence_threshold")?;
+    let min_label_count = body
+        .min_label_count
+        .unwrap_or(TRACE_RANKING_DEFAULT_MIN_LABEL_COUNT);
+    if min_label_count > 1_000_000 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranking min_label_count is too large",
+        ));
+    }
+    let max_average_absolute_error_micros = body
+        .max_average_absolute_error_micros
+        .unwrap_or(TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS);
+    validate_nonnegative_micros(
+        max_average_absolute_error_micros,
+        "max_average_absolute_error_micros",
+    )?;
+
+    let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    if !model_versions
+        .iter()
+        .any(|model| model.model_version == model_version)
+    {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "ranking model version not found",
+        ));
+    }
+    let predictions = read_ranking_predictions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let labels = read_ranking_labels_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let mut record = ranking_calibration_run_record(
+        &tenant,
+        RankingCalibrationRunInputs {
+            calibration_run_id: Uuid::new_v4(),
+            model_version,
+            target_use: body.target_use,
+            policy_version,
+            evaluation_dataset_hash,
+            min_label_count,
+            confidence_threshold,
+            max_average_absolute_error_micros,
+            actor_principal_ref: tenant.principal_ref.clone(),
+            created_at: Utc::now(),
+        },
+        &predictions,
+        &labels,
+    );
+    record.report_hash = ranking_calibration_run_report_hash(&record);
+    append_ranking_calibration_run_with_db_mirror(state.as_ref(), &tenant, &record)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(record))
+}
+
+async fn ranking_calibration_runs_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<TraceRankingCalibrationRunRecord>>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let records = read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(records))
+}
+
 async fn append_ranking_model_version_with_db_mirror(
     state: &AppState,
     tenant: &TenantAuth,
@@ -6321,6 +6458,27 @@ async fn append_ranking_label_with_db_mirror(
         tracing::warn!(%error, ranking_label_id = %record.ranking_label_id, "Trace Commons DB dual-write ranking label mirror failed");
     }
     enforce_db_mirror_write_result(state, "ranking label", mirror_result)
+}
+
+async fn append_ranking_calibration_run_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    record: &TraceRankingCalibrationRunRecord,
+) -> anyhow::Result<()> {
+    let mirror_result = mirror_ranking_calibration_run_to_db(state, record).await;
+    if state.require_db_mirror_writes {
+        if let Err(error) = &mirror_result {
+            tracing::warn!(%error, calibration_run_id = %record.calibration_run_id, "Trace Commons DB dual-write ranking calibration run mirror failed");
+        }
+        enforce_db_mirror_write_result(state, "ranking calibration run", mirror_result)?;
+        append_ranking_calibration_run(&state.root, &tenant.tenant_id, record)?;
+        return Ok(());
+    }
+    append_ranking_calibration_run(&state.root, &tenant.tenant_id, record)?;
+    if let Err(error) = &mirror_result {
+        tracing::warn!(%error, calibration_run_id = %record.calibration_run_id, "Trace Commons DB dual-write ranking calibration run mirror failed");
+    }
+    enforce_db_mirror_write_result(state, "ranking calibration run", mirror_result)
 }
 
 async fn mirror_ranking_model_version_to_db(
@@ -6432,6 +6590,46 @@ async fn mirror_ranking_label_to_db(
     Ok(())
 }
 
+async fn mirror_ranking_calibration_run_to_db(
+    state: &AppState,
+    record: &TraceRankingCalibrationRunRecord,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    db.upsert_trace_ranking_calibration_run(StorageTraceRankingCalibrationRunWrite {
+        tenant_id: record.tenant_id.clone(),
+        calibration_run_id: record.calibration_run_id,
+        model_version: record.model_version.clone(),
+        target_use: serde_storage_string(&record.target_use)?,
+        policy_version: record.policy_version.clone(),
+        evaluation_dataset_hash: record.evaluation_dataset_hash.clone(),
+        prediction_count: u32::try_from(record.prediction_count)
+            .context("ranking calibration prediction_count exceeds u32")?,
+        label_count: u32::try_from(record.label_count)
+            .context("ranking calibration label_count exceeds u32")?,
+        joined_label_prediction_count: u32::try_from(record.joined_label_prediction_count)
+            .context("ranking calibration joined_label_prediction_count exceeds u32")?,
+        average_predicted_utility_micros: record.average_predicted_utility_micros,
+        average_label_utility_delta_micros: record.average_label_utility_delta_micros,
+        average_absolute_error_micros: record.average_absolute_error_micros,
+        mean_signed_error_micros: record.mean_signed_error_micros,
+        low_confidence_prediction_count: u32::try_from(record.low_confidence_prediction_count)
+            .context("ranking calibration low_confidence_prediction_count exceeds u32")?,
+        confidence_threshold: record.confidence_threshold,
+        min_label_count: u32::try_from(record.min_label_count)
+            .context("ranking calibration min_label_count exceeds u32")?,
+        max_average_absolute_error_micros: record.max_average_absolute_error_micros,
+        promotable: record.promotable,
+        reason_codes: record.reason_codes.clone(),
+        report_hash: record.report_hash.clone(),
+        actor_principal_ref: record.actor_principal_ref.clone(),
+    })
+    .await
+    .context("failed to mirror ranking calibration run to DB")?;
+    Ok(())
+}
+
 async fn read_ranking_model_versions_for_admin(
     state: &AppState,
     tenant: &TenantAuth,
@@ -6510,6 +6708,26 @@ async fn read_ranking_labels_for_admin(
             .collect();
     }
     read_all_ranking_labels(&state.root, &tenant.tenant_id)
+}
+
+async fn read_ranking_calibration_runs_for_admin(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceRankingCalibrationRunRecord>> {
+    if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("TRACE_COMMONS_DB_REVIEWER_READS is enabled without a DB mirror")?;
+        return db
+            .list_trace_ranking_calibration_runs(&tenant.tenant_id)
+            .await
+            .context("failed to read ranking calibration runs from DB mirror")?
+            .into_iter()
+            .map(ranking_calibration_run_from_storage)
+            .collect();
+    }
+    read_all_ranking_calibration_runs(&state.root, &tenant.tenant_id)
 }
 
 fn ranking_model_version_from_storage(
@@ -6596,6 +6814,36 @@ fn ranking_label_from_storage(
         utility_delta_micros: record.utility_delta_micros,
         evidence_hash: record.evidence_hash,
         external_ref_hash: record.external_ref_hash,
+        actor_principal_ref: record.actor_principal_ref,
+        created_at: record.created_at,
+    })
+}
+
+fn ranking_calibration_run_from_storage(
+    record: StorageTraceRankingCalibrationRunRecord,
+) -> anyhow::Result<TraceRankingCalibrationRunRecord> {
+    Ok(TraceRankingCalibrationRunRecord {
+        tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
+        tenant_id: record.tenant_id,
+        calibration_run_id: record.calibration_run_id,
+        model_version: record.model_version,
+        target_use: storage_string_as(&record.target_use, "ranking target_use")?,
+        policy_version: record.policy_version,
+        evaluation_dataset_hash: record.evaluation_dataset_hash,
+        prediction_count: record.prediction_count as usize,
+        label_count: record.label_count as usize,
+        joined_label_prediction_count: record.joined_label_prediction_count as usize,
+        average_predicted_utility_micros: record.average_predicted_utility_micros,
+        average_label_utility_delta_micros: record.average_label_utility_delta_micros,
+        average_absolute_error_micros: record.average_absolute_error_micros,
+        mean_signed_error_micros: record.mean_signed_error_micros,
+        low_confidence_prediction_count: record.low_confidence_prediction_count as usize,
+        confidence_threshold: record.confidence_threshold,
+        min_label_count: record.min_label_count as usize,
+        max_average_absolute_error_micros: record.max_average_absolute_error_micros,
+        promotable: record.promotable,
+        reason_codes: record.reason_codes,
+        report_hash: record.report_hash,
         actor_principal_ref: record.actor_principal_ref,
         created_at: record.created_at,
     })
@@ -6761,6 +7009,142 @@ fn ranking_calibration_report(
             .filter(|prediction| prediction.confidence < 0.5)
             .count(),
     }
+}
+
+struct RankingCalibrationRunInputs {
+    calibration_run_id: Uuid,
+    model_version: String,
+    target_use: TraceAllowedUse,
+    policy_version: String,
+    evaluation_dataset_hash: String,
+    min_label_count: usize,
+    confidence_threshold: f32,
+    max_average_absolute_error_micros: i64,
+    actor_principal_ref: String,
+    created_at: DateTime<Utc>,
+}
+
+fn ranking_calibration_run_record(
+    tenant: &TenantAuth,
+    inputs: RankingCalibrationRunInputs,
+    predictions: &[TraceRankingPredictionRecord],
+    labels: &[TraceRankingLabelRecord],
+) -> TraceRankingCalibrationRunRecord {
+    let matching_predictions = predictions
+        .iter()
+        .filter(|prediction| {
+            prediction.model_version == inputs.model_version
+                && prediction.target_use == inputs.target_use
+        })
+        .collect::<Vec<_>>();
+    let matching_labels = labels
+        .iter()
+        .filter(|label| label.target_use == inputs.target_use)
+        .collect::<Vec<_>>();
+    let mut latest_prediction_by_submission = BTreeMap::new();
+    for prediction in &matching_predictions {
+        latest_prediction_by_submission.insert(
+            prediction.submission_id,
+            (
+                prediction.predicted_utility_micros,
+                prediction.confidence,
+                prediction.created_at,
+            ),
+        );
+    }
+
+    let mut joined_count = 0usize;
+    let mut predicted_sum = 0i128;
+    let mut label_sum = 0i128;
+    let mut signed_error_sum = 0i128;
+    let mut abs_error_sum = 0i128;
+    for label in &matching_labels {
+        let Some((predicted, _, _)) = latest_prediction_by_submission.get(&label.submission_id)
+        else {
+            continue;
+        };
+        joined_count += 1;
+        predicted_sum += i128::from(*predicted);
+        label_sum += i128::from(label.utility_delta_micros);
+        signed_error_sum += i128::from(*predicted - label.utility_delta_micros);
+        abs_error_sum += i128::from((label.utility_delta_micros - *predicted).abs());
+    }
+    let average_absolute_error_micros = average_i128(abs_error_sum, joined_count);
+    let mut reason_codes = Vec::new();
+    if joined_count < inputs.min_label_count {
+        reason_codes.push("insufficient_labels".to_string());
+    }
+    if average_absolute_error_micros
+        .is_none_or(|error| error > inputs.max_average_absolute_error_micros)
+    {
+        reason_codes.push("average_error_above_threshold".to_string());
+    }
+    if matching_predictions
+        .iter()
+        .any(|prediction| prediction.confidence < inputs.confidence_threshold)
+    {
+        reason_codes.push("low_confidence_predictions_present".to_string());
+    }
+    reason_codes.sort();
+    reason_codes.dedup();
+    let promotable = reason_codes.is_empty();
+
+    TraceRankingCalibrationRunRecord {
+        calibration_run_id: inputs.calibration_run_id,
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        model_version: inputs.model_version,
+        target_use: inputs.target_use,
+        policy_version: inputs.policy_version,
+        evaluation_dataset_hash: inputs.evaluation_dataset_hash,
+        prediction_count: matching_predictions.len(),
+        label_count: matching_labels.len(),
+        joined_label_prediction_count: joined_count,
+        average_predicted_utility_micros: average_i128(predicted_sum, joined_count),
+        average_label_utility_delta_micros: average_i128(label_sum, joined_count),
+        average_absolute_error_micros,
+        mean_signed_error_micros: average_i128(signed_error_sum, joined_count),
+        low_confidence_prediction_count: matching_predictions
+            .iter()
+            .filter(|prediction| prediction.confidence < inputs.confidence_threshold)
+            .count(),
+        confidence_threshold: inputs.confidence_threshold,
+        min_label_count: inputs.min_label_count,
+        max_average_absolute_error_micros: inputs.max_average_absolute_error_micros,
+        promotable,
+        reason_codes,
+        report_hash: String::new(),
+        actor_principal_ref: inputs.actor_principal_ref,
+        created_at: inputs.created_at,
+    }
+}
+
+fn ranking_calibration_run_report_hash(record: &TraceRankingCalibrationRunRecord) -> String {
+    let mut payload = format!(
+        "ranking_calibration_run:v1\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{:?}\n{:?}\n{:?}\n{:?}\n{}\n{}\n{}\n{}\n{}",
+        record.tenant_storage_ref,
+        record.model_version,
+        serde_storage_string(&record.target_use).unwrap_or_else(|_| "invalid".to_string()),
+        record.policy_version,
+        record.evaluation_dataset_hash,
+        record.prediction_count,
+        record.label_count,
+        record.joined_label_prediction_count,
+        record.average_predicted_utility_micros,
+        record.average_label_utility_delta_micros,
+        record.average_absolute_error_micros,
+        record.mean_signed_error_micros,
+        record.low_confidence_prediction_count,
+        record.confidence_threshold,
+        record.min_label_count,
+        record.max_average_absolute_error_micros,
+        record.promotable
+    );
+    for reason in &record.reason_codes {
+        payload.push('\n');
+        payload.push_str(reason);
+    }
+    sha256_prefixed(&payload)
 }
 
 fn average_i128(sum: i128, count: usize) -> Option<i64> {
@@ -16768,6 +17152,55 @@ fn ensure_ranking_label_tenant(
     Ok(())
 }
 
+fn ranking_calibration_runs_path(root: &Path, tenant_id: &str) -> PathBuf {
+    let tenant_key = tenant_storage_key(tenant_id);
+    root.join("tenants")
+        .join(tenant_key)
+        .join("ranking")
+        .join("calibration_runs.jsonl")
+}
+
+fn append_ranking_calibration_run(
+    root: &Path,
+    tenant_id: &str,
+    record: &TraceRankingCalibrationRunRecord,
+) -> anyhow::Result<()> {
+    let path = ranking_calibration_runs_path(root, tenant_id);
+    append_jsonl_record(&path, record, "ranking calibration run")
+}
+
+fn read_all_ranking_calibration_runs(
+    root: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<Vec<TraceRankingCalibrationRunRecord>> {
+    let path = ranking_calibration_runs_path(root, tenant_id);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut records: Vec<TraceRankingCalibrationRunRecord> =
+        read_jsonl_records(&path, "ranking calibration run")?;
+    for record in &records {
+        ensure_ranking_calibration_run_tenant(record, tenant_id)?;
+    }
+    records.sort_by_key(|record| record.created_at);
+    Ok(records)
+}
+
+fn ensure_ranking_calibration_run_tenant(
+    record: &TraceRankingCalibrationRunRecord,
+    tenant_id: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        record.tenant_id == tenant_id,
+        "ranking calibration run tenant mismatch"
+    );
+    anyhow::ensure!(
+        record.tenant_storage_ref == tenant_storage_ref(tenant_id),
+        "ranking calibration run tenant storage ref mismatch"
+    );
+    Ok(())
+}
+
 fn append_jsonl_record<T: Serialize>(path: &Path, value: &T, label: &str) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -22369,7 +22802,7 @@ impl TraceCommonsTenantCreditResponse {
         response.last_settlement_batch_id = visible_settlements
             .iter()
             .map(|(batch_id, _)| *batch_id)
-            .last();
+            .next_back();
         let held_account_refs = credit_holds
             .iter()
             .filter(|hold| hold.released_at.is_none())
@@ -30466,6 +30899,128 @@ mod tests {
         let labels_json = serde_json::to_string(&labels).expect("labels serialize");
         assert!(!labels_json.contains("private-frontier-lab-batch-123"));
         assert!(!labels_json.contains("trace body"));
+    }
+
+    #[tokio::test]
+    async fn ranking_calibration_run_persists_hash_only_model_quality_gate() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(model) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-calibrated-v1".to_string(),
+                feature_schema_version: "ranking-features-calibrated-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:training-set-calibrated".to_string(),
+                calibration_dataset_hash: "sha256:calibration-set-calibrated".to_string(),
+                model_artifact_hash: "sha256:model-artifact-calibrated".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can register ranking model version");
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                feature_schema_version: model.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:feature-vector-calibrated".to_string(),
+                feature_names_hash: "sha256:feature-names-calibrated".to_string(),
+                source_feature_hash: "sha256:redacted-summary-features-calibrated".to_string(),
+                duplicate_score: Some(0.05),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.88),
+                coverage_tags: vec!["tool:terminal".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking feature record");
+        let Json(_) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                model_version: model.model_version.clone(),
+                feature_schema_version: model.feature_schema_version.clone(),
+                prediction_policy_version: "trace-credit-policy-v1".to_string(),
+                feature_vector_hash: feature.feature_vector_hash.clone(),
+                predicted_utility_micros: 2_100_000,
+                uncertainty_micros: 300_000,
+                confidence: 0.82,
+                risk_penalty_micros: 50_000,
+                novelty_bonus_micros: 125_000,
+                explanation_codes: vec!["novel_tool_success".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking prediction");
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 2_500_000,
+                evidence_hash: "sha256:frontier-lab-evidence-calibrated".to_string(),
+                external_ref: "private-frontier-lab-calibration-batch".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking label");
+
+        let Json(run) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: model.model_version.clone(),
+                target_use: TraceAllowedUse::ModelTraining,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                evaluation_dataset_hash: "sha256:calibration-eval-dataset".to_string(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(500_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist calibration run");
+        assert!(run.promotable);
+        assert_eq!(run.joined_label_prediction_count, 1);
+        assert_eq!(run.average_absolute_error_micros, Some(400_000));
+        assert_eq!(run.mean_signed_error_micros, Some(-400_000));
+        assert!(run.reason_codes.is_empty());
+        assert!(run.report_hash.starts_with("sha256:"));
+
+        let Json(runs) =
+            ranking_calibration_runs_handler(State(state), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list calibration runs");
+        assert_eq!(runs.len(), 1);
+        let runs_json = serde_json::to_string(&runs).expect("calibration runs serialize");
+        assert!(!runs_json.contains("private-frontier-lab-calibration-batch"));
+        assert!(!runs_json.contains("trace body"));
     }
 
     #[tokio::test]

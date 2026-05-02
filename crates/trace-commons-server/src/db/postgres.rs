@@ -39,6 +39,7 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_ranking_features",
     "trace_ranking_predictions",
     "trace_ranking_labels",
+    "trace_ranking_calibration_runs",
 ];
 
 impl PgBackend {
@@ -131,6 +132,26 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
                     &[&3_i32, &"trace_ranking_evidence"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&4_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V4__trace_ranking_calibration_runs.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&4_i32, &"trace_ranking_calibration_runs"],
                 )
                 .await?;
         }
