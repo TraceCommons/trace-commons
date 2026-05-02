@@ -69,6 +69,10 @@ use tracedao_server::trace_corpus_storage::{
     TraceObjectArtifactKind as StorageTraceObjectArtifactKind,
     TraceObjectRefRecord as StorageTraceObjectRefRecord,
     TraceObjectRefWrite as StorageTraceObjectRefWrite,
+    TraceRankingLabelOutcome as StorageTraceRankingLabelOutcome,
+    TraceRankingLabelSource as StorageTraceRankingLabelSource,
+    TraceRankingModelStatus as StorageTraceRankingModelStatus,
+    TraceRankingUtilityCategory as StorageTraceRankingUtilityCategory,
     TraceRetentionJobItemAction as StorageTraceRetentionJobItemAction,
     TraceRetentionJobItemRecord as StorageTraceRetentionJobItemRecord,
     TraceRetentionJobItemStatus as StorageTraceRetentionJobItemStatus,
@@ -1907,6 +1911,20 @@ fn app(state: Arc<AppState>) -> Router {
             get(near_credit_outbox_handler),
         )
         .route(
+            "/v1/admin/ranking/model-versions",
+            get(ranking_model_versions_handler).post(ranking_model_version_handler),
+        )
+        .route("/v1/admin/ranking/features", get(ranking_features_handler))
+        .route(
+            "/v1/admin/ranking/predictions",
+            get(ranking_predictions_handler),
+        )
+        .route("/v1/admin/ranking/labels", get(ranking_labels_handler))
+        .route(
+            "/v1/admin/ranking/calibration-report",
+            get(ranking_calibration_report_handler),
+        )
+        .route(
             "/v1/workers/retention-maintenance",
             post(retention_maintenance_handler),
         )
@@ -1924,6 +1942,15 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/workers/near-credit-outbox/mark-status",
             post(mark_near_credit_outbox_status_handler),
         )
+        .route(
+            "/v1/workers/ranking/features",
+            post(ranking_feature_handler),
+        )
+        .route(
+            "/v1/workers/ranking/predictions",
+            post(ranking_prediction_handler),
+        )
+        .route("/v1/workers/ranking/labels", post(ranking_label_handler))
         .route(
             "/v1/workers/process-evaluation",
             post(process_evaluation_worker_handler),
@@ -4969,6 +4996,152 @@ struct TraceCreditSettlementRunResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct TraceRankingModelVersionRequest {
+    model_version: String,
+    feature_schema_version: String,
+    policy_version: String,
+    status: StorageTraceRankingModelStatus,
+    training_dataset_hash: String,
+    calibration_dataset_hash: String,
+    model_artifact_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceRankingModelVersionRecord {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    model_version: String,
+    feature_schema_version: String,
+    policy_version: String,
+    status: StorageTraceRankingModelStatus,
+    training_dataset_hash: String,
+    calibration_dataset_hash: String,
+    model_artifact_hash: String,
+    actor_principal_ref: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceRankingFeatureRequest {
+    submission_id: Uuid,
+    target_use: TraceAllowedUse,
+    feature_schema_version: String,
+    feature_vector_hash: String,
+    feature_names_hash: String,
+    source_feature_hash: String,
+    duplicate_score: Option<f32>,
+    novelty_score: Option<f32>,
+    privacy_risk_score: Option<f32>,
+    quality_score: Option<f32>,
+    coverage_tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceRankingFeatureRecord {
+    ranking_feature_id: Uuid,
+    tenant_id: String,
+    tenant_storage_ref: String,
+    submission_id: Uuid,
+    trace_id: Uuid,
+    target_use: TraceAllowedUse,
+    feature_schema_version: String,
+    feature_vector_hash: String,
+    feature_names_hash: String,
+    source_feature_hash: String,
+    duplicate_score: Option<f32>,
+    novelty_score: Option<f32>,
+    privacy_risk_score: Option<f32>,
+    quality_score: Option<f32>,
+    coverage_tags: Vec<String>,
+    actor_principal_ref: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceRankingPredictionRequest {
+    submission_id: Uuid,
+    target_use: TraceAllowedUse,
+    model_version: String,
+    feature_schema_version: String,
+    prediction_policy_version: String,
+    feature_vector_hash: String,
+    predicted_utility_micros: i64,
+    uncertainty_micros: i64,
+    confidence: f32,
+    risk_penalty_micros: i64,
+    novelty_bonus_micros: i64,
+    explanation_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceRankingPredictionRecord {
+    ranking_prediction_id: Uuid,
+    tenant_id: String,
+    tenant_storage_ref: String,
+    submission_id: Uuid,
+    trace_id: Uuid,
+    target_use: TraceAllowedUse,
+    model_version: String,
+    feature_schema_version: String,
+    prediction_policy_version: String,
+    feature_vector_hash: String,
+    predicted_utility_micros: i64,
+    uncertainty_micros: i64,
+    confidence: f32,
+    risk_penalty_micros: i64,
+    novelty_bonus_micros: i64,
+    settlement_score_micros: i64,
+    explanation_codes: Vec<String>,
+    actor_principal_ref: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceRankingLabelRequest {
+    submission_id: Uuid,
+    target_use: TraceAllowedUse,
+    label_source: StorageTraceRankingLabelSource,
+    utility_category: StorageTraceRankingUtilityCategory,
+    label_outcome: StorageTraceRankingLabelOutcome,
+    utility_delta_micros: i64,
+    evidence_hash: String,
+    external_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceRankingLabelRecord {
+    ranking_label_id: Uuid,
+    tenant_id: String,
+    tenant_storage_ref: String,
+    submission_id: Uuid,
+    trace_id: Uuid,
+    target_use: TraceAllowedUse,
+    label_source: StorageTraceRankingLabelSource,
+    utility_category: StorageTraceRankingUtilityCategory,
+    label_outcome: StorageTraceRankingLabelOutcome,
+    utility_delta_micros: i64,
+    evidence_hash: String,
+    external_ref_hash: String,
+    actor_principal_ref: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingCalibrationReport {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    model_version_count: usize,
+    feature_count: usize,
+    prediction_count: usize,
+    label_count: usize,
+    joined_label_prediction_count: usize,
+    average_predicted_utility_micros: Option<i64>,
+    average_label_utility_delta_micros: Option<i64>,
+    average_absolute_error_micros: Option<i64>,
+    low_confidence_prediction_count: usize,
+}
+
+#[derive(Debug, Deserialize)]
 struct TraceProcessEvaluationJobRequest {
     submission_id: Uuid,
     process_evaluation: ProcessEvaluationLabels,
@@ -5785,6 +5958,427 @@ async fn mark_near_credit_outbox_status_handler(
     .map_err(internal_error)?
     .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "NEAR credit outbox item not found"))?;
     Ok(Json(updated))
+}
+
+async fn ranking_model_version_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceRankingModelVersionRequest>,
+) -> ApiResult<Json<TraceRankingModelVersionRecord>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let model_version = validate_ranking_identifier(&body.model_version, "model_version")?;
+    let feature_schema_version =
+        validate_ranking_identifier(&body.feature_schema_version, "feature_schema_version")?;
+    let policy_version = validate_ranking_identifier(&body.policy_version, "policy_version")?;
+    let training_dataset_hash =
+        validate_sha256_hash(&body.training_dataset_hash, "training_dataset_hash")?;
+    let calibration_dataset_hash =
+        validate_sha256_hash(&body.calibration_dataset_hash, "calibration_dataset_hash")?;
+    let model_artifact_hash =
+        validate_sha256_hash(&body.model_artifact_hash, "model_artifact_hash")?;
+
+    let record = TraceRankingModelVersionRecord {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        model_version,
+        feature_schema_version,
+        policy_version,
+        status: body.status,
+        training_dataset_hash,
+        calibration_dataset_hash,
+        model_artifact_hash,
+        actor_principal_ref: tenant.principal_ref.clone(),
+        created_at: Utc::now(),
+    };
+    append_ranking_model_version(&state.root, &tenant.tenant_id, &record)
+        .map_err(internal_error)?;
+    Ok(Json(record))
+}
+
+async fn ranking_model_versions_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<TraceRankingModelVersionRecord>>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let records =
+        read_all_ranking_model_versions(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    Ok(Json(records))
+}
+
+async fn ranking_feature_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceRankingFeatureRequest>,
+) -> ApiResult<Json<TraceRankingFeatureRecord>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_utility_operator(&tenant)?;
+    let submission = read_ranking_source_submission(
+        state.as_ref(),
+        &tenant,
+        body.submission_id,
+        body.target_use,
+    )
+    .await?;
+    let feature_schema_version =
+        validate_ranking_identifier(&body.feature_schema_version, "feature_schema_version")?;
+    let feature_vector_hash =
+        validate_sha256_hash(&body.feature_vector_hash, "feature_vector_hash")?;
+    let feature_names_hash = validate_sha256_hash(&body.feature_names_hash, "feature_names_hash")?;
+    let source_feature_hash =
+        validate_sha256_hash(&body.source_feature_hash, "source_feature_hash")?;
+    validate_optional_unit_score(body.duplicate_score, "duplicate_score")?;
+    validate_optional_unit_score(body.novelty_score, "novelty_score")?;
+    validate_optional_unit_score(body.privacy_risk_score, "privacy_risk_score")?;
+    validate_optional_unit_score(body.quality_score, "quality_score")?;
+    validate_ranking_codes(&body.coverage_tags, "coverage_tags")?;
+
+    let record = TraceRankingFeatureRecord {
+        ranking_feature_id: Uuid::new_v4(),
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        submission_id: submission.submission_id,
+        trace_id: submission.trace_id,
+        target_use: body.target_use,
+        feature_schema_version,
+        feature_vector_hash,
+        feature_names_hash,
+        source_feature_hash,
+        duplicate_score: body.duplicate_score,
+        novelty_score: body.novelty_score,
+        privacy_risk_score: body.privacy_risk_score,
+        quality_score: body.quality_score,
+        coverage_tags: body.coverage_tags,
+        actor_principal_ref: tenant.principal_ref.clone(),
+        created_at: Utc::now(),
+    };
+    append_ranking_feature(&state.root, &tenant.tenant_id, &record).map_err(internal_error)?;
+    Ok(Json(record))
+}
+
+async fn ranking_features_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<TraceRankingFeatureRecord>>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let records =
+        read_all_ranking_features(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    Ok(Json(records))
+}
+
+async fn ranking_prediction_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceRankingPredictionRequest>,
+) -> ApiResult<Json<TraceRankingPredictionRecord>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_utility_operator(&tenant)?;
+    let submission = read_ranking_source_submission(
+        state.as_ref(),
+        &tenant,
+        body.submission_id,
+        body.target_use,
+    )
+    .await?;
+    let model_version = validate_ranking_identifier(&body.model_version, "model_version")?;
+    let feature_schema_version =
+        validate_ranking_identifier(&body.feature_schema_version, "feature_schema_version")?;
+    let prediction_policy_version =
+        validate_ranking_identifier(&body.prediction_policy_version, "prediction_policy_version")?;
+    let feature_vector_hash =
+        validate_sha256_hash(&body.feature_vector_hash, "feature_vector_hash")?;
+    validate_nonnegative_micros(body.predicted_utility_micros, "predicted_utility_micros")?;
+    validate_nonnegative_micros(body.uncertainty_micros, "uncertainty_micros")?;
+    validate_unit_score(body.confidence, "confidence")?;
+    validate_nonnegative_micros(body.risk_penalty_micros, "risk_penalty_micros")?;
+    validate_nonnegative_micros(body.novelty_bonus_micros, "novelty_bonus_micros")?;
+    validate_ranking_codes(&body.explanation_codes, "explanation_codes")?;
+
+    let settlement_score_micros =
+        body.predicted_utility_micros + body.novelty_bonus_micros - body.risk_penalty_micros;
+    let record = TraceRankingPredictionRecord {
+        ranking_prediction_id: Uuid::new_v4(),
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        submission_id: submission.submission_id,
+        trace_id: submission.trace_id,
+        target_use: body.target_use,
+        model_version,
+        feature_schema_version,
+        prediction_policy_version,
+        feature_vector_hash,
+        predicted_utility_micros: body.predicted_utility_micros,
+        uncertainty_micros: body.uncertainty_micros,
+        confidence: body.confidence,
+        risk_penalty_micros: body.risk_penalty_micros,
+        novelty_bonus_micros: body.novelty_bonus_micros,
+        settlement_score_micros,
+        explanation_codes: body.explanation_codes,
+        actor_principal_ref: tenant.principal_ref.clone(),
+        created_at: Utc::now(),
+    };
+    append_ranking_prediction(&state.root, &tenant.tenant_id, &record).map_err(internal_error)?;
+    Ok(Json(record))
+}
+
+async fn ranking_predictions_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<TraceRankingPredictionRecord>>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let records =
+        read_all_ranking_predictions(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    Ok(Json(records))
+}
+
+async fn ranking_label_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceRankingLabelRequest>,
+) -> ApiResult<Json<TraceRankingLabelRecord>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_utility_operator(&tenant)?;
+    let submission = read_ranking_source_submission(
+        state.as_ref(),
+        &tenant,
+        body.submission_id,
+        body.target_use,
+    )
+    .await?;
+    let evidence_hash = validate_sha256_hash(&body.evidence_hash, "evidence_hash")?;
+    let external_ref = body.external_ref.trim();
+    if external_ref.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranking labels require external_ref",
+        ));
+    }
+    if external_ref.len() > 1024 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranking label external_ref is too long",
+        ));
+    }
+    let record = TraceRankingLabelRecord {
+        ranking_label_id: Uuid::new_v4(),
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        submission_id: submission.submission_id,
+        trace_id: submission.trace_id,
+        target_use: body.target_use,
+        label_source: body.label_source,
+        utility_category: body.utility_category,
+        label_outcome: body.label_outcome,
+        utility_delta_micros: body.utility_delta_micros,
+        evidence_hash,
+        external_ref_hash: sha256_prefixed(external_ref),
+        actor_principal_ref: tenant.principal_ref.clone(),
+        created_at: Utc::now(),
+    };
+    append_ranking_label(&state.root, &tenant.tenant_id, &record).map_err(internal_error)?;
+    Ok(Json(record))
+}
+
+async fn ranking_labels_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<TraceRankingLabelRecord>>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let records =
+        read_all_ranking_labels(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    Ok(Json(records))
+}
+
+async fn ranking_calibration_report_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<TraceRankingCalibrationReport>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let model_versions =
+        read_all_ranking_model_versions(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let features =
+        read_all_ranking_features(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let predictions =
+        read_all_ranking_predictions(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    let labels = read_all_ranking_labels(&state.root, &tenant.tenant_id).map_err(internal_error)?;
+    Ok(Json(ranking_calibration_report(
+        &tenant.tenant_id,
+        model_versions.len(),
+        features.len(),
+        &predictions,
+        &labels,
+    )))
+}
+
+async fn read_ranking_source_submission(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+    target_use: TraceAllowedUse,
+) -> ApiResult<TraceCommonsSubmissionRecord> {
+    let required_uses = [target_use];
+    let tenant_policy =
+        tenant_utility_credit_policy_for_request(state, tenant, &required_uses).await?;
+    let submission = read_utility_submission_record(state, tenant, submission_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
+    if submission.status != TraceCorpusStatus::Accepted {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "ranking evidence can only reference accepted trace submissions",
+        ));
+    }
+    if !record_matches_utility_credit_policy_abac(
+        &submission,
+        tenant,
+        tenant_policy.as_ref(),
+        &required_uses,
+    ) {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "ranking evidence source is not allowed for this target use",
+        ));
+    }
+    Ok(submission)
+}
+
+fn validate_ranking_identifier(value: &str, label: &str) -> ApiResult<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("ranking {label} is required"),
+        ));
+    }
+    if value.len() > 128 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("ranking {label} is too long"),
+        ));
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':'))
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("ranking {label} contains unsupported characters"),
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn validate_sha256_hash(value: &str, label: &str) -> ApiResult<String> {
+    let value = value.trim();
+    if value.starts_with("sha256:") {
+        Ok(value.to_string())
+    } else {
+        Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("ranking {label} must be a sha256-prefixed hash"),
+        ))
+    }
+}
+
+fn validate_unit_score(value: f32, label: &str) -> ApiResult<()> {
+    if value.is_finite() && (0.0..=1.0).contains(&value) {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("ranking {label} must be between 0 and 1"),
+        ))
+    }
+}
+
+fn validate_optional_unit_score(value: Option<f32>, label: &str) -> ApiResult<()> {
+    if let Some(value) = value {
+        validate_unit_score(value, label)?;
+    }
+    Ok(())
+}
+
+fn validate_nonnegative_micros(value: i64, label: &str) -> ApiResult<()> {
+    if (0..=1_000_000_000_000).contains(&value) {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("ranking {label} must be non-negative and within policy bounds"),
+        ))
+    }
+}
+
+fn validate_ranking_codes(values: &[String], label: &str) -> ApiResult<()> {
+    if values.len() > 64 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("ranking {label} has too many entries"),
+        ));
+    }
+    for value in values {
+        validate_ranking_identifier(value, label)?;
+    }
+    Ok(())
+}
+
+fn ranking_calibration_report(
+    tenant_id: &str,
+    model_version_count: usize,
+    feature_count: usize,
+    predictions: &[TraceRankingPredictionRecord],
+    labels: &[TraceRankingLabelRecord],
+) -> TraceRankingCalibrationReport {
+    let mut latest_prediction_by_submission_use = BTreeMap::new();
+    for prediction in predictions {
+        latest_prediction_by_submission_use.insert(
+            (prediction.submission_id, prediction.target_use),
+            prediction.predicted_utility_micros,
+        );
+    }
+
+    let mut joined_count = 0usize;
+    let mut predicted_sum = 0i128;
+    let mut label_sum = 0i128;
+    let mut abs_error_sum = 0i128;
+    for label in labels {
+        let Some(predicted) =
+            latest_prediction_by_submission_use.get(&(label.submission_id, label.target_use))
+        else {
+            continue;
+        };
+        joined_count += 1;
+        predicted_sum += i128::from(*predicted);
+        label_sum += i128::from(label.utility_delta_micros);
+        abs_error_sum += i128::from((label.utility_delta_micros - *predicted).abs());
+    }
+
+    TraceRankingCalibrationReport {
+        tenant_id: tenant_id.to_string(),
+        tenant_storage_ref: tenant_storage_ref(tenant_id),
+        model_version_count,
+        feature_count,
+        prediction_count: predictions.len(),
+        label_count: labels.len(),
+        joined_label_prediction_count: joined_count,
+        average_predicted_utility_micros: average_i128(predicted_sum, joined_count),
+        average_label_utility_delta_micros: average_i128(label_sum, joined_count),
+        average_absolute_error_micros: average_i128(abs_error_sum, joined_count),
+        low_confidence_prediction_count: predictions
+            .iter()
+            .filter(|prediction| prediction.confidence < 0.5)
+            .count(),
+    }
+}
+
+fn average_i128(sum: i128, count: usize) -> Option<i64> {
+    (count > 0).then_some((sum / count as i128) as i64)
 }
 
 fn trace_credit_event_type_is_settlement_eligible(event_type: TraceCreditLedgerEventType) -> bool {
@@ -15590,6 +16184,200 @@ fn ensure_near_credit_outbox_item_tenant(
     anyhow::ensure!(
         item.tenant_storage_ref == tenant_storage_ref(tenant_id),
         "NEAR credit outbox tenant storage ref mismatch"
+    );
+    Ok(())
+}
+
+fn ranking_model_versions_path(root: &Path, tenant_id: &str) -> PathBuf {
+    let tenant_key = tenant_storage_key(tenant_id);
+    root.join("tenants")
+        .join(tenant_key)
+        .join("ranking")
+        .join("model_versions.jsonl")
+}
+
+fn append_ranking_model_version(
+    root: &Path,
+    tenant_id: &str,
+    record: &TraceRankingModelVersionRecord,
+) -> anyhow::Result<()> {
+    let path = ranking_model_versions_path(root, tenant_id);
+    append_jsonl_record(&path, record, "ranking model version")
+}
+
+fn read_all_ranking_model_versions(
+    root: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<Vec<TraceRankingModelVersionRecord>> {
+    let path = ranking_model_versions_path(root, tenant_id);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut records: Vec<TraceRankingModelVersionRecord> =
+        read_jsonl_records(&path, "ranking model version")?;
+    for record in &records {
+        ensure_ranking_model_version_tenant(record, tenant_id)?;
+    }
+    records.sort_by_key(|record| record.created_at);
+    Ok(records)
+}
+
+fn ensure_ranking_model_version_tenant(
+    record: &TraceRankingModelVersionRecord,
+    tenant_id: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        record.tenant_id == tenant_id,
+        "ranking model version tenant mismatch"
+    );
+    anyhow::ensure!(
+        record.tenant_storage_ref == tenant_storage_ref(tenant_id),
+        "ranking model version tenant storage ref mismatch"
+    );
+    Ok(())
+}
+
+fn ranking_features_path(root: &Path, tenant_id: &str) -> PathBuf {
+    let tenant_key = tenant_storage_key(tenant_id);
+    root.join("tenants")
+        .join(tenant_key)
+        .join("ranking")
+        .join("features.jsonl")
+}
+
+fn append_ranking_feature(
+    root: &Path,
+    tenant_id: &str,
+    record: &TraceRankingFeatureRecord,
+) -> anyhow::Result<()> {
+    let path = ranking_features_path(root, tenant_id);
+    append_jsonl_record(&path, record, "ranking feature")
+}
+
+fn read_all_ranking_features(
+    root: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<Vec<TraceRankingFeatureRecord>> {
+    let path = ranking_features_path(root, tenant_id);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut records: Vec<TraceRankingFeatureRecord> = read_jsonl_records(&path, "ranking feature")?;
+    for record in &records {
+        ensure_ranking_feature_tenant(record, tenant_id)?;
+    }
+    records.sort_by_key(|record| record.created_at);
+    Ok(records)
+}
+
+fn ensure_ranking_feature_tenant(
+    record: &TraceRankingFeatureRecord,
+    tenant_id: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        record.tenant_id == tenant_id,
+        "ranking feature tenant mismatch"
+    );
+    anyhow::ensure!(
+        record.tenant_storage_ref == tenant_storage_ref(tenant_id),
+        "ranking feature tenant storage ref mismatch"
+    );
+    Ok(())
+}
+
+fn ranking_predictions_path(root: &Path, tenant_id: &str) -> PathBuf {
+    let tenant_key = tenant_storage_key(tenant_id);
+    root.join("tenants")
+        .join(tenant_key)
+        .join("ranking")
+        .join("predictions.jsonl")
+}
+
+fn append_ranking_prediction(
+    root: &Path,
+    tenant_id: &str,
+    record: &TraceRankingPredictionRecord,
+) -> anyhow::Result<()> {
+    let path = ranking_predictions_path(root, tenant_id);
+    append_jsonl_record(&path, record, "ranking prediction")
+}
+
+fn read_all_ranking_predictions(
+    root: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<Vec<TraceRankingPredictionRecord>> {
+    let path = ranking_predictions_path(root, tenant_id);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut records: Vec<TraceRankingPredictionRecord> =
+        read_jsonl_records(&path, "ranking prediction")?;
+    for record in &records {
+        ensure_ranking_prediction_tenant(record, tenant_id)?;
+    }
+    records.sort_by_key(|record| record.created_at);
+    Ok(records)
+}
+
+fn ensure_ranking_prediction_tenant(
+    record: &TraceRankingPredictionRecord,
+    tenant_id: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        record.tenant_id == tenant_id,
+        "ranking prediction tenant mismatch"
+    );
+    anyhow::ensure!(
+        record.tenant_storage_ref == tenant_storage_ref(tenant_id),
+        "ranking prediction tenant storage ref mismatch"
+    );
+    Ok(())
+}
+
+fn ranking_labels_path(root: &Path, tenant_id: &str) -> PathBuf {
+    let tenant_key = tenant_storage_key(tenant_id);
+    root.join("tenants")
+        .join(tenant_key)
+        .join("ranking")
+        .join("labels.jsonl")
+}
+
+fn append_ranking_label(
+    root: &Path,
+    tenant_id: &str,
+    record: &TraceRankingLabelRecord,
+) -> anyhow::Result<()> {
+    let path = ranking_labels_path(root, tenant_id);
+    append_jsonl_record(&path, record, "ranking label")
+}
+
+fn read_all_ranking_labels(
+    root: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<Vec<TraceRankingLabelRecord>> {
+    let path = ranking_labels_path(root, tenant_id);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut records: Vec<TraceRankingLabelRecord> = read_jsonl_records(&path, "ranking label")?;
+    for record in &records {
+        ensure_ranking_label_tenant(record, tenant_id)?;
+    }
+    records.sort_by_key(|record| record.created_at);
+    Ok(records)
+}
+
+fn ensure_ranking_label_tenant(
+    record: &TraceRankingLabelRecord,
+    tenant_id: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        record.tenant_id == tenant_id,
+        "ranking label tenant mismatch"
+    );
+    anyhow::ensure!(
+        record.tenant_storage_ref == tenant_storage_ref(tenant_id),
+        "ranking label tenant storage ref mismatch"
     );
     Ok(())
 }
@@ -29129,6 +29917,123 @@ mod tests {
             TraceCreditLedgerEventType::TrainingUtility
         );
         assert_eq!(credit_events[0].credit_points_delta, 2.0);
+    }
+
+    #[tokio::test]
+    async fn ranking_evidence_pipeline_records_hash_only_predictions_and_labels() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(model) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-v1".to_string(),
+                feature_schema_version: "ranking-features-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:training-set".to_string(),
+                calibration_dataset_hash: "sha256:calibration-set".to_string(),
+                model_artifact_hash: "sha256:model-artifact".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can register ranking model version");
+
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                feature_schema_version: model.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:feature-vector".to_string(),
+                feature_names_hash: "sha256:feature-names".to_string(),
+                source_feature_hash: "sha256:redacted-summary-features".to_string(),
+                duplicate_score: Some(0.05),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.88),
+                coverage_tags: vec!["tool:terminal".to_string(), "outcome:success".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking feature record");
+        assert_eq!(feature.submission_id, submission_id);
+        assert_eq!(feature.feature_vector_hash, "sha256:feature-vector");
+
+        let Json(prediction) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                model_version: model.model_version.clone(),
+                feature_schema_version: model.feature_schema_version.clone(),
+                prediction_policy_version: "trace-credit-policy-v1".to_string(),
+                feature_vector_hash: feature.feature_vector_hash.clone(),
+                predicted_utility_micros: 2_100_000,
+                uncertainty_micros: 300_000,
+                confidence: 0.82,
+                risk_penalty_micros: 50_000,
+                novelty_bonus_micros: 125_000,
+                explanation_codes: vec!["novel_tool_success".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking prediction");
+        assert_eq!(prediction.settlement_score_micros, 2_175_000);
+
+        let Json(label) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 2_500_000,
+                evidence_hash: "sha256:frontier-lab-evidence".to_string(),
+                external_ref: "private-frontier-lab-batch-123".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking label");
+        assert_eq!(
+            label.external_ref_hash,
+            "sha256:55a627f63c11c1b4e2211b00a2c4dd64e42fcd8d1b953a3a4a7ba16691605dde"
+        );
+
+        let Json(report) =
+            ranking_calibration_report_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can read ranking calibration report");
+        assert_eq!(report.prediction_count, 1);
+        assert_eq!(report.label_count, 1);
+        assert_eq!(report.joined_label_prediction_count, 1);
+        assert_eq!(report.average_absolute_error_micros, Some(400_000));
+
+        let Json(labels) = ranking_labels_handler(State(state), auth_headers("admin-token-a"))
+            .await
+            .expect("admin can list ranking labels");
+        let labels_json = serde_json::to_string(&labels).expect("labels serialize");
+        assert!(!labels_json.contains("private-frontier-lab-batch-123"));
+        assert!(!labels_json.contains("trace body"));
     }
 
     #[tokio::test]

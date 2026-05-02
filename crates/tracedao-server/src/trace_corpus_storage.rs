@@ -149,6 +149,43 @@ pub enum TraceCreditHoldReason {
     LegalCompliance,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceRankingModelStatus {
+    Candidate,
+    Active,
+    Deprecated,
+    Archived,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceRankingLabelSource {
+    FrontierLab,
+    Reviewer,
+    Benchmark,
+    System,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceRankingUtilityCategory {
+    ModelTraining,
+    RankingTraining,
+    Evaluation,
+    Regression,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceRankingLabelOutcome {
+    Useful,
+    Neutral,
+    Rejected,
+    RegressionCaught,
+    Disputed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TraceCreditAccountSettlementLineItem {
     pub credit_account_ref: String,

@@ -17,7 +17,9 @@ DTOs, status DTOs, and deterministic redaction helpers live in this repo.
 It also owns the first server-side Trace Credits settlement surface: hash-only
 utility attestations, admin-triggered dry-run/final settlement batches, credit
 holds, contributor pending/settled/held projections, and a NEAR non-transferable
-credit receipt outbox.
+credit receipt outbox. The next ranking substrate is also server-owned: model
+version records, hash-only feature records, prediction records, frontier/reviewer
+labels, and calibration reports.
 
 ## Trace Credits
 
@@ -33,6 +35,11 @@ confirmed, or failed after contract submission. The server ledger remains
 authoritative; NEAR payloads contain batch ids, account hashes, source-list
 hashes, policy versions, amounts, and issuer-signature hashes, never trace
 bodies or raw contributor identity.
+
+Ranking evidence is stored separately from settlement. Workers can register
+feature hashes, model predictions, and lab/reviewer labels; admins can inspect
+the calibration report before deciding which predictions are trustworthy enough
+to influence settlement policy.
 
 ## Binaries
 

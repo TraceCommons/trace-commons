@@ -7,9 +7,10 @@ use tracedao_server::trace_corpus_storage::{
     TraceCreditSettlementBatchStatus, TraceCreditSettlementNearStatus, TraceDerivedRecord,
     TraceDerivedStatus, TraceExportManifestItemInvalidationReason, TraceExportManifestItemRecord,
     TraceExportManifestRecord, TraceObjectArtifactKind, TraceObjectRefRecord,
-    TraceReviewLeaseAuditAction, TraceSubmissionWrite, TraceTombstoneRecord,
-    TraceVectorEntryRecord, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
-    TraceWorkerKind,
+    TraceRankingLabelOutcome, TraceRankingLabelSource, TraceRankingModelStatus,
+    TraceRankingUtilityCategory, TraceReviewLeaseAuditAction, TraceSubmissionWrite,
+    TraceTombstoneRecord, TraceVectorEntryRecord, TraceVectorEntrySourceProjection,
+    TraceVectorEntryStatus, TraceWorkerKind,
 };
 use uuid::Uuid;
 
@@ -167,6 +168,44 @@ fn credit_settlement_contract_uses_typed_states_and_hash_only_near_metadata() {
         serde_json::to_value(TraceCreditHoldReason::DuplicateClusterUnderReview).unwrap(),
         "duplicate_cluster_under_review"
     );
+}
+
+#[test]
+fn ranking_evidence_contract_uses_typed_enums_and_hash_only_outcomes() {
+    assert_eq!(
+        serde_json::to_value(TraceRankingModelStatus::Candidate).unwrap(),
+        "candidate"
+    );
+    assert_eq!(
+        serde_json::to_value(TraceRankingLabelSource::FrontierLab).unwrap(),
+        "frontier_lab"
+    );
+    assert_eq!(
+        serde_json::to_value(TraceRankingUtilityCategory::ModelTraining).unwrap(),
+        "model_training"
+    );
+    assert_eq!(
+        serde_json::to_value(TraceRankingLabelOutcome::Useful).unwrap(),
+        "useful"
+    );
+
+    let label_json = serde_json::json!({
+        "tenant_id": "tenant-a",
+        "submission_id": Uuid::from_u128(0x55),
+        "label_source": TraceRankingLabelSource::FrontierLab,
+        "utility_category": TraceRankingUtilityCategory::ModelTraining,
+        "label_outcome": TraceRankingLabelOutcome::Useful,
+        "utility_delta_micros": 2_500_000,
+        "evidence_hash": "sha256:evidence",
+        "external_ref_hash": "sha256:external-ref"
+    });
+
+    assert_eq!(label_json["label_source"], "frontier_lab");
+    assert_eq!(label_json["utility_category"], "model_training");
+    assert_eq!(label_json["label_outcome"], "useful");
+    assert!(label_json.get("external_ref").is_none());
+    assert!(label_json.get("lab_note").is_none());
+    assert!(label_json.get("trace_body").is_none());
 }
 
 #[test]
