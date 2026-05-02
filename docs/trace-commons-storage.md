@@ -10,6 +10,7 @@ This repository owns the production-storage surface:
 
 - `migrations/V1__trace_commons_schema.sql`, consolidated as this repo's first landing schema for the full Trace Commons relational control plane.
 - `migrations/V2__trace_credit_settlement.sql`, adding hash-only utility attestations, settlement batches, credit holds, and the NEAR non-transferable receipt outbox.
+- `migrations/V3__trace_ranking_evidence.sql`, adding ranking model versions, feature hashes, prediction records, labels, and calibration-report source tables.
 - `crates/trace-commons-server/src/trace_corpus_storage.rs` and the PostgreSQL `TraceCorpusStore` implementation.
 - `crates/trace-commons-server/src/trace_artifact_store.rs` and the encrypted local service object-store provider.
 - Optional ingest-service DB dual-write behind `TRACE_COMMONS_DB_DUAL_WRITE=true`.
@@ -21,6 +22,7 @@ This repository owns the production-storage surface:
 - Admin-token operational inspection through `/v1/admin/operational-summary` and `ironclaw traces operational-summary`, returning only safe tenant-scoped aggregate counts for submission status/risk, review SLA pressure, DB export manifests/jobs, retention jobs, vector coverage, and delayed credit totals with a read audit event.
 - Admin-triggered Trace Credits settlement through `/v1/admin/credit-settlements`, with dry-run support, idempotent source-event selection, held-account exclusion, contributor pending/settled/held projections, optional NEAR non-transferable receipt outbox rows, and worker status updates through `/v1/workers/near-credit-outbox/mark-status`.
 - Utility-worker evidence ingestion through `/v1/workers/utility-attestations`, storing policy version, source ids, evidence hash, and external-ref hash without raw lab notes or trace bodies.
+- Ranking evidence ingestion through `/v1/workers/ranking/features`, `/v1/workers/ranking/predictions`, and `/v1/workers/ranking/labels`, plus admin inspection through `/v1/admin/ranking/model-versions`, `/v1/admin/ranking/features`, `/v1/admin/ranking/predictions`, `/v1/admin/ranking/labels`, and `/v1/admin/ranking/calibration-report`.
 - Optional encrypted local artifact storage behind `TRACE_COMMONS_ARTIFACT_KEY_HEX`, with `TRACE_COMMONS_OBJECT_STORE=local_service` selecting the service-owned local encrypted backend used for production-shaped object refs.
 - Optional object-primary submit/review mode behind `TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW=true`, which requires the DB/object-ref cutover guards and skips plaintext submitted/reviewed envelope body files while retaining compatibility metadata, derived records, and file audit rows. Object-primary envelope writes use unique encrypted artifact object ids per logical snapshot so review/process-evaluation writes do not overwrite ciphertext behind older submitted-envelope object refs.
 - Optional object-primary replay export mode behind `TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT=true`, which requires DB replay selection, required replay object refs, required DB mirror writes, and the service-local encrypted object store.

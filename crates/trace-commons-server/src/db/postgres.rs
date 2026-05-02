@@ -35,6 +35,10 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_credit_settlement_batches",
     "trace_credit_holds",
     "trace_near_credit_outbox",
+    "trace_ranking_model_versions",
+    "trace_ranking_features",
+    "trace_ranking_predictions",
+    "trace_ranking_labels",
 ];
 
 impl PgBackend {
@@ -107,6 +111,26 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
                     &[&2_i32, &"trace_credit_settlement"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&3_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V3__trace_ranking_evidence.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&3_i32, &"trace_ranking_evidence"],
                 )
                 .await?;
         }
