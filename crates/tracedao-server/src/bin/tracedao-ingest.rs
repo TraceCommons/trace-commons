@@ -3821,6 +3821,7 @@ struct TraceCommonsConfigStatusResponse {
     ranking_max_average_absolute_error_micros: i64,
     ranking_min_label_count: usize,
     ranking_min_label_source_count: usize,
+    ranking_worker_run_stale_after_hours: i64,
     artifact_store_configured: bool,
     artifact_object_store: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3939,6 +3940,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         ranking_max_average_absolute_error_micros: state.ranking_max_average_absolute_error_micros,
         ranking_min_label_count: state.ranking_min_label_count,
         ranking_min_label_source_count: state.ranking_min_label_source_count,
+        ranking_worker_run_stale_after_hours: TRACE_RANKING_WORKER_RUN_STALE_AFTER_HOURS,
         artifact_store_configured: state.artifact_store.is_some(),
         artifact_object_store: state
             .artifact_store
@@ -30361,6 +30363,10 @@ mod tests {
         assert_eq!(
             value["ranking_min_label_count"],
             serde_json::json!(DEFAULT_TRACE_RANKING_MIN_LABEL_COUNT)
+        );
+        assert_eq!(
+            value["ranking_worker_run_stale_after_hours"],
+            serde_json::json!(TRACE_RANKING_WORKER_RUN_STALE_AFTER_HOURS)
         );
         assert_eq!(
             value["submission_quota"],
