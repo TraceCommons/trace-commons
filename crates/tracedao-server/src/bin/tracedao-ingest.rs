@@ -19365,8 +19365,19 @@ async fn backfill_db_mirror_from_files(
     let file_credit_events = read_all_credit_events(&state.root, &tenant.tenant_id)?;
     let file_audit_events = read_all_audit_events(&state.root, &tenant.tenant_id)?;
     let file_export_manifests = read_all_export_manifests(&state.root, &tenant.tenant_id)?;
+    let file_utility_attestations = read_all_utility_attestations(&state.root, &tenant.tenant_id)?;
+    let file_credit_settlement_batches =
+        read_all_credit_settlement_batches(&state.root, &tenant.tenant_id)?;
+    let file_credit_holds = read_all_credit_holds(&state.root, &tenant.tenant_id)?;
+    let file_near_credit_outbox_items =
+        read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)?;
     if dry_run {
-        report.backfilled += file_credit_events.len() + file_audit_events.len();
+        report.backfilled += file_credit_events.len()
+            + file_audit_events.len()
+            + file_utility_attestations.len()
+            + file_credit_settlement_batches.len()
+            + file_credit_holds.len()
+            + file_near_credit_outbox_items.len();
         for manifest in &file_export_manifests {
             match replay_export_items_for_manifest_backfill(
                 state,
@@ -19426,6 +19437,114 @@ async fn backfill_db_mirror_from_files(
             Err(error) => {
                 report.record_failure("audit_event", event.event_id.to_string(), error.to_string())
             }
+        }
+    }
+
+    let existing_utility_attestation_ids = db
+        .list_trace_utility_attestations(&tenant.tenant_id)
+        .await
+        .context("failed to list utility attestations for DB backfill")?
+        .into_iter()
+        .map(|attestation| attestation.attestation_id)
+        .collect::<BTreeSet<_>>();
+    for attestation in &file_utility_attestations {
+        if existing_utility_attestation_ids.contains(&attestation.attestation_id) {
+            continue;
+        }
+        match mirror_utility_attestation_to_db(state, attestation).await {
+            Ok(()) => report.backfilled += 1,
+            Err(error) => report.record_failure(
+                "utility_attestation",
+                attestation.attestation_id.to_string(),
+                error.to_string(),
+            ),
+        }
+    }
+
+    let existing_credit_settlement_batch_ids = db
+        .list_trace_credit_settlement_batches(&tenant.tenant_id)
+        .await
+        .context("failed to list credit settlement batches for DB backfill")?
+        .into_iter()
+        .map(|batch| batch.settlement_batch_id)
+        .collect::<BTreeSet<_>>();
+    for batch in &file_credit_settlement_batches {
+        if existing_credit_settlement_batch_ids.contains(&batch.settlement_batch_id) {
+            continue;
+        }
+        match mirror_credit_settlement_batch_to_db(state, batch).await {
+            Ok(()) => report.backfilled += 1,
+            Err(error) => report.record_failure(
+                "credit_settlement_batch",
+                batch.settlement_batch_id.to_string(),
+                error.to_string(),
+            ),
+        }
+    }
+
+    let existing_credit_hold_ids = db
+        .list_trace_credit_holds(&tenant.tenant_id)
+        .await
+        .context("failed to list credit holds for DB backfill")?
+        .into_iter()
+        .map(|hold| hold.hold_id)
+        .collect::<BTreeSet<_>>();
+    for hold in &file_credit_holds {
+        if existing_credit_hold_ids.contains(&hold.hold_id) {
+            continue;
+        }
+        match mirror_credit_hold_to_db(state, hold).await {
+            Ok(()) => report.backfilled += 1,
+            Err(error) => {
+                report.record_failure("credit_hold", hold.hold_id.to_string(), error.to_string())
+            }
+        }
+    }
+
+    let existing_near_credit_outbox_ids = db
+        .list_trace_near_credit_outbox_items(&tenant.tenant_id)
+        .await
+        .context("failed to list NEAR credit outbox items for DB backfill")?
+        .into_iter()
+        .map(|item| item.near_outbox_id)
+        .collect::<BTreeSet<_>>();
+    for item in &file_near_credit_outbox_items {
+        let item_already_mirrored = existing_near_credit_outbox_ids.contains(&item.near_outbox_id);
+        let mirror_result = async {
+            if !item_already_mirrored {
+                mirror_near_credit_outbox_item_to_db(state, item).await?;
+            }
+            if matches!(
+                item.status,
+                StorageTraceCreditSettlementNearStatus::Submitted
+                    | StorageTraceCreditSettlementNearStatus::Confirmed
+                    | StorageTraceCreditSettlementNearStatus::Failed
+            ) {
+                mirror_near_credit_outbox_item_status_to_db(
+                    state,
+                    &tenant.tenant_id,
+                    item.near_outbox_id,
+                    item.status,
+                    item.near_transaction_hash.clone(),
+                    item.last_error_hash.clone(),
+                )
+                .await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        match mirror_result {
+            Ok(()) if !item_already_mirrored => report.backfilled += 1,
+            Ok(()) => {}
+            Err(error) => report.record_failure(
+                if item_already_mirrored {
+                    "near_credit_outbox_item_status"
+                } else {
+                    "near_credit_outbox_item"
+                },
+                item.near_outbox_id.to_string(),
+                error.to_string(),
+            ),
         }
     }
 
@@ -19816,6 +19935,22 @@ async fn reconcile_db_mirror(
         .list_trace_credit_events(&tenant.tenant_id)
         .await
         .context("failed to list trace credit events for DB reconciliation")?;
+    let db_utility_attestations = db
+        .list_trace_utility_attestations(&tenant.tenant_id)
+        .await
+        .context("failed to list utility attestations for DB reconciliation")?;
+    let db_credit_settlement_batches = db
+        .list_trace_credit_settlement_batches(&tenant.tenant_id)
+        .await
+        .context("failed to list credit settlement batches for DB reconciliation")?;
+    let db_credit_holds = db
+        .list_trace_credit_holds(&tenant.tenant_id)
+        .await
+        .context("failed to list credit holds for DB reconciliation")?;
+    let db_near_credit_outbox_items = db
+        .list_trace_near_credit_outbox_items(&tenant.tenant_id)
+        .await
+        .context("failed to list NEAR credit outbox items for DB reconciliation")?;
     let db_audit_events = db
         .list_trace_audit_events(&tenant.tenant_id)
         .await
@@ -19985,6 +20120,12 @@ async fn reconcile_db_mirror(
             + db_ranker_export_manifest_count,
     );
     let file_credit_events = read_all_credit_events(&state.root, &tenant.tenant_id)?;
+    let file_utility_attestations = read_all_utility_attestations(&state.root, &tenant.tenant_id)?;
+    let file_credit_settlement_batches =
+        read_all_credit_settlement_batches(&state.root, &tenant.tenant_id)?;
+    let file_credit_holds = read_all_credit_holds(&state.root, &tenant.tenant_id)?;
+    let file_near_credit_outbox_items =
+        read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)?;
     let file_audit_events = read_all_audit_events(&state.root, &tenant.tenant_id)?;
     let file_replay_export_manifests = read_all_export_manifests(&state.root, &tenant.tenant_id)?;
     let file_revocations = read_all_revocations(&state.root, &tenant.tenant_id)?;
@@ -20008,6 +20149,113 @@ async fn reconcile_db_mirror(
     let missing_credit_event_ids_in_files = db_file_projected_credit_event_ids
         .difference(&file_credit_event_ids)
         .copied()
+        .collect::<Vec<_>>();
+    let file_utility_attestation_ids = file_utility_attestations
+        .iter()
+        .map(|attestation| attestation.attestation_id)
+        .collect::<BTreeSet<_>>();
+    let db_utility_attestation_ids = db_utility_attestations
+        .iter()
+        .map(|attestation| attestation.attestation_id)
+        .collect::<BTreeSet<_>>();
+    let missing_utility_attestation_ids_in_db = file_utility_attestation_ids
+        .difference(&db_utility_attestation_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let missing_utility_attestation_ids_in_files = db_utility_attestation_ids
+        .difference(&file_utility_attestation_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let file_credit_settlement_batch_ids = file_credit_settlement_batches
+        .iter()
+        .map(|batch| batch.settlement_batch_id)
+        .collect::<BTreeSet<_>>();
+    let db_credit_settlement_batch_ids = db_credit_settlement_batches
+        .iter()
+        .map(|batch| batch.settlement_batch_id)
+        .collect::<BTreeSet<_>>();
+    let missing_credit_settlement_batch_ids_in_db = file_credit_settlement_batch_ids
+        .difference(&db_credit_settlement_batch_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let missing_credit_settlement_batch_ids_in_files = db_credit_settlement_batch_ids
+        .difference(&file_credit_settlement_batch_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let db_credit_settlement_batches_by_id = db_credit_settlement_batches
+        .iter()
+        .map(|batch| (batch.settlement_batch_id, batch))
+        .collect::<BTreeMap<_, _>>();
+    let credit_settlement_batch_status_mismatch_ids = file_credit_settlement_batches
+        .iter()
+        .filter_map(|batch| {
+            db_credit_settlement_batches_by_id
+                .get(&batch.settlement_batch_id)
+                .filter(|db_batch| db_batch.status != batch.status)
+                .map(|_| batch.settlement_batch_id)
+        })
+        .collect::<Vec<_>>();
+    let file_credit_hold_ids = file_credit_holds
+        .iter()
+        .map(|hold| hold.hold_id)
+        .collect::<BTreeSet<_>>();
+    let db_credit_hold_ids = db_credit_holds
+        .iter()
+        .map(|hold| hold.hold_id)
+        .collect::<BTreeSet<_>>();
+    let missing_credit_hold_ids_in_db = file_credit_hold_ids
+        .difference(&db_credit_hold_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let missing_credit_hold_ids_in_files = db_credit_hold_ids
+        .difference(&file_credit_hold_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let db_credit_holds_by_id = db_credit_holds
+        .iter()
+        .map(|hold| (hold.hold_id, hold))
+        .collect::<BTreeMap<_, _>>();
+    let credit_hold_release_mismatch_ids = file_credit_holds
+        .iter()
+        .filter_map(|hold| {
+            db_credit_holds_by_id
+                .get(&hold.hold_id)
+                .filter(|db_hold| db_hold.released_at != hold.released_at)
+                .map(|_| hold.hold_id)
+        })
+        .collect::<Vec<_>>();
+    let file_near_credit_outbox_ids = file_near_credit_outbox_items
+        .iter()
+        .map(|item| item.near_outbox_id)
+        .collect::<BTreeSet<_>>();
+    let db_near_credit_outbox_ids = db_near_credit_outbox_items
+        .iter()
+        .map(|item| item.near_outbox_id)
+        .collect::<BTreeSet<_>>();
+    let missing_near_credit_outbox_ids_in_db = file_near_credit_outbox_ids
+        .difference(&db_near_credit_outbox_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let missing_near_credit_outbox_ids_in_files = db_near_credit_outbox_ids
+        .difference(&file_near_credit_outbox_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let db_near_credit_outbox_items_by_id = db_near_credit_outbox_items
+        .iter()
+        .map(|item| (item.near_outbox_id, item))
+        .collect::<BTreeMap<_, _>>();
+    let near_credit_outbox_status_mismatch_ids = file_near_credit_outbox_items
+        .iter()
+        .filter_map(|item| {
+            db_near_credit_outbox_items_by_id
+                .get(&item.near_outbox_id)
+                .filter(|db_item| {
+                    db_item.status != item.status
+                        || db_item.near_transaction_hash != item.near_transaction_hash
+                        || db_item.last_error_hash != item.last_error_hash
+                })
+                .map(|_| item.near_outbox_id)
+        })
         .collect::<Vec<_>>();
     let file_audit_event_ids = file_audit_events
         .iter()
@@ -20347,6 +20595,25 @@ async fn reconcile_db_mirror(
         db_credit_event_count: db_credit_events.len(),
         missing_credit_event_ids_in_db,
         missing_credit_event_ids_in_files,
+        file_utility_attestation_count: file_utility_attestations.len(),
+        db_utility_attestation_count: db_utility_attestations.len(),
+        missing_utility_attestation_ids_in_db,
+        missing_utility_attestation_ids_in_files,
+        file_credit_settlement_batch_count: file_credit_settlement_batches.len(),
+        db_credit_settlement_batch_count: db_credit_settlement_batches.len(),
+        missing_credit_settlement_batch_ids_in_db,
+        missing_credit_settlement_batch_ids_in_files,
+        credit_settlement_batch_status_mismatch_ids,
+        file_credit_hold_count: file_credit_holds.len(),
+        db_credit_hold_count: db_credit_holds.len(),
+        missing_credit_hold_ids_in_db,
+        missing_credit_hold_ids_in_files,
+        credit_hold_release_mismatch_ids,
+        file_near_credit_outbox_item_count: file_near_credit_outbox_items.len(),
+        db_near_credit_outbox_item_count: db_near_credit_outbox_items.len(),
+        missing_near_credit_outbox_ids_in_db,
+        missing_near_credit_outbox_ids_in_files,
+        near_credit_outbox_status_mismatch_ids,
         file_audit_event_count: file_audit_events.len(),
         db_audit_event_count: db_audit_events.len(),
         missing_audit_event_ids_in_db,
@@ -22420,6 +22687,25 @@ struct TraceDbReconciliationReport {
     db_credit_event_count: usize,
     missing_credit_event_ids_in_db: Vec<Uuid>,
     missing_credit_event_ids_in_files: Vec<Uuid>,
+    file_utility_attestation_count: usize,
+    db_utility_attestation_count: usize,
+    missing_utility_attestation_ids_in_db: Vec<Uuid>,
+    missing_utility_attestation_ids_in_files: Vec<Uuid>,
+    file_credit_settlement_batch_count: usize,
+    db_credit_settlement_batch_count: usize,
+    missing_credit_settlement_batch_ids_in_db: Vec<Uuid>,
+    missing_credit_settlement_batch_ids_in_files: Vec<Uuid>,
+    credit_settlement_batch_status_mismatch_ids: Vec<Uuid>,
+    file_credit_hold_count: usize,
+    db_credit_hold_count: usize,
+    missing_credit_hold_ids_in_db: Vec<Uuid>,
+    missing_credit_hold_ids_in_files: Vec<Uuid>,
+    credit_hold_release_mismatch_ids: Vec<Uuid>,
+    file_near_credit_outbox_item_count: usize,
+    db_near_credit_outbox_item_count: usize,
+    missing_near_credit_outbox_ids_in_db: Vec<Uuid>,
+    missing_near_credit_outbox_ids_in_files: Vec<Uuid>,
+    near_credit_outbox_status_mismatch_ids: Vec<Uuid>,
     file_audit_event_count: usize,
     db_audit_event_count: usize,
     missing_audit_event_ids_in_db: Vec<Uuid>,
@@ -22503,6 +22789,61 @@ impl TraceDbReconciliationReport {
             &mut gaps,
             "missing_credit_event_ids_in_files",
             self.missing_credit_event_ids_in_files.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_utility_attestation_ids_in_db",
+            self.missing_utility_attestation_ids_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_utility_attestation_ids_in_files",
+            self.missing_utility_attestation_ids_in_files.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_credit_settlement_batch_ids_in_db",
+            self.missing_credit_settlement_batch_ids_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_credit_settlement_batch_ids_in_files",
+            self.missing_credit_settlement_batch_ids_in_files.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "credit_settlement_batch_status_mismatch_ids",
+            self.credit_settlement_batch_status_mismatch_ids.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_credit_hold_ids_in_db",
+            self.missing_credit_hold_ids_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_credit_hold_ids_in_files",
+            self.missing_credit_hold_ids_in_files.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "credit_hold_release_mismatch_ids",
+            self.credit_hold_release_mismatch_ids.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_near_credit_outbox_ids_in_db",
+            self.missing_near_credit_outbox_ids_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_near_credit_outbox_ids_in_files",
+            self.missing_near_credit_outbox_ids_in_files.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "near_credit_outbox_status_mismatch_ids",
+            self.near_credit_outbox_status_mismatch_ids.len(),
         );
         push_gap_count(
             &mut gaps,
@@ -30092,6 +30433,272 @@ mod tests {
         .expect_err("DB reconciliation requires configured DB mirror");
         assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
         assert!(error.1.0.error.contains("TRACE_COMMONS_DB_DUAL_WRITE"));
+    }
+
+    #[tokio::test]
+    async fn maintenance_backfill_dry_run_counts_credit_settlement_control_plane_rows() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let settlement_batch_id = Uuid::new_v4();
+        let near_outbox_id = Uuid::new_v4();
+        append_utility_attestation(
+            temp.path(),
+            "tenant-a",
+            &TraceUtilityAttestationRecord {
+                attestation_id: Uuid::new_v4(),
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                use_category: "frontier_lab_training".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                evidence_hash: "sha256:utility-attestation-evidence".to_string(),
+                external_ref_hash: "sha256:utility-attestation-ref".to_string(),
+                source_submission_ids: vec![Uuid::new_v4()],
+                actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+                created_at: Utc::now(),
+            },
+        )
+        .expect("attestation file writes");
+        append_credit_hold(
+            temp.path(),
+            "tenant-a",
+            &TraceCreditHoldRecord {
+                hold_id: Uuid::new_v4(),
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                credit_account_ref: principal_storage_ref("token-a"),
+                credit_account_hash: sha256_prefixed(&principal_storage_ref("token-a")),
+                reason: StorageTraceCreditHoldReason::AttestationDispute,
+                reason_hash: "sha256:credit-hold-reason".to_string(),
+                actor_principal_ref: principal_storage_ref("admin-token-a"),
+                created_at: Utc::now(),
+                released_at: None,
+            },
+        )
+        .expect("hold file writes");
+        append_credit_settlement_batch(
+            temp.path(),
+            "tenant-a",
+            &TraceCreditSettlementBatchRecord {
+                settlement_batch_id,
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceCreditSettlementBatchStatus::Finalized,
+                reason_hash: "sha256:settlement-reason".to_string(),
+                source_credit_event_ids: vec![Uuid::new_v4()],
+                source_submission_ids: vec![Uuid::new_v4()],
+                source_list_hash: "sha256:settlement-sources".to_string(),
+                settled_credit_points: 1.0,
+                settled_credit_micros: 1_000_000,
+                line_items: vec![StorageTraceCreditAccountSettlementLineItem {
+                    credit_account_ref: principal_storage_ref("token-a"),
+                    credit_account_hash: sha256_prefixed(&principal_storage_ref("token-a")),
+                    settled_credit_delta_micros: 1_000_000,
+                    source_credit_event_ids: vec![Uuid::new_v4()],
+                    source_submission_ids: vec![Uuid::new_v4()],
+                    source_list_hash: "sha256:settlement-item-sources".to_string(),
+                    near_status: StorageTraceCreditSettlementNearStatus::Pending,
+                    near_outbox_id: Some(near_outbox_id),
+                }],
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
+                ranking_calibration_run_id: None,
+                ranking_calibration_report_hash: None,
+                ranking_credit_events_excluded_count: 0,
+                actor_principal_ref: principal_storage_ref("admin-token-a"),
+                created_at: Utc::now(),
+            },
+        )
+        .expect("settlement file writes");
+        let receipt = NearCreditReceipt {
+            settlement_batch_id,
+            credit_account_hash: sha256_prefixed(&principal_storage_ref("token-a")),
+            policy_version: "trace-credit-policy-v1".to_string(),
+            source_list_hash: "sha256:settlement-item-sources".to_string(),
+            attestation_hash: "sha256:settlement-attestation".to_string(),
+            amount_micros: 1_000_000,
+            issuer_signature_hash: "sha256:settlement-issuer-signature".to_string(),
+        };
+        append_near_credit_outbox_item(
+            temp.path(),
+            "tenant-a",
+            &TraceNearCreditOutboxItem {
+                near_outbox_id,
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                settlement_batch_id,
+                credit_account_hash: receipt.credit_account_hash.clone(),
+                near_call: NearCreditReceiptCall::settle("trace-credits.testnet", receipt)
+                    .expect("NEAR call builds"),
+                status: StorageTraceCreditSettlementNearStatus::Pending,
+                created_at: Utc::now(),
+                submitted_at: None,
+                near_transaction_hash: None,
+                last_error_hash: None,
+                confirmed_at: None,
+            },
+        )
+        .expect("outbox file writes");
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("credit_control_plane_backfill_dry_run".to_string()),
+                dry_run: true,
+                backfill_db_mirror: true,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("maintenance dry-run succeeds without a DB mirror");
+        assert_eq!(response.db_mirror_backfilled, 4);
+        assert_eq!(response.db_mirror_backfill_failed, 0);
+    }
+
+    #[tokio::test]
+    async fn maintenance_backfill_updates_existing_near_outbox_status_in_db() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        let settlement_batch_id = Uuid::new_v4();
+        let near_outbox_id = Uuid::new_v4();
+        let receipt = NearCreditReceipt {
+            settlement_batch_id,
+            credit_account_hash: sha256_prefixed(&principal_storage_ref("token-a")),
+            policy_version: "trace-credit-policy-v1".to_string(),
+            source_list_hash: "sha256:settlement-item-sources".to_string(),
+            attestation_hash: "sha256:settlement-attestation".to_string(),
+            amount_micros: 1_000_000,
+            issuer_signature_hash: "sha256:settlement-issuer-signature".to_string(),
+        };
+        let batch = TraceCreditSettlementBatchRecord {
+            settlement_batch_id,
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            policy_version: "trace-credit-policy-v1".to_string(),
+            status: StorageTraceCreditSettlementBatchStatus::Finalized,
+            reason_hash: "sha256:settlement-reason".to_string(),
+            source_credit_event_ids: vec![Uuid::new_v4()],
+            source_submission_ids: vec![Uuid::new_v4()],
+            source_list_hash: "sha256:settlement-sources".to_string(),
+            settled_credit_points: 1.0,
+            settled_credit_micros: 1_000_000,
+            line_items: vec![StorageTraceCreditAccountSettlementLineItem {
+                credit_account_ref: principal_storage_ref("token-a"),
+                credit_account_hash: receipt.credit_account_hash.clone(),
+                settled_credit_delta_micros: 1_000_000,
+                source_credit_event_ids: vec![Uuid::new_v4()],
+                source_submission_ids: vec![Uuid::new_v4()],
+                source_list_hash: "sha256:settlement-item-sources".to_string(),
+                near_status: StorageTraceCreditSettlementNearStatus::Pending,
+                near_outbox_id: Some(near_outbox_id),
+            }],
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+            ranking_calibration_run_id: None,
+            ranking_calibration_report_hash: None,
+            ranking_credit_events_excluded_count: 0,
+            actor_principal_ref: principal_storage_ref("admin-token-a"),
+            created_at: Utc::now(),
+        };
+        append_credit_settlement_batch(temp.path(), "tenant-a", &batch)
+            .expect("settlement file writes");
+        mirror_credit_settlement_batch_to_db(state.as_ref(), &batch)
+            .await
+            .expect("settlement DB mirror writes");
+        let outbox_item = TraceNearCreditOutboxItem {
+            near_outbox_id,
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            settlement_batch_id,
+            credit_account_hash: receipt.credit_account_hash.clone(),
+            near_call: NearCreditReceiptCall::settle("trace-credits.testnet", receipt)
+                .expect("NEAR call builds"),
+            status: StorageTraceCreditSettlementNearStatus::Pending,
+            created_at: Utc::now(),
+            submitted_at: None,
+            near_transaction_hash: None,
+            last_error_hash: None,
+            confirmed_at: None,
+        };
+        append_near_credit_outbox_item(temp.path(), "tenant-a", &outbox_item)
+            .expect("outbox file writes");
+        mirror_near_credit_outbox_item_to_db(state.as_ref(), &outbox_item)
+            .await
+            .expect("pending outbox DB mirror writes");
+
+        let file_updated = update_near_credit_outbox_item_status(
+            temp.path(),
+            "tenant-a",
+            near_outbox_id,
+            StorageTraceCreditSettlementNearStatus::Submitted,
+            Some("near-backfilled-tx".to_string()),
+            None,
+            Utc::now(),
+        )
+        .expect("file status update succeeds")
+        .expect("file outbox item exists");
+        assert_eq!(
+            file_updated.status,
+            StorageTraceCreditSettlementNearStatus::Submitted
+        );
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("near_outbox_status_backfill".to_string()),
+                dry_run: false,
+                backfill_db_mirror: true,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("maintenance backfill succeeds");
+        assert_eq!(response.db_mirror_backfill_failed, 0);
+
+        let db_outbox = backend
+            .list_trace_near_credit_outbox_items("tenant-a")
+            .await
+            .expect("DB NEAR outbox reads");
+        assert_eq!(db_outbox.len(), 1);
+        assert_eq!(
+            db_outbox[0].status,
+            StorageTraceCreditSettlementNearStatus::Submitted
+        );
+        assert_eq!(
+            db_outbox[0].near_transaction_hash.as_deref(),
+            Some("near-backfilled-tx")
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
 
     #[tokio::test]
