@@ -496,6 +496,8 @@ Replay dataset exports, benchmark conversion artifacts, and ranker training expo
 
 `GET /v1/admin/ranking/model-risk-report` recomputes the current joined-evidence hash for each active model/target-use pair and reports post-calibration prediction/label counts, low-confidence fresh predictions, stale or non-promotable calibration status, evidence-hash drift, and machine-readable risk codes without exposing trace bodies or raw lab references.
 
+Model-derived ranking credit also applies the latest calibration run's confidence threshold to each active-model prediction at issuance and settlement time. Low-confidence predictions remain visible in admin evidence and risk reports, but `/v1/workers/ranking/prediction-credit` rejects them and settlement excludes manually appended ranking utility events that reference them.
+
 Ranking calibration runs apply both caller-supplied thresholds and
 deployment-owned floors. In production, set
 `TRACE_COMMONS_RANKING_MIN_LABEL_COUNT` high enough that a small ad hoc label
