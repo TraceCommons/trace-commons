@@ -240,6 +240,8 @@ const MAX_EDDSA_KEYSET_URL_BYTES: usize = 256 * 1024;
 const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT: u32 = 100;
 const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT: u32 = 500;
 const TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT: usize = 5;
+const TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_LIMIT: usize = 1;
+const TRACE_CREDIT_CYCLE_SCHEDULER_MAX_LIMIT: usize = 25;
 const TRACE_CREDIT_SETTLEMENT_WORKER_RUN_DEFAULT_LIMIT: usize = 100;
 const TRACE_CREDIT_SETTLEMENT_WORKER_RUN_MAX_LIMIT: usize = 500;
 const TRACE_RANKING_CALIBRATION_RUN_DEFAULT_LIMIT: usize = 25;
@@ -2150,6 +2152,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/workers/credit-cycle/run",
             post(credit_cycle_worker_run_handler),
+        )
+        .route(
+            "/v1/workers/credit-cycle/scheduler/run",
+            post(credit_cycle_scheduler_run_handler),
         )
         .route(
             "/v1/admin/credit-holds",
@@ -5440,6 +5446,62 @@ struct TraceCreditCycleWorkerRunRequest {
     allow_at_risk_models: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceCreditCycleSchedulerRunRequest {
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default)]
+    submit_near_outbox: bool,
+    target_use: TraceAllowedUse,
+    #[serde(default)]
+    model_version: Option<String>,
+    #[serde(default)]
+    policy_version: Option<String>,
+    reason: String,
+    #[serde(default)]
+    near_contract_id: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    calibration_limit: Option<usize>,
+    #[serde(default)]
+    model_promotion_limit: Option<usize>,
+    #[serde(default)]
+    prediction_credit_limit: Option<usize>,
+    #[serde(default)]
+    credit_settlement_limit: Option<usize>,
+    #[serde(default)]
+    near_outbox_limit: Option<u32>,
+    #[serde(default)]
+    min_label_count: Option<usize>,
+    #[serde(default)]
+    confidence_threshold: Option<f32>,
+    #[serde(default)]
+    max_average_absolute_error_micros: Option<i64>,
+    #[serde(default)]
+    allow_at_risk_models: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceCreditCycleSchedulerRunResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    dry_run: bool,
+    submit_near_outbox: bool,
+    target_use: TraceAllowedUse,
+    model_version: Option<String>,
+    policy_version: Option<String>,
+    reason_hash: String,
+    limit: usize,
+    checked_count: usize,
+    started_count: usize,
+    skipped_active_count: usize,
+    skipped_count: usize,
+    pending_after_count: usize,
+    skipped_reason_counts: BTreeMap<String, usize>,
+    cycles: Vec<TraceCreditCycleWorkerRunResponse>,
+}
+
 #[derive(Debug, Serialize)]
 struct TraceCreditCycleWorkerRunResponse {
     tenant_id: String,
@@ -6584,6 +6646,188 @@ async fn credit_settlement_worker_run_handler(
     run_credit_settlement(state.as_ref(), &tenant, body.request, limit)
         .await
         .map(Json)
+}
+
+async fn credit_cycle_scheduler_run_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceCreditCycleSchedulerRunRequest>,
+) -> ApiResult<Json<TraceCreditCycleSchedulerRunResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_utility_operator(&tenant)?;
+    let reason = validate_credit_cycle_scheduler_reason(&body.reason)?;
+    let limit = validate_credit_cycle_scheduler_limit(body.limit)?;
+    let model_version = optional_ranking_identifier(body.model_version, "model_version")?;
+    let policy_version = optional_ranking_identifier(body.policy_version, "policy_version")?;
+    let near_contract_id = body
+        .near_contract_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|contract_id| !contract_id.is_empty())
+        .map(ToOwned::to_owned);
+
+    let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let mut candidates = latest_ranking_model_versions(&model_versions)
+        .into_iter()
+        .filter(|model| {
+            matches!(
+                model.status,
+                StorageTraceRankingModelStatus::Candidate | StorageTraceRankingModelStatus::Active
+            )
+        })
+        .filter(|model| {
+            model_version
+                .as_ref()
+                .is_none_or(|model_version| &model.model_version == model_version)
+                && policy_version
+                    .as_ref()
+                    .is_none_or(|policy_version| &model.policy_version == policy_version)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        (
+            credit_cycle_scheduler_model_status_priority(left.status),
+            left.created_at,
+            &left.model_version,
+        )
+            .cmp(&(
+                credit_cycle_scheduler_model_status_priority(right.status),
+                right.created_at,
+                &right.model_version,
+            ))
+    });
+    let candidate_count = candidates.len();
+
+    let mut response = TraceCreditCycleSchedulerRunResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        dry_run: body.dry_run,
+        submit_near_outbox: body.submit_near_outbox,
+        target_use: body.target_use,
+        model_version: model_version.clone(),
+        policy_version: policy_version.clone(),
+        reason_hash: sha256_prefixed(&reason),
+        limit,
+        checked_count: 0,
+        started_count: 0,
+        skipped_active_count: 0,
+        skipped_count: 0,
+        pending_after_count: 0,
+        skipped_reason_counts: BTreeMap::new(),
+        cycles: Vec::new(),
+    };
+
+    for candidate in candidates.into_iter().take(limit) {
+        response.checked_count += 1;
+        if has_overlapping_live_ranking_worker_run(
+            state.as_ref(),
+            &tenant,
+            TraceRankingWorkerRunKind::CreditCycle,
+            body.dry_run,
+            Some(&candidate.model_version),
+            Some(body.target_use),
+            Some(&candidate.policy_version),
+        )
+        .await?
+        {
+            credit_cycle_scheduler_record_skip(&mut response, "active_credit_cycle_claim");
+            response.skipped_active_count += 1;
+            continue;
+        }
+
+        match credit_cycle_worker_run_handler(
+            State(state.clone()),
+            headers.clone(),
+            Json(TraceCreditCycleWorkerRunRequest {
+                dry_run: body.dry_run,
+                submit_near_outbox: body.submit_near_outbox,
+                target_use: body.target_use,
+                model_version: candidate.model_version,
+                policy_version: candidate.policy_version,
+                reason: reason.clone(),
+                near_contract_id: near_contract_id.clone(),
+                calibration_limit: body.calibration_limit,
+                model_promotion_limit: body.model_promotion_limit,
+                prediction_credit_limit: body.prediction_credit_limit,
+                credit_settlement_limit: body.credit_settlement_limit,
+                near_outbox_limit: body.near_outbox_limit,
+                min_label_count: body.min_label_count,
+                confidence_threshold: body.confidence_threshold,
+                max_average_absolute_error_micros: body.max_average_absolute_error_micros,
+                allow_at_risk_models: body.allow_at_risk_models,
+            }),
+        )
+        .await
+        {
+            Ok(Json(cycle)) => {
+                response.started_count += 1;
+                response.cycles.push(cycle);
+            }
+            Err((StatusCode::CONFLICT, Json(error)))
+                if error.error
+                    == ranking_worker_run_active_conflict_message(
+                        TraceRankingWorkerRunKind::CreditCycle,
+                    ) =>
+            {
+                credit_cycle_scheduler_record_skip(&mut response, "active_credit_cycle_claim");
+                response.skipped_active_count += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    response.pending_after_count = candidate_count.saturating_sub(response.checked_count);
+    Ok(Json(response))
+}
+
+fn validate_credit_cycle_scheduler_reason(reason: &str) -> ApiResult<String> {
+    let reason = reason.trim().to_string();
+    if reason.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit cycle scheduler requires a non-empty reason",
+        ));
+    }
+    if reason.len() > 1024 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit cycle scheduler reason is too long",
+        ));
+    }
+    Ok(reason)
+}
+
+fn validate_credit_cycle_scheduler_limit(limit: Option<usize>) -> ApiResult<usize> {
+    let limit = limit.unwrap_or(TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_LIMIT);
+    if !(1..=TRACE_CREDIT_CYCLE_SCHEDULER_MAX_LIMIT).contains(&limit) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit cycle scheduler limit must be between 1 and 25",
+        ));
+    }
+    Ok(limit)
+}
+
+fn credit_cycle_scheduler_model_status_priority(status: StorageTraceRankingModelStatus) -> u8 {
+    match status {
+        StorageTraceRankingModelStatus::Candidate => 0,
+        StorageTraceRankingModelStatus::Active => 1,
+        StorageTraceRankingModelStatus::Deprecated => 2,
+        StorageTraceRankingModelStatus::Archived => 3,
+    }
+}
+
+fn credit_cycle_scheduler_record_skip(
+    response: &mut TraceCreditCycleSchedulerRunResponse,
+    reason: &str,
+) {
+    response.skipped_count += 1;
+    *response
+        .skipped_reason_counts
+        .entry(reason.to_string())
+        .or_insert(0) += 1;
 }
 
 async fn credit_cycle_worker_run_handler(
@@ -8569,14 +8813,42 @@ async fn ensure_no_overlapping_live_ranking_worker_run(
     target_use: Option<TraceAllowedUse>,
     policy_version: Option<&str>,
 ) -> ApiResult<()> {
+    if has_overlapping_live_ranking_worker_run(
+        state,
+        tenant,
+        run_kind,
+        dry_run,
+        model_version,
+        target_use,
+        policy_version,
+    )
+    .await?
+    {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            ranking_worker_run_active_conflict_message(run_kind),
+        ));
+    }
+    Ok(())
+}
+
+async fn has_overlapping_live_ranking_worker_run(
+    state: &AppState,
+    tenant: &TenantAuth,
+    run_kind: TraceRankingWorkerRunKind,
+    dry_run: bool,
+    model_version: Option<&str>,
+    target_use: Option<TraceAllowedUse>,
+    policy_version: Option<&str>,
+) -> ApiResult<bool> {
     if dry_run {
-        return Ok(());
+        return Ok(false);
     }
     let worker_runs = read_ranking_worker_runs_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
     let stale_cutoff = Utc::now() - Duration::hours(TRACE_RANKING_WORKER_RUN_STALE_AFTER_HOURS);
-    if worker_runs.iter().any(|record| {
+    Ok(worker_runs.iter().any(|record| {
         ranking_worker_run_overlaps_live_claim(
             record,
             run_kind,
@@ -8585,13 +8857,7 @@ async fn ensure_no_overlapping_live_ranking_worker_run(
             policy_version,
             stale_cutoff,
         )
-    }) {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            ranking_worker_run_active_conflict_message(run_kind),
-        ));
-    }
-    Ok(())
+    }))
 }
 
 fn ranking_worker_run_overlaps_live_claim(
@@ -40788,21 +41054,21 @@ mod tests {
         assert_eq!(latest.status, StorageTraceRankingModelStatus::Active);
     }
 
-    #[tokio::test]
-    async fn credit_cycle_worker_runs_ranking_credit_settlement_sequence() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let state = test_state(temp.path().to_path_buf());
+    async fn seed_credit_cycle_ready_candidate(
+        state: Arc<AppState>,
+        model_version: &str,
+    ) -> (TraceRankingModelVersionRecord, TraceRankingPredictionRecord) {
         let Json(candidate) = ranking_model_version_handler(
             State(state.clone()),
             auth_headers("admin-token-a"),
             Json(TraceRankingModelVersionRequest {
-                model_version: "trace-ranker-credit-cycle-v1".to_string(),
-                feature_schema_version: "ranking-features-credit-cycle-v1".to_string(),
+                model_version: model_version.to_string(),
+                feature_schema_version: format!("ranking-features-{model_version}"),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:ranking-training-credit-cycle".to_string(),
-                calibration_dataset_hash: "sha256:ranking-calibration-credit-cycle".to_string(),
-                model_artifact_hash: "sha256:ranking-model-artifact-credit-cycle".to_string(),
+                training_dataset_hash: format!("sha256:ranking-training-{model_version}"),
+                calibration_dataset_hash: format!("sha256:ranking-calibration-{model_version}"),
+                model_artifact_hash: format!("sha256:ranking-model-artifact-{model_version}"),
             }),
         )
         .await
@@ -40829,9 +41095,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:ranking-feature-credit-cycle".to_string(),
-                feature_names_hash: "sha256:ranking-feature-names-credit-cycle".to_string(),
-                source_feature_hash: "sha256:ranking-source-feature-credit-cycle".to_string(),
+                feature_vector_hash: format!("sha256:ranking-feature-{model_version}"),
+                feature_names_hash: format!("sha256:ranking-feature-names-{model_version}"),
+                source_feature_hash: format!("sha256:ranking-source-feature-{model_version}"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -40871,12 +41137,21 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_250_000,
-                evidence_hash: "sha256:ranking-frontier-evidence-credit-cycle".to_string(),
-                external_ref: "private-ranking-credit-cycle".to_string(),
+                evidence_hash: format!("sha256:ranking-frontier-evidence-{model_version}"),
+                external_ref: format!("private-ranking-{model_version}"),
             }),
         )
         .await
         .expect("utility worker can write ranking label");
+        (candidate, prediction)
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_worker_runs_ranking_credit_settlement_sequence() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let (candidate, prediction) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-credit-cycle-v1").await;
 
         let Json(cycle) = credit_cycle_worker_run_handler(
             State(state.clone()),
@@ -40962,6 +41237,171 @@ mod tests {
                 .iter()
                 .any(|result_ref| result_ref.starts_with("credit_settlement_batch:"))
         );
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_runs_next_eligible_model() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let (candidate, prediction) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-credit-cycle-sched-v1")
+                .await;
+
+        let Json(scheduler) = credit_cycle_scheduler_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleSchedulerRunRequest {
+                dry_run: false,
+                submit_near_outbox: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: None,
+                policy_version: Some(candidate.policy_version.clone()),
+                reason: "scheduled next eligible credit cycle".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: Some(1),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect("scheduler runs next eligible credit cycle");
+
+        assert_eq!(scheduler.checked_count, 1);
+        assert_eq!(scheduler.started_count, 1);
+        assert_eq!(scheduler.skipped_active_count, 0);
+        assert_eq!(scheduler.skipped_count, 0);
+        assert_eq!(scheduler.cycles.len(), 1);
+        assert_eq!(scheduler.cycles[0].model_version, candidate.model_version);
+        assert_eq!(scheduler.cycles[0].prediction_credit.credited_count, 1);
+        assert_eq!(scheduler.cycles[0].settlement.settled_source_event_count, 1);
+
+        let credit_events = read_all_credit_events(temp.path(), "tenant-a")
+            .expect("credit events read after scheduled cycle");
+        assert!(credit_events.iter().any(|event| {
+            event.external_ref.as_deref()
+                == Some(&format!(
+                    "ranking_prediction:{}",
+                    prediction.ranking_prediction_id
+                ))
+        }));
+        let worker_runs =
+            read_all_ranking_worker_runs(temp.path(), "tenant-a").expect("worker runs read");
+        assert_eq!(
+            worker_runs
+                .iter()
+                .filter(|run| run.run_kind == TraceRankingWorkerRunKind::CreditCycle)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_skips_live_claim_without_side_effects() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let Json(candidate) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-credit-cycle-claimed-v1".to_string(),
+                feature_schema_version: "ranking-features-credit-cycle-claimed-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:ranking-training-credit-cycle-claimed".to_string(),
+                calibration_dataset_hash: "sha256:ranking-calibration-credit-cycle-claimed"
+                    .to_string(),
+                model_artifact_hash: "sha256:ranking-model-artifact-credit-cycle-claimed"
+                    .to_string(),
+            }),
+        )
+        .await
+        .expect("admin can stage claimed scheduler model");
+        let active_cycle_id = Uuid::new_v4();
+        append_jsonl_record(
+            &ranking_worker_runs_path(temp.path(), "tenant-a"),
+            &serde_json::json!({
+                "ranking_worker_run_id": active_cycle_id,
+                "tenant_id": "tenant-a",
+                "tenant_storage_ref": tenant_storage_ref("tenant-a"),
+                "run_kind": "credit_cycle",
+                "status": "running",
+                "dry_run": false,
+                "reason_hash": sha256_prefixed("existing scheduler claim"),
+                "model_version": candidate.model_version,
+                "target_use": "ranking_model_training",
+                "policy_version": candidate.policy_version,
+                "limit": 10,
+                "checked_count": 0,
+                "succeeded_count": 0,
+                "skipped_existing_count": 0,
+                "skipped_model_risk_count": 0,
+                "skipped_ineligible_count": 0,
+                "pending_after_count": 0,
+                "result_refs": [],
+                "reason_counts": {},
+                "actor_principal_ref": "utility-worker-token-a",
+                "created_at": Utc::now(),
+                "completed_at": null,
+                "last_error_hash": null
+            }),
+            "ranking worker run",
+        )
+        .expect("active scheduler claim writes");
+
+        let Json(scheduler) = credit_cycle_scheduler_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleSchedulerRunRequest {
+                dry_run: false,
+                submit_near_outbox: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: None,
+                policy_version: Some("trace-credit-policy-v1".to_string()),
+                reason: "scheduled credit cycle should skip claim".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: Some(1),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect("scheduler treats live claim as a bounded skip");
+
+        assert_eq!(scheduler.checked_count, 1);
+        assert_eq!(scheduler.started_count, 0);
+        assert_eq!(scheduler.skipped_active_count, 1);
+        assert_eq!(scheduler.skipped_count, 1);
+        assert_eq!(
+            scheduler
+                .skipped_reason_counts
+                .get("active_credit_cycle_claim"),
+            Some(&1)
+        );
+        assert!(scheduler.cycles.is_empty());
+        let worker_runs =
+            read_all_ranking_worker_runs(temp.path(), "tenant-a").expect("worker runs read");
+        assert_eq!(worker_runs.len(), 1);
+        assert_eq!(worker_runs[0].ranking_worker_run_id, active_cycle_id);
+        let credit_events =
+            read_all_credit_events(temp.path(), "tenant-a").expect("credit events read");
+        assert!(credit_events.is_empty());
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert!(outbox.is_empty());
     }
 
     #[tokio::test]

@@ -20,6 +20,9 @@ holds, contributor pending/settled/held projections, and a NEAR non-transferable
 credit receipt outbox. Utility workers can also run a bounded credit-cycle
 coordinator that sequences calibration, model promotion, prediction credit,
 settlement, and NEAR outbox submission checks for one model/policy/target. The
+`POST /v1/workers/credit-cycle/scheduler/run` route lets utility-worker cron
+jobs select the next eligible candidate or active model for a target/policy and
+run at most a bounded number of credit cycles while skipping live claims. The
 next ranking substrate is also server-owned: model
 version records, hash-only feature records, prediction records, frontier/reviewer
 labels, calibration reports, persisted model-promotion calibration runs, and
