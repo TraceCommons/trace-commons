@@ -40576,6 +40576,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn credit_cycle_worker_rejects_contributors_without_side_effects() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = credit_cycle_worker_run_handler(
+            State(state),
+            auth_headers("token-a"),
+            Json(TraceCreditCycleWorkerRunRequest {
+                dry_run: false,
+                submit_near_outbox: true,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: "trace-ranker-credit-cycle-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "contributor should not run credit cycle".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect_err("contributors cannot run the credit cycle worker");
+
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.1.0.error,
+            "reviewer, admin, or utility worker token required"
+        );
+        assert!(
+            read_all_ranking_worker_runs(temp.path(), "tenant-a")
+                .expect("worker run ledger reads")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit ledger reads")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("NEAR outbox reads")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn ranking_model_promotion_worker_run_promotes_calibrated_candidates_only() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
