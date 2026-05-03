@@ -254,6 +254,8 @@ const TRACE_RANKING_CALIBRATION_RUN_DEFAULT_LIMIT: usize = 25;
 const TRACE_RANKING_CALIBRATION_RUN_MAX_LIMIT: usize = 100;
 const TRACE_RANKING_MODEL_PROMOTION_RUN_DEFAULT_LIMIT: usize = 25;
 const TRACE_RANKING_MODEL_PROMOTION_RUN_MAX_LIMIT: usize = 100;
+const TRACE_BENCHMARK_EVALUATION_WORKER_RUN_DEFAULT_LIMIT: usize = 25;
+const TRACE_BENCHMARK_EVALUATION_WORKER_RUN_MAX_LIMIT: usize = 100;
 const TRACE_RANKING_WORKER_RUN_STALE_AFTER_HOURS: i64 = 1;
 const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
 const TRACE_REVIEW_DUE_AFTER_HOURS: i64 = 24;
@@ -2105,6 +2107,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/workers/benchmark-convert",
             post(benchmark_worker_convert_handler),
+        )
+        .route(
+            "/v1/workers/benchmark-evaluations/run",
+            post(benchmark_evaluation_worker_run_handler),
         )
         .route(
             "/v1/workers/replay-export",
@@ -14839,6 +14845,40 @@ struct TraceBenchmarkEvaluationPatch {
     fail_count: Option<u32>,
 }
 
+#[derive(Debug, Deserialize)]
+struct BenchmarkEvaluationWorkerRunRequest {
+    limit: Option<usize>,
+    #[serde(default)]
+    dry_run: Option<bool>,
+    #[serde(default)]
+    evaluator_ref: Option<String>,
+    #[serde(default)]
+    min_score: Option<f32>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct BenchmarkEvaluationWorkerRunResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    dry_run: bool,
+    limit: usize,
+    evaluator_ref: String,
+    min_score: f32,
+    reason_hash: String,
+    checked_count: usize,
+    evaluated_count: usize,
+    passed_count: usize,
+    failed_count: usize,
+    skipped_existing_count: usize,
+    skipped_ineligible_count: usize,
+    pending_after_count: usize,
+    evaluated_conversion_ids: Vec<Uuid>,
+    failed_conversion_ids: Vec<Uuid>,
+    skipped_reason_counts: BTreeMap<String, usize>,
+}
+
 async fn benchmark_convert_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -14868,6 +14908,164 @@ async fn benchmark_lifecycle_handler(
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_benchmarker(&tenant)?;
     update_benchmark_lifecycle(state.as_ref(), &tenant, conversion_id, body).await
+}
+
+async fn benchmark_evaluation_worker_run_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<BenchmarkEvaluationWorkerRunRequest>,
+) -> ApiResult<Json<BenchmarkEvaluationWorkerRunResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_benchmarker(&tenant)?;
+    run_benchmark_evaluation_worker(state.as_ref(), &tenant, body)
+        .await
+        .map(Json)
+}
+
+async fn run_benchmark_evaluation_worker(
+    state: &AppState,
+    tenant: &TenantAuth,
+    body: BenchmarkEvaluationWorkerRunRequest,
+) -> ApiResult<BenchmarkEvaluationWorkerRunResponse> {
+    let limit = validate_benchmark_evaluation_worker_limit(body.limit)?;
+    let dry_run = body.dry_run.unwrap_or(false);
+    let evaluator_ref = normalize_required_benchmark_evaluator_ref(body.evaluator_ref)?;
+    let reason = normalize_benchmark_evaluation_worker_reason(body.reason)?;
+    let min_score = body.min_score.unwrap_or(1.0);
+    validate_unit_score(min_score, "benchmark evaluation min_score")?;
+    let artifacts = list_benchmark_conversion_artifacts_for_worker(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let mut response = BenchmarkEvaluationWorkerRunResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        dry_run,
+        limit,
+        evaluator_ref: evaluator_ref.clone(),
+        min_score,
+        reason_hash: sha256_prefixed(&reason),
+        checked_count: 0,
+        evaluated_count: 0,
+        passed_count: 0,
+        failed_count: 0,
+        skipped_existing_count: 0,
+        skipped_ineligible_count: 0,
+        pending_after_count: 0,
+        evaluated_conversion_ids: Vec::new(),
+        failed_conversion_ids: Vec::new(),
+        skipped_reason_counts: BTreeMap::new(),
+    };
+
+    for artifact in artifacts.iter().take(limit) {
+        response.checked_count += 1;
+        if artifact.registry.status != TraceBenchmarkRegistryStatus::Candidate {
+            response.skipped_ineligible_count += 1;
+            increment_count(
+                &mut response.skipped_reason_counts,
+                "registry_not_candidate",
+            );
+            continue;
+        }
+        if artifact.evaluation.status != TraceBenchmarkEvaluationStatus::NotRun {
+            response.skipped_existing_count += 1;
+            increment_count(
+                &mut response.skipped_reason_counts,
+                "evaluation_already_recorded",
+            );
+            continue;
+        }
+        let Some(decision) = evaluate_benchmark_artifact_for_worker(artifact, min_score) else {
+            response.skipped_ineligible_count += 1;
+            increment_count(&mut response.skipped_reason_counts, "empty_benchmark");
+            continue;
+        };
+        if !dry_run {
+            let _ = update_benchmark_lifecycle(
+                state,
+                tenant,
+                artifact.conversion_id,
+                BenchmarkLifecycleUpdateRequest {
+                    registry: None,
+                    evaluation: Some(TraceBenchmarkEvaluationPatch {
+                        status: Some(decision.status),
+                        evaluator_ref: Some(evaluator_ref.clone()),
+                        evaluated_at: Some(Utc::now()),
+                        score: Some(decision.score),
+                        pass_count: Some(decision.pass_count),
+                        fail_count: Some(decision.fail_count),
+                    }),
+                    reason: Some(reason.clone()),
+                },
+            )
+            .await?;
+        }
+        response.evaluated_count += 1;
+        response
+            .evaluated_conversion_ids
+            .push(artifact.conversion_id);
+        match decision.status {
+            TraceBenchmarkEvaluationStatus::Passed => {
+                response.passed_count += 1;
+            }
+            TraceBenchmarkEvaluationStatus::Failed => {
+                response.failed_count += 1;
+                response.failed_conversion_ids.push(artifact.conversion_id);
+            }
+            TraceBenchmarkEvaluationStatus::NotRun
+            | TraceBenchmarkEvaluationStatus::Queued
+            | TraceBenchmarkEvaluationStatus::Running
+            | TraceBenchmarkEvaluationStatus::Inconclusive => {}
+        }
+    }
+    response.pending_after_count = artifacts
+        .iter()
+        .skip(limit)
+        .filter(|artifact| benchmark_artifact_is_pending_evaluation(artifact))
+        .count();
+    Ok(response)
+}
+
+fn validate_benchmark_evaluation_worker_limit(limit: Option<usize>) -> ApiResult<usize> {
+    let limit = limit.unwrap_or(TRACE_BENCHMARK_EVALUATION_WORKER_RUN_DEFAULT_LIMIT);
+    if !(1..=TRACE_BENCHMARK_EVALUATION_WORKER_RUN_MAX_LIMIT).contains(&limit) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "benchmark evaluation worker limit must be between 1 and 100",
+        ));
+    }
+    Ok(limit)
+}
+
+fn normalize_required_benchmark_evaluator_ref(value: Option<String>) -> ApiResult<String> {
+    let Some(value) = value else {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "benchmark evaluation worker requires evaluator_ref",
+        ));
+    };
+    normalize_benchmark_lifecycle_ref(value)?.ok_or_else(|| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "benchmark evaluation worker requires evaluator_ref",
+        )
+    })
+}
+
+fn normalize_benchmark_evaluation_worker_reason(value: Option<String>) -> ApiResult<String> {
+    let Some(value) = value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "benchmark evaluation worker requires reason",
+        ));
+    };
+    Ok(value)
+}
+
+fn increment_count(counts: &mut BTreeMap<String, usize>, label: &str) {
+    *counts.entry(label.to_string()).or_insert(0) += 1;
 }
 
 async fn run_benchmark_conversion(
@@ -24261,6 +24459,83 @@ async fn read_benchmark_conversion_artifact_with_ref_policy(
     Ok(None)
 }
 
+async fn list_benchmark_conversion_artifacts_for_worker(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceBenchmarkConversionArtifact>> {
+    let tenant_key = tenant_storage_key(&tenant.tenant_id);
+    let benchmarks_dir = state
+        .root
+        .join("tenants")
+        .join(tenant_key)
+        .join("benchmarks");
+    let mut artifacts_by_id = BTreeMap::new();
+    if benchmarks_dir.exists() {
+        for entry in std::fs::read_dir(&benchmarks_dir).with_context(|| {
+            format!("failed to read benchmarks dir {}", benchmarks_dir.display())
+        })? {
+            let entry = entry.context("failed to read benchmark dir entry")?;
+            if !entry
+                .file_type()
+                .context("failed to inspect benchmark dir entry")?
+                .is_dir()
+            {
+                continue;
+            }
+            let artifact_path = entry.path().join("artifact.json");
+            if !artifact_path.exists() {
+                continue;
+            }
+            let body = std::fs::read_to_string(&artifact_path).with_context(|| {
+                format!(
+                    "failed to read trace benchmark conversion artifact {}",
+                    artifact_path.display()
+                )
+            })?;
+            let artifact: TraceBenchmarkConversionArtifact = serde_json::from_str(&body)
+                .with_context(|| {
+                    format!(
+                        "failed to parse trace benchmark conversion artifact {}",
+                        artifact_path.display()
+                    )
+                })?;
+            ensure_benchmark_artifact_tenant(&artifact, &tenant.tenant_id)?;
+            artifacts_by_id.insert(artifact.conversion_id, artifact);
+        }
+    }
+
+    if let Some(db) = state.db_mirror.as_ref() {
+        let manifests = db
+            .list_trace_export_manifests(&tenant.tenant_id)
+            .await
+            .context("failed to list benchmark export manifests for evaluation worker")?;
+        for manifest in manifests
+            .into_iter()
+            .filter(is_benchmark_conversion_storage_manifest)
+        {
+            if artifacts_by_id.contains_key(&manifest.export_manifest_id) {
+                continue;
+            }
+            if let Some(artifact) =
+                read_benchmark_conversion_artifact(state, tenant, manifest.export_manifest_id)
+                    .await?
+            {
+                artifacts_by_id.insert(artifact.conversion_id, artifact);
+            }
+        }
+    }
+
+    let mut artifacts = artifacts_by_id.into_values().collect::<Vec<_>>();
+    artifacts.sort_by_key(|artifact| (artifact.generated_at, artifact.conversion_id));
+    Ok(artifacts)
+}
+
+fn is_benchmark_conversion_storage_manifest(record: &StorageTraceExportManifestRecord) -> bool {
+    record.artifact_kind == StorageTraceObjectArtifactKind::BenchmarkArtifact
+        && record.invalidated_at.is_none()
+        && record.deleted_at.is_none()
+}
+
 fn benchmark_artifact_path(root: &Path, tenant_id: &str, conversion_id: Uuid) -> PathBuf {
     let tenant_key = tenant_storage_key(tenant_id);
     root.join("tenants")
@@ -28462,6 +28737,56 @@ impl TraceBenchmarkCandidate {
             consent_scopes: submission.consent_scopes.clone(),
         }
     }
+}
+
+struct BenchmarkEvaluationWorkerDecision {
+    status: TraceBenchmarkEvaluationStatus,
+    score: f32,
+    pass_count: u32,
+    fail_count: u32,
+}
+
+fn benchmark_artifact_is_pending_evaluation(artifact: &TraceBenchmarkConversionArtifact) -> bool {
+    artifact.registry.status == TraceBenchmarkRegistryStatus::Candidate
+        && artifact.evaluation.status == TraceBenchmarkEvaluationStatus::NotRun
+        && !artifact.candidates.is_empty()
+}
+
+fn evaluate_benchmark_artifact_for_worker(
+    artifact: &TraceBenchmarkConversionArtifact,
+    min_score: f32,
+) -> Option<BenchmarkEvaluationWorkerDecision> {
+    if artifact.candidates.is_empty() {
+        return None;
+    }
+    let pass_count = artifact
+        .candidates
+        .iter()
+        .filter(|candidate| benchmark_candidate_passes_structural_evaluation(candidate))
+        .count();
+    let fail_count = artifact.candidates.len().saturating_sub(pass_count);
+    let score = pass_count as f32 / artifact.candidates.len() as f32;
+    let status = if score >= min_score {
+        TraceBenchmarkEvaluationStatus::Passed
+    } else {
+        TraceBenchmarkEvaluationStatus::Failed
+    };
+    Some(BenchmarkEvaluationWorkerDecision {
+        status,
+        score,
+        pass_count: pass_count.min(u32::MAX as usize) as u32,
+        fail_count: fail_count.min(u32::MAX as usize) as u32,
+    })
+}
+
+fn benchmark_candidate_passes_structural_evaluation(candidate: &TraceBenchmarkCandidate) -> bool {
+    candidate.canonical_summary_hash.starts_with("sha256:")
+        && !candidate.canonical_summary.trim().is_empty()
+        && candidate.event_count > 0
+        && !candidate.task_success.trim().is_empty()
+        && candidate
+            .consent_scopes
+            .contains(&ConsentScope::BenchmarkOnly)
 }
 
 #[derive(Debug, Serialize)]
@@ -36293,6 +36618,116 @@ mod tests {
         assert!(!audit_events.iter().any(|event| {
             event.kind == "benchmark_lifecycle_update"
                 && event.export_id == Some(benchmark.conversion_id)
+        }));
+    }
+
+    #[tokio::test]
+    async fn benchmark_evaluation_worker_run_marks_candidate_passed_without_publishing() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::BenchmarkOnly];
+        envelope.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::BenchmarkGeneration];
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("benchmark source submission succeeds");
+
+        let Json(benchmark) = benchmark_worker_convert_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("worker_evaluation_candidate".to_string()),
+                consent_scope: Some("benchmark_only".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: Some("benchmark:evaluation-worker".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark worker conversion succeeds");
+        assert_eq!(benchmark.item_count, 1);
+        assert_eq!(
+            benchmark.registry.status,
+            TraceBenchmarkRegistryStatus::Candidate
+        );
+        assert_eq!(
+            benchmark.evaluation.status,
+            TraceBenchmarkEvaluationStatus::NotRun
+        );
+
+        let Json(run) = benchmark_evaluation_worker_run_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkEvaluationWorkerRunRequest {
+                limit: Some(10),
+                dry_run: Some(false),
+                evaluator_ref: Some("deterministic-benchmark-evaluator:v1".to_string()),
+                min_score: None,
+                reason: Some("scheduled benchmark evaluator run".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark evaluation worker run succeeds");
+
+        assert!(!run.dry_run);
+        assert_eq!(run.checked_count, 1);
+        assert_eq!(run.evaluated_count, 1);
+        assert_eq!(run.passed_count, 1);
+        assert_eq!(run.failed_count, 0);
+        assert_eq!(run.skipped_existing_count, 0);
+        assert_eq!(run.skipped_ineligible_count, 0);
+        assert_eq!(run.pending_after_count, 0);
+        assert_eq!(run.evaluated_conversion_ids, vec![benchmark.conversion_id]);
+
+        let persisted: TraceBenchmarkConversionArtifact = serde_json::from_str(
+            &std::fs::read_to_string(benchmark_artifact_path(
+                temp.path(),
+                "tenant-a",
+                benchmark.conversion_id,
+            ))
+            .expect("benchmark artifact reads"),
+        )
+        .expect("benchmark artifact parses");
+        assert_eq!(
+            persisted.registry.status,
+            TraceBenchmarkRegistryStatus::Candidate
+        );
+        assert_eq!(
+            persisted.evaluation.status,
+            TraceBenchmarkEvaluationStatus::Passed
+        );
+        assert_eq!(
+            persisted.evaluation.evaluator_ref.as_deref(),
+            Some("deterministic-benchmark-evaluator:v1")
+        );
+        assert_eq!(persisted.evaluation.score, Some(1.0));
+        assert_eq!(persisted.evaluation.pass_count, Some(1));
+        assert_eq!(persisted.evaluation.fail_count, Some(0));
+        assert!(
+            persisted
+                .evaluation
+                .last_update_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("scheduled benchmark evaluator run"))
+        );
+
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "benchmark_lifecycle_update"
+                && event.export_id == Some(benchmark.conversion_id)
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("registry_status=candidate")
+                        && reason.contains("evaluation_status=passed")
+                })
         }));
     }
 
