@@ -220,6 +220,8 @@ const TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN: &str =
     "TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN";
 const TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS: &str =
     "TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS";
+const TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS: &str =
+    "TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS";
 const DEFAULT_EDDSA_KEYSET_URL_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_EDDSA_KEYSET_REFRESH_INTERVAL_SECONDS: u64 = 300;
@@ -286,6 +288,7 @@ struct AppState {
     legal_hold_retention_policy_ids: Arc<BTreeSet<String>>,
     artifact_store: Option<ConfiguredTraceArtifactStore>,
     near_credit_submitter: Option<Arc<dyn TraceNearCreditSubmitter>>,
+    ranking_calibration_max_age: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1393,6 +1396,7 @@ impl AppState {
         let legal_hold_retention_policy_ids = parse_legal_hold_retention_policy_ids_from_env()?;
         let artifact_store = trace_artifact_store_from_env(&root)?;
         let near_credit_submitter = trace_near_credit_submitter_from_env()?;
+        let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
         let object_primary_submit_review = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW);
         let object_primary_replay_export = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT);
         let object_primary_derived_exports =
@@ -1535,6 +1539,7 @@ impl AppState {
             legal_hold_retention_policy_ids: Arc::new(legal_hold_retention_policy_ids),
             artifact_store,
             near_credit_submitter,
+            ranking_calibration_max_age,
         })
     }
 }
@@ -3424,6 +3429,20 @@ fn parse_submission_quota_limit(var_name: &'static str, configured: &str) -> any
         .with_context(|| format!("{var_name} must be a non-negative integer"))
 }
 
+fn parse_ranking_calibration_max_age_from_env() -> anyhow::Result<Option<Duration>> {
+    let Some(value) = optional_trimmed_env(TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS)? else {
+        return Ok(None);
+    };
+    let hours = value.parse::<i64>().with_context(|| {
+        format!("{TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS} must be a positive hour count")
+    })?;
+    anyhow::ensure!(
+        (1..=24 * 365).contains(&hours),
+        "{TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS} must be between 1 and 8760 hours"
+    );
+    Ok(Some(Duration::hours(hours)))
+}
+
 fn validate_retention_policy_id(policy_id: &str) -> anyhow::Result<()> {
     let valid = policy_id.len() <= 128
         && policy_id.chars().all(|character| {
@@ -3658,6 +3677,7 @@ struct TraceCommonsConfigStatusResponse {
     analytics_min_cell_count: usize,
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Vec<String>,
+    ranking_calibration_max_age_hours: Option<i64>,
     artifact_store_configured: bool,
     artifact_object_store: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3769,6 +3789,9 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .iter()
             .cloned()
             .collect(),
+        ranking_calibration_max_age_hours: state
+            .ranking_calibration_max_age
+            .map(|max_age| max_age.num_hours()),
         artifact_store_configured: state.artifact_store.is_some(),
         artifact_object_store: state
             .artifact_store
@@ -7376,6 +7399,7 @@ async fn ranking_model_promotion_handler(
         &model_version,
         body.target_use,
         &policy_version,
+        RankingCalibrationGateContext::ModelPromotion,
     )
     .await?;
     ensure_active_ranking_model_has_promotable_calibration(
@@ -7459,6 +7483,7 @@ async fn latest_promotable_ranking_calibration_run(
     model_version: &str,
     target_use: TraceAllowedUse,
     policy_version: &str,
+    context: RankingCalibrationGateContext,
 ) -> ApiResult<TraceRankingCalibrationRunRecord> {
     let calibration_runs = read_ranking_calibration_runs_for_admin(state, tenant)
         .await
@@ -7472,17 +7497,15 @@ async fn latest_promotable_ranking_calibration_run(
         })
         .max_by_key(|run| run.created_at)
     else {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            "ranking model promotion requires a calibration run for the requested model, target use, and policy",
-        ));
+        return Err(api_error(StatusCode::CONFLICT, context.missing_message()));
     };
     if !run.promotable {
         return Err(api_error(
             StatusCode::CONFLICT,
-            "ranking model promotion requires the latest calibration run to be promotable",
+            context.nonpromotable_message(),
         ));
     }
+    ensure_ranking_calibration_fresh(state, &run, context)?;
     Ok(run)
 }
 
@@ -7715,6 +7738,15 @@ async fn ranking_prediction_credit_handler(
             "ranking prediction credit policy does not match the active model",
         ));
     }
+    let _calibration_run = latest_promotable_ranking_calibration_run(
+        state.as_ref(),
+        &tenant,
+        &prediction.model_version,
+        prediction.target_use,
+        &prediction.prediction_policy_version,
+        RankingCalibrationGateContext::PredictionCredit,
+    )
+    .await?;
 
     let credit_points_delta = prediction.settlement_score_micros as f32 / 1_000_000.0;
     if !credit_points_delta.is_finite() {
@@ -8761,6 +8793,49 @@ struct RankingSettlementCalibrationGate {
     report_hash: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum RankingCalibrationGateContext {
+    ModelPromotion,
+    PredictionCredit,
+    Settlement,
+}
+
+impl RankingCalibrationGateContext {
+    fn missing_message(self) -> &'static str {
+        match self {
+            Self::ModelPromotion => {
+                "ranking model promotion requires a calibration run for the requested model, target use, and policy"
+            }
+            Self::PredictionCredit => {
+                "ranking prediction credit requires a calibration run for the requested model, target use, and policy"
+            }
+            Self::Settlement => {
+                "ranking utility settlement requires a calibration run for the requested model, target use, and policy"
+            }
+        }
+    }
+
+    fn nonpromotable_message(self) -> &'static str {
+        match self {
+            Self::ModelPromotion => {
+                "ranking model promotion requires the latest calibration run to be promotable"
+            }
+            Self::PredictionCredit => {
+                "ranking prediction credit requires the latest calibration run to be promotable"
+            }
+            Self::Settlement => "ranking utility settlement requires a promotable calibration run",
+        }
+    }
+
+    fn stale_message(self) -> &'static str {
+        match self {
+            Self::ModelPromotion => "ranking model promotion requires a fresh calibration run",
+            Self::PredictionCredit => "ranking prediction credit requires a fresh calibration run",
+            Self::Settlement => "ranking utility settlement requires a fresh calibration run",
+        }
+    }
+}
+
 const RANKING_PREDICTION_EXTERNAL_REF_PREFIX: &str = "ranking_prediction:";
 
 fn ranking_prediction_external_ref(ranking_prediction_id: Uuid) -> String {
@@ -8794,6 +8869,21 @@ fn ranking_credit_event_matches_active_prediction(
     })
 }
 
+fn ensure_ranking_calibration_fresh(
+    state: &AppState,
+    run: &TraceRankingCalibrationRunRecord,
+    context: RankingCalibrationGateContext,
+) -> ApiResult<()> {
+    let Some(max_age) = state.ranking_calibration_max_age else {
+        return Ok(());
+    };
+    let age = Utc::now().signed_duration_since(run.created_at);
+    if age > max_age {
+        return Err(api_error(StatusCode::CONFLICT, context.stale_message()));
+    }
+    Ok(())
+}
+
 async fn ranking_settlement_calibration_gate(
     state: &AppState,
     tenant: &TenantAuth,
@@ -8818,15 +8908,16 @@ async fn ranking_settlement_calibration_gate(
     else {
         return Err(api_error(
             StatusCode::CONFLICT,
-            "ranking utility settlement requires a calibration run for the requested model, target use, and policy",
+            RankingCalibrationGateContext::Settlement.missing_message(),
         ));
     };
     if !run.promotable {
         return Err(api_error(
             StatusCode::CONFLICT,
-            "ranking utility settlement requires a promotable calibration run",
+            RankingCalibrationGateContext::Settlement.nonpromotable_message(),
         ));
     }
+    ensure_ranking_calibration_fresh(state, &run, RankingCalibrationGateContext::Settlement)?;
     let model_versions = read_ranking_model_versions_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
@@ -26026,6 +26117,7 @@ mod tests {
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store,
             near_credit_submitter: None,
+            ranking_calibration_max_age: None,
         })
     }
 
@@ -31430,6 +31522,7 @@ mod tests {
             ])),
             artifact_store: None,
             near_credit_submitter: None,
+            ranking_calibration_max_age: None,
         });
 
         let mut envelope = sample_envelope().await;
@@ -34289,6 +34382,190 @@ mod tests {
 
         let events = read_all_credit_events(temp.path(), "tenant-a").expect("credit reads");
         assert!(events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ranking_credit_paths_reject_stale_calibration_when_freshness_gate_enabled() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("ranking submission succeeds");
+
+        let Json(candidate) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-freshness-v1".to_string(),
+                feature_schema_version: "ranking-features-freshness-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:ranking-training-freshness".to_string(),
+                calibration_dataset_hash: "sha256:ranking-calibration-freshness".to_string(),
+                model_artifact_hash: "sha256:ranking-model-artifact-freshness".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can stage candidate ranking model");
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:ranking-feature-freshness".to_string(),
+                feature_names_hash: "sha256:ranking-feature-names-freshness".to_string(),
+                source_feature_hash: "sha256:ranking-source-feature-freshness".to_string(),
+                duplicate_score: Some(0.05),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.88),
+                coverage_tags: vec!["tool:terminal".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking feature");
+        let Json(prediction) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: candidate.model_version.clone(),
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                prediction_policy_version: candidate.policy_version.clone(),
+                feature_vector_hash: feature.feature_vector_hash,
+                predicted_utility_micros: 1_250_000,
+                uncertainty_micros: 250_000,
+                confidence: 0.9,
+                risk_penalty_micros: 0,
+                novelty_bonus_micros: 0,
+                explanation_codes: vec!["ranking_pair_utility".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking prediction");
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_300_000,
+                evidence_hash: "sha256:ranking-frontier-evidence-freshness".to_string(),
+                external_ref: "private-ranking-freshness".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking label");
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: "sha256:ranking-eval-freshness".to_string(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration");
+        assert!(calibration.promotable);
+        Arc::make_mut(&mut state).ranking_calibration_max_age = Some(Duration::zero());
+        let stale_promotion_error = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "stale calibration should not promote".to_string(),
+            }),
+        )
+        .await
+        .expect_err("stale calibration blocks model promotion");
+        assert_eq!(stale_promotion_error.0, StatusCode::CONFLICT);
+
+        Arc::make_mut(&mut state).ranking_calibration_max_age = None;
+        let Json(_) = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "nightly calibration passed".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can promote calibrated model");
+
+        Arc::make_mut(&mut state).ranking_calibration_max_age = Some(Duration::zero());
+        let stale_prediction_credit_error = ranking_prediction_credit_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionCreditRequest {
+                ranking_prediction_id: prediction.ranking_prediction_id,
+                reason: "stale calibration should not credit".to_string(),
+            }),
+        )
+        .await
+        .expect_err("stale calibration blocks prediction credit");
+        assert_eq!(stale_prediction_credit_error.0, StatusCode::CONFLICT);
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit reads")
+                .is_empty()
+        );
+
+        Arc::make_mut(&mut state).ranking_calibration_max_age = None;
+        let Json(_) = ranking_prediction_credit_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionCreditRequest {
+                ranking_prediction_id: prediction.ranking_prediction_id,
+                reason: "freshness gate disabled for queued pending credit".to_string(),
+            }),
+        )
+        .await
+        .expect("prediction credit can append when freshness gate is disabled");
+
+        Arc::make_mut(&mut state).ranking_calibration_max_age = Some(Duration::zero());
+        let stale_settlement_error = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "stale calibration should not settle".to_string(),
+                near_contract_id: None,
+                ranking_model_version: Some(candidate.model_version),
+                ranking_target_use: Some(TraceAllowedUse::RankingModelTraining),
+            }),
+        )
+        .await
+        .expect_err("stale calibration blocks ranking settlement");
+        assert_eq!(stale_settlement_error.0, StatusCode::CONFLICT);
     }
 
     #[tokio::test]
