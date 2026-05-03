@@ -100,6 +100,7 @@ pub enum TraceAuditAction {
     BenchmarkConvert,
     ProcessEvaluate,
     PolicyUpdate,
+    RankingWorkerRunRecovery,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1069,6 +1070,12 @@ pub enum TraceAuditSafeMetadata {
         allowed_consent_scope_count: u32,
         allowed_use_count: u32,
         grant_projection_hash: String,
+    },
+    RankingWorkerRunRecovery {
+        ranking_worker_run_id: Uuid,
+        run_kind: TraceRankingWorkerRunKind,
+        recovered_status: TraceRankingWorkerRunStatus,
+        reason_hash: String,
     },
 }
 

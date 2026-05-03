@@ -2,15 +2,16 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use tracedao_server::trace_corpus_storage::{
-    TenantScopedTraceObjectRef, TraceAuditSafeMetadata, TraceCorpusStatus,
+    TenantScopedTraceObjectRef, TraceAuditAction, TraceAuditSafeMetadata, TraceCorpusStatus,
     TraceCreditAccountSettlementLineItem, TraceCreditEventType, TraceCreditHoldReason,
     TraceCreditSettlementBatchStatus, TraceCreditSettlementNearStatus, TraceDerivedRecord,
     TraceDerivedStatus, TraceExportManifestItemInvalidationReason, TraceExportManifestItemRecord,
     TraceExportManifestRecord, TraceObjectArtifactKind, TraceObjectRefRecord,
     TraceRankingLabelOutcome, TraceRankingLabelSource, TraceRankingModelStatus,
-    TraceRankingUtilityCategory, TraceReviewLeaseAuditAction, TraceSubmissionWrite,
-    TraceTombstoneRecord, TraceVectorEntryRecord, TraceVectorEntrySourceProjection,
-    TraceVectorEntryStatus, TraceWorkerKind,
+    TraceRankingUtilityCategory, TraceRankingWorkerRunKind, TraceRankingWorkerRunStatus,
+    TraceReviewLeaseAuditAction, TraceSubmissionWrite, TraceTombstoneRecord,
+    TraceVectorEntryRecord, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
+    TraceWorkerKind,
 };
 use uuid::Uuid;
 
@@ -115,6 +116,33 @@ fn credit_mutation_audit_metadata_hashes_sensitive_refs() {
     assert_eq!(json["external_ref_hash"], "sha256:artifact-ref");
     assert!(json.get("reason").is_none());
     assert!(json.get("external_ref").is_none());
+}
+
+#[test]
+fn ranking_worker_run_recovery_audit_metadata_is_hash_only() {
+    let metadata = TraceAuditSafeMetadata::RankingWorkerRunRecovery {
+        ranking_worker_run_id: Uuid::from_u128(0x44),
+        run_kind: TraceRankingWorkerRunKind::PredictionCredit,
+        recovered_status: TraceRankingWorkerRunStatus::Failed,
+        reason_hash: "sha256:operator-note".to_string(),
+    };
+    let json = serde_json::to_value(metadata).unwrap();
+
+    assert_eq!(
+        serde_json::to_value(TraceAuditAction::RankingWorkerRunRecovery).unwrap(),
+        "ranking_worker_run_recovery"
+    );
+    assert_eq!(json["kind"], "ranking_worker_run_recovery");
+    assert_eq!(
+        json["ranking_worker_run_id"],
+        Uuid::from_u128(0x44).to_string()
+    );
+    assert_eq!(json["run_kind"], "prediction_credit");
+    assert_eq!(json["recovered_status"], "failed");
+    assert_eq!(json["reason_hash"], "sha256:operator-note");
+    assert!(json.get("reason").is_none());
+    assert!(json.get("operator_note").is_none());
+    assert!(json.get("raw_error").is_none());
 }
 
 #[test]

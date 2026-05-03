@@ -70,7 +70,8 @@ running/completed/failed lifecycle status, limits, counts, result refs, skipped
 reason aggregates, and safe hashed fatal-error refs for admin review. Live
 non-dry-run ranking schedulers reject overlapping active non-stale runs before
 appending a new running row; stale running rows surface as operational-summary
-blockers until an admin append-finalizes them through the stale recovery API.
+blockers until an admin append-finalizes them through the stale recovery API,
+which also writes a hash-only audit event for the recovery action.
 With the DB mirror configured, ranking evidence, calibration runs, and ranking
 worker runs are dual-written to PostgreSQL and
 `TRACE_COMMONS_DB_REVIEWER_READS=true` serves admin ranking lists, calibration
