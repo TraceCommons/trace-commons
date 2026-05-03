@@ -956,9 +956,10 @@ prefers candidates before active models, skips any model/policy/target that
 already has a live non-stale `credit_cycle` worker-run claim, and runs a
 read-only calibration preflight before creating a direct cycle claim. Candidates
 with no matching prediction evidence, no target labels, no labels that join to
-the model's matching predictions, or non-promotable current calibration evidence
-are reported as scheduler skips without creating credit-cycle worker rows,
-credit events, settlement batches, or NEAR outbox items. The response reports
+the model's matching predictions, non-promotable current calibration evidence,
+or uncleared pairwise evidence/accuracy policy risk are reported as scheduler
+skips without creating credit-cycle worker rows, credit events, settlement
+batches, or NEAR outbox items. The response reports
 checked, started, skipped, active-claim skipped, still-pending, and skip-reason
 counts plus a per-candidate decision list and the nested cycle responses.
 Requests with `preflight_only: true` stop after eligibility checks and return

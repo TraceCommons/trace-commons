@@ -6863,6 +6863,9 @@ async fn credit_cycle_scheduler_run_handler(
     let labels = read_ranking_labels_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    let preference_labels = read_ranking_preference_labels_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     let mut candidates = latest_ranking_model_versions(&model_versions)
         .into_iter()
         .filter(|model| {
@@ -6951,9 +6954,13 @@ async fn credit_cycle_scheduler_run_handler(
                 min_label_count: body.min_label_count,
                 confidence_threshold: body.confidence_threshold,
                 max_average_absolute_error_micros: body.max_average_absolute_error_micros,
+                allow_at_risk_models: body.allow_at_risk_models,
             },
-            &predictions,
-            &labels,
+            CreditCycleSchedulerPreflightEvidence {
+                predictions: &predictions,
+                labels: &labels,
+                preference_labels: &preference_labels,
+            },
         ) {
             credit_cycle_scheduler_record_skip(&mut response, &skip_reason);
             credit_cycle_scheduler_record_decision(
@@ -7078,6 +7085,14 @@ struct CreditCycleSchedulerPreflightOptions {
     min_label_count: Option<usize>,
     confidence_threshold: Option<f32>,
     max_average_absolute_error_micros: Option<i64>,
+    allow_at_risk_models: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CreditCycleSchedulerPreflightEvidence<'a> {
+    predictions: &'a [TraceRankingPredictionRecord],
+    labels: &'a [TraceRankingLabelRecord],
+    preference_labels: &'a [TraceRankingPreferenceLabelRecord],
 }
 
 fn credit_cycle_scheduler_candidate_skip_reason(
@@ -7086,10 +7101,10 @@ fn credit_cycle_scheduler_candidate_skip_reason(
     candidate: &TraceRankingModelVersionRecord,
     target_use: TraceAllowedUse,
     options: CreditCycleSchedulerPreflightOptions,
-    predictions: &[TraceRankingPredictionRecord],
-    labels: &[TraceRankingLabelRecord],
+    evidence: CreditCycleSchedulerPreflightEvidence<'_>,
 ) -> Option<String> {
-    let matching_prediction_count = predictions
+    let matching_prediction_count = evidence
+        .predictions
         .iter()
         .filter(|prediction| {
             ranking_prediction_matches_model_target(prediction, candidate, target_use)
@@ -7098,7 +7113,8 @@ fn credit_cycle_scheduler_candidate_skip_reason(
     if matching_prediction_count == 0 {
         return Some("missing_prediction_evidence".to_string());
     }
-    let matching_label_count = labels
+    let matching_label_count = evidence
+        .labels
         .iter()
         .filter(|label| label.target_use == target_use)
         .count();
@@ -7127,23 +7143,40 @@ fn credit_cycle_scheduler_candidate_skip_reason(
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
         },
-        predictions,
-        labels,
+        evidence.predictions,
+        evidence.labels,
     );
     if current.joined_label_prediction_count == 0 {
         return Some("missing_joined_label_evidence".to_string());
     }
-    if current.promotable {
-        None
-    } else {
-        Some(
+    if !current.promotable {
+        return Some(
             current
                 .reason_codes
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "calibration_not_promotable".to_string()),
-        )
+        );
     }
+    if !options.allow_at_risk_models {
+        let pairwise = ranking_pairwise_evaluation_model_report(
+            candidate,
+            target_use,
+            evidence.predictions,
+            evidence.preference_labels,
+        );
+        if pairwise.joined_pair_prediction_count < state.ranking_min_pairwise_label_count {
+            return Some("pairwise_evidence_below_threshold".to_string());
+        }
+        if pairwise.joined_pair_prediction_count > 0
+            && pairwise
+                .pairwise_accuracy_micros
+                .is_some_and(|accuracy| accuracy < state.ranking_min_pairwise_accuracy_micros)
+        {
+            return Some("pairwise_accuracy_below_threshold".to_string());
+        }
+    }
+    None
 }
 
 fn credit_cycle_scheduler_record_decision(
@@ -43084,6 +43117,65 @@ mod tests {
             scheduler
                 .skipped_reason_counts
                 .get("missing_joined_label_evidence"),
+            Some(&1)
+        );
+        assert!(scheduler.cycles.is_empty());
+        let worker_runs =
+            read_all_ranking_worker_runs(temp.path(), "tenant-a").expect("worker runs read");
+        assert!(worker_runs.is_empty());
+        let credit_events =
+            read_all_credit_events(temp.path(), "tenant-a").expect("credit events read");
+        assert!(credit_events.is_empty());
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert!(outbox.is_empty());
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_skips_pairwise_policy_risk_before_claiming() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).ranking_min_pairwise_label_count = 1;
+        let (candidate, _) = seed_credit_cycle_ready_candidate(
+            state.clone(),
+            "trace-ranker-credit-cycle-pairwise-preflight-v1",
+        )
+        .await;
+
+        let Json(scheduler) = credit_cycle_scheduler_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleSchedulerRunRequest {
+                dry_run: false,
+                preflight_only: false,
+                submit_near_outbox: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: None,
+                policy_version: Some(candidate.policy_version),
+                reason: "scheduled credit cycle should skip pairwise-risk candidate".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: Some(1),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect("scheduler skips pairwise-risk candidate without invoking cycle");
+
+        assert_eq!(scheduler.checked_count, 1);
+        assert_eq!(scheduler.started_count, 0);
+        assert_eq!(scheduler.skipped_count, 1);
+        assert_eq!(
+            scheduler
+                .skipped_reason_counts
+                .get("pairwise_evidence_below_threshold"),
             Some(&1)
         );
         assert!(scheduler.cycles.is_empty());
