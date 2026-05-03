@@ -5737,6 +5737,7 @@ struct TraceCreditSettlementRunResponse {
     ranking_calibration_report_hash: Option<String>,
     ranking_calibration_joined_evidence_hash: Option<String>,
     ranking_credit_events_excluded_count: usize,
+    ranking_credit_events_excluded_reason_counts: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -7446,25 +7447,28 @@ async fn run_credit_settlement(
         Vec::new()
     };
     let mut ranking_credit_events_excluded_count = 0usize;
+    let mut ranking_credit_events_excluded_reason_counts = BTreeMap::new();
     let mut selected_events = Vec::new();
     for event in candidate_events {
         if event.event_type != TraceCreditLedgerEventType::RankingUtility {
             selected_events.push(event);
             continue;
         }
-        let Some(gate) = ranking_calibration_gate.as_ref() else {
-            ranking_credit_events_excluded_count += 1;
-            continue;
-        };
-        if ranking_credit_event_matches_active_prediction(
+        let exclusion_reason_codes = ranking_credit_event_exclusion_reason_codes(
             &event,
             &ranking_predictions,
-            gate,
+            ranking_calibration_gate.as_ref(),
             &policy_version,
-        ) {
+        );
+        if exclusion_reason_codes.is_empty() {
             selected_events.push(event);
         } else {
             ranking_credit_events_excluded_count += 1;
+            for code in exclusion_reason_codes {
+                *ranking_credit_events_excluded_reason_counts
+                    .entry(code)
+                    .or_insert(0) += 1;
+            }
         }
     }
     selected_events.sort_by_key(|event| event.event_id);
@@ -7655,6 +7659,7 @@ async fn run_credit_settlement(
             .as_ref()
             .map(|gate| gate.joined_evidence_hash.clone()),
         ranking_credit_events_excluded_count,
+        ranking_credit_events_excluded_reason_counts,
     })
 }
 
@@ -12317,29 +12322,57 @@ fn parse_ranking_prediction_external_ref(external_ref: Option<&str>) -> Option<U
     Uuid::parse_str(prediction_id).ok()
 }
 
-fn ranking_credit_event_matches_active_prediction(
+fn ranking_credit_event_exclusion_reason_codes(
     event: &TraceCommonsCreditLedgerRecord,
     predictions: &[TraceRankingPredictionRecord],
-    gate: &RankingSettlementCalibrationGate,
+    gate: Option<&RankingSettlementCalibrationGate>,
     policy_version: &str,
-) -> bool {
-    if !gate.model_risk_codes.is_empty() {
-        return false;
-    }
+) -> Vec<String> {
+    let mut reason_codes = Vec::new();
+    let Some(gate) = gate else {
+        return vec!["missing_ranking_model_gate".to_string()];
+    };
+    reason_codes.extend(gate.model_risk_codes.iter().cloned());
+
     let Some(prediction_id) = parse_ranking_prediction_external_ref(event.external_ref.as_deref())
     else {
-        return false;
+        reason_codes.push("missing_prediction_ref".to_string());
+        reason_codes.sort();
+        reason_codes.dedup();
+        return reason_codes;
     };
+    let Some(prediction) = predictions
+        .iter()
+        .find(|prediction| prediction.ranking_prediction_id == prediction_id)
+    else {
+        reason_codes.push("missing_prediction".to_string());
+        reason_codes.sort();
+        reason_codes.dedup();
+        return reason_codes;
+    };
+
+    if prediction.submission_id != event.submission_id {
+        reason_codes.push("prediction_submission_mismatch".to_string());
+    }
     let settlement_score_micros = credit_delta_micros(event.credit_points_delta);
-    predictions.iter().any(|prediction| {
-        prediction.ranking_prediction_id == prediction_id
-            && prediction.submission_id == event.submission_id
-            && prediction.model_version == gate.model_version
-            && prediction.target_use == gate.target_use
-            && prediction.prediction_policy_version == policy_version
-            && prediction.settlement_score_micros == settlement_score_micros
-            && prediction.confidence >= gate.confidence_threshold
-    })
+    if prediction.model_version != gate.model_version {
+        reason_codes.push("model_mismatch".to_string());
+    }
+    if prediction.target_use != gate.target_use {
+        reason_codes.push("target_use_mismatch".to_string());
+    }
+    if prediction.prediction_policy_version != policy_version {
+        reason_codes.push("policy_mismatch".to_string());
+    }
+    if prediction.settlement_score_micros != settlement_score_micros {
+        reason_codes.push("settlement_score_mismatch".to_string());
+    }
+    if prediction.confidence < gate.confidence_threshold {
+        reason_codes.push("low_confidence_prediction".to_string());
+    }
+    reason_codes.sort();
+    reason_codes.dedup();
+    reason_codes
 }
 
 fn ensure_ranking_calibration_fresh(
@@ -39103,6 +39136,12 @@ mod tests {
         .expect("settlement without ranking model gate succeeds but excludes ranking utility");
         assert_eq!(no_model_gate.settled_source_event_count, 0);
         assert_eq!(no_model_gate.ranking_credit_events_excluded_count, 1);
+        let no_model_gate_value =
+            serde_json::to_value(&no_model_gate).expect("settlement response serializes");
+        assert_eq!(
+            no_model_gate_value["ranking_credit_events_excluded_reason_counts"]["missing_ranking_model_gate"],
+            serde_json::json!(1)
+        );
 
         let missing_calibration = credit_settlement_handler(
             State(state.clone()),
@@ -39255,6 +39294,12 @@ mod tests {
         .expect("promotable calibrated ranking model allows ranking utility settlement");
         assert_eq!(finalized.settled_source_event_count, 1);
         assert_eq!(finalized.ranking_credit_events_excluded_count, 1);
+        let finalized_value =
+            serde_json::to_value(&finalized).expect("settlement response serializes");
+        assert_eq!(
+            finalized_value["ranking_credit_events_excluded_reason_counts"]["missing_prediction_ref"],
+            serde_json::json!(1)
+        );
         assert_eq!(
             finalized.ranking_calibration_run_id,
             Some(calibration.calibration_run_id)
@@ -45096,6 +45141,16 @@ mod tests {
         .expect("settlement can evaluate at-risk active model credits");
         assert_eq!(settlement.settled_source_event_count, 0);
         assert_eq!(settlement.ranking_credit_events_excluded_count, 1);
+        let settlement_value =
+            serde_json::to_value(&settlement).expect("settlement response serializes");
+        assert_eq!(
+            settlement_value["ranking_credit_events_excluded_reason_counts"]["joined_evidence_changed_since_calibration"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            settlement_value["ranking_credit_events_excluded_reason_counts"]["current_evidence_not_promotable"],
+            serde_json::json!(1)
+        );
     }
 
     #[tokio::test]
