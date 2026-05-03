@@ -12,6 +12,10 @@ use uuid::Uuid;
 
 use crate::error::DatabaseError;
 
+fn default_trace_ranking_min_label_source_count() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TraceCorpusStatus {
@@ -158,7 +162,7 @@ pub enum TraceRankingModelStatus {
     Archived,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum TraceRankingLabelSource {
     FrontierLab,
@@ -339,6 +343,7 @@ pub struct TraceRankingCalibrationRunWrite {
     pub prediction_count: u32,
     pub label_count: u32,
     pub joined_label_prediction_count: u32,
+    pub joined_label_source_count: u32,
     pub average_predicted_utility_micros: Option<i64>,
     pub average_label_utility_delta_micros: Option<i64>,
     pub average_absolute_error_micros: Option<i64>,
@@ -346,6 +351,7 @@ pub struct TraceRankingCalibrationRunWrite {
     pub low_confidence_prediction_count: u32,
     pub confidence_threshold: f32,
     pub min_label_count: u32,
+    pub min_label_source_count: u32,
     pub max_average_absolute_error_micros: i64,
     pub promotable: bool,
     pub reason_codes: Vec<String>,
@@ -364,6 +370,8 @@ pub struct TraceRankingCalibrationRunRecord {
     pub prediction_count: u32,
     pub label_count: u32,
     pub joined_label_prediction_count: u32,
+    #[serde(default)]
+    pub joined_label_source_count: u32,
     pub average_predicted_utility_micros: Option<i64>,
     pub average_label_utility_delta_micros: Option<i64>,
     pub average_absolute_error_micros: Option<i64>,
@@ -371,6 +379,8 @@ pub struct TraceRankingCalibrationRunRecord {
     pub low_confidence_prediction_count: u32,
     pub confidence_threshold: f32,
     pub min_label_count: u32,
+    #[serde(default = "default_trace_ranking_min_label_source_count")]
+    pub min_label_source_count: u32,
     pub max_average_absolute_error_micros: i64,
     pub promotable: bool,
     pub reason_codes: Vec<String>,
