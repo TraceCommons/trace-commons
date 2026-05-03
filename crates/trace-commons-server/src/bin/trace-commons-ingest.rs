@@ -237,6 +237,8 @@ const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT: u32 = 100;
 const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT: u32 = 500;
 const TRACE_CREDIT_SETTLEMENT_WORKER_RUN_DEFAULT_LIMIT: usize = 100;
 const TRACE_CREDIT_SETTLEMENT_WORKER_RUN_MAX_LIMIT: usize = 500;
+const TRACE_RANKING_MODEL_PROMOTION_RUN_DEFAULT_LIMIT: usize = 25;
+const TRACE_RANKING_MODEL_PROMOTION_RUN_MAX_LIMIT: usize = 100;
 const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
 const TRACE_REVIEW_DUE_AFTER_HOURS: i64 = 24;
 const TRACE_REVIEW_OVERDUE_AFTER_HOURS: i64 = 72;
@@ -2192,6 +2194,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/workers/ranking/prediction-credit/run",
             post(ranking_prediction_credit_run_handler),
+        )
+        .route(
+            "/v1/workers/ranking/model-promotions/run",
+            post(ranking_model_promotion_worker_run_handler),
         )
         .route("/v1/workers/ranking/labels", post(ranking_label_handler))
         .route(
@@ -5485,6 +5491,20 @@ struct TraceRankingModelPromotionRequest {
     reason: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceRankingModelPromotionRunRequest {
+    #[serde(default)]
+    dry_run: bool,
+    target_use: TraceAllowedUse,
+    reason: String,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    model_version: Option<String>,
+    #[serde(default)]
+    policy_version: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct TraceRankingModelPromotionResponse {
     tenant_id: String,
@@ -5498,6 +5518,24 @@ struct TraceRankingModelPromotionResponse {
     calibration_run_id: Uuid,
     calibration_report_hash: String,
     reason_hash: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingModelPromotionRunResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    dry_run: bool,
+    limit: usize,
+    target_use: TraceAllowedUse,
+    reason_hash: String,
+    model_version: Option<String>,
+    policy_version: Option<String>,
+    checked_count: usize,
+    promoted_count: usize,
+    skipped_ineligible_count: usize,
+    skipped_reason_counts: BTreeMap<String, usize>,
+    pending_after_count: usize,
+    promotions: Vec<TraceRankingModelPromotionResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7740,9 +7778,115 @@ async fn ranking_model_promotion_handler(
 ) -> ApiResult<Json<TraceRankingModelPromotionResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
-    let model_version = validate_ranking_identifier(&body.model_version, "model_version")?;
-    let policy_version = validate_ranking_identifier(&body.policy_version, "policy_version")?;
-    let reason = body.reason.trim();
+    promote_ranking_model_version(state.as_ref(), &tenant, body)
+        .await
+        .map(Json)
+}
+
+async fn ranking_model_promotion_worker_run_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceRankingModelPromotionRunRequest>,
+) -> ApiResult<Json<TraceRankingModelPromotionRunResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_utility_operator(&tenant)?;
+    let reason = validate_ranking_model_promotion_reason(&body.reason)?;
+    let limit = body
+        .limit
+        .unwrap_or(TRACE_RANKING_MODEL_PROMOTION_RUN_DEFAULT_LIMIT);
+    if !(1..=TRACE_RANKING_MODEL_PROMOTION_RUN_MAX_LIMIT).contains(&limit) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranking model promotion run limit must be between 1 and 100",
+        ));
+    }
+    let model_version = optional_ranking_identifier(body.model_version, "model_version")?;
+    let policy_version = optional_ranking_identifier(body.policy_version, "policy_version")?;
+    let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let mut candidates = latest_ranking_model_versions(&model_versions)
+        .into_iter()
+        .filter(|model| model.status == StorageTraceRankingModelStatus::Candidate)
+        .filter(|model| {
+            model_version
+                .as_ref()
+                .is_none_or(|model_version| &model.model_version == model_version)
+                && policy_version
+                    .as_ref()
+                    .is_none_or(|policy_version| &model.policy_version == policy_version)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        (left.created_at, &left.model_version).cmp(&(right.created_at, &right.model_version))
+    });
+
+    let mut response = TraceRankingModelPromotionRunResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        dry_run: body.dry_run,
+        limit,
+        target_use: body.target_use,
+        reason_hash: sha256_prefixed(&reason),
+        model_version: model_version.clone(),
+        policy_version: policy_version.clone(),
+        checked_count: 0,
+        promoted_count: 0,
+        skipped_ineligible_count: 0,
+        skipped_reason_counts: BTreeMap::new(),
+        pending_after_count: 0,
+        promotions: Vec::new(),
+    };
+
+    for model in candidates.into_iter().take(limit) {
+        response.checked_count += 1;
+        match promote_ranking_model_version(
+            state.as_ref(),
+            &tenant,
+            TraceRankingModelPromotionRequest {
+                dry_run: body.dry_run,
+                model_version: model.model_version.clone(),
+                target_use: body.target_use,
+                policy_version: model.policy_version.clone(),
+                reason: reason.clone(),
+            },
+        )
+        .await
+        {
+            Ok(promotion) => {
+                if promotion.promoted {
+                    response.promoted_count += 1;
+                }
+                response.promotions.push(promotion);
+            }
+            Err((status, Json(error))) if ranking_model_promotion_run_can_skip_status(status) => {
+                response.skipped_ineligible_count += 1;
+                *response
+                    .skipped_reason_counts
+                    .entry(error.error)
+                    .or_insert(0) += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    response.pending_after_count = count_pending_ranking_model_promotions(
+        state.as_ref(),
+        &tenant,
+        model_version.as_deref(),
+        policy_version.as_deref(),
+    )
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(response))
+}
+
+fn ranking_model_promotion_run_can_skip_status(status: StatusCode) -> bool {
+    matches!(status, StatusCode::NOT_FOUND | StatusCode::CONFLICT)
+}
+
+fn validate_ranking_model_promotion_reason(reason: &str) -> ApiResult<String> {
+    let reason = reason.trim().to_string();
     if reason.is_empty() {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
@@ -7755,8 +7899,37 @@ async fn ranking_model_promotion_handler(
             "ranking model promotion reason is too long",
         ));
     }
+    Ok(reason)
+}
 
-    let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
+async fn count_pending_ranking_model_promotions(
+    state: &AppState,
+    tenant: &TenantAuth,
+    model_version: Option<&str>,
+    policy_version: Option<&str>,
+) -> anyhow::Result<usize> {
+    let model_versions = read_ranking_model_versions_for_admin(state, tenant).await?;
+    Ok(latest_ranking_model_versions(&model_versions)
+        .into_iter()
+        .filter(|model| model.status == StorageTraceRankingModelStatus::Candidate)
+        .filter(|model| {
+            model_version.is_none_or(|model_version| model.model_version == model_version)
+                && policy_version
+                    .is_none_or(|policy_version| model.policy_version == policy_version)
+        })
+        .count())
+}
+
+async fn promote_ranking_model_version(
+    state: &AppState,
+    tenant: &TenantAuth,
+    body: TraceRankingModelPromotionRequest,
+) -> ApiResult<TraceRankingModelPromotionResponse> {
+    let model_version = validate_ranking_identifier(&body.model_version, "model_version")?;
+    let policy_version = validate_ranking_identifier(&body.policy_version, "policy_version")?;
+    let reason = validate_ranking_model_promotion_reason(&body.reason)?;
+
+    let model_versions = read_ranking_model_versions_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
     let model = latest_ranking_model_version(&model_versions, &model_version)
@@ -7778,8 +7951,8 @@ async fn ranking_model_promotion_handler(
     }
 
     let calibration_run = latest_promotable_ranking_calibration_run(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         &model_version,
         body.target_use,
         &policy_version,
@@ -7788,8 +7961,8 @@ async fn ranking_model_promotion_handler(
     )
     .await?;
     ensure_active_ranking_model_has_promotable_calibration(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         &model_version,
         &policy_version,
         &model.calibration_dataset_hash,
@@ -7811,12 +7984,12 @@ async fn ranking_model_promotion_handler(
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
         };
-        append_ranking_model_version_with_db_mirror(state.as_ref(), &tenant, &active_record)
+        append_ranking_model_version_with_db_mirror(state, tenant, &active_record)
             .await
             .map_err(internal_error)?;
     }
 
-    Ok(Json(TraceRankingModelPromotionResponse {
+    Ok(TraceRankingModelPromotionResponse {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         dry_run: body.dry_run,
@@ -7831,8 +8004,8 @@ async fn ranking_model_promotion_handler(
         },
         calibration_run_id: calibration_run.calibration_run_id,
         calibration_report_hash: calibration_run.report_hash,
-        reason_hash: sha256_prefixed(reason),
-    }))
+        reason_hash: sha256_prefixed(&reason),
+    })
 }
 
 async fn ensure_active_ranking_model_has_promotable_calibration(
@@ -37064,6 +37237,185 @@ mod tests {
         let latest =
             latest_ranking_model_version(&model_versions, "trace-ranker-promote-v1").unwrap();
         assert_eq!(latest.status, StorageTraceRankingModelStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn ranking_model_promotion_worker_run_promotes_calibrated_candidates_only() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let Json(candidate) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-worker-promote-v1".to_string(),
+                feature_schema_version: "ranking-features-worker-promote-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:ranking-training-worker-promote".to_string(),
+                calibration_dataset_hash: "sha256:ranking-calibration-worker-promote".to_string(),
+                model_artifact_hash: "sha256:ranking-model-artifact-worker-promote".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can stage promotable candidate");
+        let Json(blocked_candidate) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-worker-promote-blocked-v1".to_string(),
+                feature_schema_version: "ranking-features-worker-promote-blocked-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:ranking-training-worker-promote-blocked".to_string(),
+                calibration_dataset_hash: "sha256:ranking-calibration-worker-promote-blocked"
+                    .to_string(),
+                model_artifact_hash: "sha256:ranking-model-artifact-worker-promote-blocked"
+                    .to_string(),
+            }),
+        )
+        .await
+        .expect("admin can stage blocked candidate");
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("ranking submission succeeds");
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:ranking-feature-worker-promote".to_string(),
+                feature_names_hash: "sha256:ranking-feature-names-worker-promote".to_string(),
+                source_feature_hash: "sha256:ranking-source-feature-worker-promote".to_string(),
+                duplicate_score: Some(0.05),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.88),
+                coverage_tags: vec!["tool:terminal".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking feature");
+        let Json(_) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: candidate.model_version.clone(),
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                prediction_policy_version: candidate.policy_version.clone(),
+                feature_vector_hash: feature.feature_vector_hash,
+                predicted_utility_micros: 1_250_000,
+                uncertainty_micros: 250_000,
+                confidence: 0.9,
+                risk_penalty_micros: 0,
+                novelty_bonus_micros: 0,
+                explanation_codes: vec!["ranking_pair_utility".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking prediction");
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_250_000,
+                evidence_hash: "sha256:ranking-frontier-evidence-worker-promote".to_string(),
+                external_ref: "private-ranking-worker-promote".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking label");
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration");
+        assert!(calibration.promotable);
+
+        let admin_only_error = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "utility worker should use scoped run route".to_string(),
+            }),
+        )
+        .await
+        .expect_err("utility worker cannot call generic admin promotion route");
+        assert_eq!(admin_only_error.0, StatusCode::FORBIDDEN);
+
+        let Json(run) = ranking_model_promotion_worker_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingModelPromotionRunRequest {
+                dry_run: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                reason: "scheduled calibrated candidate promotion".to_string(),
+                limit: Some(10),
+                model_version: None,
+                policy_version: Some("trace-credit-policy-v1".to_string()),
+            }),
+        )
+        .await
+        .expect("utility worker can run scoped model promotion automation");
+        assert_eq!(run.checked_count, 2);
+        assert_eq!(run.promoted_count, 1);
+        assert_eq!(run.skipped_ineligible_count, 1);
+        assert_eq!(run.pending_after_count, 1);
+        assert_eq!(run.promotions.len(), 1);
+        assert_eq!(run.promotions[0].model_version, candidate.model_version);
+        assert_eq!(
+            run.promotions[0].calibration_run_id,
+            calibration.calibration_run_id
+        );
+
+        let model_versions =
+            read_all_ranking_model_versions(temp.path(), "tenant-a").expect("model versions read");
+        let latest_promoted =
+            latest_ranking_model_version(&model_versions, &candidate.model_version).unwrap();
+        assert_eq!(
+            latest_promoted.status,
+            StorageTraceRankingModelStatus::Active
+        );
+        let latest_blocked =
+            latest_ranking_model_version(&model_versions, &blocked_candidate.model_version)
+                .unwrap();
+        assert_eq!(
+            latest_blocked.status,
+            StorageTraceRankingModelStatus::Candidate
+        );
     }
 
     #[tokio::test]

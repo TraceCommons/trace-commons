@@ -62,7 +62,9 @@ target use, and registered calibration dataset, and every credit event is bound
 to a matching `ranking_prediction:<uuid>` reference with a settlement score that
 matches the stored prediction. Prediction-credit workers also require the active
 model/target pair to have no uncleared model-risk report codes by default so new
-credits wait for calibration/drift review before settlement. With the DB
+credits wait for calibration/drift review before settlement. A scoped promotion
+run lets utility workers promote calibrated candidate models through the same
+server-owned gate without generic admin access. With the DB
 mirror configured, ranking evidence and calibration runs are dual-written to
 PostgreSQL and
 `TRACE_COMMONS_DB_REVIEWER_READS=true` serves admin ranking lists, calibration
