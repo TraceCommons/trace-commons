@@ -5062,6 +5062,46 @@ fn trace_audit_reason_value<'a>(reason: Option<&'a str>, key: &str) -> Option<&'
         .find_map(|part| part.strip_prefix(&prefix))
 }
 
+fn trace_audit_reason_u32(reason: Option<&str>, key: &str) -> Option<u32> {
+    trace_audit_reason_value(reason, key)?.parse::<u32>().ok()
+}
+
+fn trace_audit_reason_enum<T>(reason: Option<&str>, key: &str) -> Option<T>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_value(serde_json::Value::String(
+        trace_audit_reason_value(reason, key)?.to_string(),
+    ))
+    .ok()
+}
+
+fn tenant_policy_audit_metadata_from_reason(
+    reason: Option<&str>,
+) -> Option<StorageTraceAuditSafeMetadata> {
+    Some(StorageTraceAuditSafeMetadata::TenantPolicy {
+        policy_version: trace_audit_reason_value(reason, "policy_version")?.to_string(),
+        allowed_consent_scope_count: trace_audit_reason_u32(reason, "allowed_consent_scope_count")?,
+        allowed_use_count: trace_audit_reason_u32(reason, "allowed_use_count")?,
+        policy_projection_hash: trace_audit_reason_value(reason, "policy_projection_hash")?
+            .to_string(),
+    })
+}
+
+fn tenant_access_grant_audit_metadata_from_reason(
+    reason: Option<&str>,
+) -> Option<StorageTraceAuditSafeMetadata> {
+    Some(StorageTraceAuditSafeMetadata::TenantAccessGrant {
+        action: trace_audit_reason_value(reason, "action")?.to_string(),
+        role: trace_audit_reason_enum::<StorageTraceTenantAccessGrantRole>(reason, "role")?,
+        status: trace_audit_reason_enum::<StorageTraceTenantAccessGrantStatus>(reason, "status")?,
+        allowed_consent_scope_count: trace_audit_reason_u32(reason, "allowed_consent_scope_count")?,
+        allowed_use_count: trace_audit_reason_u32(reason, "allowed_use_count")?,
+        grant_projection_hash: trace_audit_reason_value(reason, "grant_projection_hash")?
+            .to_string(),
+    })
+}
+
 fn trace_review_lease_audit_action_from_reason(
     reason: Option<&str>,
 ) -> Option<StorageTraceReviewLeaseAuditAction> {
@@ -5086,18 +5126,9 @@ fn ranking_worker_run_recovery_audit_metadata_from_reason(
 ) -> Option<StorageTraceAuditSafeMetadata> {
     let ranking_worker_run_id = trace_audit_reason_value(reason, "ranking_worker_run_id")
         .and_then(|value| Uuid::parse_str(value).ok())?;
-    let run_kind = trace_audit_reason_value(reason, "run_kind").and_then(|value| {
-        serde_json::from_value::<StorageTraceRankingWorkerRunKind>(serde_json::Value::String(
-            value.to_string(),
-        ))
-        .ok()
-    })?;
-    let recovered_status = trace_audit_reason_value(reason, "status").and_then(|value| {
-        serde_json::from_value::<StorageTraceRankingWorkerRunStatus>(serde_json::Value::String(
-            value.to_string(),
-        ))
-        .ok()
-    })?;
+    let run_kind = trace_audit_reason_enum::<StorageTraceRankingWorkerRunKind>(reason, "run_kind")?;
+    let recovered_status =
+        trace_audit_reason_enum::<StorageTraceRankingWorkerRunStatus>(reason, "status")?;
     let reason_hash = trace_audit_reason_value(reason, "reason_hash")?.to_string();
     Some(StorageTraceAuditSafeMetadata::RankingWorkerRunRecovery {
         ranking_worker_run_id,
@@ -23044,7 +23075,9 @@ fn audit_backfill_storage_projection(
             StorageTraceAuditAction::BenchmarkConvert
         }
         "process_evaluation" => StorageTraceAuditAction::ProcessEvaluate,
-        "tenant_policy_update" => StorageTraceAuditAction::PolicyUpdate,
+        "tenant_policy_update" | "tenant_access_grant_update" => {
+            StorageTraceAuditAction::PolicyUpdate
+        }
         "ranking_worker_run_recovery" => StorageTraceAuditAction::RankingWorkerRunRecovery,
         _ => StorageTraceAuditAction::Read,
     };
@@ -23088,6 +23121,12 @@ fn audit_backfill_storage_projection(
                     .unwrap_or_default()
                     .min(u32::MAX as usize) as u32,
             }
+        }
+        "tenant_policy_update" => tenant_policy_audit_metadata_from_reason(event.reason.as_deref())
+            .unwrap_or(StorageTraceAuditSafeMetadata::Empty),
+        "tenant_access_grant_update" => {
+            tenant_access_grant_audit_metadata_from_reason(event.reason.as_deref())
+                .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
         }
         "ranking_worker_run_recovery" => {
             ranking_worker_run_recovery_audit_metadata_from_reason(event.reason.as_deref())
@@ -34658,6 +34697,70 @@ mod tests {
             Some(TRACE_AUDIT_EVENT_GENESIS_HASH)
         );
         assert!(raw_events[1].event_hash.is_some());
+    }
+
+    #[test]
+    fn audit_backfill_preserves_tenant_policy_update_metadata() {
+        let auth = test_reviewer_auth("tenant-a");
+        let event = TraceCommonsAuditEvent::tenant_policy_update(
+            &auth,
+            "trace-policy-v1",
+            2,
+            3,
+            "sha256:policy-projection",
+        );
+
+        let (action, metadata) = audit_backfill_storage_projection(&event);
+
+        assert_eq!(action, StorageTraceAuditAction::PolicyUpdate);
+        assert_eq!(
+            metadata,
+            StorageTraceAuditSafeMetadata::TenantPolicy {
+                policy_version: "trace-policy-v1".to_string(),
+                allowed_consent_scope_count: 2,
+                allowed_use_count: 3,
+                policy_projection_hash: "sha256:policy-projection".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn audit_backfill_preserves_tenant_access_grant_update_metadata() {
+        let grant_id = Uuid::from_u128(0x77);
+        let projection_hash = "sha256:grant-projection";
+        let event = TraceCommonsAuditEvent {
+            event_id: Uuid::from_u128(0x88),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: Uuid::nil(),
+            kind: "tenant_access_grant_update".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Admin),
+            actor_principal_ref: Some(principal_storage_ref("admin-token-a")),
+            reason: Some(format!(
+                "action=revoked;grant_id={grant_id};role=reviewer;status=revoked;allowed_consent_scope_count=2;allowed_use_count=1;grant_projection_hash={projection_hash}"
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: Some(projection_hash.to_string()),
+            previous_event_hash: None,
+            event_hash: None,
+        };
+
+        let (action, metadata) = audit_backfill_storage_projection(&event);
+
+        assert_eq!(action, StorageTraceAuditAction::PolicyUpdate);
+        assert_eq!(
+            metadata,
+            StorageTraceAuditSafeMetadata::TenantAccessGrant {
+                action: "revoked".to_string(),
+                role: StorageTraceTenantAccessGrantRole::Reviewer,
+                status: StorageTraceTenantAccessGrantStatus::Revoked,
+                allowed_consent_scope_count: 2,
+                allowed_use_count: 1,
+                grant_projection_hash: projection_hash.to_string(),
+            }
+        );
     }
 
     #[test]
