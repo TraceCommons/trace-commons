@@ -604,6 +604,7 @@ impl TraceExportAccessGrant {
 struct ConfiguredTraceArtifactStore {
     object_store_name: String,
     store: Arc<dyn TraceArtifactStore>,
+    object_io_enabled: bool,
     plaintext_compatibility_allowed: bool,
 }
 
@@ -612,6 +613,7 @@ impl ConfiguredTraceArtifactStore {
         Self {
             object_store_name: object_store_name.into(),
             store,
+            object_io_enabled: true,
             plaintext_compatibility_allowed: true,
         }
     }
@@ -625,6 +627,7 @@ impl ConfiguredTraceArtifactStore {
         Self {
             object_store_name: config.status_object_store_alias().to_string(),
             store: Arc::new(DisabledRemoteTraceArtifactStore::new(config)),
+            object_io_enabled: false,
             plaintext_compatibility_allowed: false,
         }
     }
@@ -635,6 +638,15 @@ impl ConfiguredTraceArtifactStore {
 
     fn plaintext_compatibility_allowed(&self) -> bool {
         self.plaintext_compatibility_allowed
+    }
+
+    fn object_io_enabled(&self) -> bool {
+        self.object_io_enabled
+    }
+
+    fn object_primary_eligible(&self) -> bool {
+        self.object_io_enabled()
+            && is_enabled_object_primary_trace_object_store(Some(self.object_store_name()))
     }
 
     fn put_json<T: Serialize>(
@@ -3831,6 +3843,8 @@ struct TraceCommonsConfigStatusResponse {
     ranking_worker_run_stale_after_hours: i64,
     artifact_store_configured: bool,
     artifact_object_store: Option<String>,
+    artifact_object_store_io_enabled: bool,
+    object_primary_object_store_eligible: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     trace_corpus_rls: Option<TraceCommonsRlsConfigStatus>,
 }
@@ -3953,6 +3967,14 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .artifact_store
             .as_ref()
             .map(|store| store.object_store_name().to_string()),
+        artifact_object_store_io_enabled: state
+            .artifact_store
+            .as_ref()
+            .is_some_and(|store| store.object_io_enabled()),
+        object_primary_object_store_eligible: state
+            .artifact_store
+            .as_ref()
+            .is_some_and(|store| store.object_primary_eligible()),
         trace_corpus_rls: None,
     }
 }
@@ -31657,6 +31679,14 @@ mod tests {
             value["artifact_object_store"],
             serde_json::json!(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE)
         );
+        assert_eq!(
+            value["artifact_object_store_io_enabled"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["object_primary_object_store_eligible"],
+            serde_json::json!(true)
+        );
         let object = value.as_object().expect("status response is object");
         for forbidden_key in [
             "root",
@@ -31755,6 +31785,14 @@ mod tests {
         assert_eq!(
             value["artifact_object_store"],
             serde_json::json!(TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE)
+        );
+        assert_eq!(
+            value["artifact_object_store_io_enabled"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["object_primary_object_store_eligible"],
+            serde_json::json!(false)
         );
 
         let object = value.as_object().expect("status response is object");
