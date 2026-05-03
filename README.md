@@ -77,11 +77,13 @@ appending a new running row; stale running rows surface as operational-summary
 blockers until an admin append-finalizes them through the stale recovery API,
 which also writes a hash-only audit event for the recovery action.
 With the DB mirror configured, ranking evidence, calibration runs, and ranking
-worker runs are dual-written to PostgreSQL. Maintenance reconciliation compares
-ranking model versions, feature/prediction/label evidence, calibration report
-hashes, and worker-run lifecycle rows across file and DB storage, feeding any
-missing or drifted rows into `blocking_gaps` before DB reviewer reads or
-credit-bearing ranking paths are promoted.
+worker runs are dual-written to PostgreSQL. Maintenance backfill mirrors
+file-backed ranking model versions, feature/prediction/label evidence,
+calibration runs, and worker-run rows into the DB. Maintenance reconciliation
+compares ranking model versions, feature/prediction/label evidence,
+calibration report hashes, and worker-run lifecycle rows across file and DB
+storage, feeding any missing or drifted rows into `blocking_gaps` before DB
+reviewer reads or credit-bearing ranking paths are promoted.
 `TRACE_COMMONS_DB_REVIEWER_READS=true` serves admin ranking lists, calibration
 reports, model-risk reports, credit-readiness reports, calibration-run history,
 and worker-run history from the tenant-scoped DB mirror.
