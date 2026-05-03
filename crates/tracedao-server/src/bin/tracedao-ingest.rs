@@ -2144,6 +2144,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(ranking_calibration_report_handler),
         )
         .route(
+            "/v1/admin/ranking/model-risk-report",
+            get(ranking_model_risk_report_handler),
+        )
+        .route(
             "/v1/admin/ranking/calibration-runs",
             get(ranking_calibration_runs_handler),
         )
@@ -5680,6 +5684,41 @@ struct TraceRankingCalibrationReport {
     low_confidence_prediction_count: usize,
 }
 
+#[derive(Debug, Serialize)]
+struct TraceRankingModelRiskReport {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    active_model_count: usize,
+    monitored_model_count: usize,
+    at_risk_model_count: usize,
+    models: Vec<TraceRankingModelRiskRecord>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingModelRiskRecord {
+    model_version: String,
+    target_use: TraceAllowedUse,
+    policy_version: String,
+    feature_schema_version: String,
+    latest_calibration_run_id: Option<Uuid>,
+    latest_calibration_report_hash: Option<String>,
+    latest_joined_evidence_hash: Option<String>,
+    latest_calibration_created_at: Option<DateTime<Utc>>,
+    latest_calibration_promotable: Option<bool>,
+    latest_calibration_reason_codes: Vec<String>,
+    current_joined_evidence_hash: String,
+    current_promotable: bool,
+    current_reason_codes: Vec<String>,
+    joined_evidence_changed: bool,
+    prediction_count: usize,
+    label_count: usize,
+    joined_label_prediction_count: usize,
+    predictions_since_calibration_count: usize,
+    labels_since_calibration_count: usize,
+    low_confidence_predictions_since_calibration_count: usize,
+    risk_codes: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct TraceRankingCalibrationRunRequest {
     model_version: String,
@@ -8405,6 +8444,34 @@ async fn ranking_calibration_report_handler(
     )))
 }
 
+async fn ranking_model_risk_report_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<TraceRankingModelRiskReport>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let predictions = read_ranking_predictions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let labels = read_ranking_labels_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let calibration_runs = read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(ranking_model_risk_report(
+        state.as_ref(),
+        &tenant,
+        &model_versions,
+        &predictions,
+        &labels,
+        &calibration_runs,
+    )))
+}
+
 async fn ranking_calibration_run_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -9212,6 +9279,256 @@ fn ranking_calibration_report(
             .iter()
             .filter(|prediction| prediction.confidence < 0.5)
             .count(),
+    }
+}
+
+fn latest_ranking_model_versions(
+    records: &[TraceRankingModelVersionRecord],
+) -> Vec<&TraceRankingModelVersionRecord> {
+    let mut latest_by_version = BTreeMap::new();
+    for record in records {
+        let should_replace = latest_by_version.get(&record.model_version).is_none_or(
+            |current: &&TraceRankingModelVersionRecord| record.created_at > current.created_at,
+        );
+        if should_replace {
+            latest_by_version.insert(record.model_version.clone(), record);
+        }
+    }
+    latest_by_version.into_values().collect()
+}
+
+fn ranking_prediction_matches_model_target(
+    prediction: &TraceRankingPredictionRecord,
+    model: &TraceRankingModelVersionRecord,
+    target_use: TraceAllowedUse,
+) -> bool {
+    prediction.model_version == model.model_version
+        && prediction.target_use == target_use
+        && prediction.prediction_policy_version == model.policy_version
+        && prediction.feature_schema_version == model.feature_schema_version
+}
+
+fn ranking_model_target_uses(
+    model: &TraceRankingModelVersionRecord,
+    predictions: &[TraceRankingPredictionRecord],
+    calibration_runs: &[TraceRankingCalibrationRunRecord],
+) -> BTreeSet<TraceAllowedUse> {
+    let mut target_uses = BTreeSet::new();
+    for run in calibration_runs {
+        if run.model_version == model.model_version
+            && run.policy_version == model.policy_version
+            && run.evaluation_dataset_hash == model.calibration_dataset_hash
+        {
+            target_uses.insert(run.target_use);
+        }
+    }
+    for prediction in predictions {
+        if prediction.model_version == model.model_version
+            && prediction.prediction_policy_version == model.policy_version
+            && prediction.feature_schema_version == model.feature_schema_version
+        {
+            target_uses.insert(prediction.target_use);
+        }
+    }
+    target_uses
+}
+
+fn latest_calibration_run_for_model_target<'a>(
+    model: &TraceRankingModelVersionRecord,
+    target_use: TraceAllowedUse,
+    calibration_runs: &'a [TraceRankingCalibrationRunRecord],
+) -> Option<&'a TraceRankingCalibrationRunRecord> {
+    calibration_runs
+        .iter()
+        .filter(|run| {
+            run.model_version == model.model_version
+                && run.target_use == target_use
+                && run.policy_version == model.policy_version
+                && run.evaluation_dataset_hash == model.calibration_dataset_hash
+        })
+        .max_by_key(|run| run.created_at)
+}
+
+fn ranking_calibration_is_stale(state: &AppState, run: &TraceRankingCalibrationRunRecord) -> bool {
+    state
+        .ranking_calibration_max_age
+        .is_some_and(|max_age| Utc::now().signed_duration_since(run.created_at) > max_age)
+}
+
+fn ranking_model_risk_report(
+    state: &AppState,
+    tenant: &TenantAuth,
+    model_versions: &[TraceRankingModelVersionRecord],
+    predictions: &[TraceRankingPredictionRecord],
+    labels: &[TraceRankingLabelRecord],
+    calibration_runs: &[TraceRankingCalibrationRunRecord],
+) -> TraceRankingModelRiskReport {
+    let active_models = latest_ranking_model_versions(model_versions)
+        .into_iter()
+        .filter(|model| model.status == StorageTraceRankingModelStatus::Active)
+        .collect::<Vec<_>>();
+    let active_model_count = active_models.len();
+    let mut models = Vec::new();
+    for model in active_models {
+        for target_use in ranking_model_target_uses(model, predictions, calibration_runs) {
+            models.push(ranking_model_risk_record(
+                state,
+                tenant,
+                model,
+                target_use,
+                predictions,
+                labels,
+                calibration_runs,
+            ));
+        }
+    }
+    models.sort_by(|left, right| {
+        (
+            &left.model_version,
+            serde_enum_tag(&left.target_use),
+            &left.policy_version,
+        )
+            .cmp(&(
+                &right.model_version,
+                serde_enum_tag(&right.target_use),
+                &right.policy_version,
+            ))
+    });
+    let at_risk_model_count = models
+        .iter()
+        .filter(|model| !model.risk_codes.is_empty())
+        .count();
+    TraceRankingModelRiskReport {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        active_model_count,
+        monitored_model_count: models.len(),
+        at_risk_model_count,
+        models,
+    }
+}
+
+fn ranking_model_risk_record(
+    state: &AppState,
+    tenant: &TenantAuth,
+    model: &TraceRankingModelVersionRecord,
+    target_use: TraceAllowedUse,
+    predictions: &[TraceRankingPredictionRecord],
+    labels: &[TraceRankingLabelRecord],
+    calibration_runs: &[TraceRankingCalibrationRunRecord],
+) -> TraceRankingModelRiskRecord {
+    let latest_calibration =
+        latest_calibration_run_for_model_target(model, target_use, calibration_runs);
+    let confidence_threshold = latest_calibration
+        .map_or(state.ranking_min_confidence_threshold, |run| {
+            run.confidence_threshold
+        });
+    let current = ranking_calibration_run_record(
+        tenant,
+        RankingCalibrationRunInputs {
+            calibration_run_id: Uuid::new_v4(),
+            model_version: model.model_version.clone(),
+            target_use,
+            policy_version: model.policy_version.clone(),
+            feature_schema_version: model.feature_schema_version.clone(),
+            evaluation_dataset_hash: model.calibration_dataset_hash.clone(),
+            min_label_count: latest_calibration
+                .map_or(state.ranking_min_label_count, |run| run.min_label_count),
+            min_label_source_count: latest_calibration
+                .map_or(state.ranking_min_label_source_count, |run| {
+                    run.min_label_source_count
+                }),
+            confidence_threshold,
+            max_average_absolute_error_micros: latest_calibration
+                .map_or(state.ranking_max_average_absolute_error_micros, |run| {
+                    run.max_average_absolute_error_micros
+                }),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            created_at: Utc::now(),
+        },
+        predictions,
+        labels,
+    );
+
+    let predictions_since_calibration_count = latest_calibration.map_or(0, |run| {
+        predictions
+            .iter()
+            .filter(|prediction| {
+                prediction.created_at > run.created_at
+                    && ranking_prediction_matches_model_target(prediction, model, target_use)
+            })
+            .count()
+    });
+    let labels_since_calibration_count = latest_calibration.map_or(0, |run| {
+        labels
+            .iter()
+            .filter(|label| label.created_at > run.created_at && label.target_use == target_use)
+            .count()
+    });
+    let low_confidence_predictions_since_calibration_count = latest_calibration.map_or(0, |run| {
+        predictions
+            .iter()
+            .filter(|prediction| {
+                prediction.created_at > run.created_at
+                    && ranking_prediction_matches_model_target(prediction, model, target_use)
+                    && prediction.confidence < confidence_threshold
+            })
+            .count()
+    });
+
+    let joined_evidence_changed = latest_calibration
+        .is_some_and(|run| run.joined_evidence_hash != current.joined_evidence_hash);
+    let mut risk_codes = Vec::new();
+    match latest_calibration {
+        Some(run) => {
+            if !run.promotable {
+                risk_codes.push("calibration_not_promotable".to_string());
+            }
+            if ranking_calibration_is_stale(state, run) {
+                risk_codes.push("calibration_stale".to_string());
+            }
+            if run.joined_label_source_count < state.ranking_min_label_source_count {
+                risk_codes.push("calibration_label_source_underdiverse".to_string());
+            }
+            if joined_evidence_changed {
+                risk_codes.push("joined_evidence_changed_since_calibration".to_string());
+            }
+        }
+        None => risk_codes.push("missing_calibration".to_string()),
+    }
+    if !current.promotable {
+        risk_codes.push("current_evidence_not_promotable".to_string());
+    }
+    if low_confidence_predictions_since_calibration_count > 0 {
+        risk_codes.push("low_confidence_predictions_since_calibration".to_string());
+    }
+    risk_codes.sort();
+    risk_codes.dedup();
+
+    TraceRankingModelRiskRecord {
+        model_version: model.model_version.clone(),
+        target_use,
+        policy_version: model.policy_version.clone(),
+        feature_schema_version: model.feature_schema_version.clone(),
+        latest_calibration_run_id: latest_calibration.map(|run| run.calibration_run_id),
+        latest_calibration_report_hash: latest_calibration.map(|run| run.report_hash.clone()),
+        latest_joined_evidence_hash: latest_calibration.map(|run| run.joined_evidence_hash.clone()),
+        latest_calibration_created_at: latest_calibration.map(|run| run.created_at),
+        latest_calibration_promotable: latest_calibration.map(|run| run.promotable),
+        latest_calibration_reason_codes: latest_calibration
+            .map(|run| run.reason_codes.clone())
+            .unwrap_or_default(),
+        current_joined_evidence_hash: current.joined_evidence_hash,
+        current_promotable: current.promotable,
+        current_reason_codes: current.reason_codes,
+        joined_evidence_changed,
+        prediction_count: current.prediction_count,
+        label_count: current.label_count,
+        joined_label_prediction_count: current.joined_label_prediction_count,
+        predictions_since_calibration_count,
+        labels_since_calibration_count,
+        low_confidence_predictions_since_calibration_count,
+        risk_codes,
     }
 }
 
@@ -37505,6 +37822,234 @@ mod tests {
         .await
         .expect("promotable calibration evidence allows activation");
         assert_eq!(active.status, StorageTraceRankingModelStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn active_ranking_model_risk_report_flags_post_calibration_evidence_drift() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut calibration_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut calibration_envelope);
+        calibration_envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        calibration_envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        calibration_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let calibration_submission_id = calibration_envelope.submission_id;
+        let mut drift_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut drift_envelope);
+        drift_envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        drift_envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        drift_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let drift_submission_id = drift_envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(calibration_envelope),
+        )
+        .await
+        .expect("calibration submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(drift_envelope),
+        )
+        .await
+        .expect("drift submission succeeds");
+
+        let Json(candidate) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-risk-report-v1".to_string(),
+                feature_schema_version: "ranking-features-risk-report-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:training-set-risk-report".to_string(),
+                calibration_dataset_hash: "sha256:calibration-set-risk-report".to_string(),
+                model_artifact_hash: "sha256:model-artifact-risk-report".to_string(),
+            }),
+        )
+        .await
+        .expect("candidate ranking model can be registered");
+        let Json(calibration_feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id: calibration_submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:feature-vector-risk-report-calibration".to_string(),
+                feature_names_hash: "sha256:feature-names-risk-report-calibration".to_string(),
+                source_feature_hash: "sha256:source-feature-risk-report-calibration".to_string(),
+                duplicate_score: Some(0.02),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.01),
+                quality_score: Some(0.9),
+                coverage_tags: vec!["tool:terminal".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write calibration feature");
+        let Json(_) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id: calibration_submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                model_version: candidate.model_version.clone(),
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                prediction_policy_version: candidate.policy_version.clone(),
+                feature_vector_hash: calibration_feature.feature_vector_hash.clone(),
+                predicted_utility_micros: 2_100_000,
+                uncertainty_micros: 300_000,
+                confidence: 0.82,
+                risk_penalty_micros: 50_000,
+                novelty_bonus_micros: 125_000,
+                explanation_codes: vec!["novel_tool_success".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write calibration prediction");
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: calibration_submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 2_500_000,
+                evidence_hash: "sha256:frontier-lab-evidence-risk-report-calibration".to_string(),
+                external_ref: "private-frontier-lab-risk-report-calibration".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write calibration label");
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::ModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(500_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration run");
+        assert!(calibration.promotable);
+        let Json(active) = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::ModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "promote calibrated model for risk reporting".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can promote calibrated model");
+        assert_eq!(active.model_status, StorageTraceRankingModelStatus::Active);
+
+        let Json(drift_feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id: drift_submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:feature-vector-risk-report-drift".to_string(),
+                feature_names_hash: "sha256:feature-names-risk-report-drift".to_string(),
+                source_feature_hash: "sha256:source-feature-risk-report-drift".to_string(),
+                duplicate_score: Some(0.03),
+                novelty_score: Some(0.88),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.87),
+                coverage_tags: vec!["tool:shell".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write drift feature");
+        let Json(_) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id: drift_submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                model_version: candidate.model_version.clone(),
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                prediction_policy_version: candidate.policy_version.clone(),
+                feature_vector_hash: drift_feature.feature_vector_hash.clone(),
+                predicted_utility_micros: 2_300_000,
+                uncertainty_micros: 600_000,
+                confidence: 0.42,
+                risk_penalty_micros: 100_000,
+                novelty_bonus_micros: 75_000,
+                explanation_codes: vec!["fresh_unreviewed_slice".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write post-calibration prediction");
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: drift_submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 3_000_000,
+                evidence_hash: "sha256:reviewer-evidence-risk-report-drift".to_string(),
+                external_ref: "private-reviewer-risk-report-drift".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write post-calibration label");
+
+        let Json(report) =
+            ranking_model_risk_report_handler(State(state), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can read active ranking model risk report");
+        assert_eq!(report.active_model_count, 1);
+        assert_eq!(report.at_risk_model_count, 1);
+        assert_eq!(report.models.len(), 1);
+        let model = &report.models[0];
+        assert_eq!(model.model_version, candidate.model_version);
+        assert_eq!(model.target_use, TraceAllowedUse::ModelTraining);
+        assert_eq!(
+            model.latest_calibration_run_id,
+            Some(calibration.calibration_run_id)
+        );
+        assert_eq!(
+            model.latest_calibration_report_hash,
+            Some(calibration.report_hash.clone())
+        );
+        assert_eq!(
+            model.latest_joined_evidence_hash,
+            Some(calibration.joined_evidence_hash)
+        );
+        assert!(model.current_joined_evidence_hash.starts_with("sha256:"));
+        assert!(model.joined_evidence_changed);
+        assert_eq!(model.predictions_since_calibration_count, 1);
+        assert_eq!(model.labels_since_calibration_count, 1);
+        assert_eq!(model.low_confidence_predictions_since_calibration_count, 1);
+        assert!(
+            model
+                .risk_codes
+                .contains(&"joined_evidence_changed_since_calibration".to_string())
+        );
+        assert!(
+            model
+                .risk_codes
+                .contains(&"low_confidence_predictions_since_calibration".to_string())
+        );
     }
 
     #[tokio::test]
