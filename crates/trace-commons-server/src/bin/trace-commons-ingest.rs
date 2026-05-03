@@ -15362,7 +15362,14 @@ async fn run_ranker_training_pairs_export_with_grant(
         .await,
     )
     .await?;
-    let pairs = build_ranker_training_pairs(&candidates, pair_limit);
+    let preference_labels = fail_export_job_on_error(
+        state,
+        &job,
+        "ranker pair export job failure",
+        read_ranking_preference_labels_for_admin(state, tenant).await,
+    )
+    .await?;
+    let pairs = build_ranker_training_pairs(&candidates, &preference_labels, pair_limit);
     let source_submission_ids = ranker_pair_source_submission_ids(&pairs);
     let source_object_refs = fail_export_job_on_error(
         state,
@@ -16048,23 +16055,82 @@ fn is_ranker_training_consent_scope(scope: ConsentScope) -> bool {
 
 fn build_ranker_training_pairs(
     candidates: &[TraceRankerTrainingCandidate],
+    preference_labels: &[TraceRankingPreferenceLabelRecord],
     limit: usize,
 ) -> Vec<TraceRankerTrainingPair> {
-    candidates
-        .windows(2)
-        .filter_map(|window| {
+    let candidates_by_submission = candidates
+        .iter()
+        .map(|candidate| (candidate.submission_id, candidate))
+        .collect::<BTreeMap<_, _>>();
+    let mut preference_labels = preference_labels.iter().collect::<Vec<_>>();
+    preference_labels.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.preference_label_id.cmp(&right.preference_label_id))
+    });
+    let mut seen_unordered_pairs = BTreeSet::new();
+    let mut pairs = Vec::new();
+    for label in preference_labels {
+        if pairs.len() >= limit {
+            return pairs;
+        }
+        if label.target_use != TraceAllowedUse::RankingModelTraining {
+            continue;
+        }
+        let Some(preferred) = candidates_by_submission.get(&label.preferred_submission_id) else {
+            continue;
+        };
+        let Some(rejected) = candidates_by_submission.get(&label.rejected_submission_id) else {
+            continue;
+        };
+        if preferred.submission_id == rejected.submission_id {
+            continue;
+        }
+        if !seen_unordered_pairs.insert(ranker_pair_unordered_key(
+            preferred.submission_id,
+            rejected.submission_id,
+        )) {
+            continue;
+        }
+        pairs.push(TraceRankerTrainingPair::from_preference_label(
+            preferred, rejected, label,
+        ));
+    }
+
+    for window in candidates.windows(2) {
+        if pairs.len() >= limit {
+            break;
+        }
+        let Some(pair) = (|| {
             let [preferred, rejected] = window else {
                 return None;
             };
             if preferred.submission_id == rejected.submission_id {
                 return None;
             }
+            if !seen_unordered_pairs.insert(ranker_pair_unordered_key(
+                preferred.submission_id,
+                rejected.submission_id,
+            )) {
+                return None;
+            }
             Some(TraceRankerTrainingPair::from_candidates(
                 preferred, rejected,
             ))
-        })
-        .take(limit)
-        .collect()
+        })() else {
+            continue;
+        };
+        pairs.push(pair);
+    }
+    pairs
+}
+
+fn ranker_pair_unordered_key(left: Uuid, right: Uuid) -> (Uuid, Uuid) {
+    if left <= right {
+        (left, right)
+    } else {
+        (right, left)
+    }
 }
 
 fn source_submission_ids_hash(kind: &str, source_submission_ids: &[Uuid]) -> String {
@@ -16083,6 +16149,12 @@ fn ranker_pair_list_hash(pairs: &[TraceRankerTrainingPair]) -> String {
         payload.push_str(&pair.preferred_submission_id.to_string());
         payload.push('>');
         payload.push_str(&pair.rejected_submission_id.to_string());
+        payload.push(':');
+        payload.push_str(&pair.reason);
+        if let Some(preference_label_id) = pair.preference_label_id {
+            payload.push(':');
+            payload.push_str(&preference_label_id.to_string());
+        }
     }
     sha256_prefixed(&payload)
 }
@@ -28067,6 +28139,16 @@ struct TraceRankerTrainingPair {
     preferred_score: f32,
     rejected_score: f32,
     reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preference_label_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preference_label_source: Option<StorageTraceRankingLabelSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preference_utility_category: Option<StorageTraceRankingUtilityCategory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preference_strength_micros: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preference_evidence_hash: Option<String>,
     preferred: TraceRankerTrainingCandidate,
     rejected: TraceRankerTrainingCandidate,
 }
@@ -28084,6 +28166,34 @@ impl TraceRankerTrainingPair {
             preferred_score: preferred.ranker_score,
             rejected_score: rejected.ranker_score,
             reason: "higher_ranker_score".to_string(),
+            preference_label_id: None,
+            preference_label_source: None,
+            preference_utility_category: None,
+            preference_strength_micros: None,
+            preference_evidence_hash: None,
+            preferred: preferred.clone(),
+            rejected: rejected.clone(),
+        }
+    }
+
+    fn from_preference_label(
+        preferred: &TraceRankerTrainingCandidate,
+        rejected: &TraceRankerTrainingCandidate,
+        preference: &TraceRankingPreferenceLabelRecord,
+    ) -> Self {
+        Self {
+            preferred_submission_id: preferred.submission_id,
+            rejected_submission_id: rejected.submission_id,
+            preferred_trace_id: preferred.trace_id,
+            rejected_trace_id: rejected.trace_id,
+            preferred_score: preferred.ranker_score,
+            rejected_score: rejected.ranker_score,
+            reason: "explicit_pairwise_preference_label".to_string(),
+            preference_label_id: Some(preference.preference_label_id),
+            preference_label_source: Some(preference.label_source),
+            preference_utility_category: Some(preference.utility_category),
+            preference_strength_micros: Some(preference.preference_strength_micros),
+            preference_evidence_hash: Some(preference.evidence_hash.clone()),
             preferred: preferred.clone(),
             rejected: rejected.clone(),
         }
@@ -44059,6 +44169,86 @@ mod tests {
             serde_json::to_string(&preferences).expect("preference labels serialize");
         assert!(!preferences_json.contains("frontier-lab-private-pair-456"));
         assert!(!preferences_json.contains("trace body"));
+    }
+
+    #[tokio::test]
+    async fn ranker_training_pairs_include_explicit_preference_labels_before_score_heuristics() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut preferred = sample_envelope().await;
+        make_metadata_only_low_risk(&mut preferred);
+        preferred.consent.scopes = vec![ConsentScope::RankingTraining];
+        preferred.trace_card.consent_scope = ConsentScope::RankingTraining;
+        preferred.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        preferred.value.submission_score = 0.05;
+        let preferred_submission_id = preferred.submission_id;
+        let mut rejected = sample_envelope().await;
+        make_metadata_only_low_risk(&mut rejected);
+        rejected.consent.scopes = vec![ConsentScope::RankingTraining];
+        rejected.trace_card.consent_scope = ConsentScope::RankingTraining;
+        rejected.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        rejected.value.submission_score = 0.95;
+        let rejected_submission_id = rejected.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(preferred),
+        )
+        .await
+        .expect("preferred ranking source submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(rejected),
+        )
+        .await
+        .expect("rejected ranking source submission succeeds");
+
+        let Json(preference) = ranking_preference_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id,
+                rejected_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 900_000,
+                evidence_hash: "sha256:frontier-explicit-training-pair".to_string(),
+                external_ref: "frontier-lab-private-training-pair-789".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write explicit preference label");
+
+        let Json(pairs) = ranker_training_pairs_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(1),
+                purpose: Some("explicit_preference_pair_export".to_string()),
+                status: None,
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect("reviewer can export ranker pairs");
+
+        assert_eq!(pairs.item_count, 1);
+        let pair = &pairs.pairs[0];
+        assert_eq!(pair.preferred_submission_id, preferred_submission_id);
+        assert_eq!(pair.rejected_submission_id, rejected_submission_id);
+        assert_eq!(pair.reason, "explicit_pairwise_preference_label");
+        assert_eq!(
+            pair.preference_label_id,
+            Some(preference.preference_label_id)
+        );
+        assert_eq!(pair.preference_strength_micros, Some(900_000));
+        let pairs_json = serde_json::to_string(&pairs).expect("pairs serialize");
+        assert!(!pairs_json.contains("frontier-lab-private-training-pair-789"));
+        assert!(!pairs_json.contains("trace body"));
     }
 
     #[tokio::test]
