@@ -222,6 +222,7 @@ const TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS: &str =
     "TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS";
 const TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS: &str =
     "TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS";
+const TRACE_COMMONS_RANKING_MIN_LABEL_COUNT: &str = "TRACE_COMMONS_RANKING_MIN_LABEL_COUNT";
 const TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT: &str =
     "TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT";
 const DEFAULT_EDDSA_KEYSET_URL_TIMEOUT_MS: u64 = 5_000;
@@ -240,6 +241,8 @@ const TRACE_EXPORT_ONE_SHOT_GRANT_TTL_SECONDS: i64 = 300;
 const TRACE_RANKING_DEFAULT_MIN_LABEL_COUNT: usize = 25;
 const TRACE_RANKING_DEFAULT_CONFIDENCE_THRESHOLD: f32 = 0.5;
 const TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS: i64 = 1_000_000;
+const DEFAULT_TRACE_RANKING_MIN_LABEL_COUNT: usize = 1;
+const MAX_TRACE_RANKING_MIN_LABEL_COUNT: usize = 1_000_000;
 const DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT: usize = 1;
 const MAX_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT: usize = 4;
 
@@ -299,6 +302,7 @@ struct AppState {
     artifact_store: Option<ConfiguredTraceArtifactStore>,
     near_credit_submitter: Option<Arc<dyn TraceNearCreditSubmitter>>,
     ranking_calibration_max_age: Option<Duration>,
+    ranking_min_label_count: usize,
     ranking_min_label_source_count: usize,
 }
 
@@ -1408,6 +1412,7 @@ impl AppState {
         let artifact_store = trace_artifact_store_from_env(&root)?;
         let near_credit_submitter = trace_near_credit_submitter_from_env()?;
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
+        let ranking_min_label_count = parse_ranking_min_label_count_from_env()?;
         let ranking_min_label_source_count = parse_ranking_min_label_source_count_from_env()?;
         let object_primary_submit_review = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW);
         let object_primary_replay_export = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT);
@@ -1552,6 +1557,7 @@ impl AppState {
             artifact_store,
             near_credit_submitter,
             ranking_calibration_max_age,
+            ranking_min_label_count,
             ranking_min_label_source_count,
         })
     }
@@ -3464,6 +3470,24 @@ fn parse_ranking_calibration_max_age_from_env() -> anyhow::Result<Option<Duratio
     Ok(Some(Duration::hours(hours)))
 }
 
+fn parse_ranking_min_label_count_from_env() -> anyhow::Result<usize> {
+    match optional_trimmed_env(TRACE_COMMONS_RANKING_MIN_LABEL_COUNT)? {
+        Some(value) => parse_ranking_min_label_count(&value),
+        None => Ok(DEFAULT_TRACE_RANKING_MIN_LABEL_COUNT),
+    }
+}
+
+fn parse_ranking_min_label_count(configured: &str) -> anyhow::Result<usize> {
+    let parsed = configured.trim().parse::<usize>().with_context(|| {
+        format!("{TRACE_COMMONS_RANKING_MIN_LABEL_COUNT} must be a positive integer")
+    })?;
+    anyhow::ensure!(
+        (1..=MAX_TRACE_RANKING_MIN_LABEL_COUNT).contains(&parsed),
+        "{TRACE_COMMONS_RANKING_MIN_LABEL_COUNT} must be between 1 and {MAX_TRACE_RANKING_MIN_LABEL_COUNT}"
+    );
+    Ok(parsed)
+}
+
 fn parse_ranking_min_label_source_count_from_env() -> anyhow::Result<usize> {
     match optional_trimmed_env(TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT)? {
         Some(value) => parse_ranking_min_label_source_count(&value),
@@ -3717,6 +3741,7 @@ struct TraceCommonsConfigStatusResponse {
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Vec<String>,
     ranking_calibration_max_age_hours: Option<i64>,
+    ranking_min_label_count: usize,
     ranking_min_label_source_count: usize,
     artifact_store_configured: bool,
     artifact_object_store: Option<String>,
@@ -3832,6 +3857,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         ranking_calibration_max_age_hours: state
             .ranking_calibration_max_age
             .map(|max_age| max_age.num_hours()),
+        ranking_min_label_count: state.ranking_min_label_count,
         ranking_min_label_source_count: state.ranking_min_label_source_count,
         artifact_store_configured: state.artifact_store.is_some(),
         artifact_object_store: state
@@ -8333,12 +8359,13 @@ async fn ranking_calibration_run_handler(
     let min_label_count = body
         .min_label_count
         .unwrap_or(TRACE_RANKING_DEFAULT_MIN_LABEL_COUNT);
-    if min_label_count > 1_000_000 {
+    if min_label_count > MAX_TRACE_RANKING_MIN_LABEL_COUNT {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "ranking min_label_count is too large",
         ));
     }
+    let min_label_count = min_label_count.max(state.ranking_min_label_count);
     let max_average_absolute_error_micros = body
         .max_average_absolute_error_micros
         .unwrap_or(TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS);
@@ -26638,6 +26665,7 @@ mod tests {
             artifact_store,
             near_credit_submitter: None,
             ranking_calibration_max_age: None,
+            ranking_min_label_count: DEFAULT_TRACE_RANKING_MIN_LABEL_COUNT,
             ranking_min_label_source_count: DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT,
         })
     }
@@ -28672,6 +28700,10 @@ mod tests {
         assert_eq!(
             value["ranking_min_label_source_count"],
             serde_json::json!(DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT)
+        );
+        assert_eq!(
+            value["ranking_min_label_count"],
+            serde_json::json!(DEFAULT_TRACE_RANKING_MIN_LABEL_COUNT)
         );
         assert_eq!(
             value["submission_quota"],
@@ -32048,6 +32080,7 @@ mod tests {
             artifact_store: None,
             near_credit_submitter: None,
             ranking_calibration_max_age: None,
+            ranking_min_label_count: DEFAULT_TRACE_RANKING_MIN_LABEL_COUNT,
             ranking_min_label_source_count: DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT,
         });
 
@@ -36661,6 +36694,118 @@ mod tests {
         let runs_json = serde_json::to_string(&runs).expect("calibration runs serialize");
         assert!(!runs_json.contains("private-frontier-lab-calibration-batch"));
         assert!(!runs_json.contains("trace body"));
+    }
+
+    #[tokio::test]
+    async fn ranking_calibration_run_applies_server_min_label_count_floor() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).ranking_min_label_count = 2;
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(model) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-min-label-floor-v1".to_string(),
+                feature_schema_version: "ranking-features-min-label-floor-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:training-set-min-label-floor".to_string(),
+                calibration_dataset_hash: "sha256:calibration-set-min-label-floor".to_string(),
+                model_artifact_hash: "sha256:model-artifact-min-label-floor".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can register ranking model version");
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                feature_schema_version: model.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:feature-vector-min-label-floor".to_string(),
+                feature_names_hash: "sha256:feature-names-min-label-floor".to_string(),
+                source_feature_hash: "sha256:redacted-summary-features-min-label-floor".to_string(),
+                duplicate_score: Some(0.05),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.88),
+                coverage_tags: vec!["tool:terminal".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking feature record");
+        let Json(_) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                model_version: model.model_version.clone(),
+                feature_schema_version: model.feature_schema_version.clone(),
+                prediction_policy_version: model.policy_version.clone(),
+                feature_vector_hash: feature.feature_vector_hash,
+                predicted_utility_micros: 2_100_000,
+                uncertainty_micros: 300_000,
+                confidence: 0.82,
+                risk_penalty_micros: 50_000,
+                novelty_bonus_micros: 125_000,
+                explanation_codes: vec!["novel_tool_success".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking prediction");
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 2_500_000,
+                evidence_hash: "sha256:frontier-lab-evidence-min-label-floor".to_string(),
+                external_ref: "private-frontier-lab-min-label-floor".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking label");
+
+        let Json(run) = ranking_calibration_run_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: model.model_version,
+                target_use: TraceAllowedUse::ModelTraining,
+                policy_version: model.policy_version,
+                evaluation_dataset_hash: model.calibration_dataset_hash,
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(500_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist calibration run");
+        assert!(!run.promotable);
+        assert_eq!(run.joined_label_prediction_count, 1);
+        assert_eq!(run.min_label_count, 2);
+        assert_eq!(run.reason_codes, vec!["insufficient_labels".to_string()]);
     }
 
     #[tokio::test]
