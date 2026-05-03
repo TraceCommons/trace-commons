@@ -64,12 +64,14 @@ matches the stored prediction. Prediction-credit workers also require the active
 model/target pair to have no uncleared model-risk report codes by default so new
 credits wait for calibration/drift review before settlement. A scoped promotion
 run lets utility workers promote calibrated candidate models through the same
-server-owned gate without generic admin access. With the DB
-mirror configured, ranking evidence and calibration runs are dual-written to
-PostgreSQL and
+server-owned gate without generic admin access. Prediction-credit and promotion
+automation runs now persist a hash-only worker-run ledger with limits, counts,
+result refs, and skipped reason aggregates for admin review. With the DB mirror
+configured, ranking evidence, calibration runs, and ranking worker runs are
+dual-written to PostgreSQL and
 `TRACE_COMMONS_DB_REVIEWER_READS=true` serves admin ranking lists, calibration
-reports, model-risk reports, credit-readiness reports, and calibration-run
-history from the tenant-scoped DB mirror.
+reports, model-risk reports, credit-readiness reports, calibration-run history,
+and worker-run history from the tenant-scoped DB mirror.
 
 ## Binaries
 

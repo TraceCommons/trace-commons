@@ -402,6 +402,59 @@ pub struct TraceRankingCalibrationRunRecord {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceRankingWorkerRunKind {
+    PredictionCredit,
+    ModelPromotion,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingWorkerRunWrite {
+    pub tenant_id: String,
+    pub ranking_worker_run_id: Uuid,
+    pub run_kind: TraceRankingWorkerRunKind,
+    pub dry_run: bool,
+    pub reason_hash: String,
+    pub model_version: Option<String>,
+    pub target_use: Option<String>,
+    pub policy_version: Option<String>,
+    pub limit: u32,
+    pub checked_count: u32,
+    pub succeeded_count: u32,
+    pub skipped_existing_count: u32,
+    pub skipped_model_risk_count: u32,
+    pub skipped_ineligible_count: u32,
+    pub pending_after_count: u32,
+    pub result_refs: Vec<String>,
+    pub reason_counts: BTreeMap<String, u32>,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingWorkerRunRecord {
+    pub tenant_id: String,
+    pub ranking_worker_run_id: Uuid,
+    pub run_kind: TraceRankingWorkerRunKind,
+    pub dry_run: bool,
+    pub reason_hash: String,
+    pub model_version: Option<String>,
+    pub target_use: Option<String>,
+    pub policy_version: Option<String>,
+    pub limit: u32,
+    pub checked_count: u32,
+    pub succeeded_count: u32,
+    pub skipped_existing_count: u32,
+    pub skipped_model_risk_count: u32,
+    pub skipped_ineligible_count: u32,
+    pub pending_after_count: u32,
+    pub result_refs: Vec<String>,
+    pub reason_counts: BTreeMap<String, u32>,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TraceCreditAccountSettlementLineItem {
     pub credit_account_ref: String,
@@ -1582,6 +1635,16 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceRankingCalibrationRunRecord>, DatabaseError>;
+
+    async fn upsert_trace_ranking_worker_run(
+        &self,
+        run: TraceRankingWorkerRunWrite,
+    ) -> Result<TraceRankingWorkerRunRecord, DatabaseError>;
+
+    async fn list_trace_ranking_worker_runs(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingWorkerRunRecord>, DatabaseError>;
 
     async fn upsert_trace_export_manifest(
         &self,
