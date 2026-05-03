@@ -757,6 +757,9 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
             ranking_calibration_report_hash: Some(
                 "sha256:settlement-calibration-report".to_string(),
             ),
+            ranking_calibration_joined_evidence_hash: Some(
+                "sha256:settlement-calibration-joined-evidence".to_string(),
+            ),
             ranking_credit_events_excluded_count: 0,
             actor_principal_ref: "principal:admin".to_string(),
         })
@@ -767,6 +770,12 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
     assert_eq!(
         settlement.ranking_model_version.as_deref(),
         Some("trace-ranker-settlement-v3")
+    );
+    assert_eq!(
+        settlement
+            .ranking_calibration_joined_evidence_hash
+            .as_deref(),
+        Some("sha256:settlement-calibration-joined-evidence")
     );
 
     let near_outbox_id = Uuid::new_v4();

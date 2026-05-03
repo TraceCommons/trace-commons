@@ -459,6 +459,7 @@ pub struct TraceCreditSettlementBatchWrite {
     pub ranking_target_use: Option<String>,
     pub ranking_calibration_run_id: Option<Uuid>,
     pub ranking_calibration_report_hash: Option<String>,
+    pub ranking_calibration_joined_evidence_hash: Option<String>,
     pub ranking_credit_events_excluded_count: u32,
     pub actor_principal_ref: String,
 }
@@ -481,6 +482,7 @@ pub struct TraceCreditSettlementBatchRecord {
     pub ranking_target_use: Option<String>,
     pub ranking_calibration_run_id: Option<Uuid>,
     pub ranking_calibration_report_hash: Option<String>,
+    pub ranking_calibration_joined_evidence_hash: Option<String>,
     pub ranking_credit_events_excluded_count: u32,
     pub actor_principal_ref: String,
     pub created_at: DateTime<Utc>,

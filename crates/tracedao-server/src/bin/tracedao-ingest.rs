@@ -5293,6 +5293,8 @@ struct TraceCreditSettlementBatchRecord {
     ranking_calibration_run_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ranking_calibration_report_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ranking_calibration_joined_evidence_hash: Option<String>,
     #[serde(default)]
     ranking_credit_events_excluded_count: usize,
     actor_principal_ref: String,
@@ -5454,6 +5456,7 @@ struct TraceCreditSettlementRunResponse {
     ranking_target_use: Option<TraceAllowedUse>,
     ranking_calibration_run_id: Option<Uuid>,
     ranking_calibration_report_hash: Option<String>,
+    ranking_calibration_joined_evidence_hash: Option<String>,
     ranking_credit_events_excluded_count: usize,
 }
 
@@ -6542,6 +6545,9 @@ async fn run_credit_settlement(
             ranking_calibration_report_hash: ranking_calibration_gate
                 .as_ref()
                 .map(|gate| gate.report_hash.clone()),
+            ranking_calibration_joined_evidence_hash: ranking_calibration_gate
+                .as_ref()
+                .map(|gate| gate.joined_evidence_hash.clone()),
             ranking_credit_events_excluded_count,
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
@@ -6582,6 +6588,9 @@ async fn run_credit_settlement(
         ranking_calibration_report_hash: ranking_calibration_gate
             .as_ref()
             .map(|gate| gate.report_hash.clone()),
+        ranking_calibration_joined_evidence_hash: ranking_calibration_gate
+            .as_ref()
+            .map(|gate| gate.joined_evidence_hash.clone()),
         ranking_credit_events_excluded_count,
     })
 }
@@ -7509,6 +7518,9 @@ fn credit_settlement_batch_to_storage_write(
         ranking_target_use,
         ranking_calibration_run_id: record.ranking_calibration_run_id,
         ranking_calibration_report_hash: record.ranking_calibration_report_hash.clone(),
+        ranking_calibration_joined_evidence_hash: record
+            .ranking_calibration_joined_evidence_hash
+            .clone(),
         ranking_credit_events_excluded_count,
         actor_principal_ref: record.actor_principal_ref.clone(),
     })
@@ -7554,6 +7566,7 @@ fn credit_settlement_batch_from_storage(
         ranking_target_use,
         ranking_calibration_run_id: record.ranking_calibration_run_id,
         ranking_calibration_report_hash: record.ranking_calibration_report_hash,
+        ranking_calibration_joined_evidence_hash: record.ranking_calibration_joined_evidence_hash,
         ranking_credit_events_excluded_count: record.ranking_credit_events_excluded_count as usize,
         actor_principal_ref: record.actor_principal_ref,
         created_at: record.created_at,
@@ -9747,6 +9760,7 @@ struct RankingSettlementCalibrationGate {
     target_use: TraceAllowedUse,
     calibration_run_id: Uuid,
     report_hash: String,
+    joined_evidence_hash: String,
     confidence_threshold: f32,
 }
 
@@ -9916,6 +9930,7 @@ async fn ranking_settlement_calibration_gate(
         target_use: run.target_use,
         calibration_run_id: run.calibration_run_id,
         report_hash: run.report_hash,
+        joined_evidence_hash: run.joined_evidence_hash,
         confidence_threshold: run.confidence_threshold,
     }))
 }
@@ -32695,6 +32710,7 @@ mod tests {
                 ranking_target_use: None,
                 ranking_calibration_run_id: None,
                 ranking_calibration_report_hash: None,
+                ranking_calibration_joined_evidence_hash: None,
                 ranking_credit_events_excluded_count: 0,
                 actor_principal_ref: principal_storage_ref("admin-token-a"),
                 created_at: Utc::now(),
@@ -32808,6 +32824,7 @@ mod tests {
             ranking_target_use: None,
             ranking_calibration_run_id: None,
             ranking_calibration_report_hash: None,
+            ranking_calibration_joined_evidence_hash: None,
             ranking_credit_events_excluded_count: 0,
             actor_principal_ref: principal_storage_ref("admin-token-a"),
             created_at: Utc::now(),
@@ -34359,6 +34376,7 @@ mod tests {
             ranking_target_use: None,
             ranking_calibration_run_id: None,
             ranking_calibration_report_hash: None,
+            ranking_calibration_joined_evidence_hash: None,
             ranking_credit_events_excluded_count: 0,
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
@@ -34979,6 +34997,10 @@ mod tests {
             finalized.ranking_calibration_report_hash,
             Some(calibration.report_hash.clone())
         );
+        assert_eq!(
+            finalized.ranking_calibration_joined_evidence_hash,
+            Some(calibration.joined_evidence_hash.clone())
+        );
 
         let batches =
             read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
@@ -34999,6 +35021,10 @@ mod tests {
         assert_eq!(
             batches[0].ranking_calibration_report_hash,
             Some(calibration.report_hash)
+        );
+        assert_eq!(
+            batches[0].ranking_calibration_joined_evidence_hash,
+            Some(calibration.joined_evidence_hash)
         );
     }
 

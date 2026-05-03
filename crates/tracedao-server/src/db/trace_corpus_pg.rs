@@ -95,7 +95,8 @@ const TRACE_CREDIT_SETTLEMENT_BATCH_COLUMNS: &str = "\
     source_credit_event_ids, source_submission_ids, source_list_hash, settled_credit_points, \
     settled_credit_micros, line_items_json, near_contract_id, ranking_model_version, \
     ranking_target_use, ranking_calibration_run_id, ranking_calibration_report_hash, \
-    ranking_credit_events_excluded_count, actor_principal_ref, created_at";
+    ranking_calibration_joined_evidence_hash, ranking_credit_events_excluded_count, \
+    actor_principal_ref, created_at";
 
 const TRACE_CREDIT_HOLD_COLUMNS: &str = "\
     tenant_id, hold_id, credit_account_ref, credit_account_hash, reason, reason_hash, \
@@ -444,6 +445,8 @@ fn row_to_credit_settlement_batch(
         ranking_target_use: row.get("ranking_target_use"),
         ranking_calibration_run_id: row.get("ranking_calibration_run_id"),
         ranking_calibration_report_hash: row.get("ranking_calibration_report_hash"),
+        ranking_calibration_joined_evidence_hash: row
+            .get("ranking_calibration_joined_evidence_hash"),
         ranking_credit_events_excluded_count: row_i32_to_u32(
             row,
             "ranking_credit_events_excluded_count",
@@ -3144,10 +3147,11 @@ impl TraceCorpusStore for PgBackend {
                         settled_credit_points, settled_credit_micros, line_items_json,
                         near_contract_id, ranking_model_version, ranking_target_use,
                         ranking_calibration_run_id, ranking_calibration_report_hash,
+                        ranking_calibration_joined_evidence_hash,
                         ranking_credit_events_excluded_count, actor_principal_ref
                      ) VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                        $17, $18
+                        $17, $18, $19
                      )
                      ON CONFLICT (tenant_id, settlement_batch_id) DO UPDATE SET
                         policy_version = excluded.policy_version,
@@ -3164,6 +3168,7 @@ impl TraceCorpusStore for PgBackend {
                         ranking_target_use = excluded.ranking_target_use,
                         ranking_calibration_run_id = excluded.ranking_calibration_run_id,
                         ranking_calibration_report_hash = excluded.ranking_calibration_report_hash,
+                        ranking_calibration_joined_evidence_hash = excluded.ranking_calibration_joined_evidence_hash,
                         ranking_credit_events_excluded_count = excluded.ranking_credit_events_excluded_count,
                         actor_principal_ref = excluded.actor_principal_ref
                      RETURNING {TRACE_CREDIT_SETTLEMENT_BATCH_COLUMNS}"
@@ -3185,6 +3190,7 @@ impl TraceCorpusStore for PgBackend {
                     &batch.ranking_target_use,
                     &batch.ranking_calibration_run_id,
                     &batch.ranking_calibration_report_hash,
+                    &batch.ranking_calibration_joined_evidence_hash,
                     &ranking_credit_events_excluded_count,
                     &batch.actor_principal_ref,
                 ],

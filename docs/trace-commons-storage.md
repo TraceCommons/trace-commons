@@ -17,6 +17,7 @@ This repository owns the production-storage surface:
 - `migrations/V7__trace_ranking_calibration_label_source_gate.sql`, adding label-source diversity evidence to persisted calibration runs.
 - `migrations/V8__trace_ranking_calibration_source_error_gate.sql`, adding per-label-source calibration error evidence to persisted calibration runs.
 - `migrations/V9__trace_ranking_calibration_joined_evidence_hash.sql`, adding deterministic joined prediction/label evidence hashes to persisted calibration runs.
+- `migrations/V10__trace_credit_settlement_joined_evidence_hash.sql`, binding ranking credit settlements to calibration joined-evidence hashes.
 - `crates/tracedao-server/src/trace_corpus_storage.rs` and the PostgreSQL `TraceCorpusStore` implementation.
 - `crates/tracedao-server/src/trace_artifact_store.rs` and the encrypted local service object-store provider.
 - Optional ingest-service DB dual-write behind `TRACE_COMMONS_DB_DUAL_WRITE=true`.
