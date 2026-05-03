@@ -552,9 +552,9 @@ the stale-run promotion blocker.
 
 `GET /v1/admin/ranking/model-risk-report` recomputes the current joined-evidence hash for each active model/target-use pair and reports post-calibration prediction/label counts, current joined-label source diversity, current calibration thresholds, current aggregate/per-label-source error metrics, low-confidence fresh predictions, stale or non-promotable calibration status, evidence-hash drift, aggregate risk-code counts, and per-model machine-readable risk codes without exposing trace bodies or raw lab references.
 
-`GET /v1/admin/ranking/credit-readiness-report` lists pending positive `ranking_utility` credit events that have not already settled and explains whether each can settle under the referenced active-model prediction. Blocked rows include machine-readable reasons such as missing prediction refs, missing or inactive models, missing/stale/non-promotable/under-diverse calibration, score mismatches, held credit accounts, and low-confidence predictions, plus the calibration run/report/joined-evidence hashes when available.
+`GET /v1/admin/ranking/credit-readiness-report` lists pending positive `ranking_utility` credit events that have not already settled and explains whether each can settle under the referenced active-model prediction. Blocked rows include machine-readable reasons such as missing prediction refs, missing or inactive models, missing/stale/non-promotable/under-diverse calibration, score mismatches, held credit accounts, low-confidence predictions, and uncleared active-model risk codes such as current evidence drift, plus the calibration run/report/joined-evidence hashes when available.
 
-Model-derived ranking credit also applies the latest calibration run's confidence threshold to each active-model prediction at issuance and settlement time. Low-confidence predictions remain visible in admin evidence and risk reports, but `/v1/workers/ranking/prediction-credit` rejects them and settlement excludes manually appended ranking utility events that reference them.
+Model-derived ranking credit also applies the latest calibration run's confidence threshold and active-model risk report to each active-model prediction at issuance, readiness, and settlement time. Low-confidence or uncleared-risk predictions remain visible in admin evidence and risk reports, but `/v1/workers/ranking/prediction-credit` rejects them and settlement excludes manually appended ranking utility events that reference them.
 
 Ranking calibration runs apply both caller-supplied thresholds and
 deployment-owned floors. In production, set
@@ -983,12 +983,16 @@ source list. A settlement run that provides `ranking_model_version` uses
 the latest registered model version to be `active`, the active model policy to
 match the request `policy_version`, and the latest matching calibration run to
 be `promotable` and fresh when
-`TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS` is configured. Each selected
-ranking utility credit event must also reference `ranking_prediction:<uuid>` for
-a prediction with the same submission, model, target use, policy, and
-settlement-score micros as the credit delta; otherwise the event is excluded
-from the settlement source list. Finalized batches record the calibration run id
-plus the calibration report hash and joined-evidence hash used for the gate.
+`TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS` is configured. The same
+active model/target/policy risk report must be clear at settlement time; if
+current evidence drift, non-promotable current evidence, or other model-risk
+codes are present, ranking utility events for that gate are excluded. Each
+selected ranking utility credit event must also reference
+`ranking_prediction:<uuid>` for a prediction with the same submission, model,
+target use, policy, and settlement-score micros as the credit delta; otherwise
+the event is excluded from the settlement source list. Finalized batches record
+the calibration run id plus the calibration report hash and joined-evidence hash
+used for the gate.
 When a settlement request includes `near_contract_id`, the NEAR payload builder
 validates it as a lowercase NEAR account id before any settlement batch or
 outbox row is persisted.

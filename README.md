@@ -83,7 +83,10 @@ target use, and registered calibration dataset, and every credit event is bound
 to a matching `ranking_prediction:<uuid>` reference with a settlement score that
 matches the stored prediction. Prediction-credit workers also require the active
 model/target pair to have no uncleared model-risk report codes by default so new
-credits wait for calibration/drift review before settlement. A scoped promotion
+credits wait for calibration/drift review before settlement. Readiness reports
+and settlement re-check the same active-model risk codes, so manually appended
+prediction-bound ranking credits cannot settle while current evidence is still
+at risk. A scoped promotion
 run lets utility workers promote calibrated candidate models through the same
 server-owned gate without generic admin access, and a scoped calibration run
 lets utility workers schedule bounded calibration passes across active or
