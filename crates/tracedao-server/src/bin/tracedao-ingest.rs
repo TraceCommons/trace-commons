@@ -235,6 +235,10 @@ const TRACE_COMMONS_RANKING_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS: &str =
 const TRACE_COMMONS_RANKING_MIN_LABEL_COUNT: &str = "TRACE_COMMONS_RANKING_MIN_LABEL_COUNT";
 const TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT: &str =
     "TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT";
+const TRACE_COMMONS_RANKING_MIN_PAIRWISE_LABEL_COUNT: &str =
+    "TRACE_COMMONS_RANKING_MIN_PAIRWISE_LABEL_COUNT";
+const TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS: &str =
+    "TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS";
 const DEFAULT_EDDSA_KEYSET_URL_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_EDDSA_KEYSET_REFRESH_INTERVAL_SECONDS: u64 = 300;
@@ -265,6 +269,10 @@ const DEFAULT_TRACE_RANKING_MIN_LABEL_COUNT: usize = 1;
 const MAX_TRACE_RANKING_MIN_LABEL_COUNT: usize = 1_000_000;
 const DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT: usize = 1;
 const MAX_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT: usize = 4;
+const DEFAULT_TRACE_RANKING_MIN_PAIRWISE_LABEL_COUNT: usize = 0;
+const MAX_TRACE_RANKING_MIN_PAIRWISE_LABEL_COUNT: usize = 1_000_000;
+const DEFAULT_TRACE_RANKING_MIN_PAIRWISE_ACCURACY_MICROS: i64 = 500_000;
+const MAX_TRACE_RANKING_PAIRWISE_ACCURACY_MICROS: i64 = 1_000_000;
 
 fn default_trace_ranking_min_label_source_count() -> usize {
     DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT
@@ -331,6 +339,8 @@ struct AppState {
     ranking_max_average_absolute_error_micros: i64,
     ranking_min_label_count: usize,
     ranking_min_label_source_count: usize,
+    ranking_min_pairwise_label_count: usize,
+    ranking_min_pairwise_accuracy_micros: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1460,6 +1470,9 @@ impl AppState {
             parse_ranking_max_average_absolute_error_micros_from_env()?;
         let ranking_min_label_count = parse_ranking_min_label_count_from_env()?;
         let ranking_min_label_source_count = parse_ranking_min_label_source_count_from_env()?;
+        let ranking_min_pairwise_label_count = parse_ranking_min_pairwise_label_count_from_env()?;
+        let ranking_min_pairwise_accuracy_micros =
+            parse_ranking_min_pairwise_accuracy_micros_from_env()?;
         let object_primary_submit_review = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW);
         let object_primary_replay_export = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT);
         let object_primary_derived_exports =
@@ -1608,6 +1621,8 @@ impl AppState {
             ranking_max_average_absolute_error_micros,
             ranking_min_label_count,
             ranking_min_label_source_count,
+            ranking_min_pairwise_label_count,
+            ranking_min_pairwise_accuracy_micros,
         })
     }
 }
@@ -3641,6 +3656,42 @@ fn parse_ranking_min_label_source_count(configured: &str) -> anyhow::Result<usiz
     Ok(parsed)
 }
 
+fn parse_ranking_min_pairwise_label_count_from_env() -> anyhow::Result<usize> {
+    match optional_trimmed_env(TRACE_COMMONS_RANKING_MIN_PAIRWISE_LABEL_COUNT)? {
+        Some(value) => parse_ranking_min_pairwise_label_count(&value),
+        None => Ok(DEFAULT_TRACE_RANKING_MIN_PAIRWISE_LABEL_COUNT),
+    }
+}
+
+fn parse_ranking_min_pairwise_label_count(configured: &str) -> anyhow::Result<usize> {
+    let parsed = configured.trim().parse::<usize>().with_context(|| {
+        format!("{TRACE_COMMONS_RANKING_MIN_PAIRWISE_LABEL_COUNT} must be a non-negative integer")
+    })?;
+    anyhow::ensure!(
+        parsed <= MAX_TRACE_RANKING_MIN_PAIRWISE_LABEL_COUNT,
+        "{TRACE_COMMONS_RANKING_MIN_PAIRWISE_LABEL_COUNT} must be between 0 and {MAX_TRACE_RANKING_MIN_PAIRWISE_LABEL_COUNT}"
+    );
+    Ok(parsed)
+}
+
+fn parse_ranking_min_pairwise_accuracy_micros_from_env() -> anyhow::Result<i64> {
+    match optional_trimmed_env(TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS)? {
+        Some(value) => parse_ranking_min_pairwise_accuracy_micros(&value),
+        None => Ok(DEFAULT_TRACE_RANKING_MIN_PAIRWISE_ACCURACY_MICROS),
+    }
+}
+
+fn parse_ranking_min_pairwise_accuracy_micros(configured: &str) -> anyhow::Result<i64> {
+    let parsed = configured.trim().parse::<i64>().with_context(|| {
+        format!("{TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS} must be an integer")
+    })?;
+    anyhow::ensure!(
+        (0..=MAX_TRACE_RANKING_PAIRWISE_ACCURACY_MICROS).contains(&parsed),
+        "{TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS} must be between 0 and {MAX_TRACE_RANKING_PAIRWISE_ACCURACY_MICROS}"
+    );
+    Ok(parsed)
+}
+
 fn validate_retention_policy_id(policy_id: &str) -> anyhow::Result<()> {
     let valid = policy_id.len() <= 128
         && policy_id.chars().all(|character| {
@@ -3880,6 +3931,8 @@ struct TraceCommonsConfigStatusResponse {
     ranking_max_average_absolute_error_micros: i64,
     ranking_min_label_count: usize,
     ranking_min_label_source_count: usize,
+    ranking_min_pairwise_label_count: usize,
+    ranking_min_pairwise_accuracy_micros: i64,
     ranking_worker_run_stale_after_hours: i64,
     near_credit_submitter_configured: bool,
     near_credit_submitter_timeout_ms: Option<u64>,
@@ -4009,6 +4062,8 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         ranking_max_average_absolute_error_micros: state.ranking_max_average_absolute_error_micros,
         ranking_min_label_count: state.ranking_min_label_count,
         ranking_min_label_source_count: state.ranking_min_label_source_count,
+        ranking_min_pairwise_label_count: state.ranking_min_pairwise_label_count,
+        ranking_min_pairwise_accuracy_micros: state.ranking_min_pairwise_accuracy_micros,
         ranking_worker_run_stale_after_hours: TRACE_RANKING_WORKER_RUN_STALE_AFTER_HOURS,
         near_credit_submitter_configured: state.near_credit_submitter.is_some(),
         near_credit_submitter_timeout_ms: state.near_credit_submitter_timeout_ms,
@@ -6167,6 +6222,8 @@ struct TraceRankingModelRiskRecord {
     predictions_since_calibration_count: usize,
     labels_since_calibration_count: usize,
     low_confidence_predictions_since_calibration_count: usize,
+    pairwise_min_label_count: usize,
+    pairwise_min_accuracy_micros: i64,
     pairwise_preference_label_count: usize,
     pairwise_joined_pair_prediction_count: usize,
     pairwise_correct_pair_count: usize,
@@ -12292,10 +12349,13 @@ fn ranking_model_risk_record(
     if low_confidence_predictions_since_calibration_count > 0 {
         risk_codes.push("low_confidence_predictions_since_calibration".to_string());
     }
+    if pairwise.joined_pair_prediction_count < state.ranking_min_pairwise_label_count {
+        risk_codes.push("pairwise_evidence_below_threshold".to_string());
+    }
     if pairwise.joined_pair_prediction_count > 0
         && pairwise
             .pairwise_accuracy_micros
-            .is_some_and(|accuracy| accuracy < 500_000)
+            .is_some_and(|accuracy| accuracy < state.ranking_min_pairwise_accuracy_micros)
     {
         risk_codes.push("pairwise_accuracy_below_threshold".to_string());
     }
@@ -12334,6 +12394,8 @@ fn ranking_model_risk_record(
         predictions_since_calibration_count,
         labels_since_calibration_count,
         low_confidence_predictions_since_calibration_count,
+        pairwise_min_label_count: state.ranking_min_pairwise_label_count,
+        pairwise_min_accuracy_micros: state.ranking_min_pairwise_accuracy_micros,
         pairwise_preference_label_count: pairwise.preference_label_count,
         pairwise_joined_pair_prediction_count: pairwise.joined_pair_prediction_count,
         pairwise_correct_pair_count: pairwise.correct_pair_count,
@@ -31548,6 +31610,9 @@ mod tests {
                 TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS,
             ranking_min_label_count: DEFAULT_TRACE_RANKING_MIN_LABEL_COUNT,
             ranking_min_label_source_count: DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT,
+            ranking_min_pairwise_label_count: DEFAULT_TRACE_RANKING_MIN_PAIRWISE_LABEL_COUNT,
+            ranking_min_pairwise_accuracy_micros:
+                DEFAULT_TRACE_RANKING_MIN_PAIRWISE_ACCURACY_MICROS,
         })
     }
 
@@ -32566,6 +32631,43 @@ mod tests {
             parse_error
                 .to_string()
                 .contains(TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR)
+        );
+    }
+
+    #[test]
+    fn parses_pairwise_ranking_policy_thresholds() {
+        assert_eq!(
+            parse_ranking_min_pairwise_label_count("0").expect("zero disables pairwise floor"),
+            0
+        );
+        assert_eq!(
+            parse_ranking_min_pairwise_label_count("25").expect("pairwise floor parses"),
+            25
+        );
+        assert_eq!(
+            parse_ranking_min_pairwise_accuracy_micros("0")
+                .expect("zero disables pairwise accuracy floor"),
+            0
+        );
+        assert_eq!(
+            parse_ranking_min_pairwise_accuracy_micros("850000")
+                .expect("pairwise accuracy floor parses"),
+            850_000
+        );
+
+        let label_error = parse_ranking_min_pairwise_label_count("many")
+            .expect_err("non-numeric pairwise floor is invalid");
+        assert!(
+            label_error
+                .to_string()
+                .contains(TRACE_COMMONS_RANKING_MIN_PAIRWISE_LABEL_COUNT)
+        );
+        let accuracy_error = parse_ranking_min_pairwise_accuracy_micros("1000001")
+            .expect_err("over-range pairwise accuracy floor is invalid");
+        assert!(
+            accuracy_error
+                .to_string()
+                .contains(TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS)
         );
     }
 
@@ -33642,6 +33744,14 @@ mod tests {
         assert_eq!(
             value["ranking_min_label_count"],
             serde_json::json!(DEFAULT_TRACE_RANKING_MIN_LABEL_COUNT)
+        );
+        assert_eq!(
+            value["ranking_min_pairwise_label_count"],
+            serde_json::json!(DEFAULT_TRACE_RANKING_MIN_PAIRWISE_LABEL_COUNT)
+        );
+        assert_eq!(
+            value["ranking_min_pairwise_accuracy_micros"],
+            serde_json::json!(DEFAULT_TRACE_RANKING_MIN_PAIRWISE_ACCURACY_MICROS)
         );
         assert_eq!(
             value["ranking_worker_run_stale_after_hours"],
@@ -37135,6 +37245,9 @@ mod tests {
                 TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS,
             ranking_min_label_count: DEFAULT_TRACE_RANKING_MIN_LABEL_COUNT,
             ranking_min_label_source_count: DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT,
+            ranking_min_pairwise_label_count: DEFAULT_TRACE_RANKING_MIN_PAIRWISE_LABEL_COUNT,
+            ranking_min_pairwise_accuracy_micros:
+                DEFAULT_TRACE_RANKING_MIN_PAIRWISE_ACCURACY_MICROS,
         });
 
         let mut envelope = sample_envelope().await;
@@ -42335,6 +42448,67 @@ mod tests {
         (candidate, prediction)
     }
 
+    async fn seed_pairwise_ranking_prediction_source(
+        state: Arc<AppState>,
+        candidate: &TraceRankingModelVersionRecord,
+        fixture_key: &str,
+        predicted_utility_micros: i64,
+    ) -> TraceRankingPredictionRecord {
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("pairwise source submission succeeds");
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                feature_vector_hash: format!("sha256:{fixture_key}-feature-vector"),
+                feature_names_hash: format!("sha256:{fixture_key}-feature-names"),
+                source_feature_hash: format!("sha256:{fixture_key}-source-feature"),
+                duplicate_score: Some(0.02),
+                novelty_score: Some(0.9),
+                privacy_risk_score: Some(0.01),
+                quality_score: Some(0.91),
+                coverage_tags: vec![fixture_key.to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write pairwise feature");
+        let Json(prediction) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: candidate.model_version.clone(),
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                prediction_policy_version: candidate.policy_version.clone(),
+                feature_vector_hash: feature.feature_vector_hash,
+                predicted_utility_micros,
+                uncertainty_micros: 100_000,
+                confidence: 0.95,
+                risk_penalty_micros: 0,
+                novelty_bonus_micros: 0,
+                explanation_codes: vec![fixture_key.replace('-', "_")],
+            }),
+        )
+        .await
+        .expect("utility worker can write pairwise prediction");
+        prediction
+    }
+
     #[tokio::test]
     async fn credit_cycle_worker_runs_ranking_credit_settlement_sequence() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -46145,64 +46319,19 @@ mod tests {
         .expect("admin can promote calibrated model");
         assert_eq!(active.model_status, StorageTraceRankingModelStatus::Active);
 
-        let mut higher_scored = sample_envelope().await;
-        make_metadata_only_low_risk(&mut higher_scored);
-        higher_scored.consent.scopes = vec![ConsentScope::RankingTraining];
-        higher_scored.trace_card.consent_scope = ConsentScope::RankingTraining;
-        higher_scored.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
-        let higher_scored_submission_id = higher_scored.submission_id;
-        let _ = submit_trace_handler(
-            State(state.clone()),
-            auth_headers("token-a"),
-            Json(higher_scored),
+        let higher_scored = seed_pairwise_ranking_prediction_source(
+            state.clone(),
+            &candidate,
+            "pairwise-risk",
+            2_000_000,
         )
-        .await
-        .expect("higher-scored source submission succeeds");
-        let Json(feature) = ranking_feature_handler(
-            State(state.clone()),
-            auth_headers("utility-worker-token-a"),
-            Json(TraceRankingFeatureRequest {
-                submission_id: higher_scored_submission_id,
-                target_use: TraceAllowedUse::RankingModelTraining,
-                feature_schema_version: candidate.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:pairwise-risk-feature-vector".to_string(),
-                feature_names_hash: "sha256:pairwise-risk-feature-names".to_string(),
-                source_feature_hash: "sha256:pairwise-risk-source-feature".to_string(),
-                duplicate_score: Some(0.02),
-                novelty_score: Some(0.9),
-                privacy_risk_score: Some(0.01),
-                quality_score: Some(0.91),
-                coverage_tags: vec!["pairwise-risk".to_string()],
-            }),
-        )
-        .await
-        .expect("utility worker can write pairwise risk feature");
-        let Json(_) = ranking_prediction_handler(
-            State(state.clone()),
-            auth_headers("utility-worker-token-a"),
-            Json(TraceRankingPredictionRequest {
-                submission_id: higher_scored_submission_id,
-                target_use: TraceAllowedUse::RankingModelTraining,
-                model_version: candidate.model_version.clone(),
-                feature_schema_version: candidate.feature_schema_version.clone(),
-                prediction_policy_version: candidate.policy_version.clone(),
-                feature_vector_hash: feature.feature_vector_hash,
-                predicted_utility_micros: 2_000_000,
-                uncertainty_micros: 100_000,
-                confidence: 0.95,
-                risk_penalty_micros: 0,
-                novelty_bonus_micros: 0,
-                explanation_codes: vec!["pairwise_risk_fixture".to_string()],
-            }),
-        )
-        .await
-        .expect("utility worker can write higher-scored prediction");
+        .await;
         let _ = ranking_preference_label_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
             Json(TraceRankingPreferenceLabelRequest {
                 preferred_submission_id: calibrated_prediction.submission_id,
-                rejected_submission_id: higher_scored_submission_id,
+                rejected_submission_id: higher_scored.submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 label_source: StorageTraceRankingLabelSource::Reviewer,
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
@@ -46242,6 +46371,225 @@ mod tests {
         let report_json = serde_json::to_string(&report).expect("risk report serializes");
         assert!(!report_json.contains("reviewer-private-pairwise-risk"));
         assert!(!report_json.contains("trace body"));
+    }
+
+    #[tokio::test]
+    async fn active_ranking_model_risk_report_applies_pairwise_policy_thresholds() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).ranking_min_pairwise_label_count = 2;
+        Arc::make_mut(&mut state).ranking_min_pairwise_accuracy_micros = 600_000;
+        let (candidate, calibrated_prediction) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-pairwise-policy-v1")
+                .await;
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration");
+        assert!(calibration.promotable);
+        let Json(active) = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "promote calibrated model for pairwise policy".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can promote calibrated model");
+        assert_eq!(active.model_status, StorageTraceRankingModelStatus::Active);
+
+        let higher_scored = seed_pairwise_ranking_prediction_source(
+            state.clone(),
+            &candidate,
+            "pairwise-policy",
+            2_000_000,
+        )
+        .await;
+
+        let _ = ranking_preference_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id: calibrated_prediction.submission_id,
+                rejected_submission_id: higher_scored.submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 800_000,
+                evidence_hash: "sha256:pairwise-policy-reversed-evidence".to_string(),
+                external_ref: "reviewer-private-pairwise-policy-reversed".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write reversed pairwise policy label");
+        let _ = ranking_preference_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id: higher_scored.submission_id,
+                rejected_submission_id: calibrated_prediction.submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 800_000,
+                evidence_hash: "sha256:pairwise-policy-correct-evidence".to_string(),
+                external_ref: "frontier-private-pairwise-policy-correct".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write correct pairwise policy label");
+
+        let Json(report) =
+            ranking_model_risk_report_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can read active ranking model risk report");
+        assert_eq!(report.active_model_count, 1);
+        assert_eq!(report.at_risk_model_count, 1);
+        assert_eq!(
+            report
+                .risk_code_counts
+                .get("pairwise_accuracy_below_threshold"),
+            Some(&1)
+        );
+        assert_eq!(
+            report
+                .risk_code_counts
+                .get("pairwise_evidence_below_threshold"),
+            None
+        );
+        let model = &report.models[0];
+        assert_eq!(model.model_version, candidate.model_version);
+        assert_eq!(model.pairwise_min_label_count, 2);
+        assert_eq!(model.pairwise_min_accuracy_micros, 600_000);
+        assert_eq!(model.pairwise_preference_label_count, 2);
+        assert_eq!(model.pairwise_joined_pair_prediction_count, 2);
+        assert_eq!(model.pairwise_correct_pair_count, 1);
+        assert_eq!(model.pairwise_reversed_pair_count, 1);
+        assert_eq!(model.pairwise_accuracy_micros, Some(500_000));
+        assert!(
+            model
+                .risk_codes
+                .contains(&"pairwise_accuracy_below_threshold".to_string())
+        );
+        assert!(
+            !model
+                .risk_codes
+                .contains(&"pairwise_evidence_below_threshold".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn active_ranking_model_risk_report_flags_pairwise_evidence_floor() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).ranking_min_pairwise_label_count = 2;
+        let (candidate, calibrated_prediction) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-pairwise-floor-v1")
+                .await;
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration");
+        assert!(calibration.promotable);
+        let Json(active) = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "promote calibrated model for pairwise floor".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can promote calibrated model");
+        assert_eq!(active.model_status, StorageTraceRankingModelStatus::Active);
+
+        let lower_scored = seed_pairwise_ranking_prediction_source(
+            state.clone(),
+            &candidate,
+            "pairwise-floor",
+            500_000,
+        )
+        .await;
+        let _ = ranking_preference_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id: calibrated_prediction.submission_id,
+                rejected_submission_id: lower_scored.submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 800_000,
+                evidence_hash: "sha256:pairwise-floor-evidence".to_string(),
+                external_ref: "reviewer-private-pairwise-floor".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write pairwise floor preference label");
+
+        let Json(report) =
+            ranking_model_risk_report_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can read active ranking model risk report");
+        assert_eq!(report.active_model_count, 1);
+        assert_eq!(report.at_risk_model_count, 1);
+        assert_eq!(
+            report
+                .risk_code_counts
+                .get("pairwise_evidence_below_threshold"),
+            Some(&1)
+        );
+        assert_eq!(
+            report
+                .risk_code_counts
+                .get("pairwise_accuracy_below_threshold"),
+            None
+        );
+        let model = &report.models[0];
+        assert_eq!(model.model_version, candidate.model_version);
+        assert_eq!(model.pairwise_min_label_count, 2);
+        assert_eq!(model.pairwise_joined_pair_prediction_count, 1);
+        assert_eq!(model.pairwise_correct_pair_count, 1);
+        assert_eq!(model.pairwise_accuracy_micros, Some(1_000_000));
+        assert!(
+            model
+                .risk_codes
+                .contains(&"pairwise_evidence_below_threshold".to_string())
+        );
+        assert!(
+            !model
+                .risk_codes
+                .contains(&"pairwise_accuracy_below_threshold".to_string())
+        );
     }
 
     #[tokio::test]
