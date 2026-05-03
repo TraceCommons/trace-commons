@@ -639,7 +639,10 @@ evidence/calibration tables, and a fail-closed reconciliation gate for promotion
 jobs. `TRACE_COMMONS_OBJECT_STORE=remote_service` is a disabled production
 scaffold that requires remote provider/bucket/KMS/credential-reference
 configuration and refuses plaintext compatibility fallback until a real
-service-owned remote object-store backend is wired. The server-owned
+service-owned remote object-store backend is wired. Because the remote provider
+is disabled, object-primary startup guards currently require
+`TRACE_COMMONS_OBJECT_STORE=local_service` rather than accepting
+`remote_service`. The server-owned
 `V1__trace_commons_schema.sql` through
 `V10__trace_credit_settlement_joined_evidence_hash.sql` migrations cover the
 tenant-scoped Trace Commons metadata, credit-settlement control plane, ranking
