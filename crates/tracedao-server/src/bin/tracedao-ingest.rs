@@ -23715,6 +23715,30 @@ async fn reconcile_db_mirror(
         .list_trace_near_credit_outbox_items(&tenant.tenant_id)
         .await
         .context("failed to list NEAR credit outbox items for DB reconciliation")?;
+    let db_ranking_model_versions = db
+        .list_trace_ranking_model_versions(&tenant.tenant_id)
+        .await
+        .context("failed to list ranking model versions for DB reconciliation")?;
+    let db_ranking_features = db
+        .list_trace_ranking_features(&tenant.tenant_id)
+        .await
+        .context("failed to list ranking features for DB reconciliation")?;
+    let db_ranking_predictions = db
+        .list_trace_ranking_predictions(&tenant.tenant_id)
+        .await
+        .context("failed to list ranking predictions for DB reconciliation")?;
+    let db_ranking_labels = db
+        .list_trace_ranking_labels(&tenant.tenant_id)
+        .await
+        .context("failed to list ranking labels for DB reconciliation")?;
+    let db_ranking_calibration_runs = db
+        .list_trace_ranking_calibration_runs(&tenant.tenant_id)
+        .await
+        .context("failed to list ranking calibration runs for DB reconciliation")?;
+    let db_ranking_worker_runs = db
+        .list_trace_ranking_worker_runs(&tenant.tenant_id)
+        .await
+        .context("failed to list ranking worker runs for DB reconciliation")?;
     let db_audit_events = db
         .list_trace_audit_events(&tenant.tenant_id)
         .await
@@ -23890,6 +23914,14 @@ async fn reconcile_db_mirror(
     let file_credit_holds = read_all_credit_holds(&state.root, &tenant.tenant_id)?;
     let file_near_credit_outbox_items =
         read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)?;
+    let file_ranking_model_versions =
+        read_all_ranking_model_versions(&state.root, &tenant.tenant_id)?;
+    let file_ranking_features = read_all_ranking_features(&state.root, &tenant.tenant_id)?;
+    let file_ranking_predictions = read_all_ranking_predictions(&state.root, &tenant.tenant_id)?;
+    let file_ranking_labels = read_all_ranking_labels(&state.root, &tenant.tenant_id)?;
+    let file_ranking_calibration_runs =
+        read_all_ranking_calibration_runs(&state.root, &tenant.tenant_id)?;
+    let file_ranking_worker_runs = read_all_ranking_worker_runs(&state.root, &tenant.tenant_id)?;
     let file_audit_events = read_all_audit_events(&state.root, &tenant.tenant_id)?;
     let file_replay_export_manifests = read_all_export_manifests(&state.root, &tenant.tenant_id)?;
     let file_revocations = read_all_revocations(&state.root, &tenant.tenant_id)?;
@@ -24019,6 +24051,143 @@ async fn reconcile_db_mirror(
                         || db_item.last_error_hash != item.last_error_hash
                 })
                 .map(|_| item.near_outbox_id)
+        })
+        .collect::<Vec<_>>();
+    let file_latest_ranking_model_versions =
+        latest_ranking_model_versions(&file_ranking_model_versions);
+    let file_latest_ranking_model_version_ids = file_latest_ranking_model_versions
+        .iter()
+        .map(|record| record.model_version.clone())
+        .collect::<BTreeSet<_>>();
+    let db_ranking_model_version_ids = db_ranking_model_versions
+        .iter()
+        .map(|record| record.model_version.clone())
+        .collect::<BTreeSet<_>>();
+    let db_ranking_model_versions_by_id = db_ranking_model_versions
+        .iter()
+        .map(|record| (record.model_version.clone(), record))
+        .collect::<BTreeMap<_, _>>();
+    let missing_ranking_model_versions_in_db = file_latest_ranking_model_version_ids
+        .difference(&db_ranking_model_version_ids)
+        .cloned()
+        .collect::<Vec<_>>();
+    let missing_ranking_model_versions_in_files = db_ranking_model_version_ids
+        .difference(&file_latest_ranking_model_version_ids)
+        .cloned()
+        .collect::<Vec<_>>();
+    let ranking_model_status_mismatch_versions = file_latest_ranking_model_versions
+        .iter()
+        .filter_map(|file_record| {
+            db_ranking_model_versions_by_id
+                .get(&file_record.model_version)
+                .filter(|db_record| db_record.status != file_record.status)
+                .map(|_| file_record.model_version.clone())
+        })
+        .collect::<Vec<_>>();
+    let file_ranking_feature_ids = file_ranking_features
+        .iter()
+        .map(|record| record.ranking_feature_id)
+        .collect::<BTreeSet<_>>();
+    let db_ranking_feature_ids = db_ranking_features
+        .iter()
+        .map(|record| record.ranking_feature_id)
+        .collect::<BTreeSet<_>>();
+    let missing_ranking_feature_ids_in_db = file_ranking_feature_ids
+        .difference(&db_ranking_feature_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let missing_ranking_feature_ids_in_files = db_ranking_feature_ids
+        .difference(&file_ranking_feature_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let file_ranking_prediction_ids = file_ranking_predictions
+        .iter()
+        .map(|record| record.ranking_prediction_id)
+        .collect::<BTreeSet<_>>();
+    let db_ranking_prediction_ids = db_ranking_predictions
+        .iter()
+        .map(|record| record.ranking_prediction_id)
+        .collect::<BTreeSet<_>>();
+    let missing_ranking_prediction_ids_in_db = file_ranking_prediction_ids
+        .difference(&db_ranking_prediction_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let missing_ranking_prediction_ids_in_files = db_ranking_prediction_ids
+        .difference(&file_ranking_prediction_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let file_ranking_label_ids = file_ranking_labels
+        .iter()
+        .map(|record| record.ranking_label_id)
+        .collect::<BTreeSet<_>>();
+    let db_ranking_label_ids = db_ranking_labels
+        .iter()
+        .map(|record| record.ranking_label_id)
+        .collect::<BTreeSet<_>>();
+    let missing_ranking_label_ids_in_db = file_ranking_label_ids
+        .difference(&db_ranking_label_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let missing_ranking_label_ids_in_files = db_ranking_label_ids
+        .difference(&file_ranking_label_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let file_ranking_calibration_run_ids = file_ranking_calibration_runs
+        .iter()
+        .map(|record| record.calibration_run_id)
+        .collect::<BTreeSet<_>>();
+    let db_ranking_calibration_run_ids = db_ranking_calibration_runs
+        .iter()
+        .map(|record| record.calibration_run_id)
+        .collect::<BTreeSet<_>>();
+    let db_ranking_calibration_runs_by_id = db_ranking_calibration_runs
+        .iter()
+        .map(|record| (record.calibration_run_id, record))
+        .collect::<BTreeMap<_, _>>();
+    let missing_ranking_calibration_run_ids_in_db = file_ranking_calibration_run_ids
+        .difference(&db_ranking_calibration_run_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let missing_ranking_calibration_run_ids_in_files = db_ranking_calibration_run_ids
+        .difference(&file_ranking_calibration_run_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let ranking_calibration_report_hash_mismatch_ids = file_ranking_calibration_runs
+        .iter()
+        .filter_map(|file_record| {
+            db_ranking_calibration_runs_by_id
+                .get(&file_record.calibration_run_id)
+                .filter(|db_record| db_record.report_hash != file_record.report_hash)
+                .map(|_| file_record.calibration_run_id)
+        })
+        .collect::<Vec<_>>();
+    let file_ranking_worker_run_ids = file_ranking_worker_runs
+        .iter()
+        .map(|record| record.ranking_worker_run_id)
+        .collect::<BTreeSet<_>>();
+    let db_ranking_worker_run_ids = db_ranking_worker_runs
+        .iter()
+        .map(|record| record.ranking_worker_run_id)
+        .collect::<BTreeSet<_>>();
+    let db_ranking_worker_runs_by_id = db_ranking_worker_runs
+        .iter()
+        .map(|record| (record.ranking_worker_run_id, record))
+        .collect::<BTreeMap<_, _>>();
+    let missing_ranking_worker_run_ids_in_db = file_ranking_worker_run_ids
+        .difference(&db_ranking_worker_run_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let missing_ranking_worker_run_ids_in_files = db_ranking_worker_run_ids
+        .difference(&file_ranking_worker_run_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let ranking_worker_run_status_mismatch_ids = file_ranking_worker_runs
+        .iter()
+        .filter_map(|file_record| {
+            db_ranking_worker_runs_by_id
+                .get(&file_record.ranking_worker_run_id)
+                .filter(|db_record| db_record.status != file_record.status)
+                .map(|_| file_record.ranking_worker_run_id)
         })
         .collect::<Vec<_>>();
     let file_audit_event_ids = file_audit_events
@@ -24378,6 +24547,33 @@ async fn reconcile_db_mirror(
         missing_near_credit_outbox_ids_in_db,
         missing_near_credit_outbox_ids_in_files,
         near_credit_outbox_status_mismatch_ids,
+        file_latest_ranking_model_version_count: file_latest_ranking_model_versions.len(),
+        db_ranking_model_version_count: db_ranking_model_versions.len(),
+        missing_ranking_model_versions_in_db,
+        missing_ranking_model_versions_in_files,
+        ranking_model_status_mismatch_versions,
+        file_ranking_feature_count: file_ranking_features.len(),
+        db_ranking_feature_count: db_ranking_features.len(),
+        missing_ranking_feature_ids_in_db,
+        missing_ranking_feature_ids_in_files,
+        file_ranking_prediction_count: file_ranking_predictions.len(),
+        db_ranking_prediction_count: db_ranking_predictions.len(),
+        missing_ranking_prediction_ids_in_db,
+        missing_ranking_prediction_ids_in_files,
+        file_ranking_label_count: file_ranking_labels.len(),
+        db_ranking_label_count: db_ranking_labels.len(),
+        missing_ranking_label_ids_in_db,
+        missing_ranking_label_ids_in_files,
+        file_ranking_calibration_run_count: file_ranking_calibration_runs.len(),
+        db_ranking_calibration_run_count: db_ranking_calibration_runs.len(),
+        missing_ranking_calibration_run_ids_in_db,
+        missing_ranking_calibration_run_ids_in_files,
+        ranking_calibration_report_hash_mismatch_ids,
+        file_ranking_worker_run_count: file_ranking_worker_runs.len(),
+        db_ranking_worker_run_count: db_ranking_worker_runs.len(),
+        missing_ranking_worker_run_ids_in_db,
+        missing_ranking_worker_run_ids_in_files,
+        ranking_worker_run_status_mismatch_ids,
         file_audit_event_count: file_audit_events.len(),
         db_audit_event_count: db_audit_events.len(),
         missing_audit_event_ids_in_db,
@@ -26470,6 +26666,33 @@ struct TraceDbReconciliationReport {
     missing_near_credit_outbox_ids_in_db: Vec<Uuid>,
     missing_near_credit_outbox_ids_in_files: Vec<Uuid>,
     near_credit_outbox_status_mismatch_ids: Vec<Uuid>,
+    file_latest_ranking_model_version_count: usize,
+    db_ranking_model_version_count: usize,
+    missing_ranking_model_versions_in_db: Vec<String>,
+    missing_ranking_model_versions_in_files: Vec<String>,
+    ranking_model_status_mismatch_versions: Vec<String>,
+    file_ranking_feature_count: usize,
+    db_ranking_feature_count: usize,
+    missing_ranking_feature_ids_in_db: Vec<Uuid>,
+    missing_ranking_feature_ids_in_files: Vec<Uuid>,
+    file_ranking_prediction_count: usize,
+    db_ranking_prediction_count: usize,
+    missing_ranking_prediction_ids_in_db: Vec<Uuid>,
+    missing_ranking_prediction_ids_in_files: Vec<Uuid>,
+    file_ranking_label_count: usize,
+    db_ranking_label_count: usize,
+    missing_ranking_label_ids_in_db: Vec<Uuid>,
+    missing_ranking_label_ids_in_files: Vec<Uuid>,
+    file_ranking_calibration_run_count: usize,
+    db_ranking_calibration_run_count: usize,
+    missing_ranking_calibration_run_ids_in_db: Vec<Uuid>,
+    missing_ranking_calibration_run_ids_in_files: Vec<Uuid>,
+    ranking_calibration_report_hash_mismatch_ids: Vec<Uuid>,
+    file_ranking_worker_run_count: usize,
+    db_ranking_worker_run_count: usize,
+    missing_ranking_worker_run_ids_in_db: Vec<Uuid>,
+    missing_ranking_worker_run_ids_in_files: Vec<Uuid>,
+    ranking_worker_run_status_mismatch_ids: Vec<Uuid>,
     file_audit_event_count: usize,
     db_audit_event_count: usize,
     missing_audit_event_ids_in_db: Vec<Uuid>,
@@ -26608,6 +26831,81 @@ impl TraceDbReconciliationReport {
             &mut gaps,
             "near_credit_outbox_status_mismatch_ids",
             self.near_credit_outbox_status_mismatch_ids.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_ranking_model_versions_in_db",
+            self.missing_ranking_model_versions_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_ranking_model_versions_in_files",
+            self.missing_ranking_model_versions_in_files.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "ranking_model_status_mismatch_versions",
+            self.ranking_model_status_mismatch_versions.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_ranking_feature_ids_in_db",
+            self.missing_ranking_feature_ids_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_ranking_feature_ids_in_files",
+            self.missing_ranking_feature_ids_in_files.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_ranking_prediction_ids_in_db",
+            self.missing_ranking_prediction_ids_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_ranking_prediction_ids_in_files",
+            self.missing_ranking_prediction_ids_in_files.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_ranking_label_ids_in_db",
+            self.missing_ranking_label_ids_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_ranking_label_ids_in_files",
+            self.missing_ranking_label_ids_in_files.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_ranking_calibration_run_ids_in_db",
+            self.missing_ranking_calibration_run_ids_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_ranking_calibration_run_ids_in_files",
+            self.missing_ranking_calibration_run_ids_in_files.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "ranking_calibration_report_hash_mismatch_ids",
+            self.ranking_calibration_report_hash_mismatch_ids.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_ranking_worker_run_ids_in_db",
+            self.missing_ranking_worker_run_ids_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_ranking_worker_run_ids_in_files",
+            self.missing_ranking_worker_run_ids_in_files.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "ranking_worker_run_status_mismatch_ids",
+            self.ranking_worker_run_status_mismatch_ids.len(),
         );
         push_gap_count(
             &mut gaps,
@@ -34448,6 +34746,256 @@ mod tests {
         .expect_err("DB reconciliation requires configured DB mirror");
         assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
         assert!(error.1.0.error.contains("TRACE_COMMONS_DB_DUAL_WRITE"));
+    }
+
+    #[tokio::test]
+    async fn maintenance_reconciliation_reports_ranking_control_plane_gaps() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        let now = Utc::now();
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let prediction_id = Uuid::new_v4();
+        let label_id = Uuid::new_v4();
+        let calibration_run_id = Uuid::new_v4();
+        let ranking_worker_run_id = Uuid::new_v4();
+        append_ranking_model_version(
+            temp.path(),
+            "tenant-a",
+            &TraceRankingModelVersionRecord {
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                model_version: "trace-ranker-reconcile-v1".to_string(),
+                feature_schema_version: "ranking-features-reconcile-v1".to_string(),
+                policy_version: "trace-credit-policy-reconcile-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:ranking-training-reconcile".to_string(),
+                calibration_dataset_hash: "sha256:ranking-calibration-reconcile".to_string(),
+                model_artifact_hash: "sha256:ranking-model-artifact-reconcile".to_string(),
+                actor_principal_ref: principal_storage_ref("admin-token-a"),
+                created_at: now,
+            },
+        )
+        .expect("file ranking model writes");
+        append_ranking_feature(
+            temp.path(),
+            "tenant-a",
+            &TraceRankingFeatureRecord {
+                ranking_feature_id: feature_id,
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                submission_id,
+                trace_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                feature_schema_version: "ranking-features-reconcile-v1".to_string(),
+                feature_vector_hash: "sha256:ranking-feature-reconcile".to_string(),
+                feature_names_hash: "sha256:ranking-feature-names-reconcile".to_string(),
+                source_feature_hash: "sha256:ranking-source-feature-reconcile".to_string(),
+                duplicate_score: Some(0.02),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.01),
+                quality_score: Some(0.89),
+                coverage_tags: vec!["tool:terminal".to_string()],
+                actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+                created_at: now,
+            },
+        )
+        .expect("file ranking feature writes");
+        append_ranking_prediction(
+            temp.path(),
+            "tenant-a",
+            &TraceRankingPredictionRecord {
+                ranking_prediction_id: prediction_id,
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                submission_id,
+                trace_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: "trace-ranker-reconcile-v1".to_string(),
+                feature_schema_version: "ranking-features-reconcile-v1".to_string(),
+                prediction_policy_version: "trace-credit-policy-reconcile-v1".to_string(),
+                feature_vector_hash: "sha256:ranking-feature-reconcile".to_string(),
+                predicted_utility_micros: 1_200_000,
+                uncertainty_micros: 100_000,
+                confidence: 0.86,
+                risk_penalty_micros: 0,
+                novelty_bonus_micros: 0,
+                settlement_score_micros: 1_200_000,
+                explanation_codes: vec!["reconciliation_probe".to_string()],
+                actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+                created_at: now,
+            },
+        )
+        .expect("file ranking prediction writes");
+        append_ranking_label(
+            temp.path(),
+            "tenant-a",
+            &TraceRankingLabelRecord {
+                ranking_label_id: label_id,
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                submission_id,
+                trace_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_250_000,
+                evidence_hash: "sha256:ranking-label-evidence-reconcile".to_string(),
+                external_ref_hash: "sha256:ranking-label-external-ref-reconcile".to_string(),
+                actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+                created_at: now,
+            },
+        )
+        .expect("file ranking label writes");
+        append_ranking_calibration_run(
+            temp.path(),
+            "tenant-a",
+            &TraceRankingCalibrationRunRecord {
+                calibration_run_id,
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                model_version: "trace-ranker-reconcile-v1".to_string(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: "trace-credit-policy-reconcile-v1".to_string(),
+                evaluation_dataset_hash: "sha256:ranking-calibration-reconcile".to_string(),
+                prediction_count: 1,
+                label_count: 1,
+                joined_label_prediction_count: 1,
+                joined_label_source_count: 1,
+                joined_evidence_hash: "sha256:ranking-joined-evidence-reconcile".to_string(),
+                average_predicted_utility_micros: Some(1_200_000),
+                average_label_utility_delta_micros: Some(1_250_000),
+                average_absolute_error_micros: Some(50_000),
+                max_label_source_average_absolute_error_micros: Some(50_000),
+                max_error_label_source: Some(StorageTraceRankingLabelSource::FrontierLab),
+                mean_signed_error_micros: Some(-50_000),
+                low_confidence_prediction_count: 0,
+                confidence_threshold: 0.5,
+                min_label_count: 1,
+                min_label_source_count: 1,
+                max_average_absolute_error_micros: 100_000,
+                promotable: true,
+                reason_codes: Vec::new(),
+                report_hash: "sha256:ranking-calibration-report-reconcile".to_string(),
+                actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+                created_at: now,
+            },
+        )
+        .expect("file ranking calibration run writes");
+        append_ranking_worker_run(
+            temp.path(),
+            "tenant-a",
+            &TraceRankingWorkerRunRecord {
+                ranking_worker_run_id,
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                run_kind: TraceRankingWorkerRunKind::Calibration,
+                status: TraceRankingWorkerRunStatus::Completed,
+                dry_run: false,
+                reason_hash: sha256_prefixed("ranking reconciliation worker"),
+                model_version: Some("trace-ranker-reconcile-v1".to_string()),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                policy_version: Some("trace-credit-policy-reconcile-v1".to_string()),
+                limit: 10,
+                checked_count: 1,
+                succeeded_count: 1,
+                skipped_existing_count: 0,
+                skipped_model_risk_count: 0,
+                skipped_ineligible_count: 0,
+                pending_after_count: 0,
+                result_refs: vec![format!("ranking_calibration:{calibration_run_id}")],
+                reason_counts: BTreeMap::new(),
+                actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+                created_at: now,
+                completed_at: Some(now),
+                last_error_hash: None,
+            },
+        )
+        .expect("file ranking worker run writes");
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("ranking_reconciliation_gap_probe".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: true,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("maintenance reconciliation succeeds");
+        let reconciliation = response
+            .db_reconciliation
+            .expect("reconciliation report is present");
+        let reconciliation_json =
+            serde_json::to_value(&reconciliation).expect("reconciliation serializes");
+        assert_eq!(
+            reconciliation_json["file_latest_ranking_model_version_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            reconciliation_json["missing_ranking_model_versions_in_db"],
+            serde_json::json!(["trace-ranker-reconcile-v1"])
+        );
+        assert_eq!(
+            reconciliation_json["missing_ranking_feature_ids_in_db"],
+            serde_json::json!([feature_id])
+        );
+        assert_eq!(
+            reconciliation_json["missing_ranking_prediction_ids_in_db"],
+            serde_json::json!([prediction_id])
+        );
+        assert_eq!(
+            reconciliation_json["missing_ranking_label_ids_in_db"],
+            serde_json::json!([label_id])
+        );
+        assert_eq!(
+            reconciliation_json["missing_ranking_calibration_run_ids_in_db"],
+            serde_json::json!([calibration_run_id])
+        );
+        assert_eq!(
+            reconciliation_json["missing_ranking_worker_run_ids_in_db"],
+            serde_json::json!([ranking_worker_run_id])
+        );
+        for expected_gap in [
+            "missing_ranking_model_versions_in_db=1",
+            "missing_ranking_feature_ids_in_db=1",
+            "missing_ranking_prediction_ids_in_db=1",
+            "missing_ranking_label_ids_in_db=1",
+            "missing_ranking_calibration_run_ids_in_db=1",
+            "missing_ranking_worker_run_ids_in_db=1",
+        ] {
+            assert!(
+                reconciliation
+                    .blocking_gaps
+                    .contains(&expected_gap.to_string()),
+                "reconciliation should report {expected_gap}"
+            );
+        }
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
 
     #[tokio::test]
