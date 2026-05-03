@@ -8332,6 +8332,12 @@ async fn ranking_calibration_run_handler(
             "ranking calibration policy does not match the registered model",
         ));
     }
+    if model.calibration_dataset_hash != evaluation_dataset_hash {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "ranking calibration dataset does not match the registered model",
+        ));
+    }
     let feature_schema_version = model.feature_schema_version.clone();
     let predictions = read_ranking_predictions_for_admin(state.as_ref(), &tenant)
         .await
@@ -34421,7 +34427,7 @@ mod tests {
                 model_version: model.model_version.clone(),
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: "trace-credit-policy-v1".to_string(),
-                evaluation_dataset_hash: "sha256:ranking-eval-dataset-settlement".to_string(),
+                evaluation_dataset_hash: model.calibration_dataset_hash.clone(),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(100_000),
@@ -34621,7 +34627,7 @@ mod tests {
                 model_version: candidate.model_version.clone(),
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: candidate.policy_version.clone(),
-                evaluation_dataset_hash: "sha256:ranking-eval-active-settlement".to_string(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(100_000),
@@ -34758,7 +34764,7 @@ mod tests {
                 model_version: candidate.model_version.clone(),
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: candidate.policy_version.clone(),
-                evaluation_dataset_hash: "sha256:ranking-eval-prediction-bound".to_string(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(100_000),
@@ -34945,7 +34951,7 @@ mod tests {
                 model_version: candidate.model_version.clone(),
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: candidate.policy_version.clone(),
-                evaluation_dataset_hash: "sha256:ranking-eval-credit-worker".to_string(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(100_000),
@@ -35109,7 +35115,7 @@ mod tests {
                 model_version: candidate.model_version.clone(),
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: candidate.policy_version.clone(),
-                evaluation_dataset_hash: "sha256:ranking-eval-credit-run".to_string(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
                 min_label_count: Some(2),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(100_000),
@@ -35314,7 +35320,7 @@ mod tests {
                 model_version: candidate.model_version.clone(),
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: candidate.policy_version.clone(),
-                evaluation_dataset_hash: "sha256:ranking-eval-credit-guard".to_string(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(100_000),
@@ -35469,7 +35475,7 @@ mod tests {
                 model_version: candidate.model_version.clone(),
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: candidate.policy_version.clone(),
-                evaluation_dataset_hash: "sha256:ranking-eval-freshness".to_string(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(100_000),
@@ -35672,7 +35678,7 @@ mod tests {
                 model_version: candidate.model_version.clone(),
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: candidate.policy_version.clone(),
-                evaluation_dataset_hash: "sha256:ranking-eval-promote".to_string(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(100_000),
@@ -35737,7 +35743,7 @@ mod tests {
                 model_version: candidate.model_version.clone(),
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: candidate.policy_version.clone(),
-                evaluation_dataset_hash: "sha256:ranking-eval-promote-blocked".to_string(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(100_000),
@@ -36439,7 +36445,7 @@ mod tests {
                 model_version: model.model_version.clone(),
                 target_use: TraceAllowedUse::ModelTraining,
                 policy_version: "trace-credit-policy-v1".to_string(),
-                evaluation_dataset_hash: "sha256:calibration-eval-dataset".to_string(),
+                evaluation_dataset_hash: model.calibration_dataset_hash.clone(),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(500_000),
@@ -36462,6 +36468,51 @@ mod tests {
         let runs_json = serde_json::to_string(&runs).expect("calibration runs serialize");
         assert!(!runs_json.contains("private-frontier-lab-calibration-batch"));
         assert!(!runs_json.contains("trace body"));
+    }
+
+    #[tokio::test]
+    async fn ranking_calibration_run_rejects_unregistered_evaluation_dataset_hash() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let Json(model) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-dataset-bound-v1".to_string(),
+                feature_schema_version: "ranking-features-dataset-bound-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:training-set-dataset-bound".to_string(),
+                calibration_dataset_hash: "sha256:calibration-set-dataset-bound".to_string(),
+                model_artifact_hash: "sha256:model-artifact-dataset-bound".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can register ranking model version");
+
+        let mismatch = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: model.model_version,
+                target_use: TraceAllowedUse::ModelTraining,
+                policy_version: model.policy_version,
+                evaluation_dataset_hash: "sha256:other-calibration-eval-dataset".to_string(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(500_000),
+            }),
+        )
+        .await
+        .expect_err("calibration must use the registered calibration dataset hash");
+        assert_eq!(mismatch.0, StatusCode::CONFLICT);
+
+        let Json(runs) =
+            ranking_calibration_runs_handler(State(state), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list calibration runs");
+        assert!(runs.is_empty());
     }
 
     #[tokio::test]
@@ -36562,7 +36613,7 @@ mod tests {
                 model_version: model.model_version,
                 target_use: TraceAllowedUse::ModelTraining,
                 policy_version: model.policy_version,
-                evaluation_dataset_hash: "sha256:calibration-eval-dataset-diversity".to_string(),
+                evaluation_dataset_hash: model.calibration_dataset_hash.clone(),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(500_000),
@@ -36698,7 +36749,7 @@ mod tests {
                 model_version: model.model_version,
                 target_use: TraceAllowedUse::ModelTraining,
                 policy_version: model.policy_version,
-                evaluation_dataset_hash: "sha256:calibration-eval-dataset-cohort-error".to_string(),
+                evaluation_dataset_hash: model.calibration_dataset_hash.clone(),
                 min_label_count: Some(2),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(500_000),
@@ -36837,7 +36888,7 @@ mod tests {
                 model_version: candidate.model_version.clone(),
                 target_use: TraceAllowedUse::ModelTraining,
                 policy_version: candidate.policy_version.clone(),
-                evaluation_dataset_hash: "sha256:calibration-eval-dataset-activation".to_string(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(500_000),
@@ -36961,7 +37012,7 @@ mod tests {
                 model_version: candidate.model_version.clone(),
                 target_use: TraceAllowedUse::ModelTraining,
                 policy_version: candidate.policy_version.clone(),
-                evaluation_dataset_hash: "sha256:calibration-eval-dataset-regressed-a".to_string(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(500_000),
@@ -36977,7 +37028,7 @@ mod tests {
                 model_version: candidate.model_version.clone(),
                 target_use: TraceAllowedUse::ModelTraining,
                 policy_version: candidate.policy_version.clone(),
-                evaluation_dataset_hash: "sha256:calibration-eval-dataset-regressed-b".to_string(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(10_000),
