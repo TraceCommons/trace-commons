@@ -822,6 +822,10 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
                 "sha256:settlement-calibration-joined-evidence".to_string(),
             ),
             ranking_credit_events_excluded_count: 0,
+            ranking_credit_events_excluded_reason_counts: BTreeMap::from([(
+                "missing_prediction_ref".to_string(),
+                1,
+            )]),
             actor_principal_ref: "principal:admin".to_string(),
         })
         .await
@@ -837,6 +841,12 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
             .ranking_calibration_joined_evidence_hash
             .as_deref(),
         Some("sha256:settlement-calibration-joined-evidence")
+    );
+    assert_eq!(
+        settlement
+            .ranking_credit_events_excluded_reason_counts
+            .get("missing_prediction_ref"),
+        Some(&1)
     );
 
     let near_outbox_id = Uuid::new_v4();

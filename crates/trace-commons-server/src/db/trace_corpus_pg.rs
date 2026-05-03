@@ -97,7 +97,7 @@ const TRACE_CREDIT_SETTLEMENT_BATCH_COLUMNS: &str = "\
     settled_credit_micros, line_items_json, near_contract_id, ranking_model_version, \
     ranking_target_use, ranking_calibration_run_id, ranking_calibration_report_hash, \
     ranking_calibration_joined_evidence_hash, ranking_credit_events_excluded_count, \
-    actor_principal_ref, created_at";
+    ranking_credit_events_excluded_reason_counts_json, actor_principal_ref, created_at";
 
 const TRACE_CREDIT_HOLD_COLUMNS: &str = "\
     tenant_id, hold_id, credit_account_ref, credit_account_hash, reason, reason_hash, \
@@ -428,6 +428,8 @@ fn row_to_credit_settlement_batch(
 ) -> Result<TraceCreditSettlementBatchRecord, DatabaseError> {
     let status: String = row.get("status");
     let line_items_json: serde_json::Value = row.get("line_items_json");
+    let ranking_credit_events_excluded_reason_counts_json: serde_json::Value =
+        row.get("ranking_credit_events_excluded_reason_counts_json");
     Ok(TraceCreditSettlementBatchRecord {
         tenant_id: row.get("tenant_id"),
         settlement_batch_id: row.get("settlement_batch_id"),
@@ -458,6 +460,14 @@ fn row_to_credit_settlement_batch(
             row,
             "ranking_credit_events_excluded_count",
         )?,
+        ranking_credit_events_excluded_reason_counts: serde_json::from_value(
+            ranking_credit_events_excluded_reason_counts_json,
+        )
+        .map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace credit settlement ranking exclusion reason counts decode failed: {e}"
+            ))
+        })?,
         actor_principal_ref: row.get("actor_principal_ref"),
         created_at: row.get("created_at"),
     })
@@ -3320,6 +3330,14 @@ impl TraceCorpusStore for PgBackend {
                     "trace credit settlement excluded ranking count exceeds PostgreSQL integer range: {e}"
                 ))
             })?;
+        let ranking_credit_events_excluded_reason_counts_json = serde_json::to_value(
+            &batch.ranking_credit_events_excluded_reason_counts,
+        )
+        .map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace credit settlement ranking exclusion reason counts encode failed: {e}"
+            ))
+        })?;
         let row = tx
             .query_one(
                 &format!(
@@ -3330,10 +3348,12 @@ impl TraceCorpusStore for PgBackend {
                         near_contract_id, ranking_model_version, ranking_target_use,
                         ranking_calibration_run_id, ranking_calibration_report_hash,
                         ranking_calibration_joined_evidence_hash,
-                        ranking_credit_events_excluded_count, actor_principal_ref
+                        ranking_credit_events_excluded_count,
+                        ranking_credit_events_excluded_reason_counts_json,
+                        actor_principal_ref
                      ) VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                        $17, $18, $19
+                        $17, $18, $19, $20
                      )
                      ON CONFLICT (tenant_id, settlement_batch_id) DO UPDATE SET
                         policy_version = excluded.policy_version,
@@ -3352,6 +3372,7 @@ impl TraceCorpusStore for PgBackend {
                         ranking_calibration_report_hash = excluded.ranking_calibration_report_hash,
                         ranking_calibration_joined_evidence_hash = excluded.ranking_calibration_joined_evidence_hash,
                         ranking_credit_events_excluded_count = excluded.ranking_credit_events_excluded_count,
+                        ranking_credit_events_excluded_reason_counts_json = excluded.ranking_credit_events_excluded_reason_counts_json,
                         actor_principal_ref = excluded.actor_principal_ref
                      RETURNING {TRACE_CREDIT_SETTLEMENT_BATCH_COLUMNS}"
                 ),
@@ -3374,6 +3395,7 @@ impl TraceCorpusStore for PgBackend {
                     &batch.ranking_calibration_report_hash,
                     &batch.ranking_calibration_joined_evidence_hash,
                     &ranking_credit_events_excluded_count,
+                    &ranking_credit_events_excluded_reason_counts_json,
                     &batch.actor_principal_ref,
                 ],
             )

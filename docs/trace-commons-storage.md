@@ -20,6 +20,7 @@ This repository owns the production-storage surface:
 - `migrations/V10__trace_credit_settlement_joined_evidence_hash.sql`, binding ranking credit settlements to calibration joined-evidence hashes.
 - `migrations/V11__trace_ranking_worker_runs.sql`, adding a hash-only ranking automation run ledger for prediction-credit and model-promotion workers.
 - `migrations/V12__trace_ranking_worker_run_lifecycle.sql`, adding running/completed/failed lifecycle fields to ranking worker-run rows.
+- `migrations/V13__trace_credit_settlement_exclusion_reasons.sql`, preserving aggregate ranking-credit exclusion reason counts on settlement batches.
 - `crates/trace-commons-server/src/trace_corpus_storage.rs` and the PostgreSQL `TraceCorpusStore` implementation.
 - `crates/trace-commons-server/src/trace_artifact_store.rs` and the encrypted local service object-store provider.
 - Optional ingest-service DB dual-write behind `TRACE_COMMONS_DB_DUAL_WRITE=true`.
