@@ -241,6 +241,8 @@ const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT: u32 = 100;
 const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT: u32 = 500;
 const TRACE_CREDIT_SETTLEMENT_WORKER_RUN_DEFAULT_LIMIT: usize = 100;
 const TRACE_CREDIT_SETTLEMENT_WORKER_RUN_MAX_LIMIT: usize = 500;
+const TRACE_RANKING_CALIBRATION_RUN_DEFAULT_LIMIT: usize = 25;
+const TRACE_RANKING_CALIBRATION_RUN_MAX_LIMIT: usize = 100;
 const TRACE_RANKING_MODEL_PROMOTION_RUN_DEFAULT_LIMIT: usize = 25;
 const TRACE_RANKING_MODEL_PROMOTION_RUN_MAX_LIMIT: usize = 100;
 const TRACE_RANKING_WORKER_RUN_STALE_AFTER_HOURS: i64 = 1;
@@ -2216,6 +2218,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/workers/ranking/calibration-runs",
             post(ranking_calibration_run_handler),
+        )
+        .route(
+            "/v1/workers/ranking/calibration-runs/run",
+            post(ranking_calibration_run_worker_handler),
         )
         .route(
             "/v1/workers/process-evaluation",
@@ -5917,6 +5923,46 @@ struct TraceRankingCalibrationRunRequest {
     max_average_absolute_error_micros: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceRankingCalibrationRunWorkerRequest {
+    #[serde(default)]
+    dry_run: bool,
+    target_use: TraceAllowedUse,
+    reason: String,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    model_version: Option<String>,
+    #[serde(default)]
+    policy_version: Option<String>,
+    #[serde(default)]
+    min_label_count: Option<usize>,
+    #[serde(default)]
+    confidence_threshold: Option<f32>,
+    #[serde(default)]
+    max_average_absolute_error_micros: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingCalibrationRunWorkerResponse {
+    ranking_worker_run_id: Uuid,
+    tenant_id: String,
+    tenant_storage_ref: String,
+    dry_run: bool,
+    limit: usize,
+    target_use: TraceAllowedUse,
+    reason_hash: String,
+    model_version: Option<String>,
+    policy_version: Option<String>,
+    checked_count: usize,
+    calibrated_count: usize,
+    skipped_existing_count: usize,
+    skipped_ineligible_count: usize,
+    skipped_reason_counts: BTreeMap<String, usize>,
+    pending_after_count: usize,
+    calibration_runs: Vec<TraceRankingCalibrationRunRecord>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TraceRankingCalibrationRunRecord {
     calibration_run_id: Uuid,
@@ -8126,6 +8172,9 @@ fn ranking_optional_filter_overlaps<T: PartialEq>(left: Option<T>, right: Option
 
 fn ranking_worker_run_active_conflict_message(run_kind: TraceRankingWorkerRunKind) -> &'static str {
     match run_kind {
+        TraceRankingWorkerRunKind::Calibration => {
+            "ranking calibration worker run is already active for overlapping filters"
+        }
         TraceRankingWorkerRunKind::PredictionCredit => {
             "ranking prediction credit worker run is already active for overlapping filters"
         }
@@ -8133,6 +8182,27 @@ fn ranking_worker_run_active_conflict_message(run_kind: TraceRankingWorkerRunKin
             "ranking model promotion worker run is already active for overlapping filters"
         }
     }
+}
+
+fn update_calibration_worker_run_from_response(
+    worker_run: &mut TraceRankingWorkerRunRecord,
+    response: &TraceRankingCalibrationRunWorkerResponse,
+) {
+    worker_run.checked_count = response.checked_count;
+    worker_run.succeeded_count = response.calibrated_count;
+    worker_run.skipped_existing_count = response.skipped_existing_count;
+    worker_run.skipped_ineligible_count = response.skipped_ineligible_count;
+    worker_run.pending_after_count = response.pending_after_count;
+    worker_run.result_refs = if response.dry_run {
+        Vec::new()
+    } else {
+        response
+            .calibration_runs
+            .iter()
+            .map(|run| format!("ranking_calibration:{}", run.calibration_run_id))
+            .collect()
+    };
+    worker_run.reason_counts = response.skipped_reason_counts.clone();
 }
 
 fn update_model_promotion_worker_run_from_response(
@@ -8150,6 +8220,23 @@ fn update_model_promotion_worker_run_from_response(
         .map(|promotion| format!("ranking_model:{}", promotion.model_version))
         .collect();
     worker_run.reason_counts = response.skipped_reason_counts.clone();
+}
+
+fn validate_ranking_calibration_run_reason(reason: &str) -> ApiResult<String> {
+    let reason = reason.trim().to_string();
+    if reason.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranking calibration run requires a non-empty reason",
+        ));
+    }
+    if reason.len() > 1024 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranking calibration run reason is too long",
+        ));
+    }
+    Ok(reason)
 }
 
 fn validate_ranking_model_promotion_reason(reason: &str) -> ApiResult<String> {
@@ -9298,6 +9385,17 @@ async fn ranking_calibration_run_handler(
 ) -> ApiResult<Json<TraceRankingCalibrationRunRecord>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_utility_operator(&tenant)?;
+    create_ranking_calibration_run(state.as_ref(), &tenant, body, true)
+        .await
+        .map(Json)
+}
+
+async fn create_ranking_calibration_run(
+    state: &AppState,
+    tenant: &TenantAuth,
+    body: TraceRankingCalibrationRunRequest,
+    persist: bool,
+) -> ApiResult<TraceRankingCalibrationRunRecord> {
     let model_version = validate_ranking_identifier(&body.model_version, "model_version")?;
     let policy_version = validate_ranking_identifier(&body.policy_version, "policy_version")?;
     let evaluation_dataset_hash =
@@ -9327,7 +9425,7 @@ async fn ranking_calibration_run_handler(
     let max_average_absolute_error_micros =
         max_average_absolute_error_micros.min(state.ranking_max_average_absolute_error_micros);
 
-    let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
+    let model_versions = read_ranking_model_versions_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
     let model = latest_ranking_model_version(&model_versions, &model_version)
@@ -9346,14 +9444,14 @@ async fn ranking_calibration_run_handler(
         ));
     }
     let feature_schema_version = model.feature_schema_version.clone();
-    let predictions = read_ranking_predictions_for_admin(state.as_ref(), &tenant)
+    let predictions = read_ranking_predictions_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
-    let labels = read_ranking_labels_for_admin(state.as_ref(), &tenant)
+    let labels = read_ranking_labels_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
     let mut record = ranking_calibration_run_record(
-        &tenant,
+        tenant,
         RankingCalibrationRunInputs {
             calibration_run_id: Uuid::new_v4(),
             model_version,
@@ -9372,10 +9470,176 @@ async fn ranking_calibration_run_handler(
         &labels,
     );
     record.report_hash = ranking_calibration_run_report_hash(&record);
-    append_ranking_calibration_run_with_db_mirror(state.as_ref(), &tenant, &record)
+    if persist {
+        append_ranking_calibration_run_with_db_mirror(state, tenant, &record)
+            .await
+            .map_err(internal_error)?;
+    }
+    Ok(record)
+}
+
+async fn ranking_calibration_run_worker_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceRankingCalibrationRunWorkerRequest>,
+) -> ApiResult<Json<TraceRankingCalibrationRunWorkerResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_utility_operator(&tenant)?;
+    let reason = validate_ranking_calibration_run_reason(&body.reason)?;
+    let limit = body
+        .limit
+        .unwrap_or(TRACE_RANKING_CALIBRATION_RUN_DEFAULT_LIMIT);
+    if !(1..=TRACE_RANKING_CALIBRATION_RUN_MAX_LIMIT).contains(&limit) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranking calibration run limit must be between 1 and 100",
+        ));
+    }
+    let model_version = optional_ranking_identifier(body.model_version, "model_version")?;
+    let policy_version = optional_ranking_identifier(body.policy_version, "policy_version")?;
+    ensure_no_overlapping_live_ranking_worker_run(
+        state.as_ref(),
+        &tenant,
+        TraceRankingWorkerRunKind::Calibration,
+        body.dry_run,
+        model_version.as_deref(),
+        Some(body.target_use),
+        policy_version.as_deref(),
+    )
+    .await?;
+
+    let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
-    Ok(Json(record))
+    let mut candidates = latest_ranking_model_versions(&model_versions)
+        .into_iter()
+        .filter(|model| {
+            matches!(
+                model.status,
+                StorageTraceRankingModelStatus::Candidate | StorageTraceRankingModelStatus::Active
+            )
+        })
+        .filter(|model| {
+            model_version
+                .as_ref()
+                .is_none_or(|model_version| &model.model_version == model_version)
+                && policy_version
+                    .as_ref()
+                    .is_none_or(|policy_version| &model.policy_version == policy_version)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        (left.created_at, &left.model_version).cmp(&(right.created_at, &right.model_version))
+    });
+    let candidate_count = candidates.len();
+
+    let mut response = TraceRankingCalibrationRunWorkerResponse {
+        ranking_worker_run_id: Uuid::new_v4(),
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        dry_run: body.dry_run,
+        limit,
+        target_use: body.target_use,
+        reason_hash: sha256_prefixed(&reason),
+        model_version: model_version.clone(),
+        policy_version: policy_version.clone(),
+        checked_count: 0,
+        calibrated_count: 0,
+        skipped_existing_count: 0,
+        skipped_ineligible_count: 0,
+        skipped_reason_counts: BTreeMap::new(),
+        pending_after_count: 0,
+        calibration_runs: Vec::new(),
+    };
+    let mut worker_run = TraceRankingWorkerRunRecord {
+        ranking_worker_run_id: response.ranking_worker_run_id,
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        run_kind: TraceRankingWorkerRunKind::Calibration,
+        status: TraceRankingWorkerRunStatus::Running,
+        dry_run: response.dry_run,
+        reason_hash: response.reason_hash.clone(),
+        model_version: response.model_version.clone(),
+        target_use: Some(response.target_use),
+        policy_version: response.policy_version.clone(),
+        limit: response.limit,
+        checked_count: 0,
+        succeeded_count: 0,
+        skipped_existing_count: 0,
+        skipped_model_risk_count: 0,
+        skipped_ineligible_count: 0,
+        pending_after_count: 0,
+        result_refs: Vec::new(),
+        reason_counts: BTreeMap::new(),
+        actor_principal_ref: tenant.principal_ref.clone(),
+        created_at: Utc::now(),
+        completed_at: None,
+        last_error_hash: None,
+    };
+    append_ranking_worker_run_with_db_mirror(state.as_ref(), &tenant, &worker_run)
+        .await
+        .map_err(internal_error)?;
+
+    for model in candidates.into_iter().take(limit) {
+        response.checked_count += 1;
+        match create_ranking_calibration_run(
+            state.as_ref(),
+            &tenant,
+            TraceRankingCalibrationRunRequest {
+                model_version: model.model_version.clone(),
+                target_use: body.target_use,
+                policy_version: model.policy_version.clone(),
+                evaluation_dataset_hash: model.calibration_dataset_hash.clone(),
+                min_label_count: body.min_label_count,
+                confidence_threshold: body.confidence_threshold,
+                max_average_absolute_error_micros: body.max_average_absolute_error_micros,
+            },
+            !body.dry_run,
+        )
+        .await
+        {
+            Ok(run) => {
+                response.calibrated_count += 1;
+                response.calibration_runs.push(run);
+            }
+            Err((status, Json(error)))
+                if ranking_calibration_run_worker_can_skip_status(status) =>
+            {
+                response.skipped_ineligible_count += 1;
+                *response
+                    .skipped_reason_counts
+                    .entry(error.error)
+                    .or_insert(0) += 1;
+            }
+            Err(error) => {
+                update_calibration_worker_run_from_response(&mut worker_run, &response);
+                let public_error = error.1.0.error.clone();
+                finalize_failed_ranking_worker_run_with_db_mirror(
+                    state.as_ref(),
+                    &tenant,
+                    &mut worker_run,
+                    error.0,
+                    &public_error,
+                )
+                .await?;
+                return Err(error);
+            }
+        }
+    }
+    response.pending_after_count = candidate_count.saturating_sub(limit);
+
+    update_calibration_worker_run_from_response(&mut worker_run, &response);
+    worker_run.status = TraceRankingWorkerRunStatus::Completed;
+    worker_run.completed_at = Some(Utc::now());
+    append_ranking_worker_run_with_db_mirror(state.as_ref(), &tenant, &worker_run)
+        .await
+        .map_err(internal_error)?;
+
+    Ok(Json(response))
+}
+
+fn ranking_calibration_run_worker_can_skip_status(status: StatusCode) -> bool {
+    matches!(status, StatusCode::NOT_FOUND | StatusCode::CONFLICT)
 }
 
 async fn ranking_calibration_runs_handler(
@@ -38899,6 +39163,153 @@ mod tests {
             latest_blocked.status,
             StorageTraceRankingModelStatus::Candidate
         );
+    }
+
+    #[tokio::test]
+    async fn ranking_calibration_worker_run_persists_calibration_and_worker_ledger() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("ranking submission succeeds");
+
+        let Json(model) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-calibration-worker-v1".to_string(),
+                feature_schema_version: "ranking-features-calibration-worker-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:ranking-training-calibration-worker".to_string(),
+                calibration_dataset_hash: "sha256:ranking-calibration-worker".to_string(),
+                model_artifact_hash: "sha256:ranking-model-artifact-calibration-worker".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can stage candidate model");
+
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                feature_schema_version: model.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:ranking-feature-calibration-worker".to_string(),
+                feature_names_hash: "sha256:ranking-feature-names-calibration-worker".to_string(),
+                source_feature_hash: "sha256:ranking-source-feature-calibration-worker".to_string(),
+                duplicate_score: Some(0.03),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.88),
+                coverage_tags: vec!["tool:terminal".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write feature evidence");
+        let Json(_) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: model.model_version.clone(),
+                feature_schema_version: model.feature_schema_version.clone(),
+                prediction_policy_version: model.policy_version.clone(),
+                feature_vector_hash: feature.feature_vector_hash,
+                predicted_utility_micros: 1_400_000,
+                uncertainty_micros: 100_000,
+                confidence: 0.9,
+                risk_penalty_micros: 0,
+                novelty_bonus_micros: 0,
+                explanation_codes: vec!["calibration_worker_probe".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write prediction evidence");
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_450_000,
+                evidence_hash: "sha256:frontier-evidence-calibration-worker".to_string(),
+                external_ref: "private-calibration-worker-batch".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write label evidence");
+
+        let Json(run) = ranking_calibration_run_worker_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunWorkerRequest {
+                dry_run: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                reason: "scheduled calibration worker pass".to_string(),
+                limit: Some(10),
+                model_version: Some(model.model_version.clone()),
+                policy_version: Some(model.policy_version.clone()),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can run bounded calibration automation");
+
+        assert!(!run.dry_run);
+        assert_eq!(run.checked_count, 1);
+        assert_eq!(run.calibrated_count, 1);
+        assert_eq!(run.skipped_existing_count, 0);
+        assert_eq!(run.skipped_ineligible_count, 0);
+        assert_eq!(run.pending_after_count, 0);
+        assert_eq!(run.calibration_runs.len(), 1);
+        assert_eq!(run.calibration_runs[0].model_version, model.model_version);
+        assert!(run.calibration_runs[0].promotable);
+        assert!(run.calibration_runs[0].report_hash.starts_with("sha256:"));
+
+        let Json(worker_runs) =
+            ranking_worker_runs_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect calibration worker run");
+        assert_eq!(worker_runs.len(), 1);
+        assert_eq!(
+            worker_runs[0].ranking_worker_run_id,
+            run.ranking_worker_run_id
+        );
+        assert_eq!(
+            worker_runs[0].run_kind,
+            TraceRankingWorkerRunKind::Calibration
+        );
+        assert_eq!(
+            worker_runs[0].status,
+            TraceRankingWorkerRunStatus::Completed
+        );
+        assert_eq!(worker_runs[0].checked_count, 1);
+        assert_eq!(worker_runs[0].succeeded_count, 1);
+        assert_eq!(worker_runs[0].result_refs.len(), 1);
+        assert!(worker_runs[0].result_refs[0].starts_with("ranking_calibration:"));
+
+        let raw_runs =
+            read_all_ranking_calibration_runs(temp.path(), "tenant-a").expect("runs read");
+        assert_eq!(raw_runs.len(), 1);
+        assert_eq!(raw_runs[0].report_hash, run.calibration_runs[0].report_hash);
     }
 
     #[tokio::test]

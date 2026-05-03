@@ -66,8 +66,10 @@ matches the stored prediction. Prediction-credit workers also require the active
 model/target pair to have no uncleared model-risk report codes by default so new
 credits wait for calibration/drift review before settlement. A scoped promotion
 run lets utility workers promote calibrated candidate models through the same
-server-owned gate without generic admin access. Prediction-credit and promotion
-automation runs now persist a hash-only worker-run ledger with
+server-owned gate without generic admin access, and a scoped calibration run
+lets utility workers schedule bounded calibration passes across active or
+candidate models. Calibration, prediction-credit, and promotion automation runs
+now persist a hash-only worker-run ledger with
 running/completed/failed lifecycle status, limits, counts, result refs, skipped
 reason aggregates, and safe hashed fatal-error refs for admin review. Live
 non-dry-run ranking schedulers reject overlapping active non-stale runs before
