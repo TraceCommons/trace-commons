@@ -23122,13 +23122,29 @@ async fn backfill_db_mirror_from_files(
     let file_credit_holds = read_all_credit_holds(&state.root, &tenant.tenant_id)?;
     let file_near_credit_outbox_items =
         read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)?;
+    let file_ranking_model_versions =
+        read_all_ranking_model_versions(&state.root, &tenant.tenant_id)?;
+    let file_latest_ranking_model_versions =
+        latest_ranking_model_versions(&file_ranking_model_versions);
+    let file_ranking_features = read_all_ranking_features(&state.root, &tenant.tenant_id)?;
+    let file_ranking_predictions = read_all_ranking_predictions(&state.root, &tenant.tenant_id)?;
+    let file_ranking_labels = read_all_ranking_labels(&state.root, &tenant.tenant_id)?;
+    let file_ranking_calibration_runs =
+        read_all_ranking_calibration_runs(&state.root, &tenant.tenant_id)?;
+    let file_ranking_worker_runs = read_all_ranking_worker_runs(&state.root, &tenant.tenant_id)?;
     if dry_run {
         report.backfilled += file_credit_events.len()
             + file_audit_events.len()
             + file_utility_attestations.len()
             + file_credit_settlement_batches.len()
             + file_credit_holds.len()
-            + file_near_credit_outbox_items.len();
+            + file_near_credit_outbox_items.len()
+            + file_latest_ranking_model_versions.len()
+            + file_ranking_features.len()
+            + file_ranking_predictions.len()
+            + file_ranking_labels.len()
+            + file_ranking_calibration_runs.len()
+            + file_ranking_worker_runs.len();
         for manifest in &file_export_manifests {
             match replay_export_items_for_manifest_backfill(
                 state,
@@ -23294,6 +23310,141 @@ async fn backfill_db_mirror_from_files(
                     "near_credit_outbox_item"
                 },
                 item.near_outbox_id.to_string(),
+                error.to_string(),
+            ),
+        }
+    }
+
+    let existing_ranking_model_versions = db
+        .list_trace_ranking_model_versions(&tenant.tenant_id)
+        .await
+        .context("failed to list ranking model versions for DB backfill")?
+        .into_iter()
+        .map(|record| (record.model_version.clone(), record))
+        .collect::<BTreeMap<_, _>>();
+    for record in &file_latest_ranking_model_versions {
+        if existing_ranking_model_versions
+            .get(&record.model_version)
+            .is_some_and(|db_record| db_record.status == record.status)
+        {
+            continue;
+        }
+        match mirror_ranking_model_version_to_db(state, record).await {
+            Ok(()) => report.backfilled += 1,
+            Err(error) => report.record_failure(
+                "ranking_model_version",
+                record.model_version.clone(),
+                error.to_string(),
+            ),
+        }
+    }
+
+    let existing_ranking_feature_ids = db
+        .list_trace_ranking_features(&tenant.tenant_id)
+        .await
+        .context("failed to list ranking features for DB backfill")?
+        .into_iter()
+        .map(|record| record.ranking_feature_id)
+        .collect::<BTreeSet<_>>();
+    for record in &file_ranking_features {
+        if existing_ranking_feature_ids.contains(&record.ranking_feature_id) {
+            continue;
+        }
+        match mirror_ranking_feature_to_db(state, record).await {
+            Ok(()) => report.backfilled += 1,
+            Err(error) => report.record_failure(
+                "ranking_feature",
+                record.ranking_feature_id.to_string(),
+                error.to_string(),
+            ),
+        }
+    }
+
+    let existing_ranking_prediction_ids = db
+        .list_trace_ranking_predictions(&tenant.tenant_id)
+        .await
+        .context("failed to list ranking predictions for DB backfill")?
+        .into_iter()
+        .map(|record| record.ranking_prediction_id)
+        .collect::<BTreeSet<_>>();
+    for record in &file_ranking_predictions {
+        if existing_ranking_prediction_ids.contains(&record.ranking_prediction_id) {
+            continue;
+        }
+        match mirror_ranking_prediction_to_db(state, record).await {
+            Ok(()) => report.backfilled += 1,
+            Err(error) => report.record_failure(
+                "ranking_prediction",
+                record.ranking_prediction_id.to_string(),
+                error.to_string(),
+            ),
+        }
+    }
+
+    let existing_ranking_label_ids = db
+        .list_trace_ranking_labels(&tenant.tenant_id)
+        .await
+        .context("failed to list ranking labels for DB backfill")?
+        .into_iter()
+        .map(|record| record.ranking_label_id)
+        .collect::<BTreeSet<_>>();
+    for record in &file_ranking_labels {
+        if existing_ranking_label_ids.contains(&record.ranking_label_id) {
+            continue;
+        }
+        match mirror_ranking_label_to_db(state, record).await {
+            Ok(()) => report.backfilled += 1,
+            Err(error) => report.record_failure(
+                "ranking_label",
+                record.ranking_label_id.to_string(),
+                error.to_string(),
+            ),
+        }
+    }
+
+    let existing_ranking_calibration_runs = db
+        .list_trace_ranking_calibration_runs(&tenant.tenant_id)
+        .await
+        .context("failed to list ranking calibration runs for DB backfill")?
+        .into_iter()
+        .map(|record| (record.calibration_run_id, record))
+        .collect::<BTreeMap<_, _>>();
+    for record in &file_ranking_calibration_runs {
+        if existing_ranking_calibration_runs
+            .get(&record.calibration_run_id)
+            .is_some_and(|db_record| db_record.report_hash == record.report_hash)
+        {
+            continue;
+        }
+        match mirror_ranking_calibration_run_to_db(state, record).await {
+            Ok(()) => report.backfilled += 1,
+            Err(error) => report.record_failure(
+                "ranking_calibration_run",
+                record.calibration_run_id.to_string(),
+                error.to_string(),
+            ),
+        }
+    }
+
+    let existing_ranking_worker_runs = db
+        .list_trace_ranking_worker_runs(&tenant.tenant_id)
+        .await
+        .context("failed to list ranking worker runs for DB backfill")?
+        .into_iter()
+        .map(|record| (record.ranking_worker_run_id, record))
+        .collect::<BTreeMap<_, _>>();
+    for record in &file_ranking_worker_runs {
+        if existing_ranking_worker_runs
+            .get(&record.ranking_worker_run_id)
+            .is_some_and(|db_record| db_record.status == record.status)
+        {
+            continue;
+        }
+        match mirror_ranking_worker_run_to_db(state, record).await {
+            Ok(()) => report.backfilled += 1,
+            Err(error) => report.record_failure(
+                "ranking_worker_run",
+                record.ranking_worker_run_id.to_string(),
                 error.to_string(),
             ),
         }
@@ -28753,6 +28904,189 @@ mod tests {
             )
             .await;
         tx.commit().await.expect("commit cleanup transaction");
+    }
+
+    struct RankingBackfillFixture {
+        feature_id: Uuid,
+        prediction_id: Uuid,
+        label_id: Uuid,
+        calibration_run_id: Uuid,
+        ranking_worker_run_id: Uuid,
+    }
+
+    fn append_ranking_backfill_fixture(
+        root: &std::path::Path,
+        tenant_id: &str,
+    ) -> RankingBackfillFixture {
+        let now = Utc::now();
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        let feature_id = Uuid::new_v4();
+        let prediction_id = Uuid::new_v4();
+        let label_id = Uuid::new_v4();
+        let calibration_run_id = Uuid::new_v4();
+        let ranking_worker_run_id = Uuid::new_v4();
+        append_ranking_model_version(
+            root,
+            tenant_id,
+            &TraceRankingModelVersionRecord {
+                tenant_id: tenant_id.to_string(),
+                tenant_storage_ref: tenant_storage_ref(tenant_id),
+                model_version: "trace-ranker-backfill-v1".to_string(),
+                feature_schema_version: "ranking-features-backfill-v1".to_string(),
+                policy_version: "trace-credit-policy-backfill-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:ranking-training-backfill".to_string(),
+                calibration_dataset_hash: "sha256:ranking-calibration-backfill".to_string(),
+                model_artifact_hash: "sha256:ranking-model-artifact-backfill".to_string(),
+                actor_principal_ref: principal_storage_ref("admin-token-a"),
+                created_at: now,
+            },
+        )
+        .expect("file ranking model writes");
+        append_ranking_feature(
+            root,
+            tenant_id,
+            &TraceRankingFeatureRecord {
+                ranking_feature_id: feature_id,
+                tenant_id: tenant_id.to_string(),
+                tenant_storage_ref: tenant_storage_ref(tenant_id),
+                submission_id,
+                trace_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                feature_schema_version: "ranking-features-backfill-v1".to_string(),
+                feature_vector_hash: "sha256:ranking-feature-backfill".to_string(),
+                feature_names_hash: "sha256:ranking-feature-names-backfill".to_string(),
+                source_feature_hash: "sha256:ranking-source-feature-backfill".to_string(),
+                duplicate_score: Some(0.02),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.01),
+                quality_score: Some(0.89),
+                coverage_tags: vec!["tool:terminal".to_string()],
+                actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+                created_at: now,
+            },
+        )
+        .expect("file ranking feature writes");
+        append_ranking_prediction(
+            root,
+            tenant_id,
+            &TraceRankingPredictionRecord {
+                ranking_prediction_id: prediction_id,
+                tenant_id: tenant_id.to_string(),
+                tenant_storage_ref: tenant_storage_ref(tenant_id),
+                submission_id,
+                trace_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: "trace-ranker-backfill-v1".to_string(),
+                feature_schema_version: "ranking-features-backfill-v1".to_string(),
+                prediction_policy_version: "trace-credit-policy-backfill-v1".to_string(),
+                feature_vector_hash: "sha256:ranking-feature-backfill".to_string(),
+                predicted_utility_micros: 1_200_000,
+                uncertainty_micros: 100_000,
+                confidence: 0.86,
+                risk_penalty_micros: 0,
+                novelty_bonus_micros: 0,
+                settlement_score_micros: 1_200_000,
+                explanation_codes: vec!["backfill_probe".to_string()],
+                actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+                created_at: now,
+            },
+        )
+        .expect("file ranking prediction writes");
+        append_ranking_label(
+            root,
+            tenant_id,
+            &TraceRankingLabelRecord {
+                ranking_label_id: label_id,
+                tenant_id: tenant_id.to_string(),
+                tenant_storage_ref: tenant_storage_ref(tenant_id),
+                submission_id,
+                trace_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_250_000,
+                evidence_hash: "sha256:ranking-label-evidence-backfill".to_string(),
+                external_ref_hash: "sha256:ranking-label-external-ref-backfill".to_string(),
+                actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+                created_at: now,
+            },
+        )
+        .expect("file ranking label writes");
+        append_ranking_calibration_run(
+            root,
+            tenant_id,
+            &TraceRankingCalibrationRunRecord {
+                calibration_run_id,
+                tenant_id: tenant_id.to_string(),
+                tenant_storage_ref: tenant_storage_ref(tenant_id),
+                model_version: "trace-ranker-backfill-v1".to_string(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: "trace-credit-policy-backfill-v1".to_string(),
+                evaluation_dataset_hash: "sha256:ranking-calibration-backfill".to_string(),
+                prediction_count: 1,
+                label_count: 1,
+                joined_label_prediction_count: 1,
+                joined_label_source_count: 1,
+                joined_evidence_hash: "sha256:ranking-joined-evidence-backfill".to_string(),
+                average_predicted_utility_micros: Some(1_200_000),
+                average_label_utility_delta_micros: Some(1_250_000),
+                average_absolute_error_micros: Some(50_000),
+                max_label_source_average_absolute_error_micros: Some(50_000),
+                max_error_label_source: Some(StorageTraceRankingLabelSource::FrontierLab),
+                mean_signed_error_micros: Some(-50_000),
+                low_confidence_prediction_count: 0,
+                confidence_threshold: 0.5,
+                min_label_count: 1,
+                min_label_source_count: 1,
+                max_average_absolute_error_micros: 100_000,
+                promotable: true,
+                reason_codes: Vec::new(),
+                report_hash: "sha256:ranking-calibration-report-backfill".to_string(),
+                actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+                created_at: now,
+            },
+        )
+        .expect("file ranking calibration run writes");
+        append_ranking_worker_run(
+            root,
+            tenant_id,
+            &TraceRankingWorkerRunRecord {
+                ranking_worker_run_id,
+                tenant_id: tenant_id.to_string(),
+                tenant_storage_ref: tenant_storage_ref(tenant_id),
+                run_kind: TraceRankingWorkerRunKind::Calibration,
+                status: TraceRankingWorkerRunStatus::Completed,
+                dry_run: false,
+                reason_hash: sha256_prefixed("ranking backfill worker"),
+                model_version: Some("trace-ranker-backfill-v1".to_string()),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                policy_version: Some("trace-credit-policy-backfill-v1".to_string()),
+                limit: 10,
+                checked_count: 1,
+                succeeded_count: 1,
+                skipped_existing_count: 0,
+                skipped_model_risk_count: 0,
+                skipped_ineligible_count: 0,
+                pending_after_count: 0,
+                result_refs: vec![format!("ranking_calibration:{calibration_run_id}")],
+                reason_counts: BTreeMap::new(),
+                actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+                created_at: now,
+                completed_at: Some(now),
+                last_error_hash: None,
+            },
+        )
+        .expect("file ranking worker run writes");
+        RankingBackfillFixture {
+            feature_id,
+            prediction_id,
+            label_id,
+            calibration_run_id,
+            ranking_worker_run_id,
+        }
     }
 
     fn test_state_with_options(
@@ -35125,6 +35459,139 @@ mod tests {
         .expect("maintenance dry-run succeeds without a DB mirror");
         assert_eq!(response.db_mirror_backfilled, 4);
         assert_eq!(response.db_mirror_backfill_failed, 0);
+    }
+
+    #[tokio::test]
+    async fn maintenance_backfill_dry_run_counts_ranking_control_plane_rows() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let _fixture = append_ranking_backfill_fixture(temp.path(), "tenant-a");
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("ranking_control_plane_backfill_dry_run".to_string()),
+                dry_run: true,
+                backfill_db_mirror: true,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("maintenance dry-run succeeds without a DB mirror");
+        assert_eq!(response.db_mirror_backfilled, 6);
+        assert_eq!(response.db_mirror_backfill_failed, 0);
+    }
+
+    #[tokio::test]
+    async fn maintenance_backfill_mirrors_ranking_control_plane_rows() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        let fixture = append_ranking_backfill_fixture(temp.path(), "tenant-a");
+
+        let Json(response) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("ranking_control_plane_backfill".to_string()),
+                dry_run: false,
+                backfill_db_mirror: true,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("maintenance backfill succeeds");
+        assert_eq!(response.db_mirror_backfilled, 6);
+        assert_eq!(response.db_mirror_backfill_failed, 0);
+
+        let model_versions = backend
+            .list_trace_ranking_model_versions("tenant-a")
+            .await
+            .expect("DB ranking model reads");
+        assert_eq!(model_versions.len(), 1);
+        assert_eq!(model_versions[0].model_version, "trace-ranker-backfill-v1");
+        let features = backend
+            .list_trace_ranking_features("tenant-a")
+            .await
+            .expect("DB ranking feature reads");
+        assert_eq!(features.len(), 1);
+        assert_eq!(features[0].ranking_feature_id, fixture.feature_id);
+        let predictions = backend
+            .list_trace_ranking_predictions("tenant-a")
+            .await
+            .expect("DB ranking prediction reads");
+        assert_eq!(predictions.len(), 1);
+        assert_eq!(predictions[0].ranking_prediction_id, fixture.prediction_id);
+        let labels = backend
+            .list_trace_ranking_labels("tenant-a")
+            .await
+            .expect("DB ranking label reads");
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].ranking_label_id, fixture.label_id);
+        let calibration_runs = backend
+            .list_trace_ranking_calibration_runs("tenant-a")
+            .await
+            .expect("DB ranking calibration run reads");
+        assert_eq!(calibration_runs.len(), 1);
+        assert_eq!(
+            calibration_runs[0].calibration_run_id,
+            fixture.calibration_run_id
+        );
+        let worker_runs = backend
+            .list_trace_ranking_worker_runs("tenant-a")
+            .await
+            .expect("DB ranking worker run reads");
+        assert_eq!(worker_runs.len(), 1);
+        assert_eq!(
+            worker_runs[0].ranking_worker_run_id,
+            fixture.ranking_worker_run_id
+        );
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("ranking_control_plane_backfill_idempotent".to_string()),
+                dry_run: false,
+                backfill_db_mirror: true,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("second maintenance backfill succeeds");
+        assert_eq!(response.db_mirror_backfilled, 0);
+        assert_eq!(response.db_mirror_backfill_failed, 0);
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
 
     #[tokio::test]
