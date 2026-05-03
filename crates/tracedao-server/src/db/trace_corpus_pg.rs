@@ -136,7 +136,7 @@ const TRACE_RANKING_LABEL_COLUMNS: &str = "\
 const TRACE_RANKING_CALIBRATION_RUN_COLUMNS: &str = "\
     tenant_id, calibration_run_id, model_version, target_use, policy_version, \
     evaluation_dataset_hash, prediction_count, label_count, joined_label_prediction_count, \
-    joined_label_source_count, \
+    joined_label_source_count, joined_evidence_hash, \
     average_predicted_utility_micros, average_label_utility_delta_micros, \
     average_absolute_error_micros, max_label_source_average_absolute_error_micros, \
     max_error_label_source, mean_signed_error_micros, low_confidence_prediction_count, \
@@ -684,6 +684,7 @@ fn row_to_ranking_calibration_run(
         label_count: row_i32_to_u32(row, "label_count")?,
         joined_label_prediction_count: row_i32_to_u32(row, "joined_label_prediction_count")?,
         joined_label_source_count: row_i32_to_u32(row, "joined_label_source_count")?,
+        joined_evidence_hash: row.get("joined_evidence_hash"),
         average_predicted_utility_micros: row.get("average_predicted_utility_micros"),
         average_label_utility_delta_micros: row.get("average_label_utility_delta_micros"),
         average_absolute_error_micros: row.get("average_absolute_error_micros"),
@@ -2318,8 +2319,8 @@ impl TraceCorpusStore for PgBackend {
                         tenant_id, calibration_run_id, model_version, target_use, policy_version,
                         evaluation_dataset_hash, prediction_count, label_count,
                         joined_label_prediction_count, joined_label_source_count,
-                        average_predicted_utility_micros, average_label_utility_delta_micros,
-                        average_absolute_error_micros,
+                        joined_evidence_hash, average_predicted_utility_micros,
+                        average_label_utility_delta_micros, average_absolute_error_micros,
                         max_label_source_average_absolute_error_micros,
                         max_error_label_source, mean_signed_error_micros,
                         low_confidence_prediction_count, confidence_threshold, min_label_count,
@@ -2327,7 +2328,7 @@ impl TraceCorpusStore for PgBackend {
                         reason_codes, report_hash, actor_principal_ref
                      ) VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                        $17, $18, $19, $20, $21, $22, $23, $24, $25
+                        $17, $18, $19, $20, $21, $22, $23, $24, $25, $26
                      )
                      ON CONFLICT (tenant_id, calibration_run_id) DO UPDATE SET
                         model_version = excluded.model_version,
@@ -2338,6 +2339,7 @@ impl TraceCorpusStore for PgBackend {
                         label_count = excluded.label_count,
                         joined_label_prediction_count = excluded.joined_label_prediction_count,
                         joined_label_source_count = excluded.joined_label_source_count,
+                        joined_evidence_hash = excluded.joined_evidence_hash,
                         average_predicted_utility_micros = excluded.average_predicted_utility_micros,
                         average_label_utility_delta_micros = excluded.average_label_utility_delta_micros,
                         average_absolute_error_micros = excluded.average_absolute_error_micros,
@@ -2366,6 +2368,7 @@ impl TraceCorpusStore for PgBackend {
                     &label_count,
                     &joined_label_prediction_count,
                     &joined_label_source_count,
+                    &run.joined_evidence_hash,
                     &run.average_predicted_utility_micros,
                     &run.average_label_utility_delta_micros,
                     &run.average_absolute_error_micros,
