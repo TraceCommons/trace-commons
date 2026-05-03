@@ -35,11 +35,14 @@ to PostgreSQL; `TRACE_COMMONS_DB_REVIEWER_READS=true` serves the admin credit
 control-plane lists from the tenant-scoped DB mirror.
 
 The NEAR path is intentionally an outbox of deterministic method-call payloads
-for a non-transferable receipt contract. Workers mark outbox items submitted,
-confirmed, or failed after contract submission. The server ledger remains
-authoritative; NEAR payloads contain batch ids, account hashes, source-list
-hashes, policy versions, amounts, and issuer-signature hashes, never trace
-bodies or raw contributor identity.
+for a non-transferable receipt contract. Configure
+`TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL` to let the scoped submit worker hand
+pending or failed-retry calls to an operator-owned NEAR relayer; the server then
+records the public transaction hash or a hashed failure. Workers can still
+manually mark items submitted, confirmed, or failed for fallback operations. The
+server ledger remains authoritative; NEAR payloads contain batch ids, account
+hashes, source-list hashes, policy versions, amounts, and issuer-signature
+hashes, never trace bodies or raw contributor identity.
 
 Ranking evidence is stored separately from settlement. Workers can register
 feature hashes, model predictions, lab/reviewer labels, and calibration runs

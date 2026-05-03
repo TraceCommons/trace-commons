@@ -215,9 +215,17 @@ const TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR";
+const TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL: &str = "TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL";
+const TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN: &str =
+    "TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN";
+const TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS: &str =
+    "TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS";
 const DEFAULT_EDDSA_KEYSET_URL_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_EDDSA_KEYSET_REFRESH_INTERVAL_SECONDS: u64 = 300;
 const MAX_EDDSA_KEYSET_URL_BYTES: usize = 256 * 1024;
+const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT: u32 = 100;
+const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT: u32 = 500;
 const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
 const TRACE_REVIEW_DUE_AFTER_HOURS: i64 = 24;
 const TRACE_REVIEW_OVERDUE_AFTER_HOURS: i64 = 72;
@@ -277,6 +285,7 @@ struct AppState {
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Arc<BTreeSet<String>>,
     artifact_store: Option<ConfiguredTraceArtifactStore>,
+    near_credit_submitter: Option<Arc<dyn TraceNearCreditSubmitter>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1371,6 +1380,7 @@ impl AppState {
         let submission_quota = parse_submission_quota_config_from_env()?;
         let legal_hold_retention_policy_ids = parse_legal_hold_retention_policy_ids_from_env()?;
         let artifact_store = trace_artifact_store_from_env(&root)?;
+        let near_credit_submitter = trace_near_credit_submitter_from_env()?;
         let object_primary_submit_review = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW);
         let object_primary_replay_export = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT);
         let object_primary_derived_exports =
@@ -1512,6 +1522,7 @@ impl AppState {
             submission_quota,
             legal_hold_retention_policy_ids: Arc::new(legal_hold_retention_policy_ids),
             artifact_store,
+            near_credit_submitter,
         })
     }
 }
@@ -1707,6 +1718,82 @@ fn trace_artifact_store_from_env(
         object_store_name,
         Arc::new(LocalEncryptedTraceArtifactStore::new(root, crypto)),
     )))
+}
+
+fn trace_near_credit_submitter_from_env()
+-> anyhow::Result<Option<Arc<dyn TraceNearCreditSubmitter>>> {
+    let Some(url) = optional_trimmed_env(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL)? else {
+        return Ok(None);
+    };
+    let parsed = reqwest::Url::parse(&url)
+        .with_context(|| format!("invalid {TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL}"))?;
+    validate_trace_near_credit_submitter_url(&parsed)?;
+    let timeout = parse_trace_near_credit_submitter_timeout_from_env()?;
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout.min(StdDuration::from_secs(3)))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("tracedao-near-credit-submitter/0.1")
+        .build()
+        .context("failed to build NEAR credit submitter HTTP client")?;
+    Ok(Some(Arc::new(HttpTraceNearCreditSubmitter {
+        client,
+        url,
+        bearer_token: optional_trimmed_env(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN)?
+            .map(SecretString::from),
+    })))
+}
+
+fn validate_trace_near_credit_submitter_url(url: &reqwest::Url) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        matches!(url.scheme(), "https" | "http"),
+        "{TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL} must use http or https"
+    );
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "{TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL} must not include embedded credentials"
+    );
+    anyhow::ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "{TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL} must not include query strings or fragments"
+    );
+    let host = url.host_str().map(str::to_ascii_lowercase).ok_or_else(|| {
+        anyhow::anyhow!("{TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL} requires a host")
+    })?;
+    if url.scheme() == "http" {
+        anyhow::ensure!(
+            is_loopback_or_localhost_host(&host),
+            "{TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL} may use http only for localhost loopback relayers"
+        );
+    }
+    Ok(())
+}
+
+fn is_loopback_or_localhost_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    host.parse::<IpAddr>()
+        .map(|ip| match normalize_keyset_ip(ip) {
+            IpAddr::V4(v4) => v4.is_loopback(),
+            IpAddr::V6(v6) => v6.is_loopback(),
+        })
+        .unwrap_or(false)
+}
+
+fn parse_trace_near_credit_submitter_timeout_from_env() -> anyhow::Result<StdDuration> {
+    let timeout_ms = match optional_trimmed_env(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS)? {
+        Some(configured) => configured.parse::<u64>().with_context(|| {
+            format!("{TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS} must be milliseconds")
+        })?,
+        None => DEFAULT_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS,
+    };
+    anyhow::ensure!(
+        (1..=30_000).contains(&timeout_ms),
+        "{TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS} must be between 1 and 30000"
+    );
+    Ok(StdDuration::from_millis(timeout_ms))
 }
 
 async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<Arc<dyn Database>>> {
@@ -1962,6 +2049,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/workers/utility-attestations",
             post(utility_attestation_handler),
+        )
+        .route(
+            "/v1/workers/near-credit-outbox/submit",
+            post(near_credit_outbox_submit_worker_handler),
         )
         .route(
             "/v1/workers/near-credit-outbox/mark-status",
@@ -5003,6 +5094,95 @@ struct TraceNearCreditOutboxStatusRequest {
     error_detail: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceNearCreditSubmitterRequest {
+    tenant_storage_ref: String,
+    near_outbox_id: Uuid,
+    settlement_batch_id: Uuid,
+    credit_account_hash: String,
+    near_call: NearCreditReceiptCall,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceNearCreditSubmitterResponse {
+    near_transaction_hash: String,
+}
+
+#[async_trait::async_trait]
+trait TraceNearCreditSubmitter: Send + Sync {
+    async fn submit(
+        &self,
+        request: TraceNearCreditSubmitterRequest,
+    ) -> anyhow::Result<TraceNearCreditSubmitterResponse>;
+}
+
+#[derive(Clone)]
+struct HttpTraceNearCreditSubmitter {
+    client: reqwest::Client,
+    url: String,
+    bearer_token: Option<SecretString>,
+}
+
+#[async_trait::async_trait]
+impl TraceNearCreditSubmitter for HttpTraceNearCreditSubmitter {
+    async fn submit(
+        &self,
+        request: TraceNearCreditSubmitterRequest,
+    ) -> anyhow::Result<TraceNearCreditSubmitterResponse> {
+        let mut builder = self
+            .client
+            .post(&self.url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&request);
+        if let Some(bearer_token) = &self.bearer_token {
+            builder = builder.bearer_auth(bearer_token.expose_secret());
+        }
+        let response = builder
+            .send()
+            .await
+            .context("failed to submit NEAR credit receipt call to relayer")?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!(
+                "NEAR credit receipt relayer returned HTTP {}",
+                status.as_u16()
+            );
+        }
+        let mut response: TraceNearCreditSubmitterResponse = response
+            .json()
+            .await
+            .context("failed to decode NEAR credit receipt relayer response")?;
+        response.near_transaction_hash =
+            normalize_near_transaction_hash(&response.near_transaction_hash)?;
+        Ok(response)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceNearCreditOutboxSubmitWorkerRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default = "default_near_credit_outbox_submit_limit")]
+    limit: u32,
+}
+
+fn default_near_credit_outbox_submit_limit() -> u32 {
+    TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT
+}
+
+#[derive(Debug, Serialize)]
+struct TraceNearCreditOutboxSubmitWorkerResponse {
+    purpose: String,
+    dry_run: bool,
+    checked: usize,
+    submitted: usize,
+    failed: usize,
+    skipped: usize,
+    pending: usize,
+}
+
 #[derive(Debug, Deserialize)]
 struct TraceCreditHoldRequest {
     credit_account_ref: String,
@@ -6062,6 +6242,25 @@ async fn near_credit_outbox_handler(
     Ok(Json(items))
 }
 
+async fn near_credit_outbox_submit_worker_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceNearCreditOutboxSubmitWorkerRequest>,
+) -> ApiResult<Json<TraceNearCreditOutboxSubmitWorkerResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_utility_operator(&tenant)?;
+    if !body.dry_run && state.near_credit_submitter.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "NEAR credit outbox submit worker requires TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL",
+        ));
+    }
+    let response = run_near_credit_outbox_submit_worker(state.as_ref(), &tenant, body)
+        .await
+        .map_err(maintenance_error)?;
+    Ok(Json(response))
+}
+
 async fn mark_near_credit_outbox_status_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -6085,9 +6284,9 @@ async fn mark_near_credit_outbox_status_handler(
     let near_transaction_hash = body
         .near_transaction_hash
         .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
+        .map(normalize_near_transaction_hash)
+        .transpose()
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
     if matches!(
         status,
         StorageTraceCreditSettlementNearStatus::Submitted
@@ -6099,16 +6298,6 @@ async fn mark_near_credit_outbox_status_handler(
             "submitted or confirmed NEAR credit outbox status requires near_transaction_hash",
         ));
     }
-    if near_transaction_hash
-        .as_deref()
-        .is_some_and(|hash| hash.len() > 256)
-    {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "near_transaction_hash is too long",
-        ));
-    }
-
     let last_error_hash = if status == StorageTraceCreditSettlementNearStatus::Failed {
         let error_detail = body
             .error_detail
@@ -6137,6 +6326,196 @@ async fn mark_near_credit_outbox_status_handler(
     .map_err(internal_error)?
     .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "NEAR credit outbox item not found"))?;
     Ok(Json(updated))
+}
+
+async fn run_near_credit_outbox_submit_worker(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceNearCreditOutboxSubmitWorkerRequest,
+) -> anyhow::Result<TraceNearCreditOutboxSubmitWorkerResponse> {
+    let purpose = normalized_export_purpose(
+        request.purpose.as_deref(),
+        "trace_commons_near_credit_submit_worker",
+    );
+    let limit = request
+        .limit
+        .clamp(1, TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT) as usize;
+    let items = read_near_credit_outbox_items_for_admin(state, tenant).await?;
+    let pending_total = items
+        .iter()
+        .filter(|item| near_credit_outbox_item_is_submit_candidate(item))
+        .count();
+    let candidates: Vec<_> = items
+        .into_iter()
+        .filter(near_credit_outbox_item_is_submit_candidate)
+        .take(limit)
+        .collect();
+    let mut response = TraceNearCreditOutboxSubmitWorkerResponse {
+        purpose,
+        dry_run: request.dry_run,
+        checked: candidates.len(),
+        submitted: 0,
+        failed: 0,
+        skipped: pending_total.saturating_sub(candidates.len()),
+        pending: pending_total,
+    };
+    if request.dry_run {
+        append_near_credit_outbox_submit_audit(state, tenant, &response).await?;
+        return Ok(response);
+    }
+
+    let submitter = state
+        .near_credit_submitter
+        .as_ref()
+        .context("NEAR credit outbox submitter is not configured")?
+        .clone();
+    for item in candidates {
+        let submit_request = near_credit_submitter_request_from_outbox_item(&item);
+        match submitter.submit(submit_request).await {
+            Ok(submit_response) => {
+                let near_transaction_hash =
+                    normalize_near_transaction_hash(&submit_response.near_transaction_hash)?;
+                let updated = update_near_credit_outbox_item_status_with_db_mirror(
+                    state,
+                    tenant,
+                    item.near_outbox_id,
+                    StorageTraceCreditSettlementNearStatus::Submitted,
+                    Some(near_transaction_hash),
+                    None,
+                )
+                .await?
+                .with_context(|| {
+                    format!(
+                        "NEAR credit outbox item {} disappeared before submitted status update",
+                        item.near_outbox_id
+                    )
+                })?;
+                anyhow::ensure!(
+                    updated.status == StorageTraceCreditSettlementNearStatus::Submitted,
+                    "NEAR credit outbox item {} did not update to submitted status",
+                    item.near_outbox_id
+                );
+                response.submitted += 1;
+            }
+            Err(error) => {
+                let last_error_hash = sha256_prefixed(&safe_worker_error(&error));
+                update_near_credit_outbox_item_status_with_db_mirror(
+                    state,
+                    tenant,
+                    item.near_outbox_id,
+                    StorageTraceCreditSettlementNearStatus::Failed,
+                    None,
+                    Some(last_error_hash),
+                )
+                .await?
+                .with_context(|| {
+                    format!(
+                        "NEAR credit outbox item {} disappeared before failed status update",
+                        item.near_outbox_id
+                    )
+                })?;
+                response.failed += 1;
+            }
+        }
+    }
+    response.pending = pending_total.saturating_sub(response.submitted);
+    append_near_credit_outbox_submit_audit(state, tenant, &response).await?;
+    Ok(response)
+}
+
+fn near_credit_outbox_item_is_submit_candidate(item: &TraceNearCreditOutboxItem) -> bool {
+    matches!(
+        item.status,
+        StorageTraceCreditSettlementNearStatus::Pending
+            | StorageTraceCreditSettlementNearStatus::Failed
+    )
+}
+
+fn near_credit_submitter_request_from_outbox_item(
+    item: &TraceNearCreditOutboxItem,
+) -> TraceNearCreditSubmitterRequest {
+    TraceNearCreditSubmitterRequest {
+        tenant_storage_ref: item.tenant_storage_ref.clone(),
+        near_outbox_id: item.near_outbox_id,
+        settlement_batch_id: item.settlement_batch_id,
+        credit_account_hash: item.credit_account_hash.clone(),
+        near_call: item.near_call.clone(),
+    }
+}
+
+fn normalize_near_transaction_hash(hash: &str) -> anyhow::Result<String> {
+    let hash = hash.trim();
+    anyhow::ensure!(!hash.is_empty(), "near_transaction_hash is required");
+    anyhow::ensure!(hash.len() <= 256, "near_transaction_hash is too long");
+    anyhow::ensure!(
+        hash.chars()
+            .all(|character| character.is_ascii_graphic() && character != '"' && character != '\\'),
+        "near_transaction_hash contains invalid characters"
+    );
+    Ok(hash.to_string())
+}
+
+async fn append_near_credit_outbox_submit_audit(
+    state: &AppState,
+    tenant: &TenantAuth,
+    response: &TraceNearCreditOutboxSubmitWorkerResponse,
+) -> anyhow::Result<()> {
+    let mut action_counts = BTreeMap::new();
+    action_counts.insert(
+        "checked".to_string(),
+        response.checked.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "submitted".to_string(),
+        response.submitted.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "failed".to_string(),
+        response.failed.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "skipped".to_string(),
+        response.skipped.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "pending".to_string(),
+        response.pending.min(u32::MAX as usize) as u32,
+    );
+    append_audit_event_with_db_mirror(
+        state,
+        tenant,
+        TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "near_credit_outbox_submit".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(tenant.role),
+            actor_principal_ref: Some(tenant.principal_ref.clone()),
+            reason: Some(format!(
+                "purpose={};dry_run={};checked={};submitted={};failed={};skipped={};pending={}",
+                response.purpose,
+                response.dry_run,
+                response.checked,
+                response.submitted,
+                response.failed,
+                response.skipped,
+                response.pending
+            )),
+            export_count: Some(response.checked),
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        },
+        StorageTraceAuditAction::Retain,
+        StorageTraceAuditSafeMetadata::Maintenance {
+            dry_run: response.dry_run,
+            action_counts,
+        },
+    )
+    .await
 }
 
 async fn append_utility_attestation_with_db_mirror(
@@ -24988,6 +25367,7 @@ mod tests {
             submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store,
+            near_credit_submitter: None,
         })
     }
 
@@ -30333,6 +30713,7 @@ mod tests {
                 "private_corpus_revocable".to_string()
             ])),
             artifact_store: None,
+            near_credit_submitter: None,
         });
 
         let mut envelope = sample_envelope().await;
@@ -31911,6 +32292,236 @@ mod tests {
             Some("near-public-tx-hash-1")
         );
         assert!(submitted.submitted_at.is_some());
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeNearCreditSubmitter {
+        calls: Arc<std::sync::Mutex<Vec<TraceNearCreditSubmitterRequest>>>,
+        failure: Option<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl TraceNearCreditSubmitter for FakeNearCreditSubmitter {
+        async fn submit(
+            &self,
+            request: TraceNearCreditSubmitterRequest,
+        ) -> anyhow::Result<TraceNearCreditSubmitterResponse> {
+            if let Some(failure) = &self.failure {
+                anyhow::bail!("{failure}");
+            }
+            self.calls
+                .lock()
+                .expect("fake submitter calls lock")
+                .push(request);
+            Ok(TraceNearCreditSubmitterResponse {
+                near_transaction_hash: "near-worker-tx-hash-1".to_string(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn near_credit_outbox_submit_worker_sends_pending_calls_and_marks_submitted() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let fake_submitter = FakeNearCreditSubmitter::default();
+        let submitted_calls = fake_submitter.calls.clone();
+        Arc::make_mut(&mut state).near_credit_submitter = Some(Arc::new(fake_submitter));
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let _ = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.0,
+                reason: Some("frontier utility for NEAR worker".to_string()),
+                external_ref: Some("frontier:near-submit-worker".to_string()),
+            }),
+        )
+        .await
+        .expect("credit event succeeds");
+        let Json(settlement) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "settlement for NEAR submit worker".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("settlement creates outbox");
+        assert_eq!(settlement.near_outbox_item_count, 1);
+
+        let Json(response) = near_credit_outbox_submit_worker_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxSubmitWorkerRequest {
+                purpose: Some("submit_near_receipts".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("utility worker submits NEAR outbox item");
+        assert_eq!(response.checked, 1);
+        assert_eq!(response.submitted, 1);
+        assert_eq!(response.failed, 0);
+        assert_eq!(response.pending, 0);
+
+        let calls = submitted_calls.lock().expect("fake submitter calls lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tenant_storage_ref, tenant_storage_ref("tenant-a"));
+        assert_eq!(calls[0].near_call.method_name, "settle_credit_receipt");
+        assert_eq!(calls[0].near_call.contract_id, "trace-credits.testnet");
+        assert!(calls[0].near_call.idempotency_key.starts_with("sha256:"));
+        let call_json = serde_json::to_string(&calls[0]).expect("call serializes");
+        assert!(!call_json.contains("token-a"));
+        assert!(!call_json.contains("frontier utility for NEAR worker"));
+
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(
+            outbox[0].status,
+            StorageTraceCreditSettlementNearStatus::Submitted
+        );
+        assert_eq!(
+            outbox[0].near_transaction_hash.as_deref(),
+            Some("near-worker-tx-hash-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn near_credit_outbox_submit_worker_keeps_failed_items_retryable() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).near_credit_submitter = Some(Arc::new(FakeNearCreditSubmitter {
+            calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+            failure: Some("temporary relayer outage".to_string()),
+        }));
+        let settlement_batch_id = Uuid::new_v4();
+        let near_outbox_id = Uuid::new_v4();
+        let receipt = NearCreditReceipt {
+            settlement_batch_id,
+            credit_account_hash: sha256_prefixed(&principal_storage_ref("token-a")),
+            policy_version: "trace-credit-policy-v1".to_string(),
+            source_list_hash: "sha256:settlement-worker-retry-sources".to_string(),
+            attestation_hash: "sha256:settlement-worker-retry-attestation".to_string(),
+            amount_micros: 1_000_000,
+            issuer_signature_hash: "sha256:settlement-worker-retry-signature".to_string(),
+        };
+        append_near_credit_outbox_item(
+            temp.path(),
+            "tenant-a",
+            &TraceNearCreditOutboxItem {
+                near_outbox_id,
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                settlement_batch_id,
+                credit_account_hash: receipt.credit_account_hash.clone(),
+                near_call: NearCreditReceiptCall::settle("trace-credits.testnet", receipt)
+                    .expect("NEAR call builds"),
+                status: StorageTraceCreditSettlementNearStatus::Pending,
+                created_at: Utc::now(),
+                submitted_at: None,
+                near_transaction_hash: None,
+                last_error_hash: None,
+                confirmed_at: None,
+            },
+        )
+        .expect("outbox file writes");
+
+        let Json(failed) = near_credit_outbox_submit_worker_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxSubmitWorkerRequest {
+                purpose: Some("submit_near_receipts_retry".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("relayer failure is recorded, not surfaced as a worker crash");
+        assert_eq!(failed.checked, 1);
+        assert_eq!(failed.submitted, 0);
+        assert_eq!(failed.failed, 1);
+        assert_eq!(failed.pending, 1);
+        let failed_outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert_eq!(
+            failed_outbox[0].status,
+            StorageTraceCreditSettlementNearStatus::Failed
+        );
+        assert!(failed_outbox[0].last_error_hash.is_some());
+
+        Arc::make_mut(&mut state).near_credit_submitter =
+            Some(Arc::new(FakeNearCreditSubmitter::default()));
+        let Json(submitted) = near_credit_outbox_submit_worker_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxSubmitWorkerRequest {
+                purpose: Some("submit_near_receipts_retry".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("failed item is retried by the submit worker");
+        assert_eq!(submitted.checked, 1);
+        assert_eq!(submitted.submitted, 1);
+        assert_eq!(submitted.pending, 0);
+    }
+
+    #[tokio::test]
+    async fn near_credit_outbox_submit_worker_requires_configured_submitter_for_live_run() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = near_credit_outbox_submit_worker_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxSubmitWorkerRequest {
+                purpose: Some("submitter_config_gate".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect_err("live submit worker requires configured relayer");
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+
+        let Json(dry_run) = near_credit_outbox_submit_worker_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxSubmitWorkerRequest {
+                purpose: Some("submitter_config_gate_dry_run".to_string()),
+                dry_run: true,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("dry-run does not require configured relayer");
+        assert_eq!(dry_run.checked, 0);
+        assert_eq!(dry_run.submitted, 0);
+        assert_eq!(dry_run.pending, 0);
     }
 
     #[tokio::test]
