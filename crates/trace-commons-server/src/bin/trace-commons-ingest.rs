@@ -2132,6 +2132,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(credit_settlement_worker_run_handler),
         )
         .route(
+            "/v1/workers/credit-cycle/run",
+            post(credit_cycle_worker_run_handler),
+        )
+        .route(
             "/v1/admin/credit-holds",
             get(credit_holds_handler).post(credit_hold_handler),
         )
@@ -5378,6 +5382,56 @@ struct TraceCreditSettlementWorkerRunRequest {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceCreditCycleWorkerRunRequest {
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default)]
+    submit_near_outbox: bool,
+    target_use: TraceAllowedUse,
+    model_version: String,
+    policy_version: String,
+    reason: String,
+    #[serde(default)]
+    near_contract_id: Option<String>,
+    #[serde(default)]
+    calibration_limit: Option<usize>,
+    #[serde(default)]
+    model_promotion_limit: Option<usize>,
+    #[serde(default)]
+    prediction_credit_limit: Option<usize>,
+    #[serde(default)]
+    credit_settlement_limit: Option<usize>,
+    #[serde(default)]
+    near_outbox_limit: Option<u32>,
+    #[serde(default)]
+    min_label_count: Option<usize>,
+    #[serde(default)]
+    confidence_threshold: Option<f32>,
+    #[serde(default)]
+    max_average_absolute_error_micros: Option<i64>,
+    #[serde(default)]
+    allow_at_risk_models: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceCreditCycleWorkerRunResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    dry_run: bool,
+    submit_near_outbox: bool,
+    target_use: TraceAllowedUse,
+    model_version: String,
+    policy_version: String,
+    reason_hash: String,
+    near_contract_id: Option<String>,
+    calibration: TraceRankingCalibrationRunWorkerResponse,
+    model_promotion: TraceRankingModelPromotionRunResponse,
+    prediction_credit: TraceRankingPredictionCreditRunResponse,
+    settlement: TraceCreditSettlementRunResponse,
+    near_outbox_submit: TraceNearCreditOutboxSubmitWorkerResponse,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TraceCreditSettlementBatchRecord {
     settlement_batch_id: Uuid,
@@ -6504,6 +6558,119 @@ async fn credit_settlement_worker_run_handler(
     run_credit_settlement(state.as_ref(), &tenant, body.request, limit)
         .await
         .map(Json)
+}
+
+async fn credit_cycle_worker_run_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceCreditCycleWorkerRunRequest>,
+) -> ApiResult<Json<TraceCreditCycleWorkerRunResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_utility_operator(&tenant)?;
+    let model_version = validate_ranking_identifier(&body.model_version, "model_version")?;
+    let policy_version = validate_ranking_identifier(&body.policy_version, "policy_version")?;
+    let reason = body.reason.trim().to_string();
+    if reason.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit cycle worker run requires a non-empty reason",
+        ));
+    }
+    let near_contract_id = body
+        .near_contract_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|contract_id| !contract_id.is_empty())
+        .map(ToOwned::to_owned);
+
+    let Json(calibration) = ranking_calibration_run_worker_handler(
+        State(state.clone()),
+        headers.clone(),
+        Json(TraceRankingCalibrationRunWorkerRequest {
+            dry_run: body.dry_run,
+            target_use: body.target_use,
+            reason: reason.clone(),
+            limit: body.calibration_limit,
+            model_version: Some(model_version.clone()),
+            policy_version: Some(policy_version.clone()),
+            min_label_count: body.min_label_count,
+            confidence_threshold: body.confidence_threshold,
+            max_average_absolute_error_micros: body.max_average_absolute_error_micros,
+        }),
+    )
+    .await?;
+    let Json(model_promotion) = ranking_model_promotion_worker_run_handler(
+        State(state.clone()),
+        headers.clone(),
+        Json(TraceRankingModelPromotionRunRequest {
+            dry_run: body.dry_run,
+            target_use: body.target_use,
+            reason: reason.clone(),
+            limit: body.model_promotion_limit,
+            model_version: Some(model_version.clone()),
+            policy_version: Some(policy_version.clone()),
+        }),
+    )
+    .await?;
+    let Json(prediction_credit) = ranking_prediction_credit_run_handler(
+        State(state.clone()),
+        headers.clone(),
+        Json(TraceRankingPredictionCreditRunRequest {
+            dry_run: body.dry_run,
+            allow_at_risk_models: body.allow_at_risk_models,
+            reason: reason.clone(),
+            limit: body.prediction_credit_limit,
+            model_version: Some(model_version.clone()),
+            target_use: Some(body.target_use),
+            policy_version: Some(policy_version.clone()),
+        }),
+    )
+    .await?;
+    let Json(settlement) = credit_settlement_worker_run_handler(
+        State(state.clone()),
+        headers.clone(),
+        Json(TraceCreditSettlementWorkerRunRequest {
+            request: TraceCreditSettlementRunRequest {
+                dry_run: body.dry_run,
+                policy_version: policy_version.clone(),
+                reason: reason.clone(),
+                near_contract_id: near_contract_id.clone(),
+                ranking_model_version: Some(model_version.clone()),
+                ranking_target_use: Some(body.target_use),
+            },
+            limit: body.credit_settlement_limit,
+        }),
+    )
+    .await?;
+    let Json(near_outbox_submit) = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        headers,
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("trace_commons_credit_cycle_near_outbox".to_string()),
+            dry_run: body.dry_run || !body.submit_near_outbox,
+            limit: body
+                .near_outbox_limit
+                .unwrap_or(TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT),
+        }),
+    )
+    .await?;
+
+    Ok(Json(TraceCreditCycleWorkerRunResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        dry_run: body.dry_run,
+        submit_near_outbox: body.submit_near_outbox,
+        target_use: body.target_use,
+        model_version,
+        policy_version,
+        reason_hash: sha256_prefixed(&reason),
+        near_contract_id,
+        calibration,
+        model_promotion,
+        prediction_credit,
+        settlement,
+        near_outbox_submit,
+    }))
 }
 
 async fn run_credit_settlement(
@@ -40261,6 +40428,151 @@ mod tests {
         let latest =
             latest_ranking_model_version(&model_versions, "trace-ranker-promote-v1").unwrap();
         assert_eq!(latest.status, StorageTraceRankingModelStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_worker_runs_ranking_credit_settlement_sequence() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let Json(candidate) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-credit-cycle-v1".to_string(),
+                feature_schema_version: "ranking-features-credit-cycle-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:ranking-training-credit-cycle".to_string(),
+                calibration_dataset_hash: "sha256:ranking-calibration-credit-cycle".to_string(),
+                model_artifact_hash: "sha256:ranking-model-artifact-credit-cycle".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can stage credit-cycle model");
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("ranking source submission succeeds");
+
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:ranking-feature-credit-cycle".to_string(),
+                feature_names_hash: "sha256:ranking-feature-names-credit-cycle".to_string(),
+                source_feature_hash: "sha256:ranking-source-feature-credit-cycle".to_string(),
+                duplicate_score: Some(0.05),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.88),
+                coverage_tags: vec!["tool:terminal".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking feature");
+        let Json(prediction) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: candidate.model_version.clone(),
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                prediction_policy_version: candidate.policy_version.clone(),
+                feature_vector_hash: feature.feature_vector_hash,
+                predicted_utility_micros: 1_250_000,
+                uncertainty_micros: 250_000,
+                confidence: 0.9,
+                risk_penalty_micros: 0,
+                novelty_bonus_micros: 0,
+                explanation_codes: vec!["ranking_pair_utility".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking prediction");
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_250_000,
+                evidence_hash: "sha256:ranking-frontier-evidence-credit-cycle".to_string(),
+                external_ref: "private-ranking-credit-cycle".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking label");
+
+        let Json(cycle) = credit_cycle_worker_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleWorkerRunRequest {
+                dry_run: false,
+                submit_near_outbox: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: candidate.model_version.clone(),
+                policy_version: candidate.policy_version.clone(),
+                reason: "scheduled credit cycle".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect("utility worker can run the bounded credit cycle");
+
+        assert!(!cycle.dry_run);
+        assert_eq!(cycle.model_version, candidate.model_version);
+        assert_eq!(cycle.calibration.calibrated_count, 1);
+        assert_eq!(cycle.model_promotion.promoted_count, 1);
+        assert_eq!(cycle.prediction_credit.credited_count, 1);
+        assert_eq!(cycle.settlement.settled_source_event_count, 1);
+        assert_eq!(cycle.settlement.near_outbox_item_count, 1);
+        assert!(cycle.near_outbox_submit.dry_run);
+        assert_eq!(cycle.near_outbox_submit.checked, 1);
+        assert_eq!(cycle.near_outbox_submit.pending, 1);
+
+        let credit_events = read_all_credit_events(temp.path(), "tenant-a")
+            .expect("credit events read after cycle");
+        assert!(credit_events.iter().any(|event| {
+            event.external_ref.as_deref()
+                == Some(&format!(
+                    "ranking_prediction:{}",
+                    prediction.ranking_prediction_id
+                ))
+        }));
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox[0].near_call.method_name, "settle_credit_receipt");
+        assert_eq!(
+            outbox[0].status,
+            StorageTraceCreditSettlementNearStatus::Pending
+        );
     }
 
     #[tokio::test]
