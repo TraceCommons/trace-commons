@@ -9551,6 +9551,13 @@ async fn ranking_calibration_run_worker_handler(
         pending_after_count: 0,
         calibration_runs: Vec::new(),
     };
+    let mut existing_calibration_report_hashes =
+        read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
+            .await
+            .map_err(internal_error)?
+            .into_iter()
+            .map(|run| run.report_hash)
+            .collect::<BTreeSet<_>>();
     let mut worker_run = TraceRankingWorkerRunRecord {
         ranking_worker_run_id: response.ranking_worker_run_id,
         tenant_id: tenant.tenant_id.clone(),
@@ -9582,23 +9589,41 @@ async fn ranking_calibration_run_worker_handler(
 
     for model in candidates.into_iter().take(limit) {
         response.checked_count += 1;
-        match create_ranking_calibration_run(
-            state.as_ref(),
-            &tenant,
-            TraceRankingCalibrationRunRequest {
-                model_version: model.model_version.clone(),
-                target_use: body.target_use,
-                policy_version: model.policy_version.clone(),
-                evaluation_dataset_hash: model.calibration_dataset_hash.clone(),
-                min_label_count: body.min_label_count,
-                confidence_threshold: body.confidence_threshold,
-                max_average_absolute_error_micros: body.max_average_absolute_error_micros,
-            },
-            !body.dry_run,
-        )
-        .await
+        let calibration_request = TraceRankingCalibrationRunRequest {
+            model_version: model.model_version.clone(),
+            target_use: body.target_use,
+            policy_version: model.policy_version.clone(),
+            evaluation_dataset_hash: model.calibration_dataset_hash.clone(),
+            min_label_count: body.min_label_count,
+            confidence_threshold: body.confidence_threshold,
+            max_average_absolute_error_micros: body.max_average_absolute_error_micros,
+        };
+        match create_ranking_calibration_run(state.as_ref(), &tenant, calibration_request, false)
+            .await
         {
             Ok(run) => {
+                if !existing_calibration_report_hashes.insert(run.report_hash.clone()) {
+                    response.skipped_existing_count += 1;
+                    continue;
+                }
+                if !body.dry_run
+                    && let Err(error) =
+                        append_ranking_calibration_run_with_db_mirror(state.as_ref(), &tenant, &run)
+                            .await
+                {
+                    update_calibration_worker_run_from_response(&mut worker_run, &response);
+                    let api_error = internal_error(error);
+                    let public_error = api_error.1.0.error.clone();
+                    finalize_failed_ranking_worker_run_with_db_mirror(
+                        state.as_ref(),
+                        &tenant,
+                        &mut worker_run,
+                        api_error.0,
+                        &public_error,
+                    )
+                    .await?;
+                    return Err(api_error);
+                }
                 response.calibrated_count += 1;
                 response.calibration_runs.push(run);
             }
@@ -39310,6 +39335,51 @@ mod tests {
             read_all_ranking_calibration_runs(temp.path(), "tenant-a").expect("runs read");
         assert_eq!(raw_runs.len(), 1);
         assert_eq!(raw_runs[0].report_hash, run.calibration_runs[0].report_hash);
+
+        let Json(retry) = ranking_calibration_run_worker_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunWorkerRequest {
+                dry_run: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                reason: "scheduled calibration worker retry".to_string(),
+                limit: Some(10),
+                model_version: Some(model.model_version.clone()),
+                policy_version: Some(model.policy_version.clone()),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("unchanged calibration automation retry succeeds");
+
+        assert_eq!(retry.checked_count, 1);
+        assert_eq!(retry.calibrated_count, 0);
+        assert_eq!(retry.skipped_existing_count, 1);
+        assert_eq!(retry.pending_after_count, 0);
+        assert!(retry.calibration_runs.is_empty());
+
+        let Json(worker_runs) =
+            ranking_worker_runs_handler(State(state), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect retry worker run");
+        let retry_worker_run = worker_runs
+            .iter()
+            .find(|record| record.ranking_worker_run_id == retry.ranking_worker_run_id)
+            .expect("retry worker run is recorded");
+        assert_eq!(
+            retry_worker_run.status,
+            TraceRankingWorkerRunStatus::Completed
+        );
+        assert_eq!(retry_worker_run.checked_count, 1);
+        assert_eq!(retry_worker_run.succeeded_count, 0);
+        assert_eq!(retry_worker_run.skipped_existing_count, 1);
+        assert!(retry_worker_run.result_refs.is_empty());
+
+        let raw_runs =
+            read_all_ranking_calibration_runs(temp.path(), "tenant-a").expect("runs read");
+        assert_eq!(raw_runs.len(), 1);
     }
 
     #[tokio::test]
