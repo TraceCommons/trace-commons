@@ -579,7 +579,39 @@ On submit, the service also writes a derived redacted-only record with:
 - coverage tags for channel, tool, tool category, outcome, failure mode, and privacy risk
 - aggregate analytics by status, privacy risk, task success, tool, tool category, and coverage tag
 
-The current API remains intentionally file-backed under `TRACE_COMMONS_DATA_DIR` for compatibility and easy local operation, with optional DB-backed read flags for contributor, reviewer metadata, replay/export selection, and audit surfaces. This server repo owns the production storage path: optional DB dual-write metadata, optional encrypted local artifact storage, object-primary submit/review mode that avoids plaintext envelope body files while retaining file-backed metadata/audit compatibility records, a durable DB revocation-propagation ledger for downstream invalidation/retry work, Trace Credits settlement/hold/attestation/NEAR-outbox tables, ranking evidence/calibration tables, and a fail-closed reconciliation gate for promotion jobs. `TRACE_COMMONS_OBJECT_STORE=remote_service` is a disabled production scaffold that requires remote provider/bucket/KMS/credential-reference configuration and refuses plaintext compatibility fallback until a real service-owned remote object-store backend is wired. The server-owned `V1__trace_commons_schema.sql` through `V8__trace_ranking_calibration_source_error_gate.sql` migrations cover the tenant-scoped Trace Commons metadata, credit-settlement control plane, ranking evidence substrate, persisted model-promotion calibration runs, settlement ranking gates, default `FORCE ROW LEVEL SECURITY` hardening for every Trace Commons RLS table, persisted label-source diversity evidence, and per-source calibration error evidence for promotion gates; config-status can report catalog-only RLS readiness, including policy counts, expression mismatches, disabled tables, force-RLS counts, force-RLS missing tables, whether the current role bypasses RLS, and a stricter production-ready boolean. Production deployments can set `TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY=true` to fail startup unless the configured PostgreSQL database is fully ready for RLS as an active tenant boundary. Production deployments still need a non-bypassing runtime role plus transaction-local tenant context through every DB-backed runtime path before RLS can become the active trust boundary. Production deployments should finish promoting reviewer/export/analytics paths into DB/object-primary reads and move encrypted artifacts behind remote service-owned object storage before broad rollout.
+The current API remains intentionally file-backed under `TRACE_COMMONS_DATA_DIR`
+for compatibility and easy local operation, with optional DB-backed read flags
+for contributor, reviewer metadata, replay/export selection, and audit surfaces.
+This server repo owns the production storage path: optional DB dual-write
+metadata, optional encrypted local artifact storage, object-primary
+submit/review mode that avoids plaintext envelope body files while retaining
+file-backed metadata/audit compatibility records, a durable DB
+revocation-propagation ledger for downstream invalidation/retry work, Trace
+Credits settlement/hold/attestation/NEAR-outbox tables, ranking
+evidence/calibration tables, and a fail-closed reconciliation gate for promotion
+jobs. `TRACE_COMMONS_OBJECT_STORE=remote_service` is a disabled production
+scaffold that requires remote provider/bucket/KMS/credential-reference
+configuration and refuses plaintext compatibility fallback until a real
+service-owned remote object-store backend is wired. The server-owned
+`V1__trace_commons_schema.sql` through
+`V10__trace_credit_settlement_joined_evidence_hash.sql` migrations cover the
+tenant-scoped Trace Commons metadata, credit-settlement control plane, ranking
+evidence substrate, persisted model-promotion calibration runs, settlement
+ranking gates, default `FORCE ROW LEVEL SECURITY` hardening for every Trace
+Commons RLS table, persisted label-source diversity evidence, per-source
+calibration error evidence for promotion gates, calibration joined-evidence
+hashes, and settlement calibration evidence-hash binding; config-status can
+report catalog-only RLS readiness, including policy counts, expression
+mismatches, disabled tables, force-RLS counts, force-RLS missing tables, whether
+the current role bypasses RLS, and a stricter production-ready boolean.
+Production deployments can set `TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY=true`
+to fail startup unless the configured PostgreSQL database is fully ready for RLS
+as an active tenant boundary. Production deployments still need a non-bypassing
+runtime role plus transaction-local tenant context through every DB-backed
+runtime path before RLS can become the active trust boundary. Production
+deployments should finish promoting reviewer/export/analytics paths into
+DB/object-primary reads and move encrypted artifacts behind remote service-owned
+object storage before broad rollout.
 
 ## Production Hardening Roadmap
 
@@ -854,7 +886,7 @@ ranking utility credit event must also reference `ranking_prediction:<uuid>` for
 a prediction with the same submission, model, target use, policy, and
 settlement-score micros as the credit delta; otherwise the event is excluded
 from the settlement source list. Finalized batches record the calibration run id
-and report hash used for the gate.
+plus the calibration report hash and joined-evidence hash used for the gate.
 
 Production settlement schedulers should use
 `POST /v1/workers/credit-settlements/run` rather than the admin settlement
