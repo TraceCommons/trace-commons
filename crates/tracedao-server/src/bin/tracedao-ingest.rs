@@ -38854,6 +38854,35 @@ mod tests {
         )
         .await
         .expect("utility worker writes ranking label");
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: model.model_version.clone(),
+                target_use: TraceAllowedUse::ModelTraining,
+                policy_version: model.policy_version.clone(),
+                evaluation_dataset_hash: model.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(500_000),
+            }),
+        )
+        .await
+        .expect("utility worker writes DB-mirrored calibration run");
+        assert!(calibration.promotable);
+        let Json(_) = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: model.model_version.clone(),
+                target_use: TraceAllowedUse::ModelTraining,
+                policy_version: model.policy_version.clone(),
+                reason: "promote DB-backed ranking model".to_string(),
+            }),
+        )
+        .await
+        .expect("admin promotes DB-backed calibrated model");
 
         assert_eq!(
             backend
@@ -38878,6 +38907,7 @@ mod tests {
         let _ = std::fs::remove_file(ranking_features_path(temp.path(), "tenant-a"));
         let _ = std::fs::remove_file(ranking_predictions_path(temp.path(), "tenant-a"));
         let _ = std::fs::remove_file(ranking_labels_path(temp.path(), "tenant-a"));
+        let _ = std::fs::remove_file(ranking_calibration_runs_path(temp.path(), "tenant-a"));
 
         let Json(models) =
             ranking_model_versions_handler(State(state.clone()), auth_headers("admin-token-a"))
@@ -38885,11 +38915,18 @@ mod tests {
                 .expect("admin lists DB ranking models");
         assert_eq!(models.len(), 1);
         let Json(report) =
-            ranking_calibration_report_handler(State(state), auth_headers("admin-token-a"))
+            ranking_calibration_report_handler(State(state.clone()), auth_headers("admin-token-a"))
                 .await
                 .expect("admin reads DB ranking calibration");
         assert_eq!(report.joined_label_prediction_count, 1);
         assert_eq!(report.average_absolute_error_micros, Some(350_000));
+        let Json(operational) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin operational summary reads DB ranking health");
+        assert_eq!(operational.ranking.active_model_count, 1);
+        assert_eq!(operational.ranking.at_risk_model_count, 0);
+        assert!(operational.promotion_gates.ready);
 
         cleanup_pg_trace_tenant(&backend, "tenant-a").await;
     }
