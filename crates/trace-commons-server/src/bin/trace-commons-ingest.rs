@@ -14638,6 +14638,10 @@ async fn operational_summary_handler(
     )
     .await
     .map_err(internal_error)?;
+    let benchmark_artifacts =
+        list_benchmark_conversion_artifacts_for_worker(state.as_ref(), tenant.auth())
+            .await
+            .map_err(internal_error)?;
     let response = TraceOperationalSummaryResponse::from_parts(TraceOperationalSummaryInputs {
         state: state.as_ref(),
         tenant_id: tenant.tenant_id().to_string(),
@@ -14645,6 +14649,7 @@ async fn operational_summary_handler(
         derived,
         credit_events,
         db_summary,
+        benchmark_artifacts,
         ranking,
         generated_at,
     });
@@ -30904,6 +30909,7 @@ struct TraceOperationalSummaryResponse {
     exports: TraceOperationalExportSummary,
     retention: TraceOperationalRetentionSummary,
     vectors: TraceOperationalVectorSummary,
+    benchmarks: TraceOperationalBenchmarkSummary,
     ranking: TraceOperationalRankingSummary,
     delayed_credit: TraceOperationalDelayedCreditSummary,
 }
@@ -30915,6 +30921,7 @@ struct TraceOperationalSummaryInputs<'a> {
     derived: Vec<TraceCommonsDerivedRecord>,
     credit_events: Vec<TraceCommonsCreditLedgerRecord>,
     db_summary: TraceOperationalDbSummary,
+    benchmark_artifacts: Vec<TraceBenchmarkConversionArtifact>,
     ranking: TraceOperationalRankingSummary,
     generated_at: DateTime<Utc>,
 }
@@ -30932,12 +30939,15 @@ impl TraceOperationalSummaryResponse {
             &inputs.derived,
             &inputs.db_summary,
         );
+        let benchmarks =
+            TraceOperationalBenchmarkSummary::from_artifacts(&inputs.benchmark_artifacts);
         let promotion_gates = TraceOperationalPromotionGateSummary::from_state_and_summaries(
             inputs.state,
             &review_sla,
             &exports,
             &retention,
             &vectors,
+            &benchmarks,
             &inputs.ranking,
         );
         Self {
@@ -30950,6 +30960,7 @@ impl TraceOperationalSummaryResponse {
             exports,
             retention,
             vectors,
+            benchmarks,
             ranking: inputs.ranking,
             delayed_credit,
         }
@@ -30978,6 +30989,7 @@ struct TraceOperationalPromotionGateSummary {
     failed_export_job_count: usize,
     failed_retention_job_count: usize,
     vector_missing_count: usize,
+    published_benchmark_external_registry_gap_count: usize,
     at_risk_ranking_model_count: usize,
     blocked_ranking_credit_event_count: usize,
     stale_ranking_worker_run_count: usize,
@@ -30990,6 +31002,7 @@ impl TraceOperationalPromotionGateSummary {
         exports: &TraceOperationalExportSummary,
         retention: &TraceOperationalRetentionSummary,
         vectors: &TraceOperationalVectorSummary,
+        benchmarks: &TraceOperationalBenchmarkSummary,
         ranking: &TraceOperationalRankingSummary,
     ) -> Self {
         let db_mirror_configured = state.db_mirror.is_some();
@@ -31003,6 +31016,8 @@ impl TraceOperationalPromotionGateSummary {
         let vector_missing_count = vectors
             .accepted_current_derived
             .saturating_sub(vectors.accepted_current_derived_with_active_vector);
+        let published_benchmark_external_registry_gap_count =
+            benchmarks.external_registry_adapter_gap_count;
         let at_risk_ranking_model_count = ranking.at_risk_model_count;
         let blocked_ranking_credit_event_count = ranking.blocked_credit_event_count;
         let stale_ranking_worker_run_count = ranking.stale_running_worker_run_count;
@@ -31070,6 +31085,11 @@ impl TraceOperationalPromotionGateSummary {
             "tenant_rollout_gates",
             tenant_rollout_gate_count,
         );
+        push_gap_count(
+            &mut warning_gates,
+            "published_benchmarks_waiting_for_external_registry_adapter",
+            published_benchmark_external_registry_gap_count,
+        );
 
         Self {
             ready: blocking_gates.is_empty(),
@@ -31092,6 +31112,7 @@ impl TraceOperationalPromotionGateSummary {
             failed_export_job_count,
             failed_retention_job_count,
             vector_missing_count,
+            published_benchmark_external_registry_gap_count,
             at_risk_ranking_model_count,
             blocked_ranking_credit_event_count,
             stale_ranking_worker_run_count,
@@ -31324,6 +31345,100 @@ impl TraceOperationalVectorSummary {
                 StorageTraceVectorEntryStatus::Deleted => summary.deleted_entries += 1,
             }
         }
+        summary
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
+struct TraceOperationalBenchmarkSummary {
+    total_artifact_count: usize,
+    by_registry_status: BTreeMap<String, usize>,
+    by_evaluation_status: BTreeMap<String, usize>,
+    candidate_not_evaluated_count: usize,
+    evaluated_passed_unpublished_count: usize,
+    evaluated_failed_count: usize,
+    evaluated_inconclusive_count: usize,
+    incomplete_evaluator_metadata_count: usize,
+    publishable_count: usize,
+    published_count: usize,
+    revoked_count: usize,
+    external_registry_adapter_gap_count: usize,
+    blocker_reasons: Vec<String>,
+}
+
+impl TraceOperationalBenchmarkSummary {
+    fn from_artifacts(artifacts: &[TraceBenchmarkConversionArtifact]) -> Self {
+        let mut summary = Self {
+            total_artifact_count: artifacts.len(),
+            ..Self::default()
+        };
+        for artifact in artifacts {
+            *summary
+                .by_registry_status
+                .entry(artifact.registry.status.as_str().to_string())
+                .or_insert(0) += 1;
+            *summary
+                .by_evaluation_status
+                .entry(artifact.evaluation.status.as_str().to_string())
+                .or_insert(0) += 1;
+
+            match artifact.registry.status {
+                TraceBenchmarkRegistryStatus::Candidate => match artifact.evaluation.status {
+                    TraceBenchmarkEvaluationStatus::NotRun => {
+                        summary.candidate_not_evaluated_count += 1;
+                    }
+                    TraceBenchmarkEvaluationStatus::Passed => {
+                        summary.evaluated_passed_unpublished_count += 1;
+                        if !benchmark_artifact_has_publishable_evaluation_metadata(artifact) {
+                            summary.incomplete_evaluator_metadata_count += 1;
+                        }
+                    }
+                    TraceBenchmarkEvaluationStatus::Failed => {
+                        summary.evaluated_failed_count += 1;
+                    }
+                    TraceBenchmarkEvaluationStatus::Inconclusive => {
+                        summary.evaluated_inconclusive_count += 1;
+                    }
+                    TraceBenchmarkEvaluationStatus::Queued
+                    | TraceBenchmarkEvaluationStatus::Running => {}
+                },
+                TraceBenchmarkRegistryStatus::Published => {
+                    summary.published_count += 1;
+                }
+                TraceBenchmarkRegistryStatus::Revoked => {
+                    summary.revoked_count += 1;
+                }
+            }
+            if benchmark_artifact_is_publishable_by_worker(artifact) {
+                summary.publishable_count += 1;
+            }
+        }
+        summary.external_registry_adapter_gap_count = summary.published_count;
+        push_gap_count(
+            &mut summary.blocker_reasons,
+            "benchmark_evaluation_pending",
+            summary.candidate_not_evaluated_count,
+        );
+        push_gap_count(
+            &mut summary.blocker_reasons,
+            "benchmark_registry_publication_pending",
+            summary.publishable_count,
+        );
+        push_gap_count(
+            &mut summary.blocker_reasons,
+            "benchmark_evaluator_metadata_incomplete",
+            summary.incomplete_evaluator_metadata_count,
+        );
+        push_gap_count(
+            &mut summary.blocker_reasons,
+            "benchmark_evaluation_failed",
+            summary.evaluated_failed_count,
+        );
+        push_gap_count(
+            &mut summary.blocker_reasons,
+            "external_benchmark_registry_adapter_gap",
+            summary.external_registry_adapter_gap_count,
+        );
         summary
     }
 }
@@ -37050,6 +37165,130 @@ mod tests {
                         && reason.contains("evaluation_status=passed")
                 })
         }));
+    }
+
+    #[tokio::test]
+    async fn operational_summary_reports_benchmark_lifecycle_readiness() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::BenchmarkOnly];
+        envelope.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::BenchmarkGeneration];
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("benchmark source submission succeeds");
+
+        let Json(benchmark) = benchmark_worker_convert_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("operational_summary_benchmark_readiness".to_string()),
+                consent_scope: Some("benchmark_only".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: Some("benchmark:operational-summary-readiness".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark worker conversion succeeds");
+
+        let Json(before_eval) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect benchmark readiness before evaluation");
+        assert_eq!(before_eval.benchmarks.total_artifact_count, 1);
+        assert_eq!(before_eval.benchmarks.candidate_not_evaluated_count, 1);
+        assert_eq!(before_eval.benchmarks.evaluated_passed_unpublished_count, 0);
+        assert_eq!(before_eval.benchmarks.publishable_count, 0);
+        assert_eq!(before_eval.benchmarks.published_count, 0);
+
+        let _ = benchmark_evaluation_worker_run_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkEvaluationWorkerRunRequest {
+                limit: Some(10),
+                dry_run: Some(false),
+                evaluator_ref: Some("deterministic-benchmark-evaluator:v1".to_string()),
+                min_score: None,
+                reason: Some("scheduled benchmark evaluator run".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark evaluation worker run succeeds");
+
+        let Json(after_eval) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect benchmark readiness after evaluation");
+        assert_eq!(after_eval.benchmarks.total_artifact_count, 1);
+        assert_eq!(after_eval.benchmarks.candidate_not_evaluated_count, 0);
+        assert_eq!(after_eval.benchmarks.evaluated_passed_unpublished_count, 1);
+        assert_eq!(after_eval.benchmarks.publishable_count, 1);
+        assert_eq!(after_eval.benchmarks.published_count, 0);
+        assert!(
+            after_eval
+                .benchmarks
+                .blocker_reasons
+                .contains(&"benchmark_registry_publication_pending=1".to_string())
+        );
+
+        let _ = benchmark_registry_publication_worker_run_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkRegistryPublicationWorkerRunRequest {
+                limit: Some(10),
+                dry_run: Some(false),
+                registry_ref_prefix: Some("benchmark-registry:tenant-a".to_string()),
+                reason: Some("scheduled benchmark registry publication".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark registry publication worker run succeeds");
+
+        let Json(after_publish) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect benchmark readiness after local publication");
+        assert_eq!(after_publish.benchmarks.total_artifact_count, 1);
+        assert_eq!(after_publish.benchmarks.candidate_not_evaluated_count, 0);
+        assert_eq!(
+            after_publish.benchmarks.evaluated_passed_unpublished_count,
+            0
+        );
+        assert_eq!(after_publish.benchmarks.publishable_count, 0);
+        assert_eq!(after_publish.benchmarks.published_count, 1);
+        assert_eq!(
+            after_publish.benchmarks.external_registry_adapter_gap_count,
+            1
+        );
+        assert!(
+            after_publish
+                .benchmarks
+                .blocker_reasons
+                .contains(&"external_benchmark_registry_adapter_gap=1".to_string())
+        );
+
+        let persisted: TraceBenchmarkConversionArtifact = serde_json::from_str(
+            &std::fs::read_to_string(benchmark_artifact_path(
+                temp.path(),
+                "tenant-a",
+                benchmark.conversion_id,
+            ))
+            .expect("benchmark artifact reads"),
+        )
+        .expect("benchmark artifact parses");
+        assert_eq!(
+            persisted.registry.status,
+            TraceBenchmarkRegistryStatus::Published
+        );
     }
 
     #[test]
