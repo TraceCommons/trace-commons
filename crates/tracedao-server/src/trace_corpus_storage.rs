@@ -413,6 +413,7 @@ pub enum TraceRankingWorkerRunKind {
     Calibration,
     PredictionCredit,
     ModelPromotion,
+    CreditCycle,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
