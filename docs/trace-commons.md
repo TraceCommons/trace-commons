@@ -550,7 +550,7 @@ appended with only the run id, run kind, recovered status, and reason hash,
 fresh active runs are rejected, and the recovered row no longer contributes to
 the stale-run promotion blocker.
 
-`GET /v1/admin/ranking/model-risk-report` recomputes the current joined-evidence hash for each active model/target-use pair and reports post-calibration prediction/label counts, current joined-label source diversity, current calibration thresholds, current aggregate/per-label-source error metrics, low-confidence fresh predictions, stale or non-promotable calibration status, evidence-hash drift, and machine-readable risk codes without exposing trace bodies or raw lab references.
+`GET /v1/admin/ranking/model-risk-report` recomputes the current joined-evidence hash for each active model/target-use pair and reports post-calibration prediction/label counts, current joined-label source diversity, current calibration thresholds, current aggregate/per-label-source error metrics, low-confidence fresh predictions, stale or non-promotable calibration status, evidence-hash drift, aggregate risk-code counts, and per-model machine-readable risk codes without exposing trace bodies or raw lab references.
 
 `GET /v1/admin/ranking/credit-readiness-report` lists pending positive `ranking_utility` credit events that have not already settled and explains whether each can settle under the referenced active-model prediction. Blocked rows include machine-readable reasons such as missing prediction refs, missing or inactive models, missing/stale/non-promotable/under-diverse calibration, score mismatches, held credit accounts, and low-confidence predictions, plus the calibration run/report/joined-evidence hashes when available.
 
