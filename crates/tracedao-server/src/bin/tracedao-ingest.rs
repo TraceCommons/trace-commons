@@ -1374,6 +1374,18 @@ impl AppState {
                 "{TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN} requires TRACE_COMMONS_DB_DUAL_WRITE"
             );
         }
+        validate_db_read_cutover_guard_config(
+            &tenant_rollout_gates,
+            DbReadCutoverGuardConfig {
+                require_db_reconciliation_clean,
+                require_db_mirror_writes,
+                db_contributor_reads,
+                db_reviewer_reads,
+                db_replay_export_reads,
+                db_audit_reads,
+                db_tenant_policy_reads,
+            },
+        )?;
         let require_export_guardrails = env_truthy("TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS");
         let max_export_items_per_request = parse_max_export_items_per_request_from_env()?;
         let analytics_min_cell_count = parse_analytics_min_cell_count_from_env()?;
@@ -1686,6 +1698,56 @@ fn validate_rollout_gate_dependency(
         || !feature_tenant_ids.is_subset(&dependency_tenant_ids)
     {
         anyhow::bail!("{message}");
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DbReadCutoverGuardConfig {
+    require_db_reconciliation_clean: bool,
+    require_db_mirror_writes: bool,
+    db_contributor_reads: bool,
+    db_reviewer_reads: bool,
+    db_replay_export_reads: bool,
+    db_audit_reads: bool,
+    db_tenant_policy_reads: bool,
+}
+
+fn validate_db_read_cutover_guard_config(
+    gates: &TraceTenantRolloutGates,
+    config: DbReadCutoverGuardConfig,
+) -> anyhow::Result<()> {
+    if !config.require_db_reconciliation_clean || config.require_db_mirror_writes {
+        return Ok(());
+    }
+    let db_read_promotion_configured = [
+        (
+            TraceTenantRolloutFeature::DbContributorReads,
+            config.db_contributor_reads,
+        ),
+        (
+            TraceTenantRolloutFeature::DbReviewerReads,
+            config.db_reviewer_reads,
+        ),
+        (
+            TraceTenantRolloutFeature::DbReplayExportReads,
+            config.db_replay_export_reads,
+        ),
+        (
+            TraceTenantRolloutFeature::DbAuditReads,
+            config.db_audit_reads,
+        ),
+        (
+            TraceTenantRolloutFeature::DbTenantPolicyReads,
+            config.db_tenant_policy_reads,
+        ),
+    ]
+    .into_iter()
+    .any(|(feature, global_enabled)| gates.configured(feature, global_enabled));
+    if db_read_promotion_configured {
+        anyhow::bail!(
+            "{TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN} with DB reader promotion requires TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES"
+        );
     }
     Ok(())
 }
@@ -26726,6 +26788,64 @@ mod tests {
         )
         .expect_err("missing tenant-scoped dependency is rejected");
         assert!(missing.to_string().contains("missing dependency"));
+    }
+
+    #[test]
+    fn db_read_cutover_guard_requires_fail_closed_writes_when_reconciliation_is_required() {
+        let gates = TraceTenantRolloutGates::for_feature(
+            TraceTenantRolloutFeature::DbReviewerReads,
+            &["tenant-a"],
+        );
+
+        let missing_global = validate_db_read_cutover_guard_config(
+            &TraceTenantRolloutGates::default(),
+            DbReadCutoverGuardConfig {
+                require_db_reconciliation_clean: true,
+                db_contributor_reads: true,
+                ..DbReadCutoverGuardConfig::default()
+            },
+        )
+        .expect_err("global DB reader promotion needs fail-closed mirror writes");
+        assert!(
+            missing_global
+                .to_string()
+                .contains("TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES")
+        );
+
+        let missing_allowlist = validate_db_read_cutover_guard_config(
+            &gates,
+            DbReadCutoverGuardConfig {
+                require_db_reconciliation_clean: true,
+                db_reviewer_reads: true,
+                ..DbReadCutoverGuardConfig::default()
+            },
+        )
+        .expect_err("tenant-allowlisted DB reader promotion needs fail-closed mirror writes");
+        assert!(
+            missing_allowlist
+                .to_string()
+                .contains("TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES")
+        );
+
+        validate_db_read_cutover_guard_config(
+            &gates,
+            DbReadCutoverGuardConfig {
+                require_db_reconciliation_clean: true,
+                require_db_mirror_writes: true,
+                db_reviewer_reads: true,
+                ..DbReadCutoverGuardConfig::default()
+            },
+        )
+        .expect("fail-closed mirror writes allow DB reader promotion");
+
+        validate_db_read_cutover_guard_config(
+            &gates,
+            DbReadCutoverGuardConfig {
+                db_reviewer_reads: true,
+                ..DbReadCutoverGuardConfig::default()
+            },
+        )
+        .expect("non-production reconciliation mode does not force fail-closed writes");
     }
 
     #[test]
