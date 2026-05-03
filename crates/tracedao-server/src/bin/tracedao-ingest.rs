@@ -5499,7 +5499,25 @@ struct TraceCreditCycleSchedulerRunResponse {
     skipped_count: usize,
     pending_after_count: usize,
     skipped_reason_counts: BTreeMap<String, usize>,
+    decisions: Vec<TraceCreditCycleSchedulerCandidateDecision>,
     cycles: Vec<TraceCreditCycleWorkerRunResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceCreditCycleSchedulerCandidateDecision {
+    model_version: String,
+    model_status: StorageTraceRankingModelStatus,
+    target_use: TraceAllowedUse,
+    policy_version: String,
+    action: TraceCreditCycleSchedulerDecisionAction,
+    skip_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TraceCreditCycleSchedulerDecisionAction {
+    Started,
+    Skipped,
 }
 
 #[derive(Debug, Serialize)]
@@ -6723,6 +6741,7 @@ async fn credit_cycle_scheduler_run_handler(
         skipped_count: 0,
         pending_after_count: 0,
         skipped_reason_counts: BTreeMap::new(),
+        decisions: Vec::new(),
         cycles: Vec::new(),
     };
 
@@ -6739,7 +6758,15 @@ async fn credit_cycle_scheduler_run_handler(
         )
         .await?
         {
-            credit_cycle_scheduler_record_skip(&mut response, "active_credit_cycle_claim");
+            let skip_reason = "active_credit_cycle_claim";
+            credit_cycle_scheduler_record_skip(&mut response, skip_reason);
+            credit_cycle_scheduler_record_decision(
+                &mut response,
+                &candidate,
+                body.target_use,
+                TraceCreditCycleSchedulerDecisionAction::Skipped,
+                Some(skip_reason.to_string()),
+            );
             response.skipped_active_count += 1;
             continue;
         }
@@ -6757,6 +6784,13 @@ async fn credit_cycle_scheduler_run_handler(
             &labels,
         ) {
             credit_cycle_scheduler_record_skip(&mut response, &skip_reason);
+            credit_cycle_scheduler_record_decision(
+                &mut response,
+                &candidate,
+                body.target_use,
+                TraceCreditCycleSchedulerDecisionAction::Skipped,
+                Some(skip_reason),
+            );
             continue;
         }
 
@@ -6767,8 +6801,8 @@ async fn credit_cycle_scheduler_run_handler(
                 dry_run: body.dry_run,
                 submit_near_outbox: body.submit_near_outbox,
                 target_use: body.target_use,
-                model_version: candidate.model_version,
-                policy_version: candidate.policy_version,
+                model_version: candidate.model_version.clone(),
+                policy_version: candidate.policy_version.clone(),
                 reason: reason.clone(),
                 near_contract_id: near_contract_id.clone(),
                 calibration_limit: body.calibration_limit,
@@ -6786,6 +6820,13 @@ async fn credit_cycle_scheduler_run_handler(
         {
             Ok(Json(cycle)) => {
                 response.started_count += 1;
+                credit_cycle_scheduler_record_decision(
+                    &mut response,
+                    &candidate,
+                    body.target_use,
+                    TraceCreditCycleSchedulerDecisionAction::Started,
+                    None,
+                );
                 response.cycles.push(cycle);
             }
             Err((StatusCode::CONFLICT, Json(error)))
@@ -6794,7 +6835,15 @@ async fn credit_cycle_scheduler_run_handler(
                         TraceRankingWorkerRunKind::CreditCycle,
                     ) =>
             {
-                credit_cycle_scheduler_record_skip(&mut response, "active_credit_cycle_claim");
+                let skip_reason = "active_credit_cycle_claim";
+                credit_cycle_scheduler_record_skip(&mut response, skip_reason);
+                credit_cycle_scheduler_record_decision(
+                    &mut response,
+                    &candidate,
+                    body.target_use,
+                    TraceCreditCycleSchedulerDecisionAction::Skipped,
+                    Some(skip_reason.to_string()),
+                );
                 response.skipped_active_count += 1;
             }
             Err(error) => return Err(error),
@@ -6912,6 +6961,25 @@ fn credit_cycle_scheduler_candidate_skip_reason(
                 .unwrap_or_else(|| "calibration_not_promotable".to_string()),
         )
     }
+}
+
+fn credit_cycle_scheduler_record_decision(
+    response: &mut TraceCreditCycleSchedulerRunResponse,
+    candidate: &TraceRankingModelVersionRecord,
+    target_use: TraceAllowedUse,
+    action: TraceCreditCycleSchedulerDecisionAction,
+    skip_reason: Option<String>,
+) {
+    response
+        .decisions
+        .push(TraceCreditCycleSchedulerCandidateDecision {
+            model_version: candidate.model_version.clone(),
+            model_status: candidate.status,
+            target_use,
+            policy_version: candidate.policy_version.clone(),
+            action,
+            skip_reason,
+        });
 }
 
 fn credit_cycle_scheduler_record_skip(
@@ -41617,6 +41685,7 @@ mod tests {
         )
         .await
         .expect("admin can stage unready scheduler candidate");
+        let expected_model_version = candidate.model_version.clone();
 
         let Json(scheduler) = credit_cycle_scheduler_run_handler(
             State(state.clone()),
@@ -41652,6 +41721,20 @@ mod tests {
                 .skipped_reason_counts
                 .get("missing_prediction_evidence"),
             Some(&1)
+        );
+        let scheduler_value =
+            serde_json::to_value(&scheduler).expect("scheduler response serializes");
+        assert_eq!(
+            scheduler_value["decisions"][0]["model_version"].as_str(),
+            Some(expected_model_version.as_str())
+        );
+        assert_eq!(
+            scheduler_value["decisions"][0]["action"].as_str(),
+            Some("skipped")
+        );
+        assert_eq!(
+            scheduler_value["decisions"][0]["skip_reason"].as_str(),
+            Some("missing_prediction_evidence")
         );
         assert!(scheduler.cycles.is_empty());
         let worker_runs =
