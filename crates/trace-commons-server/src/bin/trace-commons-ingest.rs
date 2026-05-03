@@ -6948,6 +6948,58 @@ fn near_credit_outbox_item_from_settlement_line_item(
     })
 }
 
+fn near_credit_reversal_outbox_item_from_settled_credit_event(
+    tenant_id: &str,
+    batch: &TraceCreditSettlementBatchRecord,
+    item: &StorageTraceCreditAccountSettlementLineItem,
+    source_event: &StorageTraceCreditEventRecord,
+    contract_id: &str,
+    near_outbox_id: Uuid,
+) -> anyhow::Result<TraceNearCreditOutboxItem> {
+    let source_event_points = source_event.points_delta.parse::<f32>().with_context(|| {
+        format!(
+            "failed to parse settled trace credit points_delta for event {}",
+            source_event.credit_event_id
+        )
+    })?;
+    anyhow::ensure!(
+        source_event_points.is_finite() && source_event_points > 0.0,
+        "NEAR credit reversal requires a positive settled credit event"
+    );
+    let source_list_hash =
+        source_credit_event_ids_hash(&batch.policy_version, &[source_event.credit_event_id]);
+    let amount_micros = credit_delta_micros(source_event_points);
+    let receipt = NearCreditReceipt {
+        settlement_batch_id: batch.settlement_batch_id,
+        credit_account_hash: item.credit_account_hash.clone(),
+        policy_version: batch.policy_version.clone(),
+        source_list_hash: source_list_hash.clone(),
+        attestation_hash: sha256_prefixed(&format!(
+            "trace-credit-reversal-attestation:v1:{source_list_hash}"
+        )),
+        amount_micros,
+        issuer_signature_hash: sha256_prefixed(&format!(
+            "trace-credit-reversal:v1:{}:{}:{}",
+            batch.settlement_batch_id, source_event.credit_event_id, source_list_hash
+        )),
+    };
+    let near_call = NearCreditReceiptCall::reverse(contract_id, receipt)?;
+    Ok(TraceNearCreditOutboxItem {
+        near_outbox_id,
+        tenant_id: tenant_id.to_string(),
+        tenant_storage_ref: tenant_storage_ref(tenant_id),
+        settlement_batch_id: batch.settlement_batch_id,
+        credit_account_hash: item.credit_account_hash.clone(),
+        near_call,
+        status: StorageTraceCreditSettlementNearStatus::Pending,
+        created_at: Utc::now(),
+        submitted_at: None,
+        near_transaction_hash: None,
+        last_error_hash: None,
+        confirmed_at: None,
+    })
+}
+
 async fn credit_settlements_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -18075,6 +18127,14 @@ async fn mirror_revocation_to_db(
         )
         .await
         .context("failed to mirror trace export manifest item invalidation")?;
+    let credit_reversal_items_enqueued = enqueue_credit_settlement_reversal_items_for_revocation(
+        db.as_ref(),
+        &tenant.tenant_id,
+        submission_id,
+        revocation_reason,
+    )
+    .await
+    .context("failed to enqueue credit settlement reversal propagation items")?;
 
     let audit_source = record
         .map(|record| {
@@ -18102,15 +18162,22 @@ async fn mirror_revocation_to_db(
             || invalidation_counts.derived_records_invalidated > 0
             || vector_entries_invalidated > 0
             || export_manifests_invalidated > 0
-            || export_manifest_items_invalidated > 0)
+            || export_manifest_items_invalidated > 0
+            || credit_reversal_items_enqueued > 0)
     {
-        let action_counts = lifecycle_invalidation_action_counts(
+        let mut action_counts = lifecycle_invalidation_action_counts(
             invalidation_counts,
             0,
             vector_entries_invalidated,
             export_manifests_invalidated,
             export_manifest_items_invalidated,
         );
+        if credit_reversal_items_enqueued > 0 {
+            action_counts.insert(
+                "credit_reversal_items_enqueued".to_string(),
+                credit_reversal_items_enqueued.min(u32::MAX as usize) as u32,
+            );
+        }
         if let Some(ledger) = retention_ledger {
             ledger.record_lifecycle_item(
                 audit_submission_id,
@@ -18148,6 +18215,92 @@ async fn mirror_revocation_to_db(
     }
 
     Ok(())
+}
+
+async fn enqueue_credit_settlement_reversal_items_for_revocation(
+    db: &dyn Database,
+    tenant_id: &str,
+    submission_id: Uuid,
+    revocation_reason: &str,
+) -> anyhow::Result<usize> {
+    let existing_idempotency_keys = db
+        .list_trace_revocation_propagation_items(tenant_id, submission_id)
+        .await
+        .context("failed to read existing revocation propagation items")?
+        .into_iter()
+        .map(|item| item.idempotency_key)
+        .collect::<BTreeSet<_>>();
+    let settled_event_ids = db
+        .list_trace_credit_settlement_batches(tenant_id)
+        .await
+        .context("failed to read credit settlement batches for revocation propagation")?
+        .into_iter()
+        .filter(|batch| batch.status == StorageTraceCreditSettlementBatchStatus::Finalized)
+        .flat_map(|batch| batch.source_credit_event_ids)
+        .collect::<BTreeSet<_>>();
+    if settled_event_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut enqueued = 0usize;
+    for event in db
+        .list_trace_credit_events(tenant_id)
+        .await
+        .context("failed to read credit events for revocation propagation")?
+        .into_iter()
+        .filter(|event| event.submission_id == submission_id)
+        .filter(|event| event.settlement_state == StorageTraceCreditSettlementState::Final)
+        .filter(|event| settled_event_ids.contains(&event.credit_event_id))
+    {
+        let Ok(points_delta) = event.points_delta.parse::<f32>() else {
+            continue;
+        };
+        if !points_delta.is_finite() || points_delta <= 0.0 {
+            continue;
+        }
+        let idempotency_key = sha256_prefixed(&format!(
+            "trace_revocation_credit_settlement_reversal:v1:{tenant_id}:{submission_id}:{}",
+            event.credit_event_id
+        ));
+        if existing_idempotency_keys.contains(&idempotency_key) {
+            continue;
+        }
+        db.upsert_trace_revocation_propagation_item(StorageTraceRevocationPropagationItemWrite {
+            tenant_id: tenant_id.to_string(),
+            propagation_item_id: deterministic_trace_uuid_for_external_ref(
+                "revocation-credit-settlement-reversal",
+                tenant_id,
+                submission_id,
+                &event.credit_event_id.to_string(),
+            ),
+            source_submission_id: submission_id,
+            target: StorageTraceRevocationPropagationTarget::CreditSettlement {
+                credit_event_id: event.credit_event_id,
+                credit_account_ref: event.credit_account_ref,
+                settlement_state_at_selection: event.settlement_state,
+            },
+            action: StorageTraceRevocationPropagationAction::ReverseCreditSettlement,
+            status: StorageTraceRevocationPropagationItemStatus::Pending,
+            idempotency_key,
+            reason: format!(
+                "revoked trace settled credit reversal;reason_hash={}",
+                sha256_prefixed(revocation_reason)
+            ),
+            attempt_count: 0,
+            last_error: None,
+            next_attempt_at: None,
+            completed_at: None,
+            evidence_hash: None,
+            metadata: BTreeMap::from([(
+                "source".to_string(),
+                "mirror_revocation_to_db".to_string(),
+            )]),
+        })
+        .await
+        .context("failed to upsert credit settlement reversal propagation item")?;
+        enqueued += 1;
+    }
+    Ok(enqueued)
 }
 
 async fn db_submission_record_for_revocation(
@@ -18462,21 +18615,21 @@ async fn reverse_credit_settlement_for_revocation_propagation(
         .list_trace_credit_events(&tenant.tenant_id)
         .await
         .context("failed to read trace credit events for settlement reversal")?;
-    if db_credit_events
+    let reversal_already_mirrored = db_credit_events
         .iter()
-        .any(|event| event.credit_event_id == reversal_event_id)
-    {
-        return Ok(done_revocation_propagation_credit_reversal_item(
-            item,
-            *credit_event_id,
-            reversal_event_id,
-        ));
-    }
+        .any(|event| event.credit_event_id == reversal_event_id);
     let Some(source_event) = db_credit_events.iter().find(|event| {
         event.credit_event_id == *credit_event_id
             && event.submission_id == item.source_submission_id
             && event.credit_account_ref == *credit_account_ref
     }) else {
+        if reversal_already_mirrored {
+            return Ok(done_revocation_propagation_credit_reversal_item(
+                item,
+                *credit_event_id,
+                reversal_event_id,
+            ));
+        }
         return Ok(skipped_revocation_propagation_item(
             item,
             "credit settlement target was not found for this tenant submission",
@@ -18501,61 +18654,129 @@ async fn reverse_credit_settlement_for_revocation_propagation(
         points_delta.is_finite(),
         "trace credit points_delta is not finite for event {credit_event_id}"
     );
-    let reversal_event = TraceCommonsCreditLedgerRecord {
-        event_id: reversal_event_id,
-        tenant_id: tenant.tenant_id.clone(),
-        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-        submission_id: item.source_submission_id,
-        trace_id: source_event.trace_id,
-        auth_principal_ref: source_event.credit_account_ref.clone(),
-        event_type,
-        credit_points_delta: -points_delta,
-        reason: Some(format!(
-            "Credit settlement reversed for revoked trace event {credit_event_id}."
-        )),
-        external_ref: Some(format!("revocation_credit_reversal:{credit_event_id}")),
-        actor_role: tenant.role,
-        actor_principal_ref: tenant.principal_ref.clone(),
-        created_at: Utc::now(),
-    };
-    let file_credit_event_ids = read_all_credit_events(&state.root, &tenant.tenant_id)?
-        .into_iter()
-        .map(|event| event.event_id)
-        .collect::<BTreeSet<_>>();
-    if !file_credit_event_ids.contains(&reversal_event_id) {
-        append_credit_event(&state.root, &tenant.tenant_id, &reversal_event)?;
+    if !reversal_already_mirrored {
+        let reversal_event = TraceCommonsCreditLedgerRecord {
+            event_id: reversal_event_id,
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            submission_id: item.source_submission_id,
+            trace_id: source_event.trace_id,
+            auth_principal_ref: source_event.credit_account_ref.clone(),
+            event_type,
+            credit_points_delta: -points_delta,
+            reason: Some(format!(
+                "Credit settlement reversed for revoked trace event {credit_event_id}."
+            )),
+            external_ref: Some(format!("revocation_credit_reversal:{credit_event_id}")),
+            actor_role: tenant.role,
+            actor_principal_ref: tenant.principal_ref.clone(),
+            created_at: Utc::now(),
+        };
+        let file_credit_event_ids = read_all_credit_events(&state.root, &tenant.tenant_id)?
+            .into_iter()
+            .map(|event| event.event_id)
+            .collect::<BTreeSet<_>>();
+        if !file_credit_event_ids.contains(&reversal_event_id) {
+            append_credit_event(&state.root, &tenant.tenant_id, &reversal_event)?;
+        }
+        mirror_credit_event_to_db_with_settlement_state(
+            state,
+            &reversal_event,
+            StorageTraceCreditSettlementState::Reversed,
+        )
+        .await
+        .context("failed to mirror reversed trace credit settlement")?;
+        append_audit_event_with_db_mirror(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::credit_mutation(
+                tenant,
+                item.source_submission_id,
+                reversal_event.credit_points_delta,
+                reversal_event.reason.as_deref(),
+            ),
+            StorageTraceAuditAction::CreditMutate,
+            StorageTraceAuditSafeMetadata::CreditMutation {
+                event_type: storage_credit_event_type(reversal_event.event_type),
+                credit_points_delta_micros: credit_delta_micros(reversal_event.credit_points_delta),
+                reason_hash: sha256_prefixed(reversal_event.reason.as_deref().unwrap_or_default()),
+                external_ref_hash: reversal_event.external_ref.as_deref().map(sha256_prefixed),
+            },
+        )
+        .await
+        .context("failed to append credit reversal audit event")?;
     }
-    mirror_credit_event_to_db_with_settlement_state(
-        state,
-        &reversal_event,
-        StorageTraceCreditSettlementState::Reversed,
-    )
-    .await
-    .context("failed to mirror reversed trace credit settlement")?;
-    append_audit_event_with_db_mirror(
+    ensure_near_credit_reversal_outbox_item_for_revocation(
         state,
         tenant,
-        TraceCommonsAuditEvent::credit_mutation(
-            tenant,
-            item.source_submission_id,
-            reversal_event.credit_points_delta,
-            reversal_event.reason.as_deref(),
-        ),
-        StorageTraceAuditAction::CreditMutate,
-        StorageTraceAuditSafeMetadata::CreditMutation {
-            event_type: storage_credit_event_type(reversal_event.event_type),
-            credit_points_delta_micros: credit_delta_micros(reversal_event.credit_points_delta),
-            reason_hash: sha256_prefixed(reversal_event.reason.as_deref().unwrap_or_default()),
-            external_ref_hash: reversal_event.external_ref.as_deref().map(sha256_prefixed),
-        },
+        source_event,
+        reversal_event_id,
     )
     .await
-    .context("failed to append credit reversal audit event")?;
+    .context("failed to enqueue NEAR credit reversal outbox item")?;
     Ok(done_revocation_propagation_credit_reversal_item(
         item,
         *credit_event_id,
         reversal_event_id,
     ))
+}
+
+async fn ensure_near_credit_reversal_outbox_item_for_revocation(
+    state: &AppState,
+    tenant: &TenantAuth,
+    source_event: &StorageTraceCreditEventRecord,
+    reversal_event_id: Uuid,
+) -> anyhow::Result<Option<Uuid>> {
+    let settlement_batches = read_credit_settlement_batches_for_admin(state, tenant).await?;
+    let Some((batch, line_item, contract_id)) = settlement_batches.iter().find_map(|batch| {
+        let contract_id = batch.near_contract_id.as_deref()?;
+        if batch.status != StorageTraceCreditSettlementBatchStatus::Finalized {
+            return None;
+        }
+        let line_item = batch.line_items.iter().find(|line_item| {
+            line_item.credit_account_ref == source_event.credit_account_ref
+                && line_item
+                    .source_credit_event_ids
+                    .contains(&source_event.credit_event_id)
+        })?;
+        Some((batch, line_item, contract_id))
+    }) else {
+        return Ok(None);
+    };
+    let near_reversal_ref = format!("{}:{reversal_event_id}", source_event.credit_event_id);
+    let near_outbox_id = deterministic_trace_uuid_for_external_ref(
+        "near-credit-reversal-outbox",
+        &tenant.tenant_id,
+        source_event.submission_id,
+        &near_reversal_ref,
+    );
+    let mut existing_outbox_ids = read_near_credit_outbox_items_for_admin(state, tenant)
+        .await?
+        .into_iter()
+        .map(|item| item.near_outbox_id)
+        .collect::<BTreeSet<_>>();
+    if let Some(db) = state.db_mirror.as_ref() {
+        existing_outbox_ids.extend(
+            db.list_trace_near_credit_outbox_items(&tenant.tenant_id)
+                .await
+                .context("failed to read DB NEAR credit outbox items")?
+                .into_iter()
+                .map(|item| item.near_outbox_id),
+        );
+    }
+    if existing_outbox_ids.contains(&near_outbox_id) {
+        return Ok(Some(near_outbox_id));
+    }
+    let outbox_item = near_credit_reversal_outbox_item_from_settled_credit_event(
+        &tenant.tenant_id,
+        batch,
+        line_item,
+        source_event,
+        contract_id,
+        near_outbox_id,
+    )?;
+    append_near_credit_outbox_item_with_db_mirror(state, tenant, &outbox_item).await?;
+    Ok(Some(near_outbox_id))
 }
 
 async fn delete_object_payload_for_revocation_propagation(
@@ -40886,6 +41107,256 @@ mod tests {
         assert_eq!(
             db_outbox[0].status,
             StorageTraceCreditSettlementNearStatus::Submitted
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[test]
+    fn near_credit_reversal_outbox_uses_reverse_method_and_single_event_amount() {
+        let settlement_batch_id = Uuid::new_v4();
+        let credit_event_id = Uuid::new_v4();
+        let other_credit_event_id = Uuid::new_v4();
+        let submission_id = Uuid::new_v4();
+        let line_source_hash = source_credit_event_ids_hash(
+            "trace-credit-policy-v1",
+            &[credit_event_id, other_credit_event_id],
+        );
+        let batch = TraceCreditSettlementBatchRecord {
+            settlement_batch_id,
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            policy_version: "trace-credit-policy-v1".to_string(),
+            status: StorageTraceCreditSettlementBatchStatus::Finalized,
+            reason_hash: sha256_prefixed("settled before revocation"),
+            source_credit_event_ids: vec![credit_event_id, other_credit_event_id],
+            source_submission_ids: vec![submission_id, Uuid::new_v4()],
+            source_list_hash: line_source_hash.clone(),
+            settled_credit_points: 3.0,
+            settled_credit_micros: 3_000_000,
+            line_items: Vec::new(),
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+            ranking_calibration_run_id: None,
+            ranking_calibration_report_hash: None,
+            ranking_calibration_joined_evidence_hash: None,
+            ranking_credit_events_excluded_count: 0,
+            actor_principal_ref: principal_storage_ref("admin-token-a"),
+            created_at: Utc::now(),
+        };
+        let line_item = StorageTraceCreditAccountSettlementLineItem {
+            credit_account_ref: principal_storage_ref("token-a"),
+            credit_account_hash: sha256_prefixed(&principal_storage_ref("token-a")),
+            settled_credit_delta_micros: 3_000_000,
+            source_credit_event_ids: vec![credit_event_id, other_credit_event_id],
+            source_submission_ids: batch.source_submission_ids.clone(),
+            source_list_hash: line_source_hash,
+            near_status: StorageTraceCreditSettlementNearStatus::Pending,
+            near_outbox_id: Some(Uuid::new_v4()),
+        };
+        let source_event = StorageTraceCreditEventRecord {
+            credit_event_id,
+            tenant_id: "tenant-a".to_string(),
+            submission_id,
+            trace_id: Uuid::new_v4(),
+            credit_account_ref: principal_storage_ref("token-a"),
+            event_type: StorageTraceCreditEventType::TrainingUtility,
+            points_delta: "1.2500".to_string(),
+            reason: "frontier training utility".to_string(),
+            external_ref: Some("frontier:revoked-credit".to_string()),
+            actor_principal_ref: principal_storage_ref("review-token-a"),
+            actor_role: "reviewer".to_string(),
+            settlement_state: StorageTraceCreditSettlementState::Final,
+            occurred_at: Utc::now(),
+        };
+        let reversal_outbox_id = Uuid::new_v4();
+
+        let outbox = near_credit_reversal_outbox_item_from_settled_credit_event(
+            "tenant-a",
+            &batch,
+            &line_item,
+            &source_event,
+            "trace-credits.testnet",
+            reversal_outbox_id,
+        )
+        .expect("reverse outbox item builds");
+
+        assert_eq!(outbox.near_outbox_id, reversal_outbox_id);
+        assert_eq!(outbox.near_call.method_name, "reverse_credit_receipt");
+        assert_eq!(outbox.near_call.contract_id, "trace-credits.testnet");
+        assert_eq!(
+            outbox.near_call.args["amount_micros"],
+            serde_json::json!(1_250_000)
+        );
+        assert_eq!(
+            outbox.near_call.args["source_list_hash"],
+            serde_json::json!(source_credit_event_ids_hash(
+                "trace-credit-policy-v1",
+                &[credit_event_id],
+            ))
+        );
+        assert_ne!(
+            outbox.near_call.args["source_list_hash"],
+            serde_json::json!(line_item.source_list_hash)
+        );
+    }
+
+    #[tokio::test]
+    async fn revocation_propagation_reverses_settled_credit_and_enqueues_near_reverse_receipt() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            true,
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission mirrors to DB");
+
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.25,
+                reason: Some("frontier training utility to reverse".to_string()),
+                external_ref: Some("frontier:revocation-near-reversal".to_string()),
+            }),
+        )
+        .await
+        .expect("credit event mirrors to DB");
+
+        let Json(finalized) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "settlement before revocation".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("settlement mirrors to DB");
+        assert_eq!(finalized.near_outbox_item_count, 1);
+
+        let revoke_status = revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(submission_id),
+        )
+        .await
+        .expect("contributor can revoke settled trace");
+        assert_eq!(revoke_status, StatusCode::NO_CONTENT);
+
+        let propagation_items = backend
+            .list_trace_revocation_propagation_items("tenant-a", submission_id)
+            .await
+            .expect("revocation propagation items read");
+        let reversal_items = propagation_items
+            .iter()
+            .filter(|item| {
+                item.action == StorageTraceRevocationPropagationAction::ReverseCreditSettlement
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reversal_items.len(), 1);
+        assert_eq!(reversal_items[0].source_submission_id, submission_id);
+        assert_eq!(
+            reversal_items[0].target,
+            StorageTraceRevocationPropagationTarget::CreditSettlement {
+                credit_event_id: event.event_id,
+                credit_account_ref: principal_storage_ref("token-a"),
+                settlement_state_at_selection: StorageTraceCreditSettlementState::Final,
+            }
+        );
+
+        let Json(response) = revocation_propagation_worker_handler(
+            State(state.clone()),
+            auth_headers("revocation-worker-token-a"),
+            Json(TraceRevocationPropagationWorkerRequest {
+                purpose: Some("reverse_settled_credit_for_revocation".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("revocation worker reverses settled credit");
+        assert_eq!(response.completed, 1);
+        assert_eq!(response.failed, 0);
+
+        let db_credit_events = backend
+            .list_trace_credit_events("tenant-a")
+            .await
+            .expect("DB credit events read");
+        let reversal_event = db_credit_events
+            .iter()
+            .find(|record| {
+                record.external_ref.as_deref()
+                    == Some(&format!("revocation_credit_reversal:{}", event.event_id))
+            })
+            .expect("reversal credit event is mirrored");
+        assert_eq!(reversal_event.submission_id, submission_id);
+        assert_eq!(
+            reversal_event.settlement_state,
+            StorageTraceCreditSettlementState::Reversed
+        );
+        assert_eq!(reversal_event.points_delta, "-1.2500");
+
+        let db_outbox = backend
+            .list_trace_near_credit_outbox_items("tenant-a")
+            .await
+            .expect("DB NEAR outbox reads")
+            .into_iter()
+            .map(near_credit_outbox_item_from_storage)
+            .collect::<anyhow::Result<Vec<_>>>()
+            .expect("DB NEAR outbox records convert");
+        assert!(
+            db_outbox
+                .iter()
+                .any(|item| item.near_call.method_name == "settle_credit_receipt")
+        );
+        let reverse_items = db_outbox
+            .iter()
+            .filter(|item| item.near_call.method_name == "reverse_credit_receipt")
+            .collect::<Vec<_>>();
+        assert_eq!(reverse_items.len(), 1);
+        assert_eq!(
+            reverse_items[0].settlement_batch_id,
+            finalized.settlement_batch_id
+        );
+        assert_eq!(
+            reverse_items[0].status,
+            StorageTraceCreditSettlementNearStatus::Pending
+        );
+        assert_eq!(
+            reverse_items[0].near_call.args["amount_micros"],
+            serde_json::json!(1_250_000)
         );
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
