@@ -91,8 +91,10 @@ run only the dedicated revocation-propagation route, and vector workers can run
 the dedicated vector-index worker route or vector-index maintenance. Utility
 credit workers can append idempotent delayed utility credit through their
 dedicated route for accepted traces only and can run the bounded credit-cycle
-coordinator for one model/policy/target, without access to reviewer bonus, abuse
-penalty, review queues, audit logs, or tenant policy administration.
+coordinator for one model/policy/target, or the scheduler route that selects the
+next eligible candidate/active model for one target/policy and skips existing
+live claims, without access to reviewer bonus, abuse penalty, review queues,
+audit logs, or tenant policy administration.
 As an alternative to configured static bearer tokens, internal deployments can
 set `TRACE_COMMONS_SIGNED_TOKEN_SECRET` to accept HS256 signed tenant claims.
 This HS256 path is an internal bridge for controlled pilots, not the production
@@ -478,6 +480,7 @@ The service exposes:
 - `GET|POST /v1/admin/credit-settlements`
 - `POST /v1/workers/credit-settlements/run`
 - `POST /v1/workers/credit-cycle/run`
+- `POST /v1/workers/credit-cycle/scheduler/run`
 - `GET /v1/admin/near-credit-outbox`
 - `POST /v1/workers/near-credit-outbox/submit`
 - `POST /v1/workers/near-credit-outbox/mark-status`
@@ -922,6 +925,18 @@ model/policy/target, and result-refs the delegated ranking worker runs plus the
 settlement batch. `submit_near_outbox` defaults to false, so the final step
 inspects pending NEAR payloads as a dry-run unless the operator explicitly asks
 the trusted relayer submission step to run live.
+
+For unattended cron-style operation, utility workers can call
+`POST /v1/workers/credit-cycle/scheduler/run` instead. The scheduler takes one
+`target_use`, optional `model_version` and `policy_version` filters, the same
+per-step limits and NEAR options as the direct coordinator, and a bounded
+`limit` for candidate selection. It scans latest candidate and active models,
+prefers candidates before active models, skips any model/policy/target that
+already has a live non-stale `credit_cycle` worker-run claim, and runs the
+direct coordinator for each selected model. The response reports checked,
+started, skipped, active-claim skipped, still-pending, and skip-reason counts
+plus the nested cycle responses, giving external schedulers a safe retry surface
+without granting generic admin settlement access.
 
 Trusted offline utility workers use a narrower bulk route for accepted traces:
 
