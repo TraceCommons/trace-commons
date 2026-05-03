@@ -28354,6 +28354,37 @@ fn apply_benchmark_lifecycle_update(
     {
         artifact.evaluation.last_update_reason = Some(reason);
     }
+    validate_benchmark_lifecycle_state(artifact)?;
+    Ok(())
+}
+
+fn validate_benchmark_lifecycle_state(
+    artifact: &TraceBenchmarkConversionArtifact,
+) -> ApiResult<()> {
+    if artifact.registry.status != TraceBenchmarkRegistryStatus::Published {
+        return Ok(());
+    }
+    if artifact.evaluation.status != TraceBenchmarkEvaluationStatus::Passed {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "published benchmark requires passed evaluation metadata",
+        ));
+    }
+    if artifact.registry.registry_ref.is_none() || artifact.registry.published_at.is_none() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "published benchmark requires registry_ref and published_at",
+        ));
+    }
+    if artifact.evaluation.evaluator_ref.is_none()
+        || artifact.evaluation.evaluated_at.is_none()
+        || artifact.evaluation.score.is_none()
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "published benchmark requires evaluator_ref, evaluated_at, and score",
+        ));
+    }
     Ok(())
 }
 
@@ -36098,6 +36129,170 @@ mod tests {
                     reason.contains("registry_status=published")
                         && reason.contains("evaluation_status=passed")
                 })
+        }));
+    }
+
+    #[tokio::test]
+    async fn benchmark_lifecycle_rejects_publish_without_passed_evaluation() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("benchmark source submission succeeds");
+
+        let Json(benchmark) = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("publish_requires_evaluation".to_string()),
+                consent_scope: None,
+                status: None,
+                privacy_risk: None,
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("benchmark conversion succeeds");
+
+        let error = benchmark_lifecycle_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            AxumPath(benchmark.conversion_id),
+            Json(BenchmarkLifecycleUpdateRequest {
+                registry: Some(TraceBenchmarkRegistryPatch {
+                    status: Some(TraceBenchmarkRegistryStatus::Published),
+                    registry_ref: Some("benchmark-registry:requires-eval".to_string()),
+                    published_at: Some(Utc::now()),
+                }),
+                evaluation: None,
+                reason: Some("publish without evaluator pass should fail".to_string()),
+            }),
+        )
+        .await
+        .expect_err("published benchmark requires passed evaluation metadata");
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.1.0.error,
+            "published benchmark requires passed evaluation metadata"
+        );
+
+        let persisted: TraceBenchmarkConversionArtifact = serde_json::from_str(
+            &std::fs::read_to_string(benchmark_artifact_path(
+                temp.path(),
+                "tenant-a",
+                benchmark.conversion_id,
+            ))
+            .expect("benchmark artifact reads"),
+        )
+        .expect("benchmark artifact parses");
+        assert_eq!(
+            persisted.registry.status,
+            TraceBenchmarkRegistryStatus::Candidate
+        );
+        assert_eq!(
+            persisted.evaluation.status,
+            TraceBenchmarkEvaluationStatus::NotRun
+        );
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
+        assert!(!audit_events.iter().any(|event| {
+            event.kind == "benchmark_lifecycle_update"
+                && event.export_id == Some(benchmark.conversion_id)
+        }));
+    }
+
+    #[tokio::test]
+    async fn benchmark_lifecycle_rejects_publish_without_evaluator_score() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("benchmark source submission succeeds");
+
+        let Json(benchmark) = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("publish_requires_evaluator_score".to_string()),
+                consent_scope: None,
+                status: None,
+                privacy_risk: None,
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("benchmark conversion succeeds");
+
+        let error = benchmark_lifecycle_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            AxumPath(benchmark.conversion_id),
+            Json(BenchmarkLifecycleUpdateRequest {
+                registry: Some(TraceBenchmarkRegistryPatch {
+                    status: Some(TraceBenchmarkRegistryStatus::Published),
+                    registry_ref: Some("benchmark-registry:requires-score".to_string()),
+                    published_at: Some(Utc::now()),
+                }),
+                evaluation: Some(TraceBenchmarkEvaluationPatch {
+                    status: Some(TraceBenchmarkEvaluationStatus::Passed),
+                    evaluator_ref: Some("evaluator:requires-score".to_string()),
+                    evaluated_at: Some(Utc::now()),
+                    score: None,
+                    pass_count: Some(1),
+                    fail_count: Some(0),
+                }),
+                reason: Some("publish without evaluator score should fail".to_string()),
+            }),
+        )
+        .await
+        .expect_err("published benchmark requires evaluator score");
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.1.0.error,
+            "published benchmark requires evaluator_ref, evaluated_at, and score"
+        );
+
+        let persisted: TraceBenchmarkConversionArtifact = serde_json::from_str(
+            &std::fs::read_to_string(benchmark_artifact_path(
+                temp.path(),
+                "tenant-a",
+                benchmark.conversion_id,
+            ))
+            .expect("benchmark artifact reads"),
+        )
+        .expect("benchmark artifact parses");
+        assert_eq!(
+            persisted.registry.status,
+            TraceBenchmarkRegistryStatus::Candidate
+        );
+        assert_eq!(
+            persisted.evaluation.status,
+            TraceBenchmarkEvaluationStatus::NotRun
+        );
+        assert!(persisted.evaluation.score.is_none());
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
+        assert!(!audit_events.iter().any(|event| {
+            event.kind == "benchmark_lifecycle_update"
+                && event.export_id == Some(benchmark.conversion_id)
         }));
     }
 
