@@ -939,9 +939,12 @@ the model's matching predictions, or non-promotable current calibration evidence
 are reported as scheduler skips without creating credit-cycle worker rows,
 credit events, settlement batches, or NEAR outbox items. The response reports
 checked, started, skipped, active-claim skipped, still-pending, and skip-reason
-counts plus a per-candidate decision list and the nested cycle responses, giving
-external schedulers a safe retry surface without granting generic admin
-settlement access.
+counts plus a per-candidate decision list and the nested cycle responses.
+Requests with `preflight_only: true` stop after eligibility checks and return
+`eligible`/`skipped` decisions without invoking the direct coordinator or
+creating worker rows, credit events, settlement batches, or NEAR outbox rows.
+This gives external schedulers a safe retry surface without granting generic
+admin settlement access.
 
 Trusted offline utility workers use a narrower bulk route for accepted traces:
 
