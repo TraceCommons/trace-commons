@@ -347,6 +347,8 @@ pub struct TraceRankingCalibrationRunWrite {
     pub average_predicted_utility_micros: Option<i64>,
     pub average_label_utility_delta_micros: Option<i64>,
     pub average_absolute_error_micros: Option<i64>,
+    pub max_label_source_average_absolute_error_micros: Option<i64>,
+    pub max_error_label_source: Option<String>,
     pub mean_signed_error_micros: Option<i64>,
     pub low_confidence_prediction_count: u32,
     pub confidence_threshold: f32,
@@ -375,6 +377,10 @@ pub struct TraceRankingCalibrationRunRecord {
     pub average_predicted_utility_micros: Option<i64>,
     pub average_label_utility_delta_micros: Option<i64>,
     pub average_absolute_error_micros: Option<i64>,
+    #[serde(default)]
+    pub max_label_source_average_absolute_error_micros: Option<i64>,
+    #[serde(default)]
+    pub max_error_label_source: Option<String>,
     pub mean_signed_error_micros: Option<i64>,
     pub low_confidence_prediction_count: u32,
     pub confidence_threshold: f32,
