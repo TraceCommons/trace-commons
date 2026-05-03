@@ -9586,28 +9586,14 @@ async fn ranking_prediction_credit_run_handler(
         let calibration_runs = read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
             .await
             .map_err(internal_error)?;
-        ranking_model_risk_report(
+        blocking_ranking_model_risk_codes_by_key(ranking_model_risk_report(
             state.as_ref(),
             &tenant,
             &model_versions,
             &predictions,
             &labels,
             &calibration_runs,
-        )
-        .models
-        .into_iter()
-        .filter(|model| !model.risk_codes.is_empty())
-        .map(|model| {
-            (
-                ranking_model_risk_lookup_key(
-                    &model.model_version,
-                    model.target_use,
-                    &model.policy_version,
-                ),
-                model.risk_codes,
-            )
-        })
-        .collect::<BTreeMap<_, _>>()
+        ))
     };
     let mut response = TraceRankingPredictionCreditRunResponse {
         ranking_worker_run_id: Uuid::new_v4(),
@@ -10271,6 +10257,9 @@ async fn ranking_credit_readiness_report_handler(
     let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    let labels = read_ranking_labels_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     let calibration_runs = read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
@@ -10283,6 +10272,7 @@ async fn ranking_credit_readiness_report_handler(
             held_credit_accounts: &held_credit_accounts,
             predictions: &predictions,
             model_versions: &model_versions,
+            labels: &labels,
             calibration_runs: &calibration_runs,
         },
     )))
@@ -11817,6 +11807,26 @@ fn ranking_prediction_risk_lookup_key(prediction: &TraceRankingPredictionRecord)
     )
 }
 
+fn blocking_ranking_model_risk_codes_by_key(
+    report: TraceRankingModelRiskReport,
+) -> BTreeMap<String, Vec<String>> {
+    report
+        .models
+        .into_iter()
+        .filter(|model| !model.risk_codes.is_empty())
+        .map(|model| {
+            (
+                ranking_model_risk_lookup_key(
+                    &model.model_version,
+                    model.target_use,
+                    &model.policy_version,
+                ),
+                model.risk_codes,
+            )
+        })
+        .collect()
+}
+
 struct RankingCreditReadinessInputs<'a> {
     state: &'a AppState,
     tenant: &'a TenantAuth,
@@ -11825,6 +11835,7 @@ struct RankingCreditReadinessInputs<'a> {
     held_credit_accounts: &'a BTreeSet<String>,
     predictions: &'a [TraceRankingPredictionRecord],
     model_versions: &'a [TraceRankingModelVersionRecord],
+    labels: &'a [TraceRankingLabelRecord],
     calibration_runs: &'a [TraceRankingCalibrationRunRecord],
 }
 
@@ -11837,6 +11848,15 @@ fn ranking_credit_readiness_report(
         .filter(|batch| batch.status == StorageTraceCreditSettlementBatchStatus::Finalized)
         .flat_map(|batch| batch.source_credit_event_ids.iter().copied())
         .collect::<BTreeSet<_>>();
+    let model_risk_codes_by_key =
+        blocking_ranking_model_risk_codes_by_key(ranking_model_risk_report(
+            inputs.state,
+            inputs.tenant,
+            inputs.model_versions,
+            inputs.predictions,
+            inputs.labels,
+            inputs.calibration_runs,
+        ));
     let mut events = inputs
         .credit_events
         .iter()
@@ -11851,6 +11871,7 @@ fn ranking_credit_readiness_report(
                 inputs.predictions,
                 inputs.model_versions,
                 inputs.calibration_runs,
+                &model_risk_codes_by_key,
             )
         })
         .collect::<Vec<_>>();
@@ -11881,6 +11902,7 @@ fn ranking_credit_readiness_event(
     predictions: &[TraceRankingPredictionRecord],
     model_versions: &[TraceRankingModelVersionRecord],
     calibration_runs: &[TraceRankingCalibrationRunRecord],
+    model_risk_codes_by_key: &BTreeMap<String, Vec<String>>,
 ) -> TraceRankingCreditReadinessEvent {
     let mut reason_codes = Vec::new();
     if held_credit_accounts.contains(&event.auth_principal_ref) {
@@ -11942,6 +11964,11 @@ fn ranking_credit_readiness_event(
     model_version = Some(prediction.model_version.clone());
     target_use = Some(prediction.target_use);
     policy_version = Some(prediction.prediction_policy_version.clone());
+    if let Some(risk_codes) =
+        model_risk_codes_by_key.get(&ranking_prediction_risk_lookup_key(prediction))
+    {
+        reason_codes.extend(risk_codes.iter().cloned());
+    }
     if prediction.submission_id != event.submission_id {
         reason_codes.push("prediction_submission_mismatch".to_string());
     }
@@ -12218,6 +12245,7 @@ struct RankingSettlementCalibrationGate {
     report_hash: String,
     joined_evidence_hash: String,
     confidence_threshold: f32,
+    model_risk_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -12295,6 +12323,9 @@ fn ranking_credit_event_matches_active_prediction(
     gate: &RankingSettlementCalibrationGate,
     policy_version: &str,
 ) -> bool {
+    if !gate.model_risk_codes.is_empty() {
+        return false;
+    }
     let Some(prediction_id) = parse_ranking_prediction_external_ref(event.external_ref.as_deref())
     else {
         return false;
@@ -12381,6 +12412,29 @@ async fn ranking_settlement_calibration_gate(
         RankingCalibrationGateContext::Settlement,
     )
     .await?;
+    let predictions = read_ranking_predictions_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let labels = read_ranking_labels_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let calibration_runs = read_ranking_calibration_runs_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let model_risk_codes = blocking_ranking_model_risk_codes_by_key(ranking_model_risk_report(
+        state,
+        tenant,
+        &model_versions,
+        &predictions,
+        &labels,
+        &calibration_runs,
+    ))
+    .remove(&ranking_model_risk_lookup_key(
+        &run.model_version,
+        run.target_use,
+        policy_version,
+    ))
+    .unwrap_or_default();
     Ok(Some(RankingSettlementCalibrationGate {
         model_version: run.model_version,
         target_use: run.target_use,
@@ -12388,6 +12442,7 @@ async fn ranking_settlement_calibration_gate(
         report_hash: run.report_hash,
         joined_evidence_hash: run.joined_evidence_hash,
         confidence_threshold: run.confidence_threshold,
+        model_risk_codes,
     }))
 }
 
@@ -29841,6 +29896,7 @@ impl TraceOperationalRankingSummary {
             held_credit_accounts: inputs.held_credit_accounts,
             predictions: inputs.predictions,
             model_versions: inputs.model_versions,
+            labels: inputs.labels,
             calibration_runs: inputs.calibration_runs,
         });
         let mut risk_code_counts = BTreeMap::new();
@@ -44849,6 +44905,195 @@ mod tests {
         )
         .await
         .expect("settlement can evaluate low-confidence ranking credit");
+        assert_eq!(settlement.settled_source_event_count, 0);
+        assert_eq!(settlement.ranking_credit_events_excluded_count, 1);
+    }
+
+    #[tokio::test]
+    async fn ranking_utility_settlement_blocks_uncleared_active_model_risk() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let (candidate, _) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-risk-settle-v1").await;
+
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration");
+        assert!(calibration.promotable);
+
+        let Json(active) = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "promote calibrated model for settlement risk gate".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can promote calibrated ranking model");
+        assert_eq!(active.model_status, StorageTraceRankingModelStatus::Active);
+
+        let mut drift_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut drift_envelope);
+        drift_envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        drift_envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        drift_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let drift_submission_id = drift_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(drift_envelope),
+        )
+        .await
+        .expect("post-calibration drift submission succeeds");
+
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id: drift_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:ranking-feature-risk-settle-drift".to_string(),
+                feature_names_hash: "sha256:ranking-feature-names-risk-settle-drift".to_string(),
+                source_feature_hash: "sha256:ranking-source-feature-risk-settle-drift".to_string(),
+                duplicate_score: Some(0.03),
+                novelty_score: Some(0.88),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.87),
+                coverage_tags: vec!["tool:shell".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write drift feature");
+        let Json(drift_prediction) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id: drift_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: candidate.model_version.clone(),
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                prediction_policy_version: candidate.policy_version.clone(),
+                feature_vector_hash: feature.feature_vector_hash,
+                predicted_utility_micros: 1_250_000,
+                uncertainty_micros: 250_000,
+                confidence: 0.9,
+                risk_penalty_micros: 0,
+                novelty_bonus_micros: 0,
+                explanation_codes: vec!["post_calibration_drift".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write high-confidence drift prediction");
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: drift_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 2_000_000,
+                evidence_hash: "sha256:ranking-frontier-evidence-risk-settle-drift".to_string(),
+                external_ref: "private-ranking-risk-settle-drift".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write drift label");
+
+        let Json(report) =
+            ranking_model_risk_report_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect active model risk");
+        assert_eq!(report.at_risk_model_count, 1);
+        assert_eq!(
+            report
+                .risk_code_counts
+                .get("joined_evidence_changed_since_calibration"),
+            Some(&1)
+        );
+        assert_eq!(
+            report
+                .risk_code_counts
+                .get("current_evidence_not_promotable"),
+            Some(&1)
+        );
+
+        let Json(manual_credit) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(drift_submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::RankingUtility,
+                credit_points_delta: drift_prediction.settlement_score_micros as f32 / 1_000_000.0,
+                reason: Some("manual drift ranking credit should not settle".to_string()),
+                external_ref: Some(ranking_prediction_external_ref(
+                    drift_prediction.ranking_prediction_id,
+                )),
+            }),
+        )
+        .await
+        .expect("reviewer can append manually bound ranking utility credit");
+
+        let Json(readiness) = ranking_credit_readiness_report_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+        )
+        .await
+        .expect("admin can inspect ranking credit readiness");
+        assert_eq!(readiness.pending_ranking_credit_event_count, 1);
+        assert_eq!(readiness.ready_count, 0);
+        assert_eq!(readiness.blocked_count, 1);
+        assert_eq!(readiness.events[0].event_id, manual_credit.event_id);
+        assert!(
+            !readiness.events[0]
+                .reason_codes
+                .contains(&"low_confidence_prediction".to_string())
+        );
+        assert_eq!(
+            readiness
+                .blocked_reason_counts
+                .get("joined_evidence_changed_since_calibration"),
+            Some(&1)
+        );
+        assert_eq!(
+            readiness
+                .blocked_reason_counts
+                .get("current_evidence_not_promotable"),
+            Some(&1)
+        );
+
+        let Json(settlement) = credit_settlement_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: candidate.policy_version,
+                reason: "settlement excludes uncleared active model risk".to_string(),
+                near_contract_id: None,
+                ranking_model_version: Some(active.model_version),
+                ranking_target_use: Some(TraceAllowedUse::RankingModelTraining),
+            }),
+        )
+        .await
+        .expect("settlement can evaluate at-risk active model credits");
         assert_eq!(settlement.settled_source_event_count, 0);
         assert_eq!(settlement.ranking_credit_events_excluded_count, 1);
     }
