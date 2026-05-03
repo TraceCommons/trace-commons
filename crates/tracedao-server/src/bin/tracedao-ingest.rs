@@ -91,6 +91,7 @@ use tracedao_server::trace_corpus_storage::{
     TraceRankingUtilityCategory as StorageTraceRankingUtilityCategory,
     TraceRankingWorkerRunKind as StorageTraceRankingWorkerRunKind,
     TraceRankingWorkerRunRecord as StorageTraceRankingWorkerRunRecord,
+    TraceRankingWorkerRunStatus as StorageTraceRankingWorkerRunStatus,
     TraceRankingWorkerRunWrite as StorageTraceRankingWorkerRunWrite,
     TraceRetentionJobItemAction as StorageTraceRetentionJobItemAction,
     TraceRetentionJobItemRecord as StorageTraceRetentionJobItemRecord,
@@ -5547,6 +5548,7 @@ struct TraceRankingModelPromotionRunResponse {
 }
 
 type TraceRankingWorkerRunKind = StorageTraceRankingWorkerRunKind;
+type TraceRankingWorkerRunStatus = StorageTraceRankingWorkerRunStatus;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TraceRankingWorkerRunRecord {
@@ -5554,6 +5556,7 @@ struct TraceRankingWorkerRunRecord {
     tenant_id: String,
     tenant_storage_ref: String,
     run_kind: TraceRankingWorkerRunKind,
+    status: TraceRankingWorkerRunStatus,
     dry_run: bool,
     reason_hash: String,
     model_version: Option<String>,
@@ -5570,6 +5573,8 @@ struct TraceRankingWorkerRunRecord {
     reason_counts: BTreeMap<String, usize>,
     actor_principal_ref: String,
     created_at: DateTime<Utc>,
+    completed_at: Option<DateTime<Utc>>,
+    last_error_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7873,6 +7878,34 @@ async fn ranking_model_promotion_worker_run_handler(
         pending_after_count: 0,
         promotions: Vec::new(),
     };
+    let mut worker_run = TraceRankingWorkerRunRecord {
+        ranking_worker_run_id: response.ranking_worker_run_id,
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        run_kind: TraceRankingWorkerRunKind::ModelPromotion,
+        status: TraceRankingWorkerRunStatus::Running,
+        dry_run: response.dry_run,
+        reason_hash: response.reason_hash.clone(),
+        model_version: response.model_version.clone(),
+        target_use: Some(response.target_use),
+        policy_version: response.policy_version.clone(),
+        limit: response.limit,
+        checked_count: 0,
+        succeeded_count: 0,
+        skipped_existing_count: 0,
+        skipped_model_risk_count: 0,
+        skipped_ineligible_count: 0,
+        pending_after_count: 0,
+        result_refs: Vec::new(),
+        reason_counts: BTreeMap::new(),
+        actor_principal_ref: tenant.principal_ref.clone(),
+        created_at: Utc::now(),
+        completed_at: None,
+        last_error_hash: None,
+    };
+    append_ranking_worker_run_with_db_mirror(state.as_ref(), &tenant, &worker_run)
+        .await
+        .map_err(internal_error)?;
 
     for model in candidates.into_iter().take(limit) {
         response.checked_count += 1;
@@ -7914,33 +7947,19 @@ async fn ranking_model_promotion_worker_run_handler(
     .await
     .map_err(internal_error)?;
 
-    let worker_run = TraceRankingWorkerRunRecord {
-        ranking_worker_run_id: response.ranking_worker_run_id,
-        tenant_id: tenant.tenant_id.clone(),
-        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-        run_kind: TraceRankingWorkerRunKind::ModelPromotion,
-        dry_run: response.dry_run,
-        reason_hash: response.reason_hash.clone(),
-        model_version: response.model_version.clone(),
-        target_use: Some(response.target_use),
-        policy_version: response.policy_version.clone(),
-        limit: response.limit,
-        checked_count: response.checked_count,
-        succeeded_count: response.promoted_count,
-        skipped_existing_count: 0,
-        skipped_model_risk_count: 0,
-        skipped_ineligible_count: response.skipped_ineligible_count,
-        pending_after_count: response.pending_after_count,
-        result_refs: response
-            .promotions
-            .iter()
-            .filter(|promotion| promotion.promoted)
-            .map(|promotion| format!("ranking_model:{}", promotion.model_version))
-            .collect(),
-        reason_counts: response.skipped_reason_counts.clone(),
-        actor_principal_ref: tenant.principal_ref.clone(),
-        created_at: Utc::now(),
-    };
+    worker_run.status = TraceRankingWorkerRunStatus::Completed;
+    worker_run.checked_count = response.checked_count;
+    worker_run.succeeded_count = response.promoted_count;
+    worker_run.skipped_ineligible_count = response.skipped_ineligible_count;
+    worker_run.pending_after_count = response.pending_after_count;
+    worker_run.result_refs = response
+        .promotions
+        .iter()
+        .filter(|promotion| promotion.promoted)
+        .map(|promotion| format!("ranking_model:{}", promotion.model_version))
+        .collect();
+    worker_run.reason_counts = response.skipped_reason_counts.clone();
+    worker_run.completed_at = Some(Utc::now());
     append_ranking_worker_run_with_db_mirror(state.as_ref(), &tenant, &worker_run)
         .await
         .map_err(internal_error)?;
@@ -8421,6 +8440,34 @@ async fn ranking_prediction_credit_run_handler(
         blocked_model_risk_reason_counts: BTreeMap::new(),
         pending_after_count: 0,
     };
+    let mut worker_run = TraceRankingWorkerRunRecord {
+        ranking_worker_run_id: response.ranking_worker_run_id,
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        run_kind: TraceRankingWorkerRunKind::PredictionCredit,
+        status: TraceRankingWorkerRunStatus::Running,
+        dry_run: response.dry_run,
+        reason_hash: response.reason_hash.clone(),
+        model_version: response.model_version.clone(),
+        target_use: response.target_use,
+        policy_version: response.policy_version.clone(),
+        limit: response.limit,
+        checked_count: 0,
+        succeeded_count: 0,
+        skipped_existing_count: 0,
+        skipped_model_risk_count: 0,
+        skipped_ineligible_count: 0,
+        pending_after_count: 0,
+        result_refs: Vec::new(),
+        reason_counts: BTreeMap::new(),
+        actor_principal_ref: tenant.principal_ref.clone(),
+        created_at: Utc::now(),
+        completed_at: None,
+        last_error_hash: None,
+    };
+    append_ranking_worker_run_with_db_mirror(state.as_ref(), &tenant, &worker_run)
+        .await
+        .map_err(internal_error)?;
 
     let mut attempted_uncredited = 0;
     let mut result_refs = Vec::new();
@@ -8493,28 +8540,16 @@ async fn ranking_prediction_credit_run_handler(
     )
     .await
     .map_err(internal_error)?;
-    let worker_run = TraceRankingWorkerRunRecord {
-        ranking_worker_run_id: response.ranking_worker_run_id,
-        tenant_id: tenant.tenant_id.clone(),
-        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-        run_kind: TraceRankingWorkerRunKind::PredictionCredit,
-        dry_run: response.dry_run,
-        reason_hash: response.reason_hash.clone(),
-        model_version: response.model_version.clone(),
-        target_use: response.target_use,
-        policy_version: response.policy_version.clone(),
-        limit: response.limit,
-        checked_count: response.checked_count,
-        succeeded_count: response.credited_count,
-        skipped_existing_count: response.skipped_existing_count,
-        skipped_model_risk_count: response.skipped_model_risk_count,
-        skipped_ineligible_count: response.skipped_ineligible_count,
-        pending_after_count: response.pending_after_count,
-        result_refs,
-        reason_counts: response.blocked_model_risk_reason_counts.clone(),
-        actor_principal_ref: tenant.principal_ref.clone(),
-        created_at: Utc::now(),
-    };
+    worker_run.status = TraceRankingWorkerRunStatus::Completed;
+    worker_run.checked_count = response.checked_count;
+    worker_run.succeeded_count = response.credited_count;
+    worker_run.skipped_existing_count = response.skipped_existing_count;
+    worker_run.skipped_model_risk_count = response.skipped_model_risk_count;
+    worker_run.skipped_ineligible_count = response.skipped_ineligible_count;
+    worker_run.pending_after_count = response.pending_after_count;
+    worker_run.result_refs = result_refs;
+    worker_run.reason_counts = response.blocked_model_risk_reason_counts.clone();
+    worker_run.completed_at = Some(Utc::now());
     append_ranking_worker_run_with_db_mirror(state.as_ref(), &tenant, &worker_run)
         .await
         .map_err(internal_error)?;
@@ -9355,6 +9390,7 @@ async fn mirror_ranking_worker_run_to_db(
         tenant_id: record.tenant_id.clone(),
         ranking_worker_run_id: record.ranking_worker_run_id,
         run_kind: record.run_kind,
+        status: record.status,
         dry_run: record.dry_run,
         reason_hash: record.reason_hash.clone(),
         model_version: record.model_version.clone(),
@@ -9389,6 +9425,8 @@ async fn mirror_ranking_worker_run_to_db(
         reason_counts: ranking_worker_run_reason_counts_to_u32(&record.reason_counts)?,
         actor_principal_ref: record.actor_principal_ref.clone(),
         created_at: record.created_at,
+        completed_at: record.completed_at,
+        last_error_hash: record.last_error_hash.clone(),
     })
     .await
     .context("failed to mirror ranking worker run to DB")?;
@@ -9670,6 +9708,7 @@ fn ranking_worker_run_from_storage(
         tenant_id: record.tenant_id,
         ranking_worker_run_id: record.ranking_worker_run_id,
         run_kind: record.run_kind,
+        status: record.status,
         dry_run: record.dry_run,
         reason_hash: record.reason_hash,
         model_version: record.model_version,
@@ -9694,6 +9733,8 @@ fn ranking_worker_run_from_storage(
             .collect(),
         actor_principal_ref: record.actor_principal_ref,
         created_at: record.created_at,
+        completed_at: record.completed_at,
+        last_error_hash: record.last_error_hash,
     })
 }
 
@@ -20862,6 +20903,12 @@ fn read_all_ranking_worker_runs(
     for record in &records {
         ensure_ranking_worker_run_tenant(record, tenant_id)?;
     }
+    records.sort_by_key(|record| record.created_at);
+    let mut latest_by_run_id = BTreeMap::new();
+    for record in records {
+        latest_by_run_id.insert(record.ranking_worker_run_id, record);
+    }
+    let mut records = latest_by_run_id.into_values().collect::<Vec<_>>();
     records.sort_by_key(|record| record.created_at);
     Ok(records)
 }
@@ -36728,6 +36775,10 @@ mod tests {
             worker_runs[0].run_kind,
             TraceRankingWorkerRunKind::PredictionCredit
         );
+        assert_eq!(
+            worker_runs[0].status,
+            TraceRankingWorkerRunStatus::Completed
+        );
         assert_eq!(worker_runs[0].limit, 1);
         assert_eq!(worker_runs[0].checked_count, first.checked_count);
         assert_eq!(worker_runs[0].succeeded_count, first.credited_count);
@@ -36751,6 +36802,20 @@ mod tests {
         );
         let worker_runs_json = serde_json::to_string(&worker_runs).expect("worker runs serialize");
         assert!(!worker_runs_json.contains("scheduled ranking prediction credit"));
+        let raw_worker_runs: Vec<TraceRankingWorkerRunRecord> = read_jsonl_records(
+            &ranking_worker_runs_path(temp.path(), "tenant-a"),
+            "ranking worker run",
+        )
+        .expect("raw worker runs read");
+        assert_eq!(raw_worker_runs.len(), 6);
+        for chunk in raw_worker_runs.chunks(2) {
+            assert_eq!(
+                chunk[0].ranking_worker_run_id,
+                chunk[1].ranking_worker_run_id
+            );
+            assert_eq!(chunk[0].status, TraceRankingWorkerRunStatus::Running);
+            assert_eq!(chunk[1].status, TraceRankingWorkerRunStatus::Completed);
+        }
     }
 
     #[tokio::test]
@@ -37753,6 +37818,10 @@ mod tests {
             worker_runs[0].run_kind,
             TraceRankingWorkerRunKind::ModelPromotion
         );
+        assert_eq!(
+            worker_runs[0].status,
+            TraceRankingWorkerRunStatus::Completed
+        );
         assert!(!worker_runs[0].dry_run);
         assert_eq!(worker_runs[0].limit, 10);
         assert_eq!(
@@ -37782,6 +37851,28 @@ mod tests {
         );
         let worker_runs_json = serde_json::to_string(&worker_runs).expect("worker runs serialize");
         assert!(!worker_runs_json.contains("scheduled calibrated candidate promotion"));
+        let raw_worker_runs: Vec<TraceRankingWorkerRunRecord> = read_jsonl_records(
+            &ranking_worker_runs_path(temp.path(), "tenant-a"),
+            "ranking worker run",
+        )
+        .expect("raw worker runs read");
+        assert_eq!(raw_worker_runs.len(), 2);
+        assert_eq!(
+            raw_worker_runs[0].ranking_worker_run_id,
+            run.ranking_worker_run_id
+        );
+        assert_eq!(
+            raw_worker_runs[0].status,
+            TraceRankingWorkerRunStatus::Running
+        );
+        assert_eq!(
+            raw_worker_runs[1].ranking_worker_run_id,
+            run.ranking_worker_run_id
+        );
+        assert_eq!(
+            raw_worker_runs[1].status,
+            TraceRankingWorkerRunStatus::Completed
+        );
 
         let model_versions =
             read_all_ranking_model_versions(temp.path(), "tenant-a").expect("model versions read");

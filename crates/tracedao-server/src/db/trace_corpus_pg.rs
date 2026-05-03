@@ -30,10 +30,10 @@ use crate::trace_corpus_storage::{
     TraceRankingLabelSource, TraceRankingLabelWrite, TraceRankingModelStatus,
     TraceRankingModelVersionRecord, TraceRankingModelVersionWrite, TraceRankingPredictionRecord,
     TraceRankingPredictionWrite, TraceRankingUtilityCategory, TraceRankingWorkerRunKind,
-    TraceRankingWorkerRunRecord, TraceRankingWorkerRunWrite, TraceRetentionJobItemAction,
-    TraceRetentionJobItemRecord, TraceRetentionJobItemStatus, TraceRetentionJobItemWrite,
-    TraceRetentionJobRecord, TraceRetentionJobStatus, TraceRetentionJobWrite,
-    TraceRevocationPropagationAction, TraceRevocationPropagationItemRecord,
+    TraceRankingWorkerRunRecord, TraceRankingWorkerRunStatus, TraceRankingWorkerRunWrite,
+    TraceRetentionJobItemAction, TraceRetentionJobItemRecord, TraceRetentionJobItemStatus,
+    TraceRetentionJobItemWrite, TraceRetentionJobRecord, TraceRetentionJobStatus,
+    TraceRetentionJobWrite, TraceRevocationPropagationAction, TraceRevocationPropagationItemRecord,
     TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget,
     TraceRevocationPropagationTargetKind, TraceSubmissionRecord, TraceSubmissionWrite,
@@ -147,10 +147,10 @@ const TRACE_RANKING_CALIBRATION_RUN_COLUMNS: &str = "\
     created_at";
 
 const TRACE_RANKING_WORKER_RUN_COLUMNS: &str = "\
-    tenant_id, ranking_worker_run_id, run_kind, dry_run, reason_hash, model_version, target_use, \
+    tenant_id, ranking_worker_run_id, run_kind, status, dry_run, reason_hash, model_version, target_use, \
     policy_version, limit_count, checked_count, succeeded_count, skipped_existing_count, \
     skipped_model_risk_count, skipped_ineligible_count, pending_after_count, result_refs, \
-    reason_counts, actor_principal_ref, created_at";
+    reason_counts, actor_principal_ref, created_at, completed_at, last_error_hash";
 
 async fn ensure_pg_object_ref_belongs_to_submission(
     tx: &Transaction<'_>,
@@ -725,6 +725,7 @@ fn row_to_ranking_calibration_run(
 
 fn row_to_ranking_worker_run(row: &Row) -> Result<TraceRankingWorkerRunRecord, DatabaseError> {
     let run_kind: String = row.get("run_kind");
+    let status: String = row.get("status");
     let result_refs: serde_json::Value = row.get("result_refs");
     let reason_counts: serde_json::Value = row.get("reason_counts");
     Ok(TraceRankingWorkerRunRecord {
@@ -733,6 +734,10 @@ fn row_to_ranking_worker_run(row: &Row) -> Result<TraceRankingWorkerRunRecord, D
         run_kind: enum_from_storage::<TraceRankingWorkerRunKind>(
             &run_kind,
             "TraceRankingWorkerRunKind",
+        )?,
+        status: enum_from_storage::<TraceRankingWorkerRunStatus>(
+            &status,
+            "TraceRankingWorkerRunStatus",
         )?,
         dry_run: row.get("dry_run"),
         reason_hash: row.get("reason_hash"),
@@ -750,6 +755,8 @@ fn row_to_ranking_worker_run(row: &Row) -> Result<TraceRankingWorkerRunRecord, D
         reason_counts: json_u32_map(reason_counts, "ranking_worker_runs.reason_counts")?,
         actor_principal_ref: row.get("actor_principal_ref"),
         created_at: row.get("created_at"),
+        completed_at: row.get("completed_at"),
+        last_error_hash: row.get("last_error_hash"),
     })
 }
 
@@ -2472,6 +2479,7 @@ impl TraceCorpusStore for PgBackend {
         let mut client = self.pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &run.tenant_id).await?;
         let run_kind = enum_to_storage(run.run_kind)?;
+        let status = enum_to_storage(run.status)?;
         let limit = u32_to_pg_i32(run.limit, "ranking_worker_runs.limit")?;
         let checked_count = u32_to_pg_i32(run.checked_count, "ranking_worker_runs.checked_count")?;
         let succeeded_count =
@@ -2506,17 +2514,18 @@ impl TraceCorpusStore for PgBackend {
             .query_one(
                 &format!(
                     "INSERT INTO trace_ranking_worker_runs (
-                        tenant_id, ranking_worker_run_id, run_kind, dry_run, reason_hash,
+                        tenant_id, ranking_worker_run_id, run_kind, status, dry_run, reason_hash,
                         model_version, target_use, policy_version, limit_count, checked_count,
                         succeeded_count, skipped_existing_count, skipped_model_risk_count,
                         skipped_ineligible_count, pending_after_count, result_refs, reason_counts,
-                        actor_principal_ref, created_at
+                        actor_principal_ref, created_at, completed_at, last_error_hash
                      ) VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                        $17, $18, $19
+                        $17, $18, $19, $20, $21, $22
                      )
                      ON CONFLICT (tenant_id, ranking_worker_run_id) DO UPDATE SET
                         run_kind = excluded.run_kind,
+                        status = excluded.status,
                         dry_run = excluded.dry_run,
                         reason_hash = excluded.reason_hash,
                         model_version = excluded.model_version,
@@ -2532,13 +2541,16 @@ impl TraceCorpusStore for PgBackend {
                         result_refs = excluded.result_refs,
                         reason_counts = excluded.reason_counts,
                         actor_principal_ref = excluded.actor_principal_ref,
-                        created_at = excluded.created_at
+                        created_at = excluded.created_at,
+                        completed_at = excluded.completed_at,
+                        last_error_hash = excluded.last_error_hash
                      RETURNING {TRACE_RANKING_WORKER_RUN_COLUMNS}"
                 ),
                 &[
                     &run.tenant_id,
                     &run.ranking_worker_run_id,
                     &run_kind,
+                    &status,
                     &run.dry_run,
                     &run.reason_hash,
                     &run.model_version,
@@ -2555,6 +2567,8 @@ impl TraceCorpusStore for PgBackend {
                     &reason_counts,
                     &run.actor_principal_ref,
                     &run.created_at,
+                    &run.completed_at,
+                    &run.last_error_hash,
                 ],
             )
             .await
