@@ -88,6 +88,8 @@ use trace_commons_server::trace_corpus_storage::{
     TraceRankingModelVersionWrite as StorageTraceRankingModelVersionWrite,
     TraceRankingPredictionRecord as StorageTraceRankingPredictionRecord,
     TraceRankingPredictionWrite as StorageTraceRankingPredictionWrite,
+    TraceRankingPreferenceLabelRecord as StorageTraceRankingPreferenceLabelRecord,
+    TraceRankingPreferenceLabelWrite as StorageTraceRankingPreferenceLabelWrite,
     TraceRankingUtilityCategory as StorageTraceRankingUtilityCategory,
     TraceRankingWorkerRunKind as StorageTraceRankingWorkerRunKind,
     TraceRankingWorkerRunRecord as StorageTraceRankingWorkerRunRecord,
@@ -2184,6 +2186,10 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route("/v1/admin/ranking/labels", get(ranking_labels_handler))
         .route(
+            "/v1/admin/ranking/preference-labels",
+            get(ranking_preference_labels_handler),
+        )
+        .route(
             "/v1/admin/ranking/calibration-report",
             get(ranking_calibration_report_handler),
         )
@@ -2250,6 +2256,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(ranking_model_promotion_worker_run_handler),
         )
         .route("/v1/workers/ranking/labels", post(ranking_label_handler))
+        .route(
+            "/v1/workers/ranking/preference-labels",
+            post(ranking_preference_label_handler),
+        )
         .route(
             "/v1/workers/ranking/calibration-runs",
             post(ranking_calibration_run_handler),
@@ -6019,6 +6029,37 @@ struct TraceRankingLabelRecord {
     utility_category: StorageTraceRankingUtilityCategory,
     label_outcome: StorageTraceRankingLabelOutcome,
     utility_delta_micros: i64,
+    evidence_hash: String,
+    external_ref_hash: String,
+    actor_principal_ref: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceRankingPreferenceLabelRequest {
+    preferred_submission_id: Uuid,
+    rejected_submission_id: Uuid,
+    target_use: TraceAllowedUse,
+    label_source: StorageTraceRankingLabelSource,
+    utility_category: StorageTraceRankingUtilityCategory,
+    preference_strength_micros: i64,
+    evidence_hash: String,
+    external_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceRankingPreferenceLabelRecord {
+    preference_label_id: Uuid,
+    tenant_id: String,
+    tenant_storage_ref: String,
+    preferred_submission_id: Uuid,
+    preferred_trace_id: Uuid,
+    rejected_submission_id: Uuid,
+    rejected_trace_id: Uuid,
+    target_use: TraceAllowedUse,
+    label_source: StorageTraceRankingLabelSource,
+    utility_category: StorageTraceRankingUtilityCategory,
+    preference_strength_micros: i64,
     evidence_hash: String,
     external_ref_hash: String,
     actor_principal_ref: String,
@@ -10208,6 +10249,88 @@ async fn ranking_labels_handler(
     Ok(Json(records))
 }
 
+async fn ranking_preference_label_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceRankingPreferenceLabelRequest>,
+) -> ApiResult<Json<TraceRankingPreferenceLabelRecord>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_utility_operator(&tenant)?;
+    if body.preferred_submission_id == body.rejected_submission_id {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranking preference labels require distinct submissions",
+        ));
+    }
+    if body.preference_strength_micros <= 0 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranking preference labels require positive preference_strength_micros",
+        ));
+    }
+    let preferred = read_ranking_source_submission(
+        state.as_ref(),
+        &tenant,
+        body.preferred_submission_id,
+        body.target_use,
+    )
+    .await?;
+    let rejected = read_ranking_source_submission(
+        state.as_ref(),
+        &tenant,
+        body.rejected_submission_id,
+        body.target_use,
+    )
+    .await?;
+    let evidence_hash = validate_sha256_hash(&body.evidence_hash, "evidence_hash")?;
+    let external_ref = body.external_ref.trim();
+    if external_ref.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranking preference labels require external_ref",
+        ));
+    }
+    if external_ref.len() > 1024 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranking preference label external_ref is too long",
+        ));
+    }
+    let record = TraceRankingPreferenceLabelRecord {
+        preference_label_id: Uuid::new_v4(),
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        preferred_submission_id: preferred.submission_id,
+        preferred_trace_id: preferred.trace_id,
+        rejected_submission_id: rejected.submission_id,
+        rejected_trace_id: rejected.trace_id,
+        target_use: body.target_use,
+        label_source: body.label_source,
+        utility_category: body.utility_category,
+        preference_strength_micros: body.preference_strength_micros,
+        evidence_hash,
+        external_ref_hash: sha256_prefixed(external_ref),
+        actor_principal_ref: tenant.principal_ref.clone(),
+        created_at: Utc::now(),
+    };
+    append_ranking_preference_label_with_db_mirror(state.as_ref(), &tenant, &record)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(record))
+}
+
+async fn ranking_preference_labels_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<TraceRankingPreferenceLabelRecord>>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let records = read_ranking_preference_labels_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(records))
+}
+
 async fn ranking_calibration_report_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -10771,6 +10894,27 @@ async fn append_ranking_label_with_db_mirror(
     enforce_db_mirror_write_result(state, "ranking label", mirror_result)
 }
 
+async fn append_ranking_preference_label_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    record: &TraceRankingPreferenceLabelRecord,
+) -> anyhow::Result<()> {
+    let mirror_result = mirror_ranking_preference_label_to_db(state, record).await;
+    if state.require_db_mirror_writes {
+        if let Err(error) = &mirror_result {
+            tracing::warn!(%error, preference_label_id = %record.preference_label_id, "Trace Commons DB dual-write ranking preference label mirror failed");
+        }
+        enforce_db_mirror_write_result(state, "ranking preference label", mirror_result)?;
+        append_ranking_preference_label(&state.root, &tenant.tenant_id, record)?;
+        return Ok(());
+    }
+    append_ranking_preference_label(&state.root, &tenant.tenant_id, record)?;
+    if let Err(error) = &mirror_result {
+        tracing::warn!(%error, preference_label_id = %record.preference_label_id, "Trace Commons DB dual-write ranking preference label mirror failed");
+    }
+    enforce_db_mirror_write_result(state, "ranking preference label", mirror_result)
+}
+
 async fn append_ranking_calibration_run_with_db_mirror(
     state: &AppState,
     tenant: &TenantAuth,
@@ -10919,6 +11063,33 @@ async fn mirror_ranking_label_to_db(
     })
     .await
     .context("failed to mirror ranking label to DB")?;
+    Ok(())
+}
+
+async fn mirror_ranking_preference_label_to_db(
+    state: &AppState,
+    record: &TraceRankingPreferenceLabelRecord,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    db.upsert_trace_ranking_preference_label(StorageTraceRankingPreferenceLabelWrite {
+        tenant_id: record.tenant_id.clone(),
+        preference_label_id: record.preference_label_id,
+        preferred_submission_id: record.preferred_submission_id,
+        preferred_trace_id: record.preferred_trace_id,
+        rejected_submission_id: record.rejected_submission_id,
+        rejected_trace_id: record.rejected_trace_id,
+        target_use: serde_storage_string(&record.target_use)?,
+        label_source: record.label_source,
+        utility_category: record.utility_category,
+        preference_strength_micros: record.preference_strength_micros,
+        evidence_hash: record.evidence_hash.clone(),
+        external_ref_hash: record.external_ref_hash.clone(),
+        actor_principal_ref: record.actor_principal_ref.clone(),
+    })
+    .await
+    .context("failed to mirror ranking preference label to DB")?;
     Ok(())
 }
 
@@ -11126,6 +11297,26 @@ async fn read_ranking_labels_for_admin(
     read_all_ranking_labels(&state.root, &tenant.tenant_id)
 }
 
+async fn read_ranking_preference_labels_for_admin(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceRankingPreferenceLabelRecord>> {
+    if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("TRACE_COMMONS_DB_REVIEWER_READS is enabled without a DB mirror")?;
+        return db
+            .list_trace_ranking_preference_labels(&tenant.tenant_id)
+            .await
+            .context("failed to read ranking preference labels from DB mirror")?
+            .into_iter()
+            .map(ranking_preference_label_from_storage)
+            .collect();
+    }
+    read_all_ranking_preference_labels(&state.root, &tenant.tenant_id)
+}
+
 async fn read_ranking_calibration_runs_for_admin(
     state: &AppState,
     tenant: &TenantAuth,
@@ -11248,6 +11439,28 @@ fn ranking_label_from_storage(
         utility_category: record.utility_category,
         label_outcome: record.label_outcome,
         utility_delta_micros: record.utility_delta_micros,
+        evidence_hash: record.evidence_hash,
+        external_ref_hash: record.external_ref_hash,
+        actor_principal_ref: record.actor_principal_ref,
+        created_at: record.created_at,
+    })
+}
+
+fn ranking_preference_label_from_storage(
+    record: StorageTraceRankingPreferenceLabelRecord,
+) -> anyhow::Result<TraceRankingPreferenceLabelRecord> {
+    Ok(TraceRankingPreferenceLabelRecord {
+        tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
+        tenant_id: record.tenant_id,
+        preference_label_id: record.preference_label_id,
+        preferred_submission_id: record.preferred_submission_id,
+        preferred_trace_id: record.preferred_trace_id,
+        rejected_submission_id: record.rejected_submission_id,
+        rejected_trace_id: record.rejected_trace_id,
+        target_use: storage_string_as(&record.target_use, "ranking target_use")?,
+        label_source: record.label_source,
+        utility_category: record.utility_category,
+        preference_strength_micros: record.preference_strength_micros,
         evidence_hash: record.evidence_hash,
         external_ref_hash: record.external_ref_hash,
         actor_principal_ref: record.actor_principal_ref,
@@ -22723,6 +22936,55 @@ fn ensure_ranking_label_tenant(
     Ok(())
 }
 
+fn ranking_preference_labels_path(root: &Path, tenant_id: &str) -> PathBuf {
+    let tenant_key = tenant_storage_key(tenant_id);
+    root.join("tenants")
+        .join(tenant_key)
+        .join("ranking")
+        .join("preference_labels.jsonl")
+}
+
+fn append_ranking_preference_label(
+    root: &Path,
+    tenant_id: &str,
+    record: &TraceRankingPreferenceLabelRecord,
+) -> anyhow::Result<()> {
+    let path = ranking_preference_labels_path(root, tenant_id);
+    append_jsonl_record(&path, record, "ranking preference label")
+}
+
+fn read_all_ranking_preference_labels(
+    root: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<Vec<TraceRankingPreferenceLabelRecord>> {
+    let path = ranking_preference_labels_path(root, tenant_id);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut records: Vec<TraceRankingPreferenceLabelRecord> =
+        read_jsonl_records(&path, "ranking preference label")?;
+    for record in &records {
+        ensure_ranking_preference_label_tenant(record, tenant_id)?;
+    }
+    records.sort_by_key(|record| record.created_at);
+    Ok(records)
+}
+
+fn ensure_ranking_preference_label_tenant(
+    record: &TraceRankingPreferenceLabelRecord,
+    tenant_id: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        record.tenant_id == tenant_id,
+        "ranking preference label tenant mismatch"
+    );
+    anyhow::ensure!(
+        record.tenant_storage_ref == tenant_storage_ref(tenant_id),
+        "ranking preference label tenant storage ref mismatch"
+    );
+    Ok(())
+}
+
 fn ranking_calibration_runs_path(root: &Path, tenant_id: &str) -> PathBuf {
     let tenant_key = tenant_storage_key(tenant_id);
     root.join("tenants")
@@ -24334,6 +24596,8 @@ async fn backfill_db_mirror_from_files(
     let file_ranking_features = read_all_ranking_features(&state.root, &tenant.tenant_id)?;
     let file_ranking_predictions = read_all_ranking_predictions(&state.root, &tenant.tenant_id)?;
     let file_ranking_labels = read_all_ranking_labels(&state.root, &tenant.tenant_id)?;
+    let file_ranking_preference_labels =
+        read_all_ranking_preference_labels(&state.root, &tenant.tenant_id)?;
     let file_ranking_calibration_runs =
         read_all_ranking_calibration_runs(&state.root, &tenant.tenant_id)?;
     let file_ranking_worker_runs = read_all_ranking_worker_runs(&state.root, &tenant.tenant_id)?;
@@ -24348,6 +24612,7 @@ async fn backfill_db_mirror_from_files(
             + file_ranking_features.len()
             + file_ranking_predictions.len()
             + file_ranking_labels.len()
+            + file_ranking_preference_labels.len()
             + file_ranking_calibration_runs.len()
             + file_ranking_worker_runs.len();
         for manifest in &file_export_manifests {
@@ -24602,6 +24867,27 @@ async fn backfill_db_mirror_from_files(
             Err(error) => report.record_failure(
                 "ranking_label",
                 record.ranking_label_id.to_string(),
+                error.to_string(),
+            ),
+        }
+    }
+
+    let existing_ranking_preference_label_ids = db
+        .list_trace_ranking_preference_labels(&tenant.tenant_id)
+        .await
+        .context("failed to list ranking preference labels for DB backfill")?
+        .into_iter()
+        .map(|record| record.preference_label_id)
+        .collect::<BTreeSet<_>>();
+    for record in &file_ranking_preference_labels {
+        if existing_ranking_preference_label_ids.contains(&record.preference_label_id) {
+            continue;
+        }
+        match mirror_ranking_preference_label_to_db(state, record).await {
+            Ok(()) => report.backfilled += 1,
+            Err(error) => report.record_failure(
+                "ranking_preference_label",
+                record.preference_label_id.to_string(),
                 error.to_string(),
             ),
         }
@@ -25087,6 +25373,10 @@ async fn reconcile_db_mirror(
         .list_trace_ranking_labels(&tenant.tenant_id)
         .await
         .context("failed to list ranking labels for DB reconciliation")?;
+    let db_ranking_preference_labels = db
+        .list_trace_ranking_preference_labels(&tenant.tenant_id)
+        .await
+        .context("failed to list ranking preference labels for DB reconciliation")?;
     let db_ranking_calibration_runs = db
         .list_trace_ranking_calibration_runs(&tenant.tenant_id)
         .await
@@ -25275,6 +25565,8 @@ async fn reconcile_db_mirror(
     let file_ranking_features = read_all_ranking_features(&state.root, &tenant.tenant_id)?;
     let file_ranking_predictions = read_all_ranking_predictions(&state.root, &tenant.tenant_id)?;
     let file_ranking_labels = read_all_ranking_labels(&state.root, &tenant.tenant_id)?;
+    let file_ranking_preference_labels =
+        read_all_ranking_preference_labels(&state.root, &tenant.tenant_id)?;
     let file_ranking_calibration_runs =
         read_all_ranking_calibration_runs(&state.root, &tenant.tenant_id)?;
     let file_ranking_worker_runs = read_all_ranking_worker_runs(&state.root, &tenant.tenant_id)?;
@@ -25486,6 +25778,22 @@ async fn reconcile_db_mirror(
         .collect::<Vec<_>>();
     let missing_ranking_label_ids_in_files = db_ranking_label_ids
         .difference(&file_ranking_label_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let file_ranking_preference_label_ids = file_ranking_preference_labels
+        .iter()
+        .map(|record| record.preference_label_id)
+        .collect::<BTreeSet<_>>();
+    let db_ranking_preference_label_ids = db_ranking_preference_labels
+        .iter()
+        .map(|record| record.preference_label_id)
+        .collect::<BTreeSet<_>>();
+    let missing_ranking_preference_label_ids_in_db = file_ranking_preference_label_ids
+        .difference(&db_ranking_preference_label_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let missing_ranking_preference_label_ids_in_files = db_ranking_preference_label_ids
+        .difference(&file_ranking_preference_label_ids)
         .copied()
         .collect::<Vec<_>>();
     let file_ranking_calibration_run_ids = file_ranking_calibration_runs
@@ -25920,6 +26228,10 @@ async fn reconcile_db_mirror(
         db_ranking_label_count: db_ranking_labels.len(),
         missing_ranking_label_ids_in_db,
         missing_ranking_label_ids_in_files,
+        file_ranking_preference_label_count: file_ranking_preference_labels.len(),
+        db_ranking_preference_label_count: db_ranking_preference_labels.len(),
+        missing_ranking_preference_label_ids_in_db,
+        missing_ranking_preference_label_ids_in_files,
         file_ranking_calibration_run_count: file_ranking_calibration_runs.len(),
         db_ranking_calibration_run_count: db_ranking_calibration_runs.len(),
         missing_ranking_calibration_run_ids_in_db,
@@ -28039,6 +28351,10 @@ struct TraceDbReconciliationReport {
     db_ranking_label_count: usize,
     missing_ranking_label_ids_in_db: Vec<Uuid>,
     missing_ranking_label_ids_in_files: Vec<Uuid>,
+    file_ranking_preference_label_count: usize,
+    db_ranking_preference_label_count: usize,
+    missing_ranking_preference_label_ids_in_db: Vec<Uuid>,
+    missing_ranking_preference_label_ids_in_files: Vec<Uuid>,
     file_ranking_calibration_run_count: usize,
     db_ranking_calibration_run_count: usize,
     missing_ranking_calibration_run_ids_in_db: Vec<Uuid>,
@@ -28232,6 +28548,16 @@ impl TraceDbReconciliationReport {
             &mut gaps,
             "missing_ranking_label_ids_in_files",
             self.missing_ranking_label_ids_in_files.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_ranking_preference_label_ids_in_db",
+            self.missing_ranking_preference_label_ids_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_ranking_preference_label_ids_in_files",
+            self.missing_ranking_preference_label_ids_in_files.len(),
         );
         push_gap_count(
             &mut gaps,
@@ -30116,6 +30442,7 @@ mod tests {
         feature_id: Uuid,
         prediction_id: Uuid,
         label_id: Uuid,
+        preference_label_id: Uuid,
         calibration_run_id: Uuid,
         ranking_worker_run_id: Uuid,
     }
@@ -30127,9 +30454,12 @@ mod tests {
         let now = Utc::now();
         let submission_id = Uuid::new_v4();
         let trace_id = Uuid::new_v4();
+        let rejected_submission_id = Uuid::new_v4();
+        let rejected_trace_id = Uuid::new_v4();
         let feature_id = Uuid::new_v4();
         let prediction_id = Uuid::new_v4();
         let label_id = Uuid::new_v4();
+        let preference_label_id = Uuid::new_v4();
         let calibration_run_id = Uuid::new_v4();
         let ranking_worker_run_id = Uuid::new_v4();
         append_ranking_model_version(
@@ -30221,6 +30551,28 @@ mod tests {
             },
         )
         .expect("file ranking label writes");
+        append_ranking_preference_label(
+            root,
+            tenant_id,
+            &TraceRankingPreferenceLabelRecord {
+                preference_label_id,
+                tenant_id: tenant_id.to_string(),
+                tenant_storage_ref: tenant_storage_ref(tenant_id),
+                preferred_submission_id: submission_id,
+                preferred_trace_id: trace_id,
+                rejected_submission_id,
+                rejected_trace_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 850_000,
+                evidence_hash: "sha256:ranking-preference-evidence-backfill".to_string(),
+                external_ref_hash: "sha256:ranking-preference-external-ref-backfill".to_string(),
+                actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+                created_at: now,
+            },
+        )
+        .expect("file ranking preference label writes");
         append_ranking_calibration_run(
             root,
             tenant_id,
@@ -30290,6 +30642,7 @@ mod tests {
             feature_id,
             prediction_id,
             label_id,
+            preference_label_id,
             calibration_run_id,
             ranking_worker_run_id,
         }
@@ -36467,9 +36820,12 @@ mod tests {
         let now = Utc::now();
         let submission_id = Uuid::new_v4();
         let trace_id = Uuid::new_v4();
+        let rejected_submission_id = Uuid::new_v4();
+        let rejected_trace_id = Uuid::new_v4();
         let feature_id = Uuid::new_v4();
         let prediction_id = Uuid::new_v4();
         let label_id = Uuid::new_v4();
+        let preference_label_id = Uuid::new_v4();
         let calibration_run_id = Uuid::new_v4();
         let ranking_worker_run_id = Uuid::new_v4();
         append_ranking_model_version(
@@ -36561,6 +36917,28 @@ mod tests {
             },
         )
         .expect("file ranking label writes");
+        append_ranking_preference_label(
+            temp.path(),
+            "tenant-a",
+            &TraceRankingPreferenceLabelRecord {
+                preference_label_id,
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                preferred_submission_id: submission_id,
+                preferred_trace_id: trace_id,
+                rejected_submission_id,
+                rejected_trace_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 850_000,
+                evidence_hash: "sha256:ranking-preference-evidence-reconcile".to_string(),
+                external_ref_hash: "sha256:ranking-preference-external-ref-reconcile".to_string(),
+                actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+                created_at: now,
+            },
+        )
+        .expect("file ranking preference label writes");
         append_ranking_calibration_run(
             temp.path(),
             "tenant-a",
@@ -36670,6 +37048,10 @@ mod tests {
             serde_json::json!([label_id])
         );
         assert_eq!(
+            reconciliation_json["missing_ranking_preference_label_ids_in_db"],
+            serde_json::json!([preference_label_id])
+        );
+        assert_eq!(
             reconciliation_json["missing_ranking_calibration_run_ids_in_db"],
             serde_json::json!([calibration_run_id])
         );
@@ -36682,6 +37064,7 @@ mod tests {
             "missing_ranking_feature_ids_in_db=1",
             "missing_ranking_prediction_ids_in_db=1",
             "missing_ranking_label_ids_in_db=1",
+            "missing_ranking_preference_label_ids_in_db=1",
             "missing_ranking_calibration_run_ids_in_db=1",
             "missing_ranking_worker_run_ids_in_db=1",
         ] {
@@ -36849,7 +37232,7 @@ mod tests {
         )
         .await
         .expect("maintenance dry-run succeeds without a DB mirror");
-        assert_eq!(response.db_mirror_backfilled, 6);
+        assert_eq!(response.db_mirror_backfilled, 7);
         assert_eq!(response.db_mirror_backfill_failed, 0);
     }
 
@@ -36890,7 +37273,7 @@ mod tests {
         )
         .await
         .expect("maintenance backfill succeeds");
-        assert_eq!(response.db_mirror_backfilled, 6);
+        assert_eq!(response.db_mirror_backfilled, 7);
         assert_eq!(response.db_mirror_backfill_failed, 0);
 
         let model_versions = backend
@@ -36917,6 +37300,15 @@ mod tests {
             .expect("DB ranking label reads");
         assert_eq!(labels.len(), 1);
         assert_eq!(labels[0].ranking_label_id, fixture.label_id);
+        let preference_labels = backend
+            .list_trace_ranking_preference_labels("tenant-a")
+            .await
+            .expect("DB ranking preference label reads");
+        assert_eq!(preference_labels.len(), 1);
+        assert_eq!(
+            preference_labels[0].preference_label_id,
+            fixture.preference_label_id
+        );
         let calibration_runs = backend
             .list_trace_ranking_calibration_runs("tenant-a")
             .await
@@ -43598,6 +43990,75 @@ mod tests {
         let labels_json = serde_json::to_string(&labels).expect("labels serialize");
         assert!(!labels_json.contains("private-frontier-lab-batch-123"));
         assert!(!labels_json.contains("trace body"));
+    }
+
+    #[tokio::test]
+    async fn ranking_preference_evidence_records_hash_only_pairwise_labels() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut preferred = sample_envelope().await;
+        make_metadata_only_low_risk(&mut preferred);
+        preferred.consent.scopes = vec![ConsentScope::RankingTraining];
+        preferred.trace_card.consent_scope = ConsentScope::RankingTraining;
+        preferred.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        preferred.value.submission_score = 0.95;
+        let preferred_submission_id = preferred.submission_id;
+        let mut rejected = sample_envelope().await;
+        make_metadata_only_low_risk(&mut rejected);
+        rejected.consent.scopes = vec![ConsentScope::RankingTraining];
+        rejected.trace_card.consent_scope = ConsentScope::RankingTraining;
+        rejected.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        rejected.value.submission_score = 0.15;
+        let rejected_submission_id = rejected.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(preferred),
+        )
+        .await
+        .expect("preferred ranking source submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(rejected),
+        )
+        .await
+        .expect("rejected ranking source submission succeeds");
+
+        let Json(preference) = ranking_preference_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id,
+                rejected_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 850_000,
+                evidence_hash: "sha256:pairwise-frontier-evidence".to_string(),
+                external_ref: "frontier-lab-private-pair-456".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking preference label");
+        assert_eq!(preference.preferred_submission_id, preferred_submission_id);
+        assert_eq!(preference.rejected_submission_id, rejected_submission_id);
+        assert_eq!(preference.preference_strength_micros, 850_000);
+        assert_eq!(
+            preference.external_ref_hash,
+            "sha256:3f55ab2405e214338cc19527f7731ec4b73adeb81c3008ae6862e91ff26dad1b"
+        );
+
+        let Json(preferences) =
+            ranking_preference_labels_handler(State(state), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list ranking preference labels");
+        assert_eq!(preferences.len(), 1);
+        let preferences_json =
+            serde_json::to_string(&preferences).expect("preference labels serialize");
+        assert!(!preferences_json.contains("frontier-lab-private-pair-456"));
+        assert!(!preferences_json.contains("trace body"));
     }
 
     #[tokio::test]

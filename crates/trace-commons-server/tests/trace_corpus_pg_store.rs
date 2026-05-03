@@ -15,10 +15,10 @@ use trace_commons_server::trace_corpus_storage::{
     TraceObjectRefWrite, TraceRankingCalibrationRunWrite, TraceRankingFeatureWrite,
     TraceRankingLabelOutcome, TraceRankingLabelSource, TraceRankingLabelWrite,
     TraceRankingModelStatus, TraceRankingModelVersionWrite, TraceRankingPredictionWrite,
-    TraceRankingUtilityCategory, TraceRankingWorkerRunKind, TraceRankingWorkerRunStatus,
-    TraceRankingWorkerRunWrite, TraceSubmissionWrite, TraceUtilityAttestationWrite,
-    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-    TraceWorkerKind,
+    TraceRankingPreferenceLabelWrite, TraceRankingUtilityCategory, TraceRankingWorkerRunKind,
+    TraceRankingWorkerRunStatus, TraceRankingWorkerRunWrite, TraceSubmissionWrite,
+    TraceUtilityAttestationWrite, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
+    TraceVectorEntryWrite, TraceWorkerKind,
 };
 use uuid::Uuid;
 
@@ -555,6 +555,75 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
         .expect("repeat ranking label upsert is idempotent");
     assert_eq!(idempotent_label.ranking_label_id, label.ranking_label_id);
 
+    let second_submission_id = Uuid::new_v4();
+    let second_trace_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(TraceSubmissionWrite {
+            tenant_id: tenant_alpha.clone(),
+            submission_id: second_submission_id,
+            trace_id: second_trace_id,
+            auth_principal_ref: "principal:contributor".to_string(),
+            contributor_pseudonym: Some("contributor-2".to_string()),
+            submitted_tenant_scope_ref: Some("tenant-scope".to_string()),
+            schema_version: "ironclaw.trace_contribution.v1".to_string(),
+            consent_policy_version: "trace-credit-policy-v2".to_string(),
+            consent_scopes: vec!["ranking_training".to_string()],
+            allowed_uses: vec!["ranking_model_training".to_string()],
+            retention_policy_id: "private_corpus_revocable".to_string(),
+            status: TraceCorpusStatus::Accepted,
+            privacy_risk: "low".to_string(),
+            redaction_pipeline_version: "server-rescrub-v1".to_string(),
+            redaction_counts: BTreeMap::new(),
+            redaction_hash: "sha256:second-redaction".to_string(),
+            canonical_summary_hash: Some("sha256:second-summary".to_string()),
+            submission_score: Some(0.5),
+            credit_points_pending: Some(0.0),
+            credit_points_final: None,
+            expires_at: None,
+        })
+        .await
+        .expect("insert second accepted ranking source");
+    let preference_label = backend
+        .upsert_trace_ranking_preference_label(TraceRankingPreferenceLabelWrite {
+            tenant_id: tenant_alpha.clone(),
+            preference_label_id: Uuid::new_v4(),
+            preferred_submission_id: submission_id,
+            preferred_trace_id: trace_id,
+            rejected_submission_id: second_submission_id,
+            rejected_trace_id: second_trace_id,
+            target_use: "ranking_model_training".to_string(),
+            label_source: TraceRankingLabelSource::FrontierLab,
+            utility_category: TraceRankingUtilityCategory::RankingTraining,
+            preference_strength_micros: 850_000,
+            evidence_hash: "sha256:pairwise-frontier-evidence".to_string(),
+            external_ref_hash: "sha256:frontier-private-pair-ref".to_string(),
+            actor_principal_ref: "principal:ranker-worker".to_string(),
+        })
+        .await
+        .expect("upsert ranking preference label");
+    let idempotent_preference = backend
+        .upsert_trace_ranking_preference_label(TraceRankingPreferenceLabelWrite {
+            tenant_id: tenant_alpha.clone(),
+            preference_label_id: Uuid::new_v4(),
+            preferred_submission_id: submission_id,
+            preferred_trace_id: trace_id,
+            rejected_submission_id: second_submission_id,
+            rejected_trace_id: second_trace_id,
+            target_use: "ranking_model_training".to_string(),
+            label_source: TraceRankingLabelSource::FrontierLab,
+            utility_category: TraceRankingUtilityCategory::RankingTraining,
+            preference_strength_micros: 850_000,
+            evidence_hash: "sha256:pairwise-frontier-evidence".to_string(),
+            external_ref_hash: "sha256:frontier-private-pair-ref".to_string(),
+            actor_principal_ref: "principal:ranker-worker".to_string(),
+        })
+        .await
+        .expect("repeat ranking preference label upsert is idempotent");
+    assert_eq!(
+        idempotent_preference.preference_label_id,
+        preference_label.preference_label_id
+    );
+
     let calibration_run_id = Uuid::new_v4();
     let calibration_run = backend
         .upsert_trace_ranking_calibration_run(TraceRankingCalibrationRunWrite {
@@ -668,6 +737,10 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
         .list_trace_ranking_labels(&tenant_alpha)
         .await
         .expect("list alpha ranking labels");
+    let alpha_preference_labels = backend
+        .list_trace_ranking_preference_labels(&tenant_alpha)
+        .await
+        .expect("list alpha ranking preference labels");
     let alpha_calibration_runs = backend
         .list_trace_ranking_calibration_runs(&tenant_alpha)
         .await
@@ -680,6 +753,7 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
     assert_eq!(alpha_features.len(), 1);
     assert_eq!(alpha_predictions.len(), 1);
     assert_eq!(alpha_labels.len(), 1);
+    assert_eq!(alpha_preference_labels.len(), 1);
     assert_eq!(alpha_calibration_runs.len(), 1);
     assert_eq!(alpha_worker_runs.len(), 1);
 
@@ -690,6 +764,14 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
             .expect("list beta ranking labels")
             .is_empty(),
         "ranking evidence must stay tenant scoped"
+    );
+    assert!(
+        backend
+            .list_trace_ranking_preference_labels(&tenant_beta)
+            .await
+            .expect("list beta ranking preference labels")
+            .is_empty(),
+        "ranking preference evidence must stay tenant scoped"
     );
     assert!(
         backend

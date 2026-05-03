@@ -39,6 +39,7 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_ranking_features",
     "trace_ranking_predictions",
     "trace_ranking_labels",
+    "trace_ranking_preference_labels",
     "trace_ranking_calibration_runs",
     "trace_ranking_worker_runs",
 ];
@@ -313,6 +314,46 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
                     &[&12_i32, &"trace_ranking_worker_run_lifecycle"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&13_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V13__trace_credit_settlement_exclusion_reasons.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&13_i32, &"trace_credit_settlement_exclusion_reasons"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&14_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V14__trace_ranking_preference_labels.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&14_i32, &"trace_ranking_preference_labels"],
                 )
                 .await?;
         }
