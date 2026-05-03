@@ -7845,6 +7845,16 @@ async fn ranking_model_promotion_worker_run_handler(
     }
     let model_version = optional_ranking_identifier(body.model_version, "model_version")?;
     let policy_version = optional_ranking_identifier(body.policy_version, "policy_version")?;
+    ensure_no_overlapping_live_ranking_worker_run(
+        state.as_ref(),
+        &tenant,
+        TraceRankingWorkerRunKind::ModelPromotion,
+        body.dry_run,
+        model_version.as_deref(),
+        Some(body.target_use),
+        policy_version.as_deref(),
+    )
+    .await?;
     let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
@@ -7990,6 +8000,72 @@ async fn ranking_model_promotion_worker_run_handler(
 
 fn ranking_model_promotion_run_can_skip_status(status: StatusCode) -> bool {
     matches!(status, StatusCode::NOT_FOUND | StatusCode::CONFLICT)
+}
+
+async fn ensure_no_overlapping_live_ranking_worker_run(
+    state: &AppState,
+    tenant: &TenantAuth,
+    run_kind: TraceRankingWorkerRunKind,
+    dry_run: bool,
+    model_version: Option<&str>,
+    target_use: Option<TraceAllowedUse>,
+    policy_version: Option<&str>,
+) -> ApiResult<()> {
+    if dry_run {
+        return Ok(());
+    }
+    let worker_runs = read_ranking_worker_runs_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let stale_cutoff = Utc::now() - Duration::hours(TRACE_RANKING_WORKER_RUN_STALE_AFTER_HOURS);
+    if worker_runs.iter().any(|record| {
+        ranking_worker_run_overlaps_live_claim(
+            record,
+            run_kind,
+            model_version,
+            target_use,
+            policy_version,
+            stale_cutoff,
+        )
+    }) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            ranking_worker_run_active_conflict_message(run_kind),
+        ));
+    }
+    Ok(())
+}
+
+fn ranking_worker_run_overlaps_live_claim(
+    record: &TraceRankingWorkerRunRecord,
+    run_kind: TraceRankingWorkerRunKind,
+    model_version: Option<&str>,
+    target_use: Option<TraceAllowedUse>,
+    policy_version: Option<&str>,
+    stale_cutoff: DateTime<Utc>,
+) -> bool {
+    record.run_kind == run_kind
+        && record.status == TraceRankingWorkerRunStatus::Running
+        && !record.dry_run
+        && record.created_at > stale_cutoff
+        && ranking_optional_filter_overlaps(record.model_version.as_deref(), model_version)
+        && ranking_optional_filter_overlaps(record.policy_version.as_deref(), policy_version)
+        && ranking_optional_filter_overlaps(record.target_use, target_use)
+}
+
+fn ranking_optional_filter_overlaps<T: PartialEq>(left: Option<T>, right: Option<T>) -> bool {
+    left.is_none() || right.is_none() || left == right
+}
+
+fn ranking_worker_run_active_conflict_message(run_kind: TraceRankingWorkerRunKind) -> &'static str {
+    match run_kind {
+        TraceRankingWorkerRunKind::PredictionCredit => {
+            "ranking prediction credit worker run is already active for overlapping filters"
+        }
+        TraceRankingWorkerRunKind::ModelPromotion => {
+            "ranking model promotion worker run is already active for overlapping filters"
+        }
+    }
 }
 
 fn update_model_promotion_worker_run_from_response(
@@ -8414,6 +8490,16 @@ async fn ranking_prediction_credit_run_handler(
     }
     let model_version = optional_ranking_identifier(body.model_version, "model_version")?;
     let policy_version = optional_ranking_identifier(body.policy_version, "policy_version")?;
+    ensure_no_overlapping_live_ranking_worker_run(
+        state.as_ref(),
+        &tenant,
+        TraceRankingWorkerRunKind::PredictionCredit,
+        body.dry_run,
+        model_version.as_deref(),
+        body.target_use,
+        policy_version.as_deref(),
+    )
+    .await?;
     let mut predictions = read_ranking_predictions_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
@@ -36993,6 +37079,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ranking_prediction_credit_worker_run_rejects_overlapping_active_run() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        append_ranking_worker_run(
+            temp.path(),
+            "tenant-a",
+            &TraceRankingWorkerRunRecord {
+                ranking_worker_run_id: Uuid::new_v4(),
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                run_kind: TraceRankingWorkerRunKind::PredictionCredit,
+                status: TraceRankingWorkerRunStatus::Running,
+                dry_run: false,
+                reason_hash: sha256_prefixed("existing prediction credit scheduler"),
+                model_version: None,
+                target_use: None,
+                policy_version: None,
+                limit: 25,
+                checked_count: 0,
+                succeeded_count: 0,
+                skipped_existing_count: 0,
+                skipped_model_risk_count: 0,
+                skipped_ineligible_count: 0,
+                pending_after_count: 0,
+                result_refs: Vec::new(),
+                reason_counts: BTreeMap::new(),
+                actor_principal_ref: "utility-worker-a".to_string(),
+                created_at: Utc::now(),
+                completed_at: None,
+                last_error_hash: None,
+            },
+        )
+        .expect("active worker run writes");
+
+        let error = ranking_prediction_credit_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionCreditRunRequest {
+                dry_run: false,
+                allow_at_risk_models: false,
+                reason: "overlapping ranking prediction credit scheduler".to_string(),
+                limit: Some(10),
+                model_version: Some("trace-ranker-credit-run-v1".to_string()),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                policy_version: None,
+            }),
+        )
+        .await
+        .expect_err("overlapping live ranking worker run is rejected");
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(
+            error.1.0.error,
+            "ranking prediction credit worker run is already active for overlapping filters"
+        );
+
+        let raw_worker_runs =
+            read_all_ranking_worker_runs(temp.path(), "tenant-a").expect("worker runs read");
+        assert_eq!(raw_worker_runs.len(), 1);
+        assert_eq!(
+            raw_worker_runs[0].status,
+            TraceRankingWorkerRunStatus::Running
+        );
+    }
+
+    #[tokio::test]
     async fn ranking_prediction_credit_worker_run_records_failed_status_on_fatal_error() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -37825,6 +37976,70 @@ mod tests {
         .await
         .expect_err("stale calibration blocks ranking settlement");
         assert_eq!(stale_settlement_error.0, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn ranking_model_promotion_worker_run_rejects_overlapping_active_run() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        append_ranking_worker_run(
+            temp.path(),
+            "tenant-a",
+            &TraceRankingWorkerRunRecord {
+                ranking_worker_run_id: Uuid::new_v4(),
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                run_kind: TraceRankingWorkerRunKind::ModelPromotion,
+                status: TraceRankingWorkerRunStatus::Running,
+                dry_run: false,
+                reason_hash: sha256_prefixed("existing model promotion scheduler"),
+                model_version: None,
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                policy_version: Some("trace-credit-policy-v1".to_string()),
+                limit: 25,
+                checked_count: 0,
+                succeeded_count: 0,
+                skipped_existing_count: 0,
+                skipped_model_risk_count: 0,
+                skipped_ineligible_count: 0,
+                pending_after_count: 0,
+                result_refs: Vec::new(),
+                reason_counts: BTreeMap::new(),
+                actor_principal_ref: "utility-worker-a".to_string(),
+                created_at: Utc::now(),
+                completed_at: None,
+                last_error_hash: None,
+            },
+        )
+        .expect("active worker run writes");
+
+        let error = ranking_model_promotion_worker_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingModelPromotionRunRequest {
+                dry_run: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                reason: "overlapping ranking model promotion scheduler".to_string(),
+                limit: Some(10),
+                model_version: Some("trace-ranker-candidate-v1".to_string()),
+                policy_version: None,
+            }),
+        )
+        .await
+        .expect_err("overlapping live model promotion worker run is rejected");
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(
+            error.1.0.error,
+            "ranking model promotion worker run is already active for overlapping filters"
+        );
+
+        let raw_worker_runs =
+            read_all_ranking_worker_runs(temp.path(), "tenant-a").expect("worker runs read");
+        assert_eq!(raw_worker_runs.len(), 1);
+        assert_eq!(
+            raw_worker_runs[0].status,
+            TraceRankingWorkerRunStatus::Running
+        );
     }
 
     #[tokio::test]

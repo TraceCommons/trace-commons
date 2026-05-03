@@ -509,16 +509,19 @@ Replay dataset exports, benchmark conversion artifacts, and ranker training expo
 `POST /v1/workers/ranking/model-promotions/run` lets production schedulers scan
 latest candidate ranking models with a bounded `limit`, required target use,
 non-empty reason, optional model/policy filters, and dry-run support. It reuses
-the same calibration/freshness/diversity gates as the admin promotion endpoint,
-promotes only eligible candidates, skips ineligible candidates with safe reason
-counts, and reports remaining candidate count without granting utility workers
-generic admin promotion access.
+the same overlapping live-run guard, calibration/freshness/diversity gates as
+the admin promotion endpoint, promotes only eligible candidates, skips
+ineligible candidates with safe reason counts, and reports remaining candidate
+count without granting utility workers generic admin promotion access.
 
 `GET /v1/admin/ranking/worker-runs` exposes the hash-only worker-run ledger for
 bounded ranking prediction-credit and model-promotion automation. Rows include
 the run id, running/completed/failed status, dry-run flag, filters, limits,
 checked/succeeded/skipped counts, result refs, and machine-readable skip reason
-counts, but store only the reason hash rather than raw operator notes.
+counts, but store only the reason hash rather than raw operator notes. The same
+ledger coordinates scheduler retries: live non-dry-run prediction-credit and
+model-promotion runs refuse active overlapping non-stale rows before appending a
+new `running` entry.
 
 `GET /v1/admin/ranking/model-risk-report` recomputes the current joined-evidence hash for each active model/target-use pair and reports post-calibration prediction/label counts, low-confidence fresh predictions, stale or non-promotable calibration status, evidence-hash drift, and machine-readable risk codes without exposing trace bodies or raw lab references.
 
@@ -866,7 +869,11 @@ whose external reference is `ranking_prediction:<uuid>`.
 
 Production schedulers can call `POST /v1/workers/ranking/prediction-credit/run`
 with a non-empty `reason`, optional `limit`, and optional `model_version`,
-`target_use`, or `policy_version` filters. The run endpoint scans stored
+`target_use`, or `policy_version` filters. Live non-dry-run requests first
+reject overlapping active prediction-credit runs for the same tenant and broad
+or narrow matching filters with `409 Conflict`; runs older than
+`ranking_worker_run_stale_after_hours` no longer block retry, but still surface
+as operational blockers until recovered. The run endpoint scans stored
 predictions in creation order, skips already-credited predictions without
 consuming the batch limit, blocks uncredited predictions for active model/target
 pairs with uncleared model-risk report codes unless `allow_at_risk_models` is
