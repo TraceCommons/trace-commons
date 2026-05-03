@@ -7502,6 +7502,22 @@ async fn ranking_model_version_handler(
         validate_sha256_hash(&body.calibration_dataset_hash, "calibration_dataset_hash")?;
     let model_artifact_hash =
         validate_sha256_hash(&body.model_artifact_hash, "model_artifact_hash")?;
+    let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    if let Some(existing) = latest_ranking_model_version(&model_versions, &model_version) {
+        let manifest_matches = existing.feature_schema_version == feature_schema_version
+            && existing.policy_version == policy_version
+            && existing.training_dataset_hash == training_dataset_hash
+            && existing.calibration_dataset_hash == calibration_dataset_hash
+            && existing.model_artifact_hash == model_artifact_hash;
+        if !manifest_matches {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "ranking model version manifest is immutable; register a new model_version for changed schema, policy, dataset, or artifact hashes",
+            ));
+        }
+    }
     if body.status == StorageTraceRankingModelStatus::Active {
         ensure_active_ranking_model_has_promotable_calibration(
             state.as_ref(),
@@ -35822,22 +35838,12 @@ mod tests {
         .expect("utility worker can persist promotable calibration");
         assert!(calibration.promotable);
 
-        let Json(re_registered) = ranking_model_version_handler(
-            State(state.clone()),
-            auth_headers("admin-token-a"),
-            Json(TraceRankingModelVersionRequest {
-                model_version: candidate.model_version.clone(),
-                feature_schema_version: candidate.feature_schema_version.clone(),
-                policy_version: candidate.policy_version.clone(),
-                status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: candidate.training_dataset_hash.clone(),
-                calibration_dataset_hash: "sha256:ranking-calibration-dataset-rewrite-b"
-                    .to_string(),
-                model_artifact_hash: candidate.model_artifact_hash.clone(),
-            }),
-        )
-        .await
-        .expect("admin can revise candidate model metadata before promotion");
+        let mut re_registered = candidate.clone();
+        re_registered.calibration_dataset_hash =
+            "sha256:ranking-calibration-dataset-rewrite-b".to_string();
+        re_registered.created_at = candidate.created_at + Duration::seconds(1);
+        append_ranking_model_version(temp.path(), "tenant-a", &re_registered)
+            .expect("legacy mutable model metadata can exist on disk");
 
         let promotion_error = ranking_model_promotion_handler(
             State(state),
@@ -36476,6 +36482,55 @@ mod tests {
         .await
         .expect("ranking prediction with registered model and feature succeeds");
         assert_eq!(prediction.settlement_score_micros, 2_175_000);
+    }
+
+    #[tokio::test]
+    async fn ranking_model_version_rejects_manifest_rewrite_for_same_version() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let Json(model) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-immutable-v1".to_string(),
+                feature_schema_version: "ranking-features-immutable-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:training-set-immutable".to_string(),
+                calibration_dataset_hash: "sha256:calibration-set-immutable".to_string(),
+                model_artifact_hash: "sha256:model-artifact-immutable".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can register initial ranking model manifest");
+
+        let rewrite_error = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: model.model_version.clone(),
+                feature_schema_version: model.feature_schema_version.clone(),
+                policy_version: model.policy_version.clone(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: model.training_dataset_hash.clone(),
+                calibration_dataset_hash: "sha256:calibration-set-immutable-rewrite".to_string(),
+                model_artifact_hash: model.model_artifact_hash.clone(),
+            }),
+        )
+        .await
+        .expect_err("same model_version cannot rewrite manifest hashes");
+        assert_eq!(rewrite_error.0, StatusCode::CONFLICT);
+
+        let Json(versions) =
+            ranking_model_versions_handler(State(state), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list model versions");
+        assert_eq!(versions.len(), 1);
+        assert_eq!(
+            versions[0].calibration_dataset_hash,
+            model.calibration_dataset_hash
+        );
     }
 
     #[tokio::test]
