@@ -6913,6 +6913,7 @@ async fn append_credit_settlement_batch_with_db_mirror(
     tenant: &TenantAuth,
     batch: &TraceCreditSettlementBatchRecord,
 ) -> anyhow::Result<()> {
+    ensure_credit_settlement_batch_has_no_finalized_source_conflict(state, tenant, batch).await?;
     let mirror_result = mirror_credit_settlement_batch_to_db(state, batch).await;
     if state.require_db_mirror_writes {
         if let Err(error) = &mirror_result {
@@ -6927,6 +6928,49 @@ async fn append_credit_settlement_batch_with_db_mirror(
         tracing::warn!(%error, settlement_batch_id = %batch.settlement_batch_id, "Trace Commons DB dual-write credit settlement mirror failed");
     }
     enforce_db_mirror_write_result(state, "credit settlement batch", mirror_result)
+}
+
+async fn ensure_credit_settlement_batch_has_no_finalized_source_conflict(
+    state: &AppState,
+    tenant: &TenantAuth,
+    batch: &TraceCreditSettlementBatchRecord,
+) -> anyhow::Result<()> {
+    if batch.status != StorageTraceCreditSettlementBatchStatus::Finalized
+        || batch.source_credit_event_ids.is_empty()
+    {
+        return Ok(());
+    }
+    let source_credit_event_ids = batch
+        .source_credit_event_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut existing_batches = read_all_credit_settlement_batches(&state.root, &tenant.tenant_id)?;
+    if (state.require_db_mirror_writes || state.db_reviewer_reads)
+        && let Some(db) = state.db_mirror.as_ref()
+    {
+        let db_batches = db
+            .list_trace_credit_settlement_batches(&tenant.tenant_id)
+            .await
+            .context("failed to read DB credit settlement batches for conflict guard")?;
+        for db_batch in db_batches {
+            existing_batches.push(credit_settlement_batch_from_storage(db_batch)?);
+        }
+    }
+    for existing_batch in existing_batches.iter().filter(|existing_batch| {
+        existing_batch.status == StorageTraceCreditSettlementBatchStatus::Finalized
+            && existing_batch.settlement_batch_id != batch.settlement_batch_id
+    }) {
+        for source_credit_event_id in &existing_batch.source_credit_event_ids {
+            if source_credit_event_ids.contains(source_credit_event_id) {
+                anyhow::bail!(
+                    "credit settlement batch contains already finalized source credit event {}",
+                    source_credit_event_id
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn append_credit_hold_with_db_mirror(
@@ -33616,6 +33660,70 @@ mod tests {
                 .expect("settlement reads")
                 .len(),
             2
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_settlement_append_rejects_finalized_source_event_conflict() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let tenant = test_reviewer_auth("tenant-a");
+        let source_credit_event_id = Uuid::new_v4();
+        let submission_id = Uuid::new_v4();
+        let first_batch_id = Uuid::new_v4();
+        let first_item_source_hash =
+            source_credit_event_ids_hash("trace-credit-policy-v1", &[source_credit_event_id]);
+        let mut first = TraceCreditSettlementBatchRecord {
+            settlement_batch_id: first_batch_id,
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            policy_version: "trace-credit-policy-v1".to_string(),
+            status: StorageTraceCreditSettlementBatchStatus::Finalized,
+            reason_hash: "sha256:first-settlement".to_string(),
+            source_credit_event_ids: vec![source_credit_event_id],
+            source_submission_ids: vec![submission_id],
+            source_list_hash: first_item_source_hash.clone(),
+            settled_credit_points: 1.0,
+            settled_credit_micros: 1_000_000,
+            line_items: vec![StorageTraceCreditAccountSettlementLineItem {
+                credit_account_ref: principal_storage_ref("token-a"),
+                credit_account_hash: sha256_prefixed(&principal_storage_ref("token-a")),
+                settled_credit_delta_micros: 1_000_000,
+                source_credit_event_ids: vec![source_credit_event_id],
+                source_submission_ids: vec![submission_id],
+                source_list_hash: first_item_source_hash,
+                near_status: StorageTraceCreditSettlementNearStatus::Disabled,
+                near_outbox_id: None,
+            }],
+            near_contract_id: None,
+            ranking_model_version: None,
+            ranking_target_use: None,
+            ranking_calibration_run_id: None,
+            ranking_calibration_report_hash: None,
+            ranking_credit_events_excluded_count: 0,
+            actor_principal_ref: tenant.principal_ref.clone(),
+            created_at: Utc::now(),
+        };
+        append_credit_settlement_batch_with_db_mirror(state.as_ref(), &tenant, &first)
+            .await
+            .expect("initial finalized batch appends");
+
+        first.settlement_batch_id = Uuid::new_v4();
+        first.reason_hash = "sha256:conflicting-settlement".to_string();
+        first.created_at = Utc::now();
+        let error = append_credit_settlement_batch_with_db_mirror(state.as_ref(), &tenant, &first)
+            .await
+            .expect_err("conflicting finalized source event is rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("already finalized source credit event")
+        );
+        assert_eq!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement reads")
+                .len(),
+            1
         );
     }
 
