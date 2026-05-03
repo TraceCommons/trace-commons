@@ -29,10 +29,13 @@ Trace Credits are non-transferable account credits backed by reviewed utility
 evidence. Uploads and ranker scores do not settle credit directly. Utility
 workers record hash-only attestations for accepted traces, admins run settlement
 batches, and optional NEAR receipt calls are queued only after off-chain
-settlement finalizes. With the DB mirror configured, utility attestations,
-settlement batches, credit holds, and NEAR receipt outbox rows are dual-written
-to PostgreSQL; `TRACE_COMMONS_DB_REVIEWER_READS=true` serves the admin credit
-control-plane lists from the tenant-scoped DB mirror.
+settlement finalizes. Settlement retries repair missing NEAR outbox rows from
+finalized batches, and reviewer/admin credit summaries report tenant-wide
+settled line items while contributor summaries stay principal-scoped. With the
+DB mirror configured, utility attestations, settlement batches, credit holds,
+and NEAR receipt outbox rows are dual-written to PostgreSQL;
+`TRACE_COMMONS_DB_REVIEWER_READS=true` serves the admin credit control-plane
+lists from the tenant-scoped DB mirror.
 
 The NEAR path is intentionally an outbox of deterministic method-call payloads
 for a non-transferable receipt contract. Configure

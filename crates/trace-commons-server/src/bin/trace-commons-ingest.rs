@@ -4503,7 +4503,7 @@ async fn credit_handler(
     Ok(Json(
         TraceCommonsTenantCreditResponse::from_records_events_and_settlements(
             tenant.tenant_id().to_string(),
-            tenant.principal_ref(),
+            tenant.auth(),
             credit_view.records,
             &credit_view.credit_events,
             &settlement_batches,
@@ -5927,6 +5927,22 @@ async fn credit_settlement_handler(
     let existing_batches = read_credit_settlement_batches_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    if !body.dry_run {
+        let repaired_outbox_count = repair_missing_near_credit_outbox_items_for_finalized_batches(
+            state.as_ref(),
+            &tenant,
+            &existing_batches,
+        )
+        .await
+        .map_err(internal_error)?;
+        if repaired_outbox_count > 0 {
+            tracing::warn!(
+                repaired_outbox_count,
+                tenant_id = %tenant.tenant_id,
+                "repaired missing NEAR credit outbox items for finalized settlement batches"
+            );
+        }
+    }
     let held_credit_accounts = active_credit_hold_account_refs_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
@@ -6153,6 +6169,96 @@ async fn credit_settlement_handler(
             .map(|gate| gate.report_hash.clone()),
         ranking_credit_events_excluded_count,
     }))
+}
+
+async fn repair_missing_near_credit_outbox_items_for_finalized_batches(
+    state: &AppState,
+    tenant: &TenantAuth,
+    settlement_batches: &[TraceCreditSettlementBatchRecord],
+) -> anyhow::Result<usize> {
+    if !settlement_batches.iter().any(|batch| {
+        batch.status == StorageTraceCreditSettlementBatchStatus::Finalized
+            && batch.near_contract_id.is_some()
+            && batch
+                .line_items
+                .iter()
+                .any(|item| item.near_outbox_id.is_some())
+    }) {
+        return Ok(0);
+    }
+
+    let mut existing_outbox_ids = read_near_credit_outbox_items_for_admin(state, tenant)
+        .await?
+        .into_iter()
+        .map(|item| item.near_outbox_id)
+        .collect::<BTreeSet<_>>();
+    let mut repaired = 0usize;
+    for batch in settlement_batches
+        .iter()
+        .filter(|batch| batch.status == StorageTraceCreditSettlementBatchStatus::Finalized)
+    {
+        let Some(contract_id) = batch.near_contract_id.as_deref() else {
+            continue;
+        };
+        for item in &batch.line_items {
+            let Some(near_outbox_id) = item.near_outbox_id else {
+                continue;
+            };
+            if existing_outbox_ids.contains(&near_outbox_id) {
+                continue;
+            }
+            let outbox_item = near_credit_outbox_item_from_settlement_line_item(
+                tenant,
+                batch,
+                item,
+                contract_id,
+                near_outbox_id,
+            )?;
+            append_near_credit_outbox_item_with_db_mirror(state, tenant, &outbox_item).await?;
+            existing_outbox_ids.insert(near_outbox_id);
+            repaired += 1;
+        }
+    }
+    Ok(repaired)
+}
+
+fn near_credit_outbox_item_from_settlement_line_item(
+    tenant: &TenantAuth,
+    batch: &TraceCreditSettlementBatchRecord,
+    item: &StorageTraceCreditAccountSettlementLineItem,
+    contract_id: &str,
+    near_outbox_id: Uuid,
+) -> anyhow::Result<TraceNearCreditOutboxItem> {
+    let receipt = NearCreditReceipt {
+        settlement_batch_id: batch.settlement_batch_id,
+        credit_account_hash: item.credit_account_hash.clone(),
+        policy_version: batch.policy_version.clone(),
+        source_list_hash: item.source_list_hash.clone(),
+        attestation_hash: sha256_prefixed(&format!(
+            "trace-credit-attestation:v1:{}",
+            item.source_list_hash
+        )),
+        amount_micros: item.settled_credit_delta_micros,
+        issuer_signature_hash: sha256_prefixed(&format!(
+            "trace-credit-settlement:v1:{}:{}",
+            batch.settlement_batch_id, item.source_list_hash
+        )),
+    };
+    let near_call = NearCreditReceiptCall::settle(contract_id, receipt)?;
+    Ok(TraceNearCreditOutboxItem {
+        near_outbox_id,
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        settlement_batch_id: batch.settlement_batch_id,
+        credit_account_hash: item.credit_account_hash.clone(),
+        near_call,
+        status: StorageTraceCreditSettlementNearStatus::Pending,
+        created_at: batch.created_at,
+        submitted_at: None,
+        near_transaction_hash: None,
+        last_error_hash: None,
+        confirmed_at: None,
+    })
 }
 
 async fn credit_settlements_handler(
@@ -24123,7 +24229,7 @@ struct TraceCommonsTenantCreditResponse {
 impl TraceCommonsTenantCreditResponse {
     fn from_records_events_and_settlements(
         tenant_id: String,
-        principal_ref: &str,
+        auth: &TenantAuth,
         records: Vec<TraceCommonsSubmissionRecord>,
         credit_events: &[TraceCommonsCreditLedgerRecord],
         settlement_batches: &[TraceCreditSettlementBatchRecord],
@@ -24170,14 +24276,19 @@ impl TraceCommonsTenantCreditResponse {
             }
         }
 
+        let principal_ref = auth.principal_ref.as_str();
+        let tenant_wide_credit_view = auth.role.can_review();
+        let legacy_principal_ref = legacy_principal_ref();
+        let legacy_principal_ref = legacy_principal_ref.as_str();
         let visible_settlements = settlement_batches
             .iter()
             .filter(|batch| batch.status == StorageTraceCreditSettlementBatchStatus::Finalized)
             .flat_map(|batch| {
                 batch.line_items.iter().filter_map(move |item| {
-                    (item.credit_account_ref == principal_ref
-                        || item.credit_account_ref == legacy_principal_ref())
-                    .then_some((batch.settlement_batch_id, item))
+                    (tenant_wide_credit_view
+                        || item.credit_account_ref == principal_ref
+                        || item.credit_account_ref == legacy_principal_ref)
+                        .then_some((batch.settlement_batch_id, item))
                 })
             })
             .collect::<Vec<_>>();
@@ -24197,8 +24308,9 @@ impl TraceCommonsTenantCreditResponse {
             .iter()
             .filter(|hold| hold.released_at.is_none())
             .filter(|hold| {
-                hold.credit_account_ref == principal_ref
-                    || hold.credit_account_ref == legacy_principal_ref()
+                tenant_wide_credit_view
+                    || hold.credit_account_ref == principal_ref
+                    || hold.credit_account_ref == legacy_principal_ref
             })
             .map(|hold| hold.credit_account_ref.as_str())
             .collect::<BTreeSet<_>>();
@@ -32292,6 +32404,160 @@ mod tests {
             Some("near-public-tx-hash-1")
         );
         assert!(submitted.submitted_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn credit_settlement_retry_recovers_missing_near_outbox_after_append_failure() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 2.25,
+                reason: Some("frontier lab utility attested".to_string()),
+                external_ref: Some("lab-attestation:batch-retry".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+
+        let outbox_path = near_credit_outbox_path(temp.path(), "tenant-a");
+        std::fs::create_dir_all(outbox_path.parent().expect("outbox parent"))
+            .expect("create outbox parent");
+        std::fs::create_dir(&outbox_path).expect("block outbox append path with directory");
+
+        let error = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "finalize settlement with blocked outbox".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect_err("outbox append failure propagates");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        let stranded_batches = read_all_credit_settlement_batches(temp.path(), "tenant-a")
+            .expect("settlement batch remains stranded for retry recovery");
+        assert_eq!(stranded_batches.len(), 1);
+        let stranded_batch_id = stranded_batches[0].settlement_batch_id;
+
+        std::fs::remove_dir(&outbox_path).expect("clear blocked outbox path before retry");
+        let Json(retry) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "retry settlement should repair missing outbox".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("retry repairs missing outbox from finalized batch");
+        assert_eq!(retry.settled_source_event_count, 0);
+
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox[0].settlement_batch_id, stranded_batch_id);
+        assert_eq!(outbox[0].near_call.method_name, "settle_credit_receipt");
+        assert!(
+            !serde_json::to_string(&outbox[0].near_call.args)
+                .expect("NEAR args serialize")
+                .contains(&event.event_id.to_string()),
+            "NEAR call must stay hash-only and not include raw source event ids"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_credit_summary_counts_tenant_wide_settled_line_items() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut submissions = Vec::new();
+        for (token, points) in [("token-a", 1.25_f32), ("token-a-2", 2.5_f32)] {
+            let mut envelope = sample_envelope().await;
+            make_metadata_only_low_risk(&mut envelope);
+            envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+            envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+            envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+            let submission_id = envelope.submission_id;
+            let _ = submit_trace_handler(State(state.clone()), auth_headers(token), Json(envelope))
+                .await
+                .expect("submission succeeds");
+            let _ = append_credit_event_handler(
+                State(state.clone()),
+                auth_headers("review-token-a"),
+                AxumPath(submission_id),
+                Json(TraceCreditLedgerAppendRequest {
+                    event_type: TraceCreditLedgerEventType::TrainingUtility,
+                    credit_points_delta: points,
+                    reason: Some("frontier lab tenant utility attested".to_string()),
+                    external_ref: Some(format!("lab-attestation:{submission_id}")),
+                }),
+            )
+            .await
+            .expect("reviewer can append delayed utility credit");
+            submissions.push((token, points));
+        }
+
+        let Json(finalized) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "tenant-wide settlement".to_string(),
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("admin can finalize tenant-wide settlement");
+        assert_eq!(finalized.settled_source_event_count, submissions.len());
+        assert_eq!(finalized.settled_credit_points, 3.75);
+
+        let Json(admin_credit) =
+            credit_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin credit summary succeeds");
+        assert_eq!(admin_credit.credit_points_settled, 3.75);
+        assert_eq!(admin_credit.credit_points_pending_ledger, 0.0);
+        assert_eq!(
+            admin_credit.last_settlement_batch_id,
+            Some(finalized.settlement_batch_id)
+        );
+
+        let Json(contributor_credit) = credit_handler(State(state), auth_headers(submissions[0].0))
+            .await
+            .expect("contributor credit summary succeeds");
+        assert_eq!(contributor_credit.credit_points_settled, submissions[0].1);
+        assert_eq!(contributor_credit.credit_points_pending_ledger, 0.0);
     }
 
     #[derive(Clone, Default)]
