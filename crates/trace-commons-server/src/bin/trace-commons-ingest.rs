@@ -1617,8 +1617,8 @@ fn validate_object_primary_submit_review_config(
         "{TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW} requires TRACE_COMMONS_DB_REVIEWER_REQUIRE_OBJECT_REFS"
     );
     anyhow::ensure!(
-        is_service_owned_trace_object_store(artifact_store_name),
-        "{TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW} requires TRACE_COMMONS_OBJECT_STORE=local_service or remote_service"
+        is_enabled_object_primary_trace_object_store(artifact_store_name),
+        "{TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW} requires TRACE_COMMONS_OBJECT_STORE=local_service until the remote_service provider is enabled"
     );
     Ok(())
 }
@@ -1651,8 +1651,8 @@ fn validate_object_primary_replay_export_config(
         "{TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT} requires TRACE_COMMONS_DB_REPLAY_EXPORT_REQUIRE_OBJECT_REFS"
     );
     anyhow::ensure!(
-        is_service_owned_trace_object_store(artifact_store_name),
-        "{TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT} requires TRACE_COMMONS_OBJECT_STORE=local_service or remote_service"
+        is_enabled_object_primary_trace_object_store(artifact_store_name),
+        "{TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT} requires TRACE_COMMONS_OBJECT_STORE=local_service until the remote_service provider is enabled"
     );
     Ok(())
 }
@@ -1690,19 +1690,16 @@ fn validate_object_primary_derived_exports_config(
         "{TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS} requires TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS"
     );
     anyhow::ensure!(
-        is_service_owned_trace_object_store(artifact_store_name),
-        "{TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS} requires TRACE_COMMONS_OBJECT_STORE=local_service or remote_service"
+        is_enabled_object_primary_trace_object_store(artifact_store_name),
+        "{TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS} requires TRACE_COMMONS_OBJECT_STORE=local_service until the remote_service provider is enabled"
     );
     Ok(())
 }
 
-fn is_service_owned_trace_object_store(artifact_store_name: Option<&str>) -> bool {
+fn is_enabled_object_primary_trace_object_store(artifact_store_name: Option<&str>) -> bool {
     matches!(
         artifact_store_name,
-        Some(
-            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
-                | TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE
-        )
+        Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE)
     )
 }
 
@@ -31055,6 +31052,55 @@ mod tests {
                 "expected {expected} in {error}"
             );
         }
+    }
+
+    #[test]
+    fn object_primary_guards_reject_disabled_remote_service_store() {
+        let submit_error = validate_object_primary_submit_review_config(
+            true,
+            true,
+            true,
+            true,
+            true,
+            Some(TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE),
+        )
+        .expect_err("disabled remote store must not satisfy object-primary submit/review");
+        assert!(
+            submit_error
+                .to_string()
+                .contains("TRACE_COMMONS_OBJECT_STORE=local_service")
+        );
+
+        let replay_error = validate_object_primary_replay_export_config(
+            true,
+            true,
+            true,
+            true,
+            true,
+            Some(TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE),
+        )
+        .expect_err("disabled remote store must not satisfy object-primary replay export");
+        assert!(
+            replay_error
+                .to_string()
+                .contains("TRACE_COMMONS_OBJECT_STORE=local_service")
+        );
+
+        let derived_error = validate_object_primary_derived_exports_config(
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            Some(TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE),
+        )
+        .expect_err("disabled remote store must not satisfy object-primary derived exports");
+        assert!(
+            derived_error
+                .to_string()
+                .contains("TRACE_COMMONS_OBJECT_STORE=local_service")
+        );
     }
 
     #[tokio::test]
