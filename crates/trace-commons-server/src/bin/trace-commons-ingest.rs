@@ -6669,6 +6669,12 @@ async fn credit_cycle_scheduler_run_handler(
     let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    let predictions = read_ranking_predictions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let labels = read_ranking_labels_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     let mut candidates = latest_ranking_model_versions(&model_versions)
         .into_iter()
         .filter(|model| {
@@ -6735,6 +6741,22 @@ async fn credit_cycle_scheduler_run_handler(
         {
             credit_cycle_scheduler_record_skip(&mut response, "active_credit_cycle_claim");
             response.skipped_active_count += 1;
+            continue;
+        }
+        if let Some(skip_reason) = credit_cycle_scheduler_candidate_skip_reason(
+            state.as_ref(),
+            &tenant,
+            &candidate,
+            body.target_use,
+            CreditCycleSchedulerPreflightOptions {
+                min_label_count: body.min_label_count,
+                confidence_threshold: body.confidence_threshold,
+                max_average_absolute_error_micros: body.max_average_absolute_error_micros,
+            },
+            &predictions,
+            &labels,
+        ) {
+            credit_cycle_scheduler_record_skip(&mut response, &skip_reason);
             continue;
         }
 
@@ -6816,6 +6838,76 @@ fn credit_cycle_scheduler_model_status_priority(status: StorageTraceRankingModel
         StorageTraceRankingModelStatus::Active => 1,
         StorageTraceRankingModelStatus::Deprecated => 2,
         StorageTraceRankingModelStatus::Archived => 3,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CreditCycleSchedulerPreflightOptions {
+    min_label_count: Option<usize>,
+    confidence_threshold: Option<f32>,
+    max_average_absolute_error_micros: Option<i64>,
+}
+
+fn credit_cycle_scheduler_candidate_skip_reason(
+    state: &AppState,
+    tenant: &TenantAuth,
+    candidate: &TraceRankingModelVersionRecord,
+    target_use: TraceAllowedUse,
+    options: CreditCycleSchedulerPreflightOptions,
+    predictions: &[TraceRankingPredictionRecord],
+    labels: &[TraceRankingLabelRecord],
+) -> Option<String> {
+    let matching_prediction_count = predictions
+        .iter()
+        .filter(|prediction| {
+            ranking_prediction_matches_model_target(prediction, candidate, target_use)
+        })
+        .count();
+    if matching_prediction_count == 0 {
+        return Some("missing_prediction_evidence".to_string());
+    }
+    let matching_label_count = labels
+        .iter()
+        .filter(|label| label.target_use == target_use)
+        .count();
+    if matching_label_count == 0 {
+        return Some("missing_label_evidence".to_string());
+    }
+    let current = ranking_calibration_run_record(
+        tenant,
+        RankingCalibrationRunInputs {
+            calibration_run_id: Uuid::new_v4(),
+            model_version: candidate.model_version.clone(),
+            target_use,
+            policy_version: candidate.policy_version.clone(),
+            feature_schema_version: candidate.feature_schema_version.clone(),
+            evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+            min_label_count: options
+                .min_label_count
+                .unwrap_or(state.ranking_min_label_count),
+            min_label_source_count: state.ranking_min_label_source_count,
+            confidence_threshold: options
+                .confidence_threshold
+                .unwrap_or(state.ranking_min_confidence_threshold),
+            max_average_absolute_error_micros: options
+                .max_average_absolute_error_micros
+                .unwrap_or(state.ranking_max_average_absolute_error_micros),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            created_at: Utc::now(),
+        },
+        predictions,
+        labels,
+    );
+    if current.promotable {
+        None
+    } else {
+        Some(
+            current
+                .reason_codes
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "calibration_not_promotable".to_string()),
+        )
     }
 }
 
@@ -41490,6 +41582,75 @@ mod tests {
         let worker_runs =
             read_all_ranking_worker_runs(temp.path(), "tenant-a").expect("worker runs read");
         assert!(worker_runs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_skips_candidate_without_ranking_evidence_before_claiming() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let Json(candidate) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-credit-cycle-unready-v1".to_string(),
+                feature_schema_version: "ranking-features-credit-cycle-unready-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:ranking-training-credit-cycle-unready".to_string(),
+                calibration_dataset_hash: "sha256:ranking-calibration-credit-cycle-unready"
+                    .to_string(),
+                model_artifact_hash: "sha256:ranking-model-artifact-credit-cycle-unready"
+                    .to_string(),
+            }),
+        )
+        .await
+        .expect("admin can stage unready scheduler candidate");
+
+        let Json(scheduler) = credit_cycle_scheduler_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleSchedulerRunRequest {
+                dry_run: false,
+                submit_near_outbox: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: None,
+                policy_version: Some(candidate.policy_version),
+                reason: "scheduled credit cycle should skip unready candidate".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: Some(1),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect("scheduler skips unready candidate without invoking cycle");
+
+        assert_eq!(scheduler.checked_count, 1);
+        assert_eq!(scheduler.started_count, 0);
+        assert_eq!(scheduler.skipped_count, 1);
+        assert_eq!(
+            scheduler
+                .skipped_reason_counts
+                .get("missing_prediction_evidence"),
+            Some(&1)
+        );
+        assert!(scheduler.cycles.is_empty());
+        let worker_runs =
+            read_all_ranking_worker_runs(temp.path(), "tenant-a").expect("worker runs read");
+        assert!(worker_runs.is_empty());
+        let credit_events =
+            read_all_credit_events(temp.path(), "tenant-a").expect("credit events read");
+        assert!(credit_events.is_empty());
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert!(outbox.is_empty());
     }
 
     #[tokio::test]
