@@ -239,6 +239,7 @@ const DEFAULT_EDDSA_KEYSET_REFRESH_INTERVAL_SECONDS: u64 = 300;
 const MAX_EDDSA_KEYSET_URL_BYTES: usize = 256 * 1024;
 const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT: u32 = 100;
 const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT: u32 = 500;
+const TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT: usize = 5;
 const TRACE_CREDIT_SETTLEMENT_WORKER_RUN_DEFAULT_LIMIT: usize = 100;
 const TRACE_CREDIT_SETTLEMENT_WORKER_RUN_MAX_LIMIT: usize = 500;
 const TRACE_RANKING_CALIBRATION_RUN_DEFAULT_LIMIT: usize = 25;
@@ -320,6 +321,7 @@ struct AppState {
     legal_hold_retention_policy_ids: Arc<BTreeSet<String>>,
     artifact_store: Option<ConfiguredTraceArtifactStore>,
     near_credit_submitter: Option<Arc<dyn TraceNearCreditSubmitter>>,
+    near_credit_submitter_timeout_ms: Option<u64>,
     ranking_calibration_max_age: Option<Duration>,
     ranking_min_confidence_threshold: f32,
     ranking_max_average_absolute_error_micros: i64,
@@ -1443,7 +1445,11 @@ impl AppState {
         let submission_quota = parse_submission_quota_config_from_env()?;
         let legal_hold_retention_policy_ids = parse_legal_hold_retention_policy_ids_from_env()?;
         let artifact_store = trace_artifact_store_from_env(&root)?;
-        let near_credit_submitter = trace_near_credit_submitter_from_env()?;
+        let near_credit_submitter_config = trace_near_credit_submitter_from_env()?;
+        let near_credit_submitter_timeout_ms = near_credit_submitter_config
+            .as_ref()
+            .map(|config| config.timeout_ms);
+        let near_credit_submitter = near_credit_submitter_config.map(|config| config.submitter);
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
         let ranking_min_confidence_threshold = parse_ranking_min_confidence_threshold_from_env()?;
         let ranking_max_average_absolute_error_micros =
@@ -1592,6 +1598,7 @@ impl AppState {
             legal_hold_retention_policy_ids: Arc::new(legal_hold_retention_policy_ids),
             artifact_store,
             near_credit_submitter,
+            near_credit_submitter_timeout_ms,
             ranking_calibration_max_age,
             ranking_min_confidence_threshold,
             ranking_max_average_absolute_error_micros,
@@ -1841,8 +1848,13 @@ fn trace_artifact_store_from_env(
     )))
 }
 
+struct ConfiguredTraceNearCreditSubmitter {
+    submitter: Arc<dyn TraceNearCreditSubmitter>,
+    timeout_ms: u64,
+}
+
 fn trace_near_credit_submitter_from_env()
--> anyhow::Result<Option<Arc<dyn TraceNearCreditSubmitter>>> {
+-> anyhow::Result<Option<ConfiguredTraceNearCreditSubmitter>> {
     let Some(url) = optional_trimmed_env(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL)? else {
         return Ok(None);
     };
@@ -1850,6 +1862,7 @@ fn trace_near_credit_submitter_from_env()
         .with_context(|| format!("invalid {TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL}"))?;
     validate_trace_near_credit_submitter_url(&parsed)?;
     let timeout = parse_trace_near_credit_submitter_timeout_from_env()?;
+    let timeout_ms = timeout.as_millis() as u64;
     let client = reqwest::Client::builder()
         .timeout(timeout)
         .connect_timeout(timeout.min(StdDuration::from_secs(3)))
@@ -1857,12 +1870,15 @@ fn trace_near_credit_submitter_from_env()
         .user_agent("trace-commons-near-credit-submitter/0.1")
         .build()
         .context("failed to build NEAR credit submitter HTTP client")?;
-    Ok(Some(Arc::new(HttpTraceNearCreditSubmitter {
-        client,
-        url,
-        bearer_token: optional_trimmed_env(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN)?
-            .map(SecretString::from),
-    })))
+    Ok(Some(ConfiguredTraceNearCreditSubmitter {
+        submitter: Arc::new(HttpTraceNearCreditSubmitter {
+            client,
+            url,
+            bearer_token: optional_trimmed_env(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN)?
+                .map(SecretString::from),
+        }),
+        timeout_ms,
+    }))
 }
 
 fn validate_trace_near_credit_submitter_url(url: &reqwest::Url) -> anyhow::Result<()> {
@@ -3845,6 +3861,11 @@ struct TraceCommonsConfigStatusResponse {
     ranking_min_label_count: usize,
     ranking_min_label_source_count: usize,
     ranking_worker_run_stale_after_hours: i64,
+    near_credit_submitter_configured: bool,
+    near_credit_submitter_timeout_ms: Option<u64>,
+    near_credit_outbox_submit_default_limit: u32,
+    near_credit_outbox_submit_max_limit: u32,
+    credit_cycle_worker_step_count: usize,
     artifact_store_configured: bool,
     artifact_object_store: Option<String>,
     artifact_object_store_io_enabled: bool,
@@ -3966,6 +3987,11 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         ranking_min_label_count: state.ranking_min_label_count,
         ranking_min_label_source_count: state.ranking_min_label_source_count,
         ranking_worker_run_stale_after_hours: TRACE_RANKING_WORKER_RUN_STALE_AFTER_HOURS,
+        near_credit_submitter_configured: state.near_credit_submitter.is_some(),
+        near_credit_submitter_timeout_ms: state.near_credit_submitter_timeout_ms,
+        near_credit_outbox_submit_default_limit: TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT,
+        near_credit_outbox_submit_max_limit: TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT,
+        credit_cycle_worker_step_count: TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT,
         artifact_store_configured: state.artifact_store.is_some(),
         artifact_object_store: state
             .artifact_store
@@ -30135,6 +30161,7 @@ mod tests {
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store,
             near_credit_submitter: None,
+            near_credit_submitter_timeout_ms: None,
             ranking_calibration_max_age: None,
             ranking_min_confidence_threshold: DEFAULT_TRACE_RANKING_MIN_CONFIDENCE_THRESHOLD,
             ranking_max_average_absolute_error_micros:
@@ -32241,6 +32268,26 @@ mod tests {
             serde_json::json!(TRACE_RANKING_WORKER_RUN_STALE_AFTER_HOURS)
         );
         assert_eq!(
+            value["near_credit_submitter_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["near_credit_submitter_timeout_ms"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            value["near_credit_outbox_submit_default_limit"],
+            serde_json::json!(TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT)
+        );
+        assert_eq!(
+            value["near_credit_outbox_submit_max_limit"],
+            serde_json::json!(TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT)
+        );
+        assert_eq!(
+            value["credit_cycle_worker_step_count"],
+            serde_json::json!(TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT)
+        );
+        assert_eq!(
             value["submission_quota"],
             serde_json::json!({
                 "max_per_tenant_per_hour": 0,
@@ -32281,6 +32328,8 @@ mod tests {
             "signed_token_issuer",
             "signed_token_audience",
             "signed_token_revoked_jtis",
+            "near_credit_submitter_url",
+            "near_credit_submitter_bearer_token",
         ] {
             assert!(
                 !object.contains_key(forbidden_key),
@@ -32307,6 +32356,63 @@ mod tests {
             event.kind == "read"
                 && event.reason.as_deref() == Some("surface=config_status;item_count=1")
         }));
+    }
+
+    #[tokio::test]
+    async fn admin_config_status_reports_near_credit_submitter_readiness_without_endpoint_secrets()
+    {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).near_credit_submitter =
+            Some(Arc::new(FakeNearCreditSubmitter::default()));
+        Arc::make_mut(&mut state).near_credit_submitter_timeout_ms = Some(1_234);
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/config-status")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("admin response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("status json parses");
+        assert_eq!(
+            value["near_credit_submitter_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["near_credit_submitter_timeout_ms"],
+            serde_json::json!(1_234)
+        );
+        assert_eq!(
+            value["near_credit_outbox_submit_default_limit"],
+            serde_json::json!(TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT)
+        );
+        assert_eq!(
+            value["near_credit_outbox_submit_max_limit"],
+            serde_json::json!(TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT)
+        );
+        assert_eq!(
+            value["credit_cycle_worker_step_count"],
+            serde_json::json!(TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT)
+        );
+
+        let object = value.as_object().expect("status response is object");
+        assert!(!object.contains_key("near_credit_submitter_url"));
+        assert!(!object.contains_key("near_credit_submitter_bearer_token"));
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL));
+        assert!(!body_text.contains(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN));
     }
 
     #[tokio::test]
@@ -35630,6 +35736,7 @@ mod tests {
             ])),
             artifact_store: None,
             near_credit_submitter: None,
+            near_credit_submitter_timeout_ms: None,
             ranking_calibration_max_age: None,
             ranking_min_confidence_threshold: DEFAULT_TRACE_RANKING_MIN_CONFIDENCE_THRESHOLD,
             ranking_max_average_absolute_error_micros:
