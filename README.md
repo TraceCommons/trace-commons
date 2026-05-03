@@ -86,7 +86,8 @@ model/target pair to have no uncleared model-risk report codes by default so new
 credits wait for calibration/drift review before settlement. Readiness reports
 and settlement re-check the same active-model risk codes, so manually appended
 prediction-bound ranking credits cannot settle while current evidence is still
-at risk. A scoped promotion
+at risk. Settlement responses report aggregate ranking-credit exclusion reason
+counts for dry-runs and live runs. A scoped promotion
 run lets utility workers promote calibrated candidate models through the same
 server-owned gate without generic admin access, and a scoped calibration run
 lets utility workers schedule bounded calibration passes across active or

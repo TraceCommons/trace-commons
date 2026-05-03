@@ -990,9 +990,12 @@ codes are present, ranking utility events for that gate are excluded. Each
 selected ranking utility credit event must also reference
 `ranking_prediction:<uuid>` for a prediction with the same submission, model,
 target use, policy, and settlement-score micros as the credit delta; otherwise
-the event is excluded from the settlement source list. Finalized batches record
-the calibration run id plus the calibration report hash and joined-evidence hash
-used for the gate.
+the event is excluded from the settlement source list. Settlement responses
+include aggregate `ranking_credit_events_excluded_reason_counts` for dry-runs
+and live runs, with reason codes such as `missing_ranking_model_gate`,
+`missing_prediction_ref`, `low_confidence_prediction`, and active-model risk
+codes. Finalized batches record the calibration run id plus the calibration
+report hash and joined-evidence hash used for the gate.
 When a settlement request includes `near_contract_id`, the NEAR payload builder
 validates it as a lowercase NEAR account id before any settlement batch or
 outbox row is persisted.
