@@ -6069,6 +6069,14 @@ struct TraceRankingModelRiskRecord {
     prediction_count: usize,
     label_count: usize,
     joined_label_prediction_count: usize,
+    joined_label_source_count: usize,
+    current_average_absolute_error_micros: Option<i64>,
+    current_max_label_source_average_absolute_error_micros: Option<i64>,
+    current_max_error_label_source: Option<StorageTraceRankingLabelSource>,
+    current_min_label_count: usize,
+    current_min_label_source_count: usize,
+    current_confidence_threshold: f32,
+    current_max_average_absolute_error_micros: i64,
     predictions_since_calibration_count: usize,
     labels_since_calibration_count: usize,
     low_confidence_predictions_since_calibration_count: usize,
@@ -11766,6 +11774,15 @@ fn ranking_model_risk_record(
         prediction_count: current.prediction_count,
         label_count: current.label_count,
         joined_label_prediction_count: current.joined_label_prediction_count,
+        joined_label_source_count: current.joined_label_source_count,
+        current_average_absolute_error_micros: current.average_absolute_error_micros,
+        current_max_label_source_average_absolute_error_micros: current
+            .max_label_source_average_absolute_error_micros,
+        current_max_error_label_source: current.max_error_label_source,
+        current_min_label_count: current.min_label_count,
+        current_min_label_source_count: current.min_label_source_count,
+        current_confidence_threshold: current.confidence_threshold,
+        current_max_average_absolute_error_micros: current.max_average_absolute_error_micros,
         predictions_since_calibration_count,
         labels_since_calibration_count,
         low_confidence_predictions_since_calibration_count,
@@ -44668,6 +44685,36 @@ mod tests {
         assert_eq!(model.predictions_since_calibration_count, 1);
         assert_eq!(model.labels_since_calibration_count, 1);
         assert_eq!(model.low_confidence_predictions_since_calibration_count, 1);
+        let model_value = serde_json::to_value(model).expect("risk model serializes");
+        assert_eq!(
+            model_value["joined_label_source_count"],
+            serde_json::json!(2)
+        );
+        assert_eq!(model_value["current_min_label_count"], serde_json::json!(1));
+        assert_eq!(
+            model_value["current_min_label_source_count"],
+            serde_json::json!(DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT)
+        );
+        assert_eq!(
+            model_value["current_confidence_threshold"],
+            serde_json::json!(0.5)
+        );
+        assert_eq!(
+            model_value["current_max_average_absolute_error_micros"],
+            serde_json::json!(500_000)
+        );
+        assert_eq!(
+            model_value["current_average_absolute_error_micros"],
+            serde_json::json!(550_000)
+        );
+        assert_eq!(
+            model_value["current_max_label_source_average_absolute_error_micros"],
+            serde_json::json!(700_000)
+        );
+        assert_eq!(
+            model_value["current_max_error_label_source"],
+            serde_json::json!("reviewer")
+        );
         assert!(
             model
                 .risk_codes
