@@ -60,8 +60,11 @@ Settlement excludes `ranking_utility` credit events unless the request names an
 active model version with a fresh promotable calibration run for the same policy,
 target use, and registered calibration dataset, and every credit event is bound
 to a matching `ranking_prediction:<uuid>` reference with a settlement score that
-matches the stored prediction. With the DB mirror configured, ranking evidence
-and calibration runs are dual-written to PostgreSQL and
+matches the stored prediction. The scheduled prediction-credit run also skips
+active model/target pairs with uncleared model-risk report codes by default so
+new credits wait for calibration/drift review before settlement. With the DB
+mirror configured, ranking evidence and calibration runs are dual-written to
+PostgreSQL and
 `TRACE_COMMONS_DB_REVIEWER_READS=true` serves admin ranking lists, calibration
 reports, model-risk reports, credit-readiness reports, and calibration-run
 history from the tenant-scoped DB mirror.
