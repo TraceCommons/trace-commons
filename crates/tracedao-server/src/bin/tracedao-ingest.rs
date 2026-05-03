@@ -7508,6 +7508,7 @@ async fn ranking_model_version_handler(
             &tenant,
             &model_version,
             &policy_version,
+            &calibration_dataset_hash,
         )
         .await?;
     }
@@ -7593,6 +7594,7 @@ async fn ranking_model_promotion_handler(
         &model_version,
         body.target_use,
         &policy_version,
+        &model.calibration_dataset_hash,
         RankingCalibrationGateContext::ModelPromotion,
     )
     .await?;
@@ -7601,6 +7603,7 @@ async fn ranking_model_promotion_handler(
         &tenant,
         &model_version,
         &policy_version,
+        &model.calibration_dataset_hash,
     )
     .await?;
 
@@ -7648,18 +7651,23 @@ async fn ensure_active_ranking_model_has_promotable_calibration(
     tenant: &TenantAuth,
     model_version: &str,
     policy_version: &str,
+    calibration_dataset_hash: &str,
 ) -> ApiResult<()> {
     let calibration_runs = read_ranking_calibration_runs_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
     let Some(latest_run) = calibration_runs
         .into_iter()
-        .filter(|run| run.model_version == model_version && run.policy_version == policy_version)
+        .filter(|run| {
+            run.model_version == model_version
+                && run.policy_version == policy_version
+                && run.evaluation_dataset_hash == calibration_dataset_hash
+        })
         .max_by_key(|run| run.created_at)
     else {
         return Err(api_error(
             StatusCode::CONFLICT,
-            "active ranking model requires a calibration run for the requested model and policy",
+            "active ranking model requires a calibration run for the requested model, policy, and calibration dataset",
         ));
     };
     if !latest_run.promotable {
@@ -7682,6 +7690,7 @@ async fn latest_promotable_ranking_calibration_run(
     model_version: &str,
     target_use: TraceAllowedUse,
     policy_version: &str,
+    calibration_dataset_hash: &str,
     context: RankingCalibrationGateContext,
 ) -> ApiResult<TraceRankingCalibrationRunRecord> {
     let calibration_runs = read_ranking_calibration_runs_for_admin(state, tenant)
@@ -7693,6 +7702,7 @@ async fn latest_promotable_ranking_calibration_run(
             run.model_version == model_version
                 && run.target_use == target_use
                 && run.policy_version == policy_version
+                && run.evaluation_dataset_hash == calibration_dataset_hash
         })
         .max_by_key(|run| run.created_at)
     else {
@@ -8128,6 +8138,7 @@ async fn append_ranking_prediction_credit_for_record(
         &prediction.model_version,
         prediction.target_use,
         &prediction.prediction_policy_version,
+        &model.calibration_dataset_hash,
         RankingCalibrationGateContext::PredictionCredit,
     )
     .await?;
@@ -9401,37 +9412,13 @@ async fn ranking_settlement_calibration_gate(
     let Some(model_version) = model_version else {
         return Ok(None);
     };
-    let calibration_runs = read_ranking_calibration_runs_for_admin(state, tenant)
-        .await
-        .map_err(internal_error)?;
-    let Some(run) = calibration_runs
-        .into_iter()
-        .filter(|run| {
-            run.model_version == model_version
-                && run.target_use == target_use
-                && run.policy_version == policy_version
-        })
-        .max_by_key(|run| run.created_at)
-    else {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            RankingCalibrationGateContext::Settlement.missing_message(),
-        ));
-    };
-    if !run.promotable {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            RankingCalibrationGateContext::Settlement.nonpromotable_message(),
-        ));
-    }
-    ensure_ranking_calibration_fresh(state, &run, RankingCalibrationGateContext::Settlement)?;
     let model_versions = read_ranking_model_versions_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
     let model = latest_ranking_model_version(&model_versions, model_version).ok_or_else(|| {
         api_error(
-            StatusCode::NOT_FOUND,
-            "ranking utility settlement model version not found",
+            StatusCode::CONFLICT,
+            RankingCalibrationGateContext::Settlement.missing_message(),
         )
     })?;
     if model.status != StorageTraceRankingModelStatus::Active {
@@ -9446,6 +9433,16 @@ async fn ranking_settlement_calibration_gate(
             "ranking utility settlement policy does not match the active model",
         ));
     }
+    let run = latest_promotable_ranking_calibration_run(
+        state,
+        tenant,
+        model_version,
+        target_use,
+        policy_version,
+        &model.calibration_dataset_hash,
+        RankingCalibrationGateContext::Settlement,
+    )
+    .await?;
     Ok(Some(RankingSettlementCalibrationGate {
         model_version: run.model_version,
         target_use: run.target_use,
@@ -35715,6 +35712,147 @@ mod tests {
         let latest =
             latest_ranking_model_version(&model_versions, "trace-ranker-promote-v1").unwrap();
         assert_eq!(latest.status, StorageTraceRankingModelStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn ranking_model_promotion_rejects_stale_calibration_dataset_after_model_reregistration()
+    {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("ranking submission succeeds");
+
+        let Json(candidate) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-dataset-rewrite-v1".to_string(),
+                feature_schema_version: "ranking-features-dataset-rewrite-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:ranking-training-dataset-rewrite".to_string(),
+                calibration_dataset_hash: "sha256:ranking-calibration-dataset-rewrite-a"
+                    .to_string(),
+                model_artifact_hash: "sha256:ranking-model-artifact-dataset-rewrite".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can stage candidate ranking model");
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:ranking-feature-dataset-rewrite".to_string(),
+                feature_names_hash: "sha256:ranking-feature-names-dataset-rewrite".to_string(),
+                source_feature_hash: "sha256:ranking-source-feature-dataset-rewrite".to_string(),
+                duplicate_score: Some(0.05),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.88),
+                coverage_tags: vec!["tool:terminal".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking feature");
+        let Json(_) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: candidate.model_version.clone(),
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                prediction_policy_version: candidate.policy_version.clone(),
+                feature_vector_hash: feature.feature_vector_hash,
+                predicted_utility_micros: 1_250_000,
+                uncertainty_micros: 250_000,
+                confidence: 0.9,
+                risk_penalty_micros: 0,
+                novelty_bonus_micros: 0,
+                explanation_codes: vec!["ranking_pair_utility".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking prediction");
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_300_000,
+                evidence_hash: "sha256:ranking-frontier-evidence-dataset-rewrite".to_string(),
+                external_ref: "private-ranking-dataset-rewrite".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking label");
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration");
+        assert!(calibration.promotable);
+
+        let Json(re_registered) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: candidate.model_version.clone(),
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                policy_version: candidate.policy_version.clone(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: candidate.training_dataset_hash.clone(),
+                calibration_dataset_hash: "sha256:ranking-calibration-dataset-rewrite-b"
+                    .to_string(),
+                model_artifact_hash: candidate.model_artifact_hash.clone(),
+            }),
+        )
+        .await
+        .expect("admin can revise candidate model metadata before promotion");
+
+        let promotion_error = ranking_model_promotion_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: re_registered.model_version,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: re_registered.policy_version,
+                reason: "stale calibration dataset should not promote".to_string(),
+            }),
+        )
+        .await
+        .expect_err("model promotion must require calibration for the latest dataset hash");
+        assert_eq!(promotion_error.0, StatusCode::CONFLICT);
     }
 
     #[tokio::test]
