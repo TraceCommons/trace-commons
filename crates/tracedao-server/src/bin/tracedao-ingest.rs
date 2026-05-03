@@ -2194,6 +2194,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(ranking_calibration_report_handler),
         )
         .route(
+            "/v1/admin/ranking/pairwise-evaluation-report",
+            get(ranking_pairwise_evaluation_report_handler),
+        )
+        .route(
             "/v1/admin/ranking/model-risk-report",
             get(ranking_model_risk_report_handler),
         )
@@ -6082,6 +6086,44 @@ struct TraceRankingCalibrationReport {
     max_label_source_average_absolute_error_micros: Option<i64>,
     max_error_label_source: Option<StorageTraceRankingLabelSource>,
     low_confidence_prediction_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingPairwiseEvaluationReport {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    model_version_count: usize,
+    prediction_count: usize,
+    preference_label_count: usize,
+    joined_pair_prediction_count: usize,
+    correct_pair_count: usize,
+    reversed_pair_count: usize,
+    tied_pair_count: usize,
+    pairwise_accuracy_micros: Option<i64>,
+    average_preferred_margin_micros: Option<i64>,
+    min_preferred_margin_micros: Option<i64>,
+    max_preferred_margin_micros: Option<i64>,
+    models: Vec<TraceRankingPairwiseEvaluationModelReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingPairwiseEvaluationModelReport {
+    model_version: String,
+    model_status: StorageTraceRankingModelStatus,
+    target_use: TraceAllowedUse,
+    policy_version: String,
+    feature_schema_version: String,
+    prediction_count: usize,
+    preference_label_count: usize,
+    joined_pair_prediction_count: usize,
+    correct_pair_count: usize,
+    reversed_pair_count: usize,
+    tied_pair_count: usize,
+    pairwise_accuracy_micros: Option<i64>,
+    average_preferred_margin_micros: Option<i64>,
+    min_preferred_margin_micros: Option<i64>,
+    max_preferred_margin_micros: Option<i64>,
+    joined_label_source_counts: BTreeMap<StorageTraceRankingLabelSource, usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -10358,6 +10400,29 @@ async fn ranking_calibration_report_handler(
     )))
 }
 
+async fn ranking_pairwise_evaluation_report_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<TraceRankingPairwiseEvaluationReport>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let predictions = read_ranking_predictions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let preference_labels = read_ranking_preference_labels_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(ranking_pairwise_evaluation_report(
+        &tenant.tenant_id,
+        &model_versions,
+        &predictions,
+        &preference_labels,
+    )))
+}
+
 async fn ranking_model_risk_report_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -11760,6 +11825,205 @@ fn ranking_calibration_report(
             .filter(|prediction| prediction.confidence < 0.5)
             .count(),
     }
+}
+
+fn ranking_pairwise_evaluation_report(
+    tenant_id: &str,
+    model_versions: &[TraceRankingModelVersionRecord],
+    predictions: &[TraceRankingPredictionRecord],
+    preference_labels: &[TraceRankingPreferenceLabelRecord],
+) -> TraceRankingPairwiseEvaluationReport {
+    let latest_models = latest_ranking_model_versions(model_versions)
+        .into_iter()
+        .filter(|model| {
+            matches!(
+                model.status,
+                StorageTraceRankingModelStatus::Candidate | StorageTraceRankingModelStatus::Active
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut models = Vec::new();
+    for model in &latest_models {
+        let mut target_uses = BTreeSet::new();
+        for prediction in predictions {
+            if prediction.model_version == model.model_version
+                && prediction.prediction_policy_version == model.policy_version
+                && prediction.feature_schema_version == model.feature_schema_version
+            {
+                target_uses.insert(prediction.target_use);
+            }
+        }
+        for label in preference_labels {
+            target_uses.insert(label.target_use);
+        }
+        for target_use in target_uses {
+            let model_report = ranking_pairwise_evaluation_model_report(
+                model,
+                target_use,
+                predictions,
+                preference_labels,
+            );
+            if model_report.prediction_count > 0 || model_report.preference_label_count > 0 {
+                models.push(model_report);
+            }
+        }
+    }
+    models.sort_by(|left, right| {
+        (
+            &left.model_version,
+            serde_enum_tag(&left.target_use),
+            &left.policy_version,
+        )
+            .cmp(&(
+                &right.model_version,
+                serde_enum_tag(&right.target_use),
+                &right.policy_version,
+            ))
+    });
+
+    let joined_pair_prediction_count = models
+        .iter()
+        .map(|model| model.joined_pair_prediction_count)
+        .sum::<usize>();
+    let correct_pair_count = models
+        .iter()
+        .map(|model| model.correct_pair_count)
+        .sum::<usize>();
+    let reversed_pair_count = models
+        .iter()
+        .map(|model| model.reversed_pair_count)
+        .sum::<usize>();
+    let tied_pair_count = models
+        .iter()
+        .map(|model| model.tied_pair_count)
+        .sum::<usize>();
+    let mut margin_sum = 0i128;
+    let mut margin_count = 0usize;
+    let mut min_preferred_margin_micros: Option<i64> = None;
+    let mut max_preferred_margin_micros: Option<i64> = None;
+    for model in &models {
+        if let Some(average) = model.average_preferred_margin_micros {
+            margin_sum += i128::from(average) * model.joined_pair_prediction_count as i128;
+            margin_count += model.joined_pair_prediction_count;
+        }
+        if let Some(min_margin) = model.min_preferred_margin_micros {
+            min_preferred_margin_micros = Some(
+                min_preferred_margin_micros.map_or(min_margin, |current| current.min(min_margin)),
+            );
+        }
+        if let Some(max_margin) = model.max_preferred_margin_micros {
+            max_preferred_margin_micros = Some(
+                max_preferred_margin_micros.map_or(max_margin, |current| current.max(max_margin)),
+            );
+        }
+    }
+
+    TraceRankingPairwiseEvaluationReport {
+        tenant_id: tenant_id.to_string(),
+        tenant_storage_ref: tenant_storage_ref(tenant_id),
+        model_version_count: latest_models.len(),
+        prediction_count: predictions.len(),
+        preference_label_count: preference_labels.len(),
+        joined_pair_prediction_count,
+        correct_pair_count,
+        reversed_pair_count,
+        tied_pair_count,
+        pairwise_accuracy_micros: ratio_micros(correct_pair_count, joined_pair_prediction_count),
+        average_preferred_margin_micros: average_i128(margin_sum, margin_count),
+        min_preferred_margin_micros,
+        max_preferred_margin_micros,
+        models,
+    }
+}
+
+fn ranking_pairwise_evaluation_model_report(
+    model: &TraceRankingModelVersionRecord,
+    target_use: TraceAllowedUse,
+    predictions: &[TraceRankingPredictionRecord],
+    preference_labels: &[TraceRankingPreferenceLabelRecord],
+) -> TraceRankingPairwiseEvaluationModelReport {
+    let matching_predictions = predictions
+        .iter()
+        .filter(|prediction| ranking_prediction_matches_model_target(prediction, model, target_use))
+        .collect::<Vec<_>>();
+    let matching_preferences = preference_labels
+        .iter()
+        .filter(|label| label.target_use == target_use)
+        .collect::<Vec<_>>();
+    let mut latest_prediction_by_submission = BTreeMap::new();
+    for prediction in &matching_predictions {
+        let should_replace = latest_prediction_by_submission
+            .get(&prediction.submission_id)
+            .is_none_or(|current: &&TraceRankingPredictionRecord| {
+                prediction.created_at > current.created_at
+            });
+        if should_replace {
+            latest_prediction_by_submission.insert(prediction.submission_id, *prediction);
+        }
+    }
+
+    let mut joined_pair_prediction_count = 0usize;
+    let mut correct_pair_count = 0usize;
+    let mut reversed_pair_count = 0usize;
+    let mut tied_pair_count = 0usize;
+    let mut margin_sum = 0i128;
+    let mut min_preferred_margin_micros: Option<i64> = None;
+    let mut max_preferred_margin_micros: Option<i64> = None;
+    let mut joined_label_source_counts = BTreeMap::new();
+    for label in &matching_preferences {
+        let Some(preferred_prediction) =
+            latest_prediction_by_submission.get(&label.preferred_submission_id)
+        else {
+            continue;
+        };
+        let Some(rejected_prediction) =
+            latest_prediction_by_submission.get(&label.rejected_submission_id)
+        else {
+            continue;
+        };
+        let margin = preferred_prediction.settlement_score_micros
+            - rejected_prediction.settlement_score_micros;
+        joined_pair_prediction_count += 1;
+        margin_sum += i128::from(margin);
+        min_preferred_margin_micros =
+            Some(min_preferred_margin_micros.map_or(margin, |current| current.min(margin)));
+        max_preferred_margin_micros =
+            Some(max_preferred_margin_micros.map_or(margin, |current| current.max(margin)));
+        *joined_label_source_counts
+            .entry(label.label_source)
+            .or_insert(0usize) += 1;
+        match margin.cmp(&0) {
+            std::cmp::Ordering::Greater => correct_pair_count += 1,
+            std::cmp::Ordering::Less => reversed_pair_count += 1,
+            std::cmp::Ordering::Equal => tied_pair_count += 1,
+        }
+    }
+
+    TraceRankingPairwiseEvaluationModelReport {
+        model_version: model.model_version.clone(),
+        model_status: model.status,
+        target_use,
+        policy_version: model.policy_version.clone(),
+        feature_schema_version: model.feature_schema_version.clone(),
+        prediction_count: matching_predictions.len(),
+        preference_label_count: matching_preferences.len(),
+        joined_pair_prediction_count,
+        correct_pair_count,
+        reversed_pair_count,
+        tied_pair_count,
+        pairwise_accuracy_micros: ratio_micros(correct_pair_count, joined_pair_prediction_count),
+        average_preferred_margin_micros: average_i128(margin_sum, joined_pair_prediction_count),
+        min_preferred_margin_micros,
+        max_preferred_margin_micros,
+        joined_label_source_counts,
+    }
+}
+
+fn ratio_micros(numerator: usize, denominator: usize) -> Option<i64> {
+    if denominator == 0 {
+        return None;
+    }
+    Some(((numerator as i128 * 1_000_000i128) / denominator as i128) as i64)
 }
 
 fn latest_ranking_model_versions(
@@ -44249,6 +44513,155 @@ mod tests {
         let pairs_json = serde_json::to_string(&pairs).expect("pairs serialize");
         assert!(!pairs_json.contains("frontier-lab-private-training-pair-789"));
         assert!(!pairs_json.contains("trace body"));
+    }
+
+    #[tokio::test]
+    async fn ranking_pairwise_evaluation_report_scores_model_ordering_against_preference_labels() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut first = sample_envelope().await;
+        make_metadata_only_low_risk(&mut first);
+        first.consent.scopes = vec![ConsentScope::RankingTraining];
+        first.trace_card.consent_scope = ConsentScope::RankingTraining;
+        first.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let first_submission_id = first.submission_id;
+        let mut second = sample_envelope().await;
+        make_metadata_only_low_risk(&mut second);
+        second.consent.scopes = vec![ConsentScope::RankingTraining];
+        second.trace_card.consent_scope = ConsentScope::RankingTraining;
+        second.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let second_submission_id = second.submission_id;
+        let mut third = sample_envelope().await;
+        make_metadata_only_low_risk(&mut third);
+        third.consent.scopes = vec![ConsentScope::RankingTraining];
+        third.trace_card.consent_scope = ConsentScope::RankingTraining;
+        third.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let third_submission_id = third.submission_id;
+
+        for envelope in [first, second, third] {
+            let _ = submit_trace_handler(
+                State(state.clone()),
+                auth_headers("token-a"),
+                Json(envelope),
+            )
+            .await
+            .expect("ranking source submission succeeds");
+        }
+
+        let Json(model) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-pairwise-v1".to_string(),
+                feature_schema_version: "ranking-features-pairwise-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:pairwise-training-set".to_string(),
+                calibration_dataset_hash: "sha256:pairwise-calibration-set".to_string(),
+                model_artifact_hash: "sha256:pairwise-model-artifact".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can register ranking model version");
+
+        for (submission_id, feature_suffix, predicted_utility_micros) in [
+            (first_submission_id, "first", 2_000_000),
+            (second_submission_id, "second", 1_000_000),
+            (third_submission_id, "third", 500_000),
+        ] {
+            let Json(feature) = ranking_feature_handler(
+                State(state.clone()),
+                auth_headers("utility-worker-token-a"),
+                Json(TraceRankingFeatureRequest {
+                    submission_id,
+                    target_use: TraceAllowedUse::RankingModelTraining,
+                    feature_schema_version: model.feature_schema_version.clone(),
+                    feature_vector_hash: format!("sha256:pairwise-feature-vector-{feature_suffix}"),
+                    feature_names_hash: "sha256:pairwise-feature-names".to_string(),
+                    source_feature_hash: format!("sha256:pairwise-source-feature-{feature_suffix}"),
+                    duplicate_score: Some(0.05),
+                    novelty_score: Some(0.9),
+                    privacy_risk_score: Some(0.01),
+                    quality_score: Some(0.9),
+                    coverage_tags: vec!["pairwise-eval".to_string()],
+                }),
+            )
+            .await
+            .expect("utility worker can write ranking feature");
+            let _ = ranking_prediction_handler(
+                State(state.clone()),
+                auth_headers("utility-worker-token-a"),
+                Json(TraceRankingPredictionRequest {
+                    submission_id,
+                    target_use: TraceAllowedUse::RankingModelTraining,
+                    model_version: model.model_version.clone(),
+                    feature_schema_version: model.feature_schema_version.clone(),
+                    prediction_policy_version: model.policy_version.clone(),
+                    feature_vector_hash: feature.feature_vector_hash,
+                    predicted_utility_micros,
+                    uncertainty_micros: 100_000,
+                    confidence: 0.9,
+                    risk_penalty_micros: 0,
+                    novelty_bonus_micros: 0,
+                    explanation_codes: vec!["pairwise_eval_fixture".to_string()],
+                }),
+            )
+            .await
+            .expect("utility worker can write ranking prediction");
+        }
+
+        let _ = ranking_preference_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id: first_submission_id,
+                rejected_submission_id: second_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 700_000,
+                evidence_hash: "sha256:pairwise-correct-evidence".to_string(),
+                external_ref: "frontier-private-pairwise-correct".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write correct preference label");
+        let _ = ranking_preference_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id: third_submission_id,
+                rejected_submission_id: first_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 650_000,
+                evidence_hash: "sha256:pairwise-reversed-evidence".to_string(),
+                external_ref: "reviewer-private-pairwise-reversed".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write reversed preference label");
+
+        let Json(report) =
+            ranking_pairwise_evaluation_report_handler(State(state), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can read pairwise evaluation report");
+
+        assert_eq!(report.preference_label_count, 2);
+        assert_eq!(report.joined_pair_prediction_count, 2);
+        assert_eq!(report.correct_pair_count, 1);
+        assert_eq!(report.reversed_pair_count, 1);
+        assert_eq!(report.tied_pair_count, 0);
+        assert_eq!(report.pairwise_accuracy_micros, Some(500_000));
+        assert_eq!(report.models.len(), 1);
+        assert_eq!(report.models[0].model_version, model.model_version);
+        assert_eq!(report.models[0].correct_pair_count, 1);
+        assert_eq!(report.models[0].reversed_pair_count, 1);
+        let report_json = serde_json::to_string(&report).expect("report serializes");
+        assert!(!report_json.contains("frontier-private-pairwise-correct"));
+        assert!(!report_json.contains("reviewer-private-pairwise-reversed"));
+        assert!(!report_json.contains("trace body"));
     }
 
     #[tokio::test]
