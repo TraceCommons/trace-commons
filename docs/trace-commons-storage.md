@@ -419,7 +419,7 @@ CREATE POLICY trace_submissions_tenant_isolation ON trace_submissions
     WITH CHECK (tenant_id = current_setting('tracedao.trace_tenant_id', true));
 ```
 
-The migration intentionally does not use `FORCE ROW LEVEL SECURITY`, so table owners still bypass policies for safe migrations, backfills, and repairs while the runtime moves to transaction-local tenant context. Before production cutover, every PG-backed Trace Commons store path should set `SELECT set_config('tracedao.trace_tenant_id', $1, true)` inside the operation transaction, and worker roles should get explicit policy variants, not blanket bypass.
+The later server-owned `V6__trace_force_rls.sql` migration applies `FORCE ROW LEVEL SECURITY` to every Trace Commons RLS table, so table-owner roles no longer bypass policies for normal runtime access. Before production cutover, every PG-backed Trace Commons store path should set `SELECT set_config('tracedao.trace_tenant_id', $1, true)` inside the operation transaction, and runtime/worker roles should be non-superuser roles without `BYPASSRLS`; any explicit worker policy variants should stay narrow rather than becoming blanket bypass.
 
 ### Rust Store Contract Shape
 

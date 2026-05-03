@@ -175,6 +175,26 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _tracedao_migrations WHERE version = $1",
+                &[&6_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V6__trace_force_rls.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _tracedao_migrations (version, name) VALUES ($1, $2)",
+                    &[&6_i32, &"trace_force_rls"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -234,7 +254,8 @@ impl Database for PgBackend {
                           AND c.relkind = 'r'
                           AND c.relname = ANY($1)
                           AND r.rolname = current_user
-                    ) AS owns_trace_tables,
+                          AND NOT c.relforcerowsecurity
+                    ) AS owns_unforced_trace_tables,
                     COALESCE((
                         SELECT rolsuper OR rolbypassrls
                         FROM pg_roles
@@ -294,7 +315,7 @@ impl Database for PgBackend {
         policy_expression_mismatch_tables.sort();
         policy_expression_mismatch_tables.dedup();
 
-        let owns_trace_tables: bool = current_role.get("owns_trace_tables");
+        let owns_unforced_trace_tables: bool = current_role.get("owns_unforced_trace_tables");
         let bypass_role: bool = current_role.get("bypass_role");
         Ok(Some(TraceCorpusRlsDiagnostics {
             expected_table_count: expected_tables.len(),
@@ -305,7 +326,7 @@ impl Database for PgBackend {
             rls_disabled_tables,
             force_rls_disabled_tables,
             policy_expression_mismatch_tables,
-            current_role_bypasses_rls: owns_trace_tables || bypass_role,
+            current_role_bypasses_rls: owns_unforced_trace_tables || bypass_role,
         }))
     }
 }
