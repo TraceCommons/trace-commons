@@ -38,7 +38,9 @@ and NEAR receipt outbox rows are dual-written to PostgreSQL;
 lists from the tenant-scoped DB mirror.
 
 The NEAR path is intentionally an outbox of deterministic method-call payloads
-for a non-transferable receipt contract. Configure
+for a non-transferable receipt contract. The payload builder only emits
+`settle_credit_receipt`, `reverse_credit_receipt`, and `freeze_credit_account`
+calls, rejecting any other NEAR credit method. Configure
 `TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL` to let the scoped submit worker hand
 pending or failed-retry calls to an operator-owned NEAR relayer; the server then
 records the public transaction hash or a hashed failure. Workers can still

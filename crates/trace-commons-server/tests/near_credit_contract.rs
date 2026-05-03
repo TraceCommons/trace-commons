@@ -48,3 +48,21 @@ fn near_credit_receipt_call_rejects_transfer_methods() {
 
     assert!(error.to_string().contains("non-transferable"));
 }
+
+#[test]
+fn near_credit_receipt_call_rejects_unknown_credit_methods() {
+    for method_name in [
+        "settle_credit_receipt",
+        "reverse_credit_receipt",
+        "freeze_credit_account",
+    ] {
+        NearCreditReceiptCall::raw("trace-credits.testnet", method_name, json!({}))
+            .expect("known non-transferable credit method is allowed");
+    }
+
+    let error =
+        NearCreditReceiptCall::raw("trace-credits.testnet", "mint_credit_receipt", json!({}))
+            .expect_err("unknown methods are outside the non-transferable credit API");
+
+    assert!(error.to_string().contains("non-transferable"));
+}
