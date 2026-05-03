@@ -6047,6 +6047,7 @@ struct TraceRankingModelRiskReport {
     active_model_count: usize,
     monitored_model_count: usize,
     at_risk_model_count: usize,
+    risk_code_counts: BTreeMap<String, usize>,
     models: Vec<TraceRankingModelRiskRecord>,
 }
 
@@ -11647,12 +11648,19 @@ fn ranking_model_risk_report(
         .iter()
         .filter(|model| !model.risk_codes.is_empty())
         .count();
+    let mut risk_code_counts = BTreeMap::new();
+    for model in &models {
+        for code in &model.risk_codes {
+            *risk_code_counts.entry(code.clone()).or_insert(0) += 1;
+        }
+    }
     TraceRankingModelRiskReport {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         active_model_count,
         monitored_model_count: models.len(),
         at_risk_model_count,
+        risk_code_counts,
         models,
     }
 }
@@ -44662,9 +44670,22 @@ mod tests {
             ranking_model_risk_report_handler(State(state.clone()), auth_headers("admin-token-a"))
                 .await
                 .expect("admin can read active ranking model risk report");
+        let report_value = serde_json::to_value(&report).expect("risk report serializes");
         assert_eq!(report.active_model_count, 1);
         assert_eq!(report.at_risk_model_count, 1);
         assert_eq!(report.models.len(), 1);
+        assert_eq!(
+            report_value["risk_code_counts"]["joined_evidence_changed_since_calibration"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            report_value["risk_code_counts"]["low_confidence_predictions_since_calibration"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            report_value["risk_code_counts"]["current_evidence_not_promotable"],
+            serde_json::json!(1)
+        );
         let model = &report.models[0];
         assert_eq!(model.model_version, candidate.model_version);
         assert_eq!(model.target_use, TraceAllowedUse::RankingModelTraining);
