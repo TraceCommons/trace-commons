@@ -95,12 +95,8 @@ impl NearCreditReceiptCall {
         method_name: impl Into<String>,
         args: Value,
     ) -> anyhow::Result<Self> {
-        let contract_id = contract_id.into();
+        let contract_id = validate_near_contract_id(contract_id.into())?;
         let method_name = method_name.into();
-        anyhow::ensure!(
-            !contract_id.trim().is_empty(),
-            "NEAR contract id is required"
-        );
         ensure_non_transferable_method(&method_name)?;
         let canonical_args =
             serde_json::to_string(&args).context("failed to serialize NEAR call args")?;
@@ -129,6 +125,46 @@ fn validate_receipt(receipt: &NearCreditReceipt) -> anyhow::Result<()> {
         "settled NEAR credit amount must be positive"
     );
     Ok(())
+}
+
+fn validate_near_contract_id(contract_id: String) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        !contract_id.trim().is_empty(),
+        "NEAR contract id is required"
+    );
+    anyhow::ensure!(
+        contract_id.trim() == contract_id,
+        "NEAR contract id must not contain leading or trailing whitespace"
+    );
+    anyhow::ensure!(
+        (2..=64).contains(&contract_id.len()),
+        "NEAR contract id must be between 2 and 64 characters"
+    );
+
+    let mut previous_separator = false;
+    for (index, byte) in contract_id.bytes().enumerate() {
+        let is_account_char = byte.is_ascii_lowercase() || byte.is_ascii_digit();
+        let is_separator = matches!(byte, b'.' | b'-' | b'_');
+        anyhow::ensure!(
+            is_account_char || is_separator,
+            "NEAR contract id must contain only lowercase account-id characters"
+        );
+        anyhow::ensure!(
+            !(index == 0 && is_separator),
+            "NEAR contract id must not start with a separator"
+        );
+        anyhow::ensure!(
+            !(previous_separator && is_separator),
+            "NEAR contract id must not contain consecutive separators"
+        );
+        previous_separator = is_separator;
+    }
+    anyhow::ensure!(
+        !previous_separator,
+        "NEAR contract id must not end with a separator"
+    );
+
+    Ok(contract_id)
 }
 
 fn ensure_hash_like(label: &str, value: &str) -> anyhow::Result<()> {

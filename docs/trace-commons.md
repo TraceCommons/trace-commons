@@ -961,6 +961,9 @@ a prediction with the same submission, model, target use, policy, and
 settlement-score micros as the credit delta; otherwise the event is excluded
 from the settlement source list. Finalized batches record the calibration run id
 plus the calibration report hash and joined-evidence hash used for the gate.
+When a settlement request includes `near_contract_id`, the NEAR payload builder
+validates it as a lowercase NEAR account id before any settlement batch or
+outbox row is persisted.
 
 Production settlement schedulers should use
 `POST /v1/workers/credit-settlements/run` rather than the admin settlement
