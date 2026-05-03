@@ -11679,15 +11679,19 @@ async fn operational_summary_handler(
     let db_summary = read_operational_db_summary(state.as_ref(), tenant.auth())
         .await
         .map_err(internal_error)?;
-    let response = TraceOperationalSummaryResponse::from_parts(
-        state.as_ref(),
-        tenant.tenant_id().to_string(),
+    let ranking = read_operational_ranking_summary(state.as_ref(), tenant.auth(), &credit_events)
+        .await
+        .map_err(internal_error)?;
+    let response = TraceOperationalSummaryResponse::from_parts(TraceOperationalSummaryInputs {
+        state: state.as_ref(),
+        tenant_id: tenant.tenant_id().to_string(),
         records,
         derived,
         credit_events,
         db_summary,
-        Utc::now(),
-    );
+        ranking,
+        generated_at: Utc::now(),
+    });
     append_audit_event_with_db_mirror(
         state.as_ref(),
         tenant.auth(),
@@ -11719,6 +11723,32 @@ async fn read_operational_credit_events(
             tenant,
             read_all_credit_events(&state.root, &tenant.tenant_id)?,
         ),
+    ))
+}
+
+async fn read_operational_ranking_summary(
+    state: &AppState,
+    tenant: &TenantAuth,
+    credit_events: &[TraceCommonsCreditLedgerRecord],
+) -> anyhow::Result<TraceOperationalRankingSummary> {
+    let settlement_batches = read_credit_settlement_batches_for_admin(state, tenant).await?;
+    let held_credit_accounts = active_credit_hold_account_refs_for_admin(state, tenant).await?;
+    let model_versions = read_ranking_model_versions_for_admin(state, tenant).await?;
+    let predictions = read_ranking_predictions_for_admin(state, tenant).await?;
+    let labels = read_ranking_labels_for_admin(state, tenant).await?;
+    let calibration_runs = read_ranking_calibration_runs_for_admin(state, tenant).await?;
+    Ok(TraceOperationalRankingSummary::from_inputs(
+        TraceOperationalRankingInputs {
+            state,
+            tenant,
+            credit_events,
+            settlement_batches: &settlement_batches,
+            held_credit_accounts: &held_credit_accounts,
+            model_versions: &model_versions,
+            predictions: &predictions,
+            labels: &labels,
+            calibration_runs: &calibration_runs,
+        },
     ))
 }
 
@@ -26403,43 +26433,53 @@ struct TraceOperationalSummaryResponse {
     exports: TraceOperationalExportSummary,
     retention: TraceOperationalRetentionSummary,
     vectors: TraceOperationalVectorSummary,
+    ranking: TraceOperationalRankingSummary,
     delayed_credit: TraceOperationalDelayedCreditSummary,
 }
 
+struct TraceOperationalSummaryInputs<'a> {
+    state: &'a AppState,
+    tenant_id: String,
+    records: Vec<TraceCommonsSubmissionRecord>,
+    derived: Vec<TraceCommonsDerivedRecord>,
+    credit_events: Vec<TraceCommonsCreditLedgerRecord>,
+    db_summary: TraceOperationalDbSummary,
+    ranking: TraceOperationalRankingSummary,
+    generated_at: DateTime<Utc>,
+}
+
 impl TraceOperationalSummaryResponse {
-    fn from_parts(
-        state: &AppState,
-        tenant_id: String,
-        records: Vec<TraceCommonsSubmissionRecord>,
-        derived: Vec<TraceCommonsDerivedRecord>,
-        credit_events: Vec<TraceCommonsCreditLedgerRecord>,
-        db_summary: TraceOperationalDbSummary,
-        generated_at: DateTime<Utc>,
-    ) -> Self {
-        let submissions = TraceOperationalSubmissionSummary::from_records(&records);
-        let review_sla = TraceOperationalReviewSlaSummary::from_records(&records, generated_at);
-        let delayed_credit = TraceOperationalDelayedCreditSummary::from_events(&credit_events);
-        let exports = TraceOperationalExportSummary::from_db_summary(&db_summary);
-        let retention = TraceOperationalRetentionSummary::from_db_summary(&db_summary);
-        let vectors =
-            TraceOperationalVectorSummary::from_records_and_db_summary(&derived, &db_summary);
+    fn from_parts(inputs: TraceOperationalSummaryInputs<'_>) -> Self {
+        let submissions = TraceOperationalSubmissionSummary::from_records(&inputs.records);
+        let review_sla =
+            TraceOperationalReviewSlaSummary::from_records(&inputs.records, inputs.generated_at);
+        let delayed_credit =
+            TraceOperationalDelayedCreditSummary::from_events(&inputs.credit_events);
+        let exports = TraceOperationalExportSummary::from_db_summary(&inputs.db_summary);
+        let retention = TraceOperationalRetentionSummary::from_db_summary(&inputs.db_summary);
+        let vectors = TraceOperationalVectorSummary::from_records_and_db_summary(
+            &inputs.derived,
+            &inputs.db_summary,
+        );
         let promotion_gates = TraceOperationalPromotionGateSummary::from_state_and_summaries(
-            state,
+            inputs.state,
             &review_sla,
             &exports,
             &retention,
             &vectors,
+            &inputs.ranking,
         );
         Self {
-            tenant_storage_ref: tenant_storage_ref(&tenant_id),
-            tenant_id,
-            generated_at,
+            tenant_storage_ref: tenant_storage_ref(&inputs.tenant_id),
+            tenant_id: inputs.tenant_id,
+            generated_at: inputs.generated_at,
             promotion_gates,
             submissions,
             review_sla,
             exports,
             retention,
             vectors,
+            ranking: inputs.ranking,
             delayed_credit,
         }
     }
@@ -26467,6 +26507,8 @@ struct TraceOperationalPromotionGateSummary {
     failed_export_job_count: usize,
     failed_retention_job_count: usize,
     vector_missing_count: usize,
+    at_risk_ranking_model_count: usize,
+    blocked_ranking_credit_event_count: usize,
 }
 
 impl TraceOperationalPromotionGateSummary {
@@ -26476,6 +26518,7 @@ impl TraceOperationalPromotionGateSummary {
         exports: &TraceOperationalExportSummary,
         retention: &TraceOperationalRetentionSummary,
         vectors: &TraceOperationalVectorSummary,
+        ranking: &TraceOperationalRankingSummary,
     ) -> Self {
         let db_mirror_configured = state.db_mirror.is_some();
         let tenant_rollout_gate_counts = state.tenant_rollout_gates.status_counts();
@@ -26488,6 +26531,8 @@ impl TraceOperationalPromotionGateSummary {
         let vector_missing_count = vectors
             .accepted_current_derived
             .saturating_sub(vectors.accepted_current_derived_with_active_vector);
+        let at_risk_ranking_model_count = ranking.at_risk_model_count;
+        let blocked_ranking_credit_event_count = ranking.blocked_credit_event_count;
         let mut blocking_gates = Vec::new();
         let mut warning_gates = Vec::new();
 
@@ -26526,6 +26571,16 @@ impl TraceOperationalPromotionGateSummary {
                 vector_missing_count,
             );
         }
+        push_gap_count(
+            &mut blocking_gates,
+            "at_risk_ranking_models",
+            at_risk_ranking_model_count,
+        );
+        push_gap_count(
+            &mut blocking_gates,
+            "blocked_ranking_credit_events",
+            blocked_ranking_credit_event_count,
+        );
 
         push_gap_count(
             &mut warning_gates,
@@ -26559,6 +26614,8 @@ impl TraceOperationalPromotionGateSummary {
             failed_export_job_count,
             failed_retention_job_count,
             vector_missing_count,
+            at_risk_ranking_model_count,
+            blocked_ranking_credit_event_count,
         }
     }
 }
@@ -26789,6 +26846,69 @@ impl TraceOperationalVectorSummary {
             }
         }
         summary
+    }
+}
+
+struct TraceOperationalRankingInputs<'a> {
+    state: &'a AppState,
+    tenant: &'a TenantAuth,
+    credit_events: &'a [TraceCommonsCreditLedgerRecord],
+    settlement_batches: &'a [TraceCreditSettlementBatchRecord],
+    held_credit_accounts: &'a BTreeSet<String>,
+    model_versions: &'a [TraceRankingModelVersionRecord],
+    predictions: &'a [TraceRankingPredictionRecord],
+    labels: &'a [TraceRankingLabelRecord],
+    calibration_runs: &'a [TraceRankingCalibrationRunRecord],
+}
+
+#[derive(Debug, Default, Serialize)]
+struct TraceOperationalRankingSummary {
+    active_model_count: usize,
+    monitored_model_count: usize,
+    at_risk_model_count: usize,
+    risk_code_counts: BTreeMap<String, usize>,
+    pending_credit_event_count: usize,
+    ready_credit_event_count: usize,
+    blocked_credit_event_count: usize,
+    blocked_credit_reason_counts: BTreeMap<String, usize>,
+}
+
+impl TraceOperationalRankingSummary {
+    fn from_inputs(inputs: TraceOperationalRankingInputs<'_>) -> Self {
+        let risk = ranking_model_risk_report(
+            inputs.state,
+            inputs.tenant,
+            inputs.model_versions,
+            inputs.predictions,
+            inputs.labels,
+            inputs.calibration_runs,
+        );
+        let readiness = ranking_credit_readiness_report(RankingCreditReadinessInputs {
+            state: inputs.state,
+            tenant: inputs.tenant,
+            credit_events: inputs.credit_events,
+            settlement_batches: inputs.settlement_batches,
+            held_credit_accounts: inputs.held_credit_accounts,
+            predictions: inputs.predictions,
+            model_versions: inputs.model_versions,
+            calibration_runs: inputs.calibration_runs,
+        });
+        let mut risk_code_counts = BTreeMap::new();
+        for model in &risk.models {
+            for code in &model.risk_codes {
+                *risk_code_counts.entry(code.clone()).or_insert(0) += 1;
+            }
+        }
+        Self {
+            active_model_count: risk.active_model_count,
+            monitored_model_count: risk.monitored_model_count,
+            at_risk_model_count: risk.at_risk_model_count,
+            risk_code_counts,
+            pending_credit_event_count: readiness.pending_ranking_credit_event_count,
+            ready_credit_event_count: readiness.ready_count,
+            blocked_credit_event_count: readiness.blocked_count,
+            blocked_credit_reason_counts: readiness.blocked_reason_counts,
+        }
     }
 }
 
@@ -38427,6 +38547,34 @@ mod tests {
             readiness.events[0]
                 .reason_codes
                 .contains(&"low_confidence_prediction".to_string())
+        );
+
+        let Json(operational) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect ranking health in operational summary");
+        assert_eq!(operational.ranking.active_model_count, 1);
+        assert_eq!(operational.ranking.at_risk_model_count, 1);
+        assert_eq!(operational.ranking.pending_credit_event_count, 1);
+        assert_eq!(operational.ranking.blocked_credit_event_count, 1);
+        assert_eq!(
+            operational
+                .ranking
+                .blocked_credit_reason_counts
+                .get("low_confidence_prediction"),
+            Some(&1)
+        );
+        assert!(
+            operational
+                .promotion_gates
+                .blocking_gates
+                .contains(&"at_risk_ranking_models=1".to_string())
+        );
+        assert!(
+            operational
+                .promotion_gates
+                .blocking_gates
+                .contains(&"blocked_ranking_credit_events=1".to_string())
         );
 
         let Json(settlement) = credit_settlement_handler(
