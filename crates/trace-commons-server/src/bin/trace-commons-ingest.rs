@@ -256,6 +256,10 @@ fn default_trace_ranking_min_label_source_count() -> usize {
     DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT
 }
 
+fn default_trace_ranking_joined_evidence_hash() -> String {
+    "sha256:legacy".to_string()
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
@@ -5701,6 +5705,8 @@ struct TraceRankingCalibrationRunRecord {
     joined_label_prediction_count: usize,
     #[serde(default)]
     joined_label_source_count: usize,
+    #[serde(default = "default_trace_ranking_joined_evidence_hash")]
+    joined_evidence_hash: String,
     average_predicted_utility_micros: Option<i64>,
     average_label_utility_delta_micros: Option<i64>,
     average_absolute_error_micros: Option<i64>,
@@ -8738,6 +8744,7 @@ async fn mirror_ranking_calibration_run_to_db(
             .context("ranking calibration joined_label_prediction_count exceeds u32")?,
         joined_label_source_count: u32::try_from(record.joined_label_source_count)
             .context("ranking calibration joined_label_source_count exceeds u32")?,
+        joined_evidence_hash: record.joined_evidence_hash.clone(),
         average_predicted_utility_micros: record.average_predicted_utility_micros,
         average_label_utility_delta_micros: record.average_label_utility_delta_micros,
         average_absolute_error_micros: record.average_absolute_error_micros,
@@ -8967,6 +8974,7 @@ fn ranking_calibration_run_from_storage(
         label_count: record.label_count as usize,
         joined_label_prediction_count: record.joined_label_prediction_count as usize,
         joined_label_source_count: record.joined_label_source_count as usize,
+        joined_evidence_hash: record.joined_evidence_hash,
         average_predicted_utility_micros: record.average_predicted_utility_micros,
         average_label_utility_delta_micros: record.average_label_utility_delta_micros,
         average_absolute_error_micros: record.average_absolute_error_micros,
@@ -9222,6 +9230,27 @@ struct RankingCalibrationRunInputs {
     created_at: DateTime<Utc>,
 }
 
+fn ranking_calibration_joined_evidence_hash(
+    inputs: &RankingCalibrationRunInputs,
+    joined_evidence_lines: &[String],
+) -> String {
+    let mut lines = joined_evidence_lines.to_vec();
+    lines.sort();
+    let mut payload = format!(
+        "ranking_calibration_joined_evidence:v1\n{}\n{}\n{}\n{}\n{}",
+        inputs.model_version,
+        serde_enum_tag(&inputs.target_use),
+        inputs.policy_version,
+        inputs.feature_schema_version,
+        inputs.evaluation_dataset_hash
+    );
+    for line in lines {
+        payload.push('\n');
+        payload.push_str(&line);
+    }
+    sha256_prefixed(&payload)
+}
+
 fn ranking_calibration_run_record(
     tenant: &TenantAuth,
     inputs: RankingCalibrationRunInputs,
@@ -9243,14 +9272,7 @@ fn ranking_calibration_run_record(
         .collect::<Vec<_>>();
     let mut latest_prediction_by_submission = BTreeMap::new();
     for prediction in &matching_predictions {
-        latest_prediction_by_submission.insert(
-            prediction.submission_id,
-            (
-                prediction.predicted_utility_micros,
-                prediction.confidence,
-                prediction.created_at,
-            ),
-        );
+        latest_prediction_by_submission.insert(prediction.submission_id, *prediction);
     }
 
     let mut joined_count = 0usize;
@@ -9260,25 +9282,40 @@ fn ranking_calibration_run_record(
     let mut abs_error_sum = 0i128;
     let mut joined_label_sources = BTreeSet::new();
     let mut label_source_abs_error_sums = BTreeMap::new();
+    let mut joined_evidence_lines = Vec::new();
     for label in &matching_labels {
-        let Some((predicted, _, _)) = latest_prediction_by_submission.get(&label.submission_id)
-        else {
+        let Some(prediction) = latest_prediction_by_submission.get(&label.submission_id) else {
             continue;
         };
         joined_count += 1;
         joined_label_sources.insert(label.label_source);
-        let abs_error = (label.utility_delta_micros - *predicted).abs();
+        let predicted = prediction.predicted_utility_micros;
+        let abs_error = (label.utility_delta_micros - predicted).abs();
         let (source_error_sum, source_count) = label_source_abs_error_sums
             .entry(label.label_source)
             .or_insert((0i128, 0usize));
         *source_error_sum += i128::from(abs_error);
         *source_count += 1;
-        predicted_sum += i128::from(*predicted);
+        predicted_sum += i128::from(predicted);
         label_sum += i128::from(label.utility_delta_micros);
-        signed_error_sum += i128::from(*predicted - label.utility_delta_micros);
+        signed_error_sum += i128::from(predicted - label.utility_delta_micros);
         abs_error_sum += i128::from(abs_error);
+        joined_evidence_lines.push(format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            label.submission_id,
+            prediction.ranking_prediction_id,
+            label.ranking_label_id,
+            serde_enum_tag(&label.label_source),
+            prediction.feature_vector_hash,
+            predicted,
+            prediction.confidence.to_bits(),
+            label.utility_delta_micros,
+            label.evidence_hash
+        ));
     }
     let joined_label_source_count = joined_label_sources.len();
+    let joined_evidence_hash =
+        ranking_calibration_joined_evidence_hash(&inputs, &joined_evidence_lines);
     let (max_label_source_average_absolute_error_micros, max_error_label_source) =
         max_label_source_average_error(&label_source_abs_error_sums);
     let average_absolute_error_micros = average_i128(abs_error_sum, joined_count);
@@ -9321,6 +9358,7 @@ fn ranking_calibration_run_record(
         label_count: matching_labels.len(),
         joined_label_prediction_count: joined_count,
         joined_label_source_count,
+        joined_evidence_hash,
         average_predicted_utility_micros: average_i128(predicted_sum, joined_count),
         average_label_utility_delta_micros: average_i128(label_sum, joined_count),
         average_absolute_error_micros,
@@ -9349,7 +9387,7 @@ fn ranking_calibration_run_report_hash(record: &TraceRankingCalibrationRunRecord
         .as_ref()
         .and_then(|source| serde_storage_string(source).ok());
     let mut payload = format!(
-        "ranking_calibration_run:v3\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "ranking_calibration_run:v4\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{}\n{}\n{}\n{}\n{}\n{}",
         record.tenant_storage_ref,
         record.model_version,
         serde_storage_string(&record.target_use).unwrap_or_else(|_| "invalid".to_string()),
@@ -9359,6 +9397,7 @@ fn ranking_calibration_run_report_hash(record: &TraceRankingCalibrationRunRecord
         record.label_count,
         record.joined_label_prediction_count,
         record.joined_label_source_count,
+        record.joined_evidence_hash,
         record.average_predicted_utility_micros,
         record.average_label_utility_delta_micros,
         record.average_absolute_error_micros,
@@ -36776,12 +36815,14 @@ mod tests {
         assert_eq!(run.mean_signed_error_micros, Some(-400_000));
         assert!(run.reason_codes.is_empty());
         assert!(run.report_hash.starts_with("sha256:"));
+        assert_eq!(run.joined_evidence_hash.len(), "sha256:".len() + 64);
 
         let Json(runs) =
             ranking_calibration_runs_handler(State(state), auth_headers("admin-token-a"))
                 .await
                 .expect("admin can list calibration runs");
         assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].joined_evidence_hash, run.joined_evidence_hash);
         let runs_json = serde_json::to_string(&runs).expect("calibration runs serialize");
         assert!(!runs_json.contains("private-frontier-lab-calibration-batch"));
         assert!(!runs_json.contains("trace body"));
