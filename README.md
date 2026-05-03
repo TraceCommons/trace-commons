@@ -49,18 +49,22 @@ hashes, never trace bodies or raw contributor identity.
 
 Ranking evidence is stored separately from settlement. Workers can register
 feature hashes, model predictions, lab/reviewer labels, and calibration runs
-that record aggregate error, confidence, threshold policy, reason codes, and a
-hash-only report digest. Prediction writes must name a registered active or
-candidate model, match its policy and feature schema, and reference an existing
-feature vector hash for the same source. Admins can inspect calibration reports
-and persisted runs before deciding which predictions are trustworthy enough to
-influence settlement policy. Settlement excludes `ranking_utility` credit events
-unless the settlement request names a ranking model version with a latest
-promotable calibration run for the same policy and target use. With the DB
-mirror configured, ranking evidence and calibration runs are dual-written to
-PostgreSQL and `TRACE_COMMONS_DB_REVIEWER_READS=true` serves admin ranking
-lists, calibration reports, and calibration-run history from the tenant-scoped
-DB mirror.
+that record aggregate error, confidence, threshold policy, per-source quality
+gates, joined-evidence hashes, reason codes, and a hash-only report digest.
+Prediction writes must name a registered active or candidate model, match its
+policy and feature schema, and reference an existing feature vector hash for the
+same source. Admins can inspect calibration reports, persisted calibration runs,
+active-model risk reports, ranking-credit readiness reports, and operational
+summary blocker counts before deciding whether model-derived credit can settle.
+Settlement excludes `ranking_utility` credit events unless the request names an
+active model version with a fresh promotable calibration run for the same policy,
+target use, and registered calibration dataset, and every credit event is bound
+to a matching `ranking_prediction:<uuid>` reference with a settlement score that
+matches the stored prediction. With the DB mirror configured, ranking evidence
+and calibration runs are dual-written to PostgreSQL and
+`TRACE_COMMONS_DB_REVIEWER_READS=true` serves admin ranking lists, calibration
+reports, model-risk reports, credit-readiness reports, and calibration-run
+history from the tenant-scoped DB mirror.
 
 ## Binaries
 
