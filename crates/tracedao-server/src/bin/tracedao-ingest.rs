@@ -2141,6 +2141,10 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/workers/ranking/prediction-credit",
             post(ranking_prediction_credit_handler),
         )
+        .route(
+            "/v1/workers/ranking/prediction-credit/run",
+            post(ranking_prediction_credit_run_handler),
+        )
         .route("/v1/workers/ranking/labels", post(ranking_label_handler))
         .route(
             "/v1/workers/ranking/calibration-runs",
@@ -5028,6 +5032,8 @@ const DEFAULT_REVIEW_LEASE_TTL_SECONDS: i64 = 30 * 60;
 const MAX_REVIEW_LEASE_TTL_SECONDS: i64 = 24 * 60 * 60;
 const DEFAULT_REVIEW_LEASE_BATCH_LIMIT: usize = 10;
 const MAX_REVIEW_LEASE_BATCH_LIMIT: usize = 50;
+const DEFAULT_RANKING_PREDICTION_CREDIT_RUN_LIMIT: usize = 100;
+const MAX_RANKING_PREDICTION_CREDIT_RUN_LIMIT: usize = 500;
 
 impl TraceCreditLedgerEventType {
     fn requires_external_ref(self) -> bool {
@@ -5425,6 +5431,21 @@ struct TraceRankingPredictionCreditRequest {
     reason: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceRankingPredictionCreditRunRequest {
+    #[serde(default)]
+    dry_run: bool,
+    reason: String,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    model_version: Option<String>,
+    #[serde(default)]
+    target_use: Option<TraceAllowedUse>,
+    #[serde(default)]
+    policy_version: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct TraceRankingPredictionCreditResponse {
     tenant_id: String,
@@ -5438,6 +5459,23 @@ struct TraceRankingPredictionCreditResponse {
     external_ref: String,
     appended_count: usize,
     skipped_existing_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingPredictionCreditRunResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    dry_run: bool,
+    limit: usize,
+    reason_hash: String,
+    model_version: Option<String>,
+    target_use: Option<TraceAllowedUse>,
+    policy_version: Option<String>,
+    checked_count: usize,
+    credited_count: usize,
+    skipped_existing_count: usize,
+    skipped_ineligible_count: usize,
+    pending_after_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7673,7 +7711,123 @@ async fn ranking_prediction_credit_handler(
 ) -> ApiResult<Json<TraceRankingPredictionCreditResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_utility_operator(&tenant)?;
-    let reason = body.reason.trim().to_string();
+    let reason = validate_ranking_prediction_credit_reason(&body.reason)?;
+
+    let predictions = read_ranking_predictions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let prediction = predictions
+        .into_iter()
+        .find(|prediction| prediction.ranking_prediction_id == body.ranking_prediction_id)
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "ranking prediction not found"))?;
+    append_ranking_prediction_credit_for_record(state.as_ref(), &tenant, prediction, &reason, false)
+        .await
+        .map(Json)
+}
+
+async fn ranking_prediction_credit_run_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceRankingPredictionCreditRunRequest>,
+) -> ApiResult<Json<TraceRankingPredictionCreditRunResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_utility_operator(&tenant)?;
+    let reason = validate_ranking_prediction_credit_reason(&body.reason)?;
+    let limit = body
+        .limit
+        .unwrap_or(DEFAULT_RANKING_PREDICTION_CREDIT_RUN_LIMIT);
+    if !(1..=MAX_RANKING_PREDICTION_CREDIT_RUN_LIMIT).contains(&limit) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranking prediction credit run limit must be between 1 and 500",
+        ));
+    }
+    let model_version = optional_ranking_identifier(body.model_version, "model_version")?;
+    let policy_version = optional_ranking_identifier(body.policy_version, "policy_version")?;
+    let mut predictions = read_ranking_predictions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    predictions.sort_by_key(|prediction| {
+        (
+            prediction.created_at,
+            prediction.submission_id,
+            prediction.ranking_prediction_id,
+        )
+    });
+    let mut response = TraceRankingPredictionCreditRunResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        dry_run: body.dry_run,
+        limit,
+        reason_hash: sha256_prefixed(&reason),
+        model_version: model_version.clone(),
+        target_use: body.target_use,
+        policy_version: policy_version.clone(),
+        checked_count: 0,
+        credited_count: 0,
+        skipped_existing_count: 0,
+        skipped_ineligible_count: 0,
+        pending_after_count: 0,
+    };
+
+    let mut attempted_uncredited = 0;
+    for prediction in predictions.into_iter().filter(|prediction| {
+        model_version
+            .as_ref()
+            .is_none_or(|model_version| &prediction.model_version == model_version)
+            && body
+                .target_use
+                .is_none_or(|target_use| prediction.target_use == target_use)
+            && policy_version.as_ref().is_none_or(|policy_version| {
+                &prediction.prediction_policy_version == policy_version
+            })
+    }) {
+        if ranking_prediction_credit_already_exists(state.as_ref(), &tenant, &prediction)
+            .await
+            .map_err(internal_error)?
+        {
+            response.checked_count += 1;
+            response.skipped_existing_count += 1;
+            continue;
+        }
+        if attempted_uncredited >= limit {
+            break;
+        }
+        response.checked_count += 1;
+        attempted_uncredited += 1;
+        match append_ranking_prediction_credit_for_record(
+            state.as_ref(),
+            &tenant,
+            prediction,
+            &reason,
+            body.dry_run,
+        )
+        .await
+        {
+            Ok(credit) => {
+                response.credited_count += credit.appended_count;
+                response.skipped_existing_count += credit.skipped_existing_count;
+            }
+            Err((status, _)) if ranking_prediction_credit_run_can_skip_status(status) => {
+                response.skipped_ineligible_count += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    response.pending_after_count = count_pending_ranking_prediction_credits(
+        state.as_ref(),
+        &tenant,
+        model_version.as_deref(),
+        body.target_use,
+        policy_version.as_deref(),
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(response))
+}
+
+fn validate_ranking_prediction_credit_reason(reason: &str) -> ApiResult<String> {
+    let reason = reason.trim().to_string();
     if reason.is_empty() {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
@@ -7686,14 +7840,82 @@ async fn ranking_prediction_credit_handler(
             "ranking prediction credit reason is too long",
         ));
     }
+    Ok(reason)
+}
 
-    let predictions = read_ranking_predictions_for_admin(state.as_ref(), &tenant)
-        .await
-        .map_err(internal_error)?;
-    let prediction = predictions
+fn optional_ranking_identifier(value: Option<String>, label: &str) -> ApiResult<Option<String>> {
+    value
+        .map(|value| validate_ranking_identifier(&value, label))
+        .transpose()
+}
+
+fn ranking_prediction_credit_run_can_skip_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND | StatusCode::CONFLICT
+    )
+}
+
+fn ranking_prediction_credit_event_id(
+    tenant: &TenantAuth,
+    prediction: &TraceRankingPredictionRecord,
+) -> Uuid {
+    deterministic_trace_uuid_for_external_ref(
+        TraceCreditLedgerEventType::RankingUtility.utility_idempotency_label(),
+        &tenant.tenant_id,
+        prediction.submission_id,
+        &ranking_prediction_external_ref(prediction.ranking_prediction_id),
+    )
+}
+
+async fn ranking_prediction_credit_already_exists(
+    state: &AppState,
+    tenant: &TenantAuth,
+    prediction: &TraceRankingPredictionRecord,
+) -> anyhow::Result<bool> {
+    let event_id = ranking_prediction_credit_event_id(tenant, prediction);
+    Ok(read_credit_events_for_admin(state, tenant)
+        .await?
         .into_iter()
-        .find(|prediction| prediction.ranking_prediction_id == body.ranking_prediction_id)
-        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "ranking prediction not found"))?;
+        .any(|event| event.event_id == event_id))
+}
+
+async fn count_pending_ranking_prediction_credits(
+    state: &AppState,
+    tenant: &TenantAuth,
+    model_version: Option<&str>,
+    target_use: Option<TraceAllowedUse>,
+    policy_version: Option<&str>,
+) -> anyhow::Result<usize> {
+    let predictions = read_ranking_predictions_for_admin(state, tenant).await?;
+    let existing_event_ids = read_credit_events_for_admin(state, tenant)
+        .await?
+        .into_iter()
+        .map(|event| event.event_id)
+        .collect::<BTreeSet<_>>();
+    Ok(predictions
+        .iter()
+        .filter(|prediction| {
+            prediction.settlement_score_micros > 0
+                && model_version
+                    .is_none_or(|model_version| prediction.model_version == model_version)
+                && target_use.is_none_or(|target_use| prediction.target_use == target_use)
+                && policy_version.is_none_or(|policy_version| {
+                    prediction.prediction_policy_version == policy_version
+                })
+                && !existing_event_ids
+                    .contains(&ranking_prediction_credit_event_id(tenant, prediction))
+        })
+        .count())
+}
+
+async fn append_ranking_prediction_credit_for_record(
+    state: &AppState,
+    tenant: &TenantAuth,
+    prediction: TraceRankingPredictionRecord,
+    reason: &str,
+    dry_run: bool,
+) -> ApiResult<TraceRankingPredictionCreditResponse> {
     if prediction.settlement_score_micros <= 0 {
         return Err(api_error(
             StatusCode::CONFLICT,
@@ -7702,8 +7924,8 @@ async fn ranking_prediction_credit_handler(
     }
 
     let submission = read_ranking_source_submission(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         prediction.submission_id,
         prediction.target_use,
     )
@@ -7715,7 +7937,7 @@ async fn ranking_prediction_credit_handler(
         ));
     }
 
-    let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
+    let model_versions = read_ranking_model_versions_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
     let model = latest_ranking_model_version(&model_versions, &prediction.model_version)
@@ -7739,8 +7961,8 @@ async fn ranking_prediction_credit_handler(
         ));
     }
     let _calibration_run = latest_promotable_ranking_calibration_run(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         &prediction.model_version,
         prediction.target_use,
         &prediction.prediction_policy_version,
@@ -7763,28 +7985,32 @@ async fn ranking_prediction_credit_handler(
     }
 
     let external_ref = ranking_prediction_external_ref(prediction.ranking_prediction_id);
-    let counts = append_automatic_utility_credit_events_once_with_counts(
-        state.as_ref(),
-        &tenant,
-        AutomaticUtilityCreditConfig {
-            idempotency_label: TraceCreditLedgerEventType::RankingUtility
-                .utility_idempotency_label(),
-            idempotency_ref: Some(external_ref.clone()),
-            event_type: TraceCreditLedgerEventType::RankingUtility,
-            credit_points_delta,
-            reason: format!("ranking prediction credit: {reason}"),
-            external_ref: external_ref.clone(),
-        },
-        [AutomaticUtilityCreditSource {
-            submission_id: submission.submission_id,
-            trace_id: submission.trace_id,
-            auth_principal_ref: submission.auth_principal_ref,
-        }],
-    )
-    .await
-    .map_err(internal_error)?;
+    let counts = if dry_run {
+        AutomaticUtilityCreditAppendCounts::default()
+    } else {
+        append_automatic_utility_credit_events_once_with_counts(
+            state,
+            tenant,
+            AutomaticUtilityCreditConfig {
+                idempotency_label: TraceCreditLedgerEventType::RankingUtility
+                    .utility_idempotency_label(),
+                idempotency_ref: Some(external_ref.clone()),
+                event_type: TraceCreditLedgerEventType::RankingUtility,
+                credit_points_delta,
+                reason: format!("ranking prediction credit: {reason}"),
+                external_ref: external_ref.clone(),
+            },
+            [AutomaticUtilityCreditSource {
+                submission_id: submission.submission_id,
+                trace_id: submission.trace_id,
+                auth_principal_ref: submission.auth_principal_ref,
+            }],
+        )
+        .await
+        .map_err(internal_error)?
+    };
 
-    Ok(Json(TraceRankingPredictionCreditResponse {
+    Ok(TraceRankingPredictionCreditResponse {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         ranking_prediction_id: prediction.ranking_prediction_id,
@@ -7796,7 +8022,7 @@ async fn ranking_prediction_credit_handler(
         external_ref,
         appended_count: counts.appended,
         skipped_existing_count: counts.skipped_existing,
-    }))
+    })
 }
 
 async fn ranking_predictions_handler(
@@ -34215,6 +34441,204 @@ mod tests {
             Some(response.external_ref.as_str())
         );
         assert_eq!(events[0].credit_points_delta, 1.25);
+    }
+
+    #[tokio::test]
+    async fn ranking_prediction_credit_worker_run_batches_uncredited_predictions_idempotently() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let Json(candidate) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-credit-run-v1".to_string(),
+                feature_schema_version: "ranking-features-credit-run-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:ranking-training-credit-run".to_string(),
+                calibration_dataset_hash: "sha256:ranking-calibration-credit-run".to_string(),
+                model_artifact_hash: "sha256:ranking-model-artifact-credit-run".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can stage candidate ranking model");
+
+        for index in 0..2 {
+            let mut envelope = sample_envelope().await;
+            make_metadata_only_low_risk(&mut envelope);
+            envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+            envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+            envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+            let submission_id = envelope.submission_id;
+            let _ = submit_trace_handler(
+                State(state.clone()),
+                auth_headers("token-a"),
+                Json(envelope),
+            )
+            .await
+            .expect("ranking submission succeeds");
+            let feature_vector_hash = format!("sha256:ranking-feature-credit-run-{index}");
+            let Json(feature) = ranking_feature_handler(
+                State(state.clone()),
+                auth_headers("utility-worker-token-a"),
+                Json(TraceRankingFeatureRequest {
+                    submission_id,
+                    target_use: TraceAllowedUse::RankingModelTraining,
+                    feature_schema_version: candidate.feature_schema_version.clone(),
+                    feature_vector_hash,
+                    feature_names_hash: format!("sha256:ranking-feature-names-credit-run-{index}"),
+                    source_feature_hash: format!(
+                        "sha256:ranking-source-feature-credit-run-{index}"
+                    ),
+                    duplicate_score: Some(0.05),
+                    novelty_score: Some(0.91),
+                    privacy_risk_score: Some(0.02),
+                    quality_score: Some(0.88),
+                    coverage_tags: vec!["tool:terminal".to_string()],
+                }),
+            )
+            .await
+            .expect("utility worker can write ranking feature");
+            let Json(_) = ranking_prediction_handler(
+                State(state.clone()),
+                auth_headers("utility-worker-token-a"),
+                Json(TraceRankingPredictionRequest {
+                    submission_id,
+                    target_use: TraceAllowedUse::RankingModelTraining,
+                    model_version: candidate.model_version.clone(),
+                    feature_schema_version: candidate.feature_schema_version.clone(),
+                    prediction_policy_version: candidate.policy_version.clone(),
+                    feature_vector_hash: feature.feature_vector_hash,
+                    predicted_utility_micros: 1_250_000 + i64::from(index) * 250_000,
+                    uncertainty_micros: 250_000,
+                    confidence: 0.9,
+                    risk_penalty_micros: 0,
+                    novelty_bonus_micros: 0,
+                    explanation_codes: vec!["ranking_pair_utility".to_string()],
+                }),
+            )
+            .await
+            .expect("utility worker can write ranking prediction");
+            let Json(_) = ranking_label_handler(
+                State(state.clone()),
+                auth_headers("utility-worker-token-a"),
+                Json(TraceRankingLabelRequest {
+                    submission_id,
+                    target_use: TraceAllowedUse::RankingModelTraining,
+                    label_source: StorageTraceRankingLabelSource::FrontierLab,
+                    utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                    label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                    utility_delta_micros: 1_300_000 + i64::from(index) * 250_000,
+                    evidence_hash: format!("sha256:ranking-frontier-evidence-credit-run-{index}"),
+                    external_ref: format!("private-ranking-credit-run-{index}"),
+                }),
+            )
+            .await
+            .expect("utility worker can write ranking label");
+        }
+
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: "sha256:ranking-eval-credit-run".to_string(),
+                min_label_count: Some(2),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration");
+        assert!(calibration.promotable);
+        let Json(_) = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "nightly calibration passed".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can promote calibrated model");
+
+        let Json(first) = ranking_prediction_credit_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionCreditRunRequest {
+                dry_run: false,
+                reason: "scheduled ranking prediction credit".to_string(),
+                limit: Some(1),
+                model_version: None,
+                target_use: None,
+                policy_version: None,
+            }),
+        )
+        .await
+        .expect("worker run credits one bounded prediction");
+        assert_eq!(first.checked_count, 1);
+        assert_eq!(first.credited_count, 1);
+        assert_eq!(first.skipped_existing_count, 0);
+        assert_eq!(first.pending_after_count, 1);
+        assert_eq!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit reads")
+                .len(),
+            1
+        );
+
+        let Json(second) = ranking_prediction_credit_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionCreditRunRequest {
+                dry_run: false,
+                reason: "scheduled ranking prediction credit retry".to_string(),
+                limit: Some(1),
+                model_version: None,
+                target_use: None,
+                policy_version: None,
+            }),
+        )
+        .await
+        .expect("worker retry credits remaining prediction");
+        assert_eq!(second.credited_count, 1);
+        assert_eq!(second.skipped_existing_count, 1);
+        assert_eq!(second.pending_after_count, 0);
+        assert_eq!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit reads")
+                .len(),
+            2
+        );
+
+        let Json(third) = ranking_prediction_credit_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionCreditRunRequest {
+                dry_run: false,
+                reason: "scheduled ranking prediction credit idempotent retry".to_string(),
+                limit: Some(10),
+                model_version: None,
+                target_use: None,
+                policy_version: None,
+            }),
+        )
+        .await
+        .expect("worker retry is idempotent");
+        assert_eq!(third.credited_count, 0);
+        assert_eq!(third.skipped_existing_count, 2);
+        assert_eq!(third.pending_after_count, 0);
+        assert_eq!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit reads")
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
