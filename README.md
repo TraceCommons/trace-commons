@@ -17,7 +17,10 @@ DTOs, status DTOs, and deterministic redaction helpers live in this repo.
 It also owns the first server-side Trace Credits settlement surface: hash-only
 utility attestations, admin-triggered dry-run/final settlement batches, credit
 holds, contributor pending/settled/held projections, and a NEAR non-transferable
-credit receipt outbox. The next ranking substrate is also server-owned: model
+credit receipt outbox. Utility workers can also run a bounded credit-cycle
+coordinator that sequences calibration, model promotion, prediction credit,
+settlement, and NEAR outbox submission checks for one model/policy/target. The
+next ranking substrate is also server-owned: model
 version records, hash-only feature records, prediction records, frontier/reviewer
 labels, calibration reports, persisted model-promotion calibration runs, and
 PostgreSQL-backed ranking evidence reads/writes behind the same DB mirror
@@ -29,11 +32,14 @@ Trace Credits are non-transferable account credits backed by reviewed utility
 evidence. Uploads and ranker scores do not settle credit directly. Utility
 workers record hash-only attestations for accepted traces, admins run settlement
 batches, and optional NEAR receipt calls are queued only after off-chain
-settlement finalizes. Settlement retries repair missing NEAR outbox rows from
-finalized batches, and revocation propagation can append deterministic negative
-ledger rows plus `reverse_credit_receipt` NEAR outbox calls for settled revoked
-sources. Reviewer/admin credit summaries report tenant-wide settled line items
-while contributor summaries stay principal-scoped. With the DB mirror
+settlement finalizes. The worker `POST /v1/workers/credit-cycle/run` route can
+run the production credit path in bounded steps for a single model/version:
+calibration, model promotion, prediction credit, settlement, then a NEAR outbox
+dry-run or explicit submit. Settlement retries repair missing NEAR outbox rows
+from finalized batches, and revocation propagation can append deterministic
+negative ledger rows plus `reverse_credit_receipt` NEAR outbox calls for settled
+revoked sources. Reviewer/admin credit summaries report tenant-wide settled line
+items while contributor summaries stay principal-scoped. With the DB mirror
 configured, utility attestations, settlement batches, credit holds, and NEAR
 receipt outbox rows are dual-written to PostgreSQL;
 `TRACE_COMMONS_DB_REVIEWER_READS=true` serves the admin credit control-plane
