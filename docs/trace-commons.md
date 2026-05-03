@@ -934,13 +934,13 @@ per-step limits and NEAR options as the direct coordinator, and a bounded
 prefers candidates before active models, skips any model/policy/target that
 already has a live non-stale `credit_cycle` worker-run claim, and runs a
 read-only calibration preflight before creating a direct cycle claim. Candidates
-with no matching prediction evidence, no target labels, or non-promotable
-current calibration evidence are reported as scheduler skips without creating
-credit-cycle worker rows, credit events, settlement batches, or NEAR outbox
-items. The response reports checked, started, skipped, active-claim skipped,
-still-pending, and skip-reason counts plus the nested cycle responses, giving
-external schedulers a safe retry surface without granting generic admin
-settlement access.
+with no matching prediction evidence, no target labels, no labels that join to
+the model's matching predictions, or non-promotable current calibration evidence
+are reported as scheduler skips without creating credit-cycle worker rows,
+credit events, settlement batches, or NEAR outbox items. The response reports
+checked, started, skipped, active-claim skipped, still-pending, and skip-reason
+counts plus the nested cycle responses, giving external schedulers a safe retry
+surface without granting generic admin settlement access.
 
 Trusted offline utility workers use a narrower bulk route for accepted traces:
 
