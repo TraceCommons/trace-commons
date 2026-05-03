@@ -16,7 +16,7 @@ These are the next independent production slices that can be staffed in parallel
 - [x] Finish live issuer-managed EdDSA/Ed25519 key refresh/sync so long-running deployments can rotate issuer-owned key records after startup without restart: URL keysets refresh in-process on a bounded interval, failures preserve the last good active keyset, managed-required deployments can configure a max-stale fail-closed window, and config-status exposes safe refresh health without URLs, hosts, key ids, PEMs, or bearer fetch credentials.
 - [x] Add durable tenant access grant storage for issuer-authorized hosted-agent principals, roles, consent scopes, allowed uses, issuer/audience/subject attribution, expiry, revocation metadata, and safe metadata across PostgreSQL, plus admin create/list/revoke APIs, CLI helpers, and enforcement gates for trace submission, autonomous contributor credit/status readback, reviewer/export/worker/audit/admin read surfaces that require an active exact-role grant, bind signed EdDSA/Ed25519 grants to configured issuer/audience/JWT `sub`, and intersect grant scopes/uses with static or EdDSA claim allow-lists.
 - [ ] Promote auth-derived `TenantCtx` into every ingest, review, export, worker, maintenance, and contributor-status path so envelope tenant fields remain attribution only. First guards now fail closed when file-backed metadata, derived rows, credit ledger rows, audit rows, revocation tombstones, replay export manifests, export provenance, or benchmark artifacts are read from an authenticated tenant directory but contain a different embedded tenant id/storage ref; service-local object-ref reads/deletes also verify the tenant key ref, encrypted benchmark artifact reads verify the decrypted body tenant, and vector payload deletes verify the encrypted payload body's tenant storage ref before physical deletion.
-- [ ] Harden PostgreSQL tenant isolation with production roles, transaction-local tenant context coverage, RLS/forced-RLS decisions, and same-id cross-tenant tests; Admin config-status now exposes safe PostgreSQL RLS readiness diagnostics for policy coverage, expression drift, disabled RLS, force-RLS count, and role bypass state.
+- [ ] Harden PostgreSQL tenant isolation with production roles, transaction-local tenant context coverage, and same-id cross-tenant tests; server migrations now force RLS on Trace Commons tables and Admin config-status exposes safe PostgreSQL RLS readiness diagnostics for policy coverage, expression drift, disabled RLS, force-RLS count, and role bypass state.
 
 ### Autonomous Client
 
@@ -69,7 +69,7 @@ As of the server split, Trace Commons has moved beyond the local-only MVP into a
 - Durable tenant access grant storage now exists for issuer-authorized principals and hosted-agent multitenant permissioning, including role, consent/use allow-lists, issuer/audience/subject attribution, expiry, revocation fields, tenant-scoped admin create/list/revoke APIs and CLI helpers, and tenant-scoped PostgreSQL RLS policies. When `TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS=true`, trace submission, contributor credit/status readback, reviewer/audit reads, review mutations, dataset/export paths, non-revocation worker mutations, maintenance, and admin ledger/observability reads are denied without an active exact-role grant for the authenticated principal. Grant scopes/uses narrow the effective request policy, while revocation/self-delete, revocation propagation, config-status, tenant-policy admin, and grant-management routes remain available for deprovisioning and recovery.
 - Revocation, retention expiration, and maintenance-discovered file tombstones already invalidate DB-mirrored submission status, object refs, derived records, vector metadata, replay export manifests, and replay export item rows. Revocation-propagation credit-settlement items now reverse exact delayed-credit ledger rows with deterministic negative settlement events. Non-dry-run physical purge and revocation-propagation object-payload items can now mark only exact physically deleted service-local submitted/review envelope object refs with `deleted_at`; revocation-propagation object deletes also record durable physical-delete receipt rows with evidence hashes for exact service-local submitted/review envelope, vector worker-intermediate, benchmark artifact, and ranker export provenance payload targets. Vector worker payloads now carry deterministic local redacted-summary feature embeddings in encrypted worker-intermediate objects, and exact vector-entry invalidation is available across PostgreSQL. Remote object deletion and unsupported artifact payload deletion remain future work.
 
-The main remaining gap is production rollout hardening: file-backed serving is still the compatibility path, encrypted artifacts are still local rather than remote service-owned object storage, PostgreSQL RLS/central policy is not yet the active trust boundary, and vector, benchmark, ranking, retention, and audit systems are not yet complete production workers.
+The main remaining gap is production rollout hardening: file-backed serving is still the compatibility path, encrypted artifacts are still local rather than remote service-owned object storage, PostgreSQL RLS is forced but still needs central policy, non-bypassing service roles, and complete transaction-local tenant context before it is the active trust boundary, and vector, benchmark, ranking, retention, and audit systems are not yet complete production workers.
 
 ## Operator Finish-Line Checks
 
@@ -190,9 +190,10 @@ export, retention, vector, and benchmark route gates; fuller RBAC/ABAC remains
 future work.
 The PostgreSQL store now sets `trace-commons.trace_tenant_id` transaction-locally around
 tenant-scoped Trace Commons operations while retaining explicit `tenant_id`
-predicates. This is an incremental guardrail only: table owners, superusers, and
-roles with `BYPASSRLS` can still bypass the server-owned V1 policies until production role
-ownership and/or forced RLS are settled.
+predicates, and server migrations force RLS for the Trace Commons tables. This is
+still an incremental guardrail until every DB-backed runtime path runs under a
+non-bypassing production role; superusers and roles with `BYPASSRLS` can still
+bypass the server-owned policies.
 
 Scope:
 

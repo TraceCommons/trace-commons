@@ -110,6 +110,37 @@ fn ready_rls_diagnostics() -> TraceCorpusRlsDiagnostics {
     }
 }
 
+fn expected_trace_rls_tables() -> Vec<&'static str> {
+    vec![
+        "trace_tenants",
+        "trace_tenant_policies",
+        "trace_tenant_access_grants",
+        "trace_submissions",
+        "trace_object_refs",
+        "trace_derived_records",
+        "trace_audit_events",
+        "trace_credit_ledger",
+        "trace_tombstones",
+        "trace_vector_entries",
+        "trace_export_manifests",
+        "trace_export_manifest_items",
+        "trace_retention_jobs",
+        "trace_retention_job_items",
+        "trace_export_access_grants",
+        "trace_export_jobs",
+        "trace_revocation_propagation_items",
+        "trace_utility_attestations",
+        "trace_credit_settlement_batches",
+        "trace_credit_holds",
+        "trace_near_credit_outbox",
+        "trace_ranking_model_versions",
+        "trace_ranking_features",
+        "trace_ranking_predictions",
+        "trace_ranking_labels",
+        "trace_ranking_calibration_runs",
+    ]
+}
+
 fn sample_audit_event(
     tenant_id: &str,
     submission_id: Uuid,
@@ -261,7 +292,8 @@ async fn current_role_bypasses_trace_rls(
                     JOIN pg_roles r ON r.oid = c.relowner
                     WHERE c.relname = 'trace_submissions'
                       AND r.rolname = current_user
-                ) AS is_table_owner,
+                      AND NOT c.relforcerowsecurity
+                ) AS owns_unforced_trace_table,
                 COALESCE((
                     SELECT rolsuper OR rolbypassrls
                     FROM pg_roles
@@ -270,7 +302,7 @@ async fn current_role_bypasses_trace_rls(
             &[],
         )
         .await?;
-    Ok(row.get::<_, bool>("is_table_owner") || row.get::<_, bool>("bypass_role"))
+    Ok(row.get::<_, bool>("owns_unforced_trace_table") || row.get::<_, bool>("bypass_role"))
 }
 
 async fn assert_raw_sql_rls_filters_by_tenant_context(
@@ -714,34 +746,10 @@ async fn cleanup_trace_tenants(backend: &PgBackend, tenant_ids: &[&str]) {
 }
 
 async fn assert_trace_rls_policies_installed(backend: &PgBackend) {
-    let expected_tables = vec![
-        "trace_tenants".to_string(),
-        "trace_tenant_policies".to_string(),
-        "trace_tenant_access_grants".to_string(),
-        "trace_submissions".to_string(),
-        "trace_object_refs".to_string(),
-        "trace_derived_records".to_string(),
-        "trace_audit_events".to_string(),
-        "trace_credit_ledger".to_string(),
-        "trace_tombstones".to_string(),
-        "trace_vector_entries".to_string(),
-        "trace_export_manifests".to_string(),
-        "trace_export_manifest_items".to_string(),
-        "trace_retention_jobs".to_string(),
-        "trace_retention_job_items".to_string(),
-        "trace_export_access_grants".to_string(),
-        "trace_export_jobs".to_string(),
-        "trace_revocation_propagation_items".to_string(),
-        "trace_utility_attestations".to_string(),
-        "trace_credit_settlement_batches".to_string(),
-        "trace_credit_holds".to_string(),
-        "trace_near_credit_outbox".to_string(),
-        "trace_ranking_model_versions".to_string(),
-        "trace_ranking_features".to_string(),
-        "trace_ranking_predictions".to_string(),
-        "trace_ranking_labels".to_string(),
-        "trace_ranking_calibration_runs".to_string(),
-    ];
+    let expected_tables: Vec<String> = expected_trace_rls_tables()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
     let client = backend.pool().get().await.expect("get policy connection");
     let rows = client
         .query(
@@ -760,6 +768,21 @@ async fn assert_trace_rls_policies_installed(backend: &PgBackend) {
     let mut expected_tables = expected_tables;
     expected_tables.sort();
     assert_eq!(actual_tables, expected_tables);
+}
+
+#[test]
+fn force_rls_migration_covers_every_trace_rls_table() {
+    let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../migrations/V6__trace_force_rls.sql");
+    let sql = std::fs::read_to_string(&migration_path)
+        .expect("read FORCE RLS production hardening migration");
+    for table in expected_trace_rls_tables() {
+        let statement = format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY;");
+        assert!(
+            sql.contains(&statement),
+            "FORCE RLS migration must include {statement}"
+        );
+    }
 }
 
 #[test]
@@ -2472,7 +2495,10 @@ async fn pg_trace_corpus_rls_diagnostics_report_policy_coverage() {
         .await
         .expect("read RLS diagnostics")
         .expect("PostgreSQL reports RLS diagnostics");
-    assert_eq!(diagnostics.expected_table_count, 26);
+    assert_eq!(
+        diagnostics.expected_table_count,
+        expected_trace_rls_tables().len()
+    );
     assert_eq!(
         diagnostics.policy_installed_count,
         diagnostics.expected_table_count
@@ -2484,11 +2510,12 @@ async fn pg_trace_corpus_rls_diagnostics_report_policy_coverage() {
     assert!(diagnostics.missing_policy_tables.is_empty());
     assert!(diagnostics.rls_disabled_tables.is_empty());
     assert!(diagnostics.policy_expression_mismatch_tables.is_empty());
-    assert!(diagnostics.force_rls_enabled_count <= diagnostics.expected_table_count);
     assert_eq!(
-        diagnostics.force_rls_ready(),
-        diagnostics.force_rls_enabled_count == diagnostics.expected_table_count
+        diagnostics.force_rls_enabled_count,
+        diagnostics.expected_table_count
     );
+    assert!(diagnostics.force_rls_disabled_tables.is_empty());
+    assert!(diagnostics.force_rls_ready());
     assert_eq!(
         diagnostics.production_ready(),
         diagnostics.rls_ready() && diagnostics.force_rls_ready()
