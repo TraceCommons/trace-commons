@@ -372,8 +372,10 @@ Ranking worker-run ledger rows are part of the ranking DB mirror and the
 DB-backed reviewer ranking read surface.
 
 `GET /v1/admin/config-status` also reports the server-owned ranking calibration
-quality gates: `ranking_min_label_count`, `ranking_min_confidence_threshold`,
-and `ranking_max_average_absolute_error_micros`. This safe projection lets
+and automation gates: `ranking_min_label_count`,
+`ranking_min_confidence_threshold`,
+`ranking_max_average_absolute_error_micros`, and
+`ranking_worker_run_stale_after_hours`. This safe projection lets
 operators confirm workers cannot lower the sample-size or quality requirements
 below production credit policy.
 
