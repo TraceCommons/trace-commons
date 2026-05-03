@@ -41405,6 +41405,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn credit_cycle_scheduler_rejects_contributors_without_side_effects() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = credit_cycle_scheduler_run_handler(
+            State(state),
+            auth_headers("token-a"),
+            Json(TraceCreditCycleSchedulerRunRequest {
+                dry_run: false,
+                submit_near_outbox: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: None,
+                policy_version: Some("trace-credit-policy-v1".to_string()),
+                reason: "contributor should not run scheduler".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: Some(1),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect_err("contributors cannot run scheduler");
+
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.1.0.error,
+            "reviewer, admin, or utility worker token required"
+        );
+        let worker_runs =
+            read_all_ranking_worker_runs(temp.path(), "tenant-a").expect("worker runs read");
+        assert!(worker_runs.is_empty());
+        let credit_events =
+            read_all_credit_events(temp.path(), "tenant-a").expect("credit events read");
+        assert!(credit_events.is_empty());
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert!(outbox.is_empty());
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_rejects_invalid_limit_without_claiming_work() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = credit_cycle_scheduler_run_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleSchedulerRunRequest {
+                dry_run: false,
+                submit_near_outbox: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: None,
+                policy_version: Some("trace-credit-policy-v1".to_string()),
+                reason: "bad scheduler limit".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: Some(0),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect_err("invalid scheduler limit is rejected");
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.1.0.error,
+            "credit cycle scheduler limit must be between 1 and 25"
+        );
+        let worker_runs =
+            read_all_ranking_worker_runs(temp.path(), "tenant-a").expect("worker runs read");
+        assert!(worker_runs.is_empty());
+    }
+
+    #[tokio::test]
     async fn credit_cycle_worker_rejects_contributors_without_side_effects() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
