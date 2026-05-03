@@ -222,6 +222,8 @@ const TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS: &str =
     "TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS";
 const TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS: &str =
     "TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS";
+const TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT: &str =
+    "TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT";
 const DEFAULT_EDDSA_KEYSET_URL_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_EDDSA_KEYSET_REFRESH_INTERVAL_SECONDS: u64 = 300;
@@ -238,6 +240,12 @@ const TRACE_EXPORT_ONE_SHOT_GRANT_TTL_SECONDS: i64 = 300;
 const TRACE_RANKING_DEFAULT_MIN_LABEL_COUNT: usize = 25;
 const TRACE_RANKING_DEFAULT_CONFIDENCE_THRESHOLD: f32 = 0.5;
 const TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS: i64 = 1_000_000;
+const DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT: usize = 1;
+const MAX_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT: usize = 4;
+
+fn default_trace_ranking_min_label_source_count() -> usize {
+    DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -291,6 +299,7 @@ struct AppState {
     artifact_store: Option<ConfiguredTraceArtifactStore>,
     near_credit_submitter: Option<Arc<dyn TraceNearCreditSubmitter>>,
     ranking_calibration_max_age: Option<Duration>,
+    ranking_min_label_source_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1399,6 +1408,7 @@ impl AppState {
         let artifact_store = trace_artifact_store_from_env(&root)?;
         let near_credit_submitter = trace_near_credit_submitter_from_env()?;
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
+        let ranking_min_label_source_count = parse_ranking_min_label_source_count_from_env()?;
         let object_primary_submit_review = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW);
         let object_primary_replay_export = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT);
         let object_primary_derived_exports =
@@ -1542,6 +1552,7 @@ impl AppState {
             artifact_store,
             near_credit_submitter,
             ranking_calibration_max_age,
+            ranking_min_label_source_count,
         })
     }
 }
@@ -3453,6 +3464,24 @@ fn parse_ranking_calibration_max_age_from_env() -> anyhow::Result<Option<Duratio
     Ok(Some(Duration::hours(hours)))
 }
 
+fn parse_ranking_min_label_source_count_from_env() -> anyhow::Result<usize> {
+    match optional_trimmed_env(TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT)? {
+        Some(value) => parse_ranking_min_label_source_count(&value),
+        None => Ok(DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT),
+    }
+}
+
+fn parse_ranking_min_label_source_count(configured: &str) -> anyhow::Result<usize> {
+    let parsed = configured.trim().parse::<usize>().with_context(|| {
+        format!("{TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT} must be a positive integer")
+    })?;
+    anyhow::ensure!(
+        (1..=MAX_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT).contains(&parsed),
+        "{TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT} must be between 1 and {MAX_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT}"
+    );
+    Ok(parsed)
+}
+
 fn validate_retention_policy_id(policy_id: &str) -> anyhow::Result<()> {
     let valid = policy_id.len() <= 128
         && policy_id.chars().all(|character| {
@@ -3688,6 +3717,7 @@ struct TraceCommonsConfigStatusResponse {
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Vec<String>,
     ranking_calibration_max_age_hours: Option<i64>,
+    ranking_min_label_source_count: usize,
     artifact_store_configured: bool,
     artifact_object_store: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3802,6 +3832,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         ranking_calibration_max_age_hours: state
             .ranking_calibration_max_age
             .map(|max_age| max_age.num_hours()),
+        ranking_min_label_source_count: state.ranking_min_label_source_count,
         artifact_store_configured: state.artifact_store.is_some(),
         artifact_object_store: state
             .artifact_store
@@ -5557,6 +5588,7 @@ struct TraceRankingCalibrationReport {
     prediction_count: usize,
     label_count: usize,
     joined_label_prediction_count: usize,
+    joined_label_source_count: usize,
     average_predicted_utility_micros: Option<i64>,
     average_label_utility_delta_micros: Option<i64>,
     average_absolute_error_micros: Option<i64>,
@@ -5586,6 +5618,8 @@ struct TraceRankingCalibrationRunRecord {
     prediction_count: usize,
     label_count: usize,
     joined_label_prediction_count: usize,
+    #[serde(default)]
+    joined_label_source_count: usize,
     average_predicted_utility_micros: Option<i64>,
     average_label_utility_delta_micros: Option<i64>,
     average_absolute_error_micros: Option<i64>,
@@ -5593,6 +5627,8 @@ struct TraceRankingCalibrationRunRecord {
     low_confidence_prediction_count: usize,
     confidence_threshold: f32,
     min_label_count: usize,
+    #[serde(default = "default_trace_ranking_min_label_source_count")]
+    min_label_source_count: usize,
     max_average_absolute_error_micros: i64,
     promotable: bool,
     reason_codes: Vec<String>,
@@ -7626,6 +7662,11 @@ async fn ensure_active_ranking_model_has_promotable_calibration(
             "active ranking model requires the latest calibration run to be promotable",
         ));
     }
+    ensure_ranking_calibration_label_source_diversity(
+        state,
+        &latest_run,
+        RankingCalibrationGateContext::ModelPromotion,
+    )?;
     Ok(())
 }
 
@@ -7657,6 +7698,7 @@ async fn latest_promotable_ranking_calibration_run(
             context.nonpromotable_message(),
         ));
     }
+    ensure_ranking_calibration_label_source_diversity(state, &run, context)?;
     ensure_ranking_calibration_fresh(state, &run, context)?;
     Ok(run)
 }
@@ -8301,6 +8343,7 @@ async fn ranking_calibration_run_handler(
             feature_schema_version,
             evaluation_dataset_hash,
             min_label_count,
+            min_label_source_count: state.ranking_min_label_source_count,
             confidence_threshold,
             max_average_absolute_error_micros,
             actor_principal_ref: tenant.principal_ref.clone(),
@@ -8562,6 +8605,8 @@ async fn mirror_ranking_calibration_run_to_db(
             .context("ranking calibration label_count exceeds u32")?,
         joined_label_prediction_count: u32::try_from(record.joined_label_prediction_count)
             .context("ranking calibration joined_label_prediction_count exceeds u32")?,
+        joined_label_source_count: u32::try_from(record.joined_label_source_count)
+            .context("ranking calibration joined_label_source_count exceeds u32")?,
         average_predicted_utility_micros: record.average_predicted_utility_micros,
         average_label_utility_delta_micros: record.average_label_utility_delta_micros,
         average_absolute_error_micros: record.average_absolute_error_micros,
@@ -8571,6 +8616,8 @@ async fn mirror_ranking_calibration_run_to_db(
         confidence_threshold: record.confidence_threshold,
         min_label_count: u32::try_from(record.min_label_count)
             .context("ranking calibration min_label_count exceeds u32")?,
+        min_label_source_count: u32::try_from(record.min_label_source_count)
+            .context("ranking calibration min_label_source_count exceeds u32")?,
         max_average_absolute_error_micros: record.max_average_absolute_error_micros,
         promotable: record.promotable,
         reason_codes: record.reason_codes.clone(),
@@ -8785,6 +8832,7 @@ fn ranking_calibration_run_from_storage(
         prediction_count: record.prediction_count as usize,
         label_count: record.label_count as usize,
         joined_label_prediction_count: record.joined_label_prediction_count as usize,
+        joined_label_source_count: record.joined_label_source_count as usize,
         average_predicted_utility_micros: record.average_predicted_utility_micros,
         average_label_utility_delta_micros: record.average_label_utility_delta_micros,
         average_absolute_error_micros: record.average_absolute_error_micros,
@@ -8792,6 +8840,7 @@ fn ranking_calibration_run_from_storage(
         low_confidence_prediction_count: record.low_confidence_prediction_count as usize,
         confidence_threshold: record.confidence_threshold,
         min_label_count: record.min_label_count as usize,
+        min_label_source_count: record.min_label_source_count as usize,
         max_average_absolute_error_micros: record.max_average_absolute_error_micros,
         promotable: record.promotable,
         reason_codes: record.reason_codes,
@@ -8956,6 +9005,7 @@ fn ranking_calibration_report(
     let mut predicted_sum = 0i128;
     let mut label_sum = 0i128;
     let mut abs_error_sum = 0i128;
+    let mut joined_label_sources = BTreeSet::new();
     for label in labels {
         let Some(predicted) =
             latest_prediction_by_submission_use.get(&(label.submission_id, label.target_use))
@@ -8963,6 +9013,7 @@ fn ranking_calibration_report(
             continue;
         };
         joined_count += 1;
+        joined_label_sources.insert(label.label_source);
         predicted_sum += i128::from(*predicted);
         label_sum += i128::from(label.utility_delta_micros);
         abs_error_sum += i128::from((label.utility_delta_micros - *predicted).abs());
@@ -8976,6 +9027,7 @@ fn ranking_calibration_report(
         prediction_count: predictions.len(),
         label_count: labels.len(),
         joined_label_prediction_count: joined_count,
+        joined_label_source_count: joined_label_sources.len(),
         average_predicted_utility_micros: average_i128(predicted_sum, joined_count),
         average_label_utility_delta_micros: average_i128(label_sum, joined_count),
         average_absolute_error_micros: average_i128(abs_error_sum, joined_count),
@@ -8994,6 +9046,7 @@ struct RankingCalibrationRunInputs {
     feature_schema_version: String,
     evaluation_dataset_hash: String,
     min_label_count: usize,
+    min_label_source_count: usize,
     confidence_threshold: f32,
     max_average_absolute_error_micros: i64,
     actor_principal_ref: String,
@@ -9036,21 +9089,27 @@ fn ranking_calibration_run_record(
     let mut label_sum = 0i128;
     let mut signed_error_sum = 0i128;
     let mut abs_error_sum = 0i128;
+    let mut joined_label_sources = BTreeSet::new();
     for label in &matching_labels {
         let Some((predicted, _, _)) = latest_prediction_by_submission.get(&label.submission_id)
         else {
             continue;
         };
         joined_count += 1;
+        joined_label_sources.insert(label.label_source);
         predicted_sum += i128::from(*predicted);
         label_sum += i128::from(label.utility_delta_micros);
         signed_error_sum += i128::from(*predicted - label.utility_delta_micros);
         abs_error_sum += i128::from((label.utility_delta_micros - *predicted).abs());
     }
+    let joined_label_source_count = joined_label_sources.len();
     let average_absolute_error_micros = average_i128(abs_error_sum, joined_count);
     let mut reason_codes = Vec::new();
     if joined_count < inputs.min_label_count {
         reason_codes.push("insufficient_labels".to_string());
+    }
+    if joined_label_source_count < inputs.min_label_source_count {
+        reason_codes.push("insufficient_label_source_diversity".to_string());
     }
     if average_absolute_error_micros
         .is_none_or(|error| error > inputs.max_average_absolute_error_micros)
@@ -9078,6 +9137,7 @@ fn ranking_calibration_run_record(
         prediction_count: matching_predictions.len(),
         label_count: matching_labels.len(),
         joined_label_prediction_count: joined_count,
+        joined_label_source_count,
         average_predicted_utility_micros: average_i128(predicted_sum, joined_count),
         average_label_utility_delta_micros: average_i128(label_sum, joined_count),
         average_absolute_error_micros,
@@ -9088,6 +9148,7 @@ fn ranking_calibration_run_record(
             .count(),
         confidence_threshold: inputs.confidence_threshold,
         min_label_count: inputs.min_label_count,
+        min_label_source_count: inputs.min_label_source_count,
         max_average_absolute_error_micros: inputs.max_average_absolute_error_micros,
         promotable,
         reason_codes,
@@ -9099,7 +9160,7 @@ fn ranking_calibration_run_record(
 
 fn ranking_calibration_run_report_hash(record: &TraceRankingCalibrationRunRecord) -> String {
     let mut payload = format!(
-        "ranking_calibration_run:v1\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{:?}\n{:?}\n{:?}\n{:?}\n{}\n{}\n{}\n{}\n{}",
+        "ranking_calibration_run:v2\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{:?}\n{:?}\n{:?}\n{:?}\n{}\n{}\n{}\n{}\n{}\n{}",
         record.tenant_storage_ref,
         record.model_version,
         serde_storage_string(&record.target_use).unwrap_or_else(|_| "invalid".to_string()),
@@ -9108,6 +9169,7 @@ fn ranking_calibration_run_report_hash(record: &TraceRankingCalibrationRunRecord
         record.prediction_count,
         record.label_count,
         record.joined_label_prediction_count,
+        record.joined_label_source_count,
         record.average_predicted_utility_micros,
         record.average_label_utility_delta_micros,
         record.average_absolute_error_micros,
@@ -9115,6 +9177,7 @@ fn ranking_calibration_run_report_hash(record: &TraceRankingCalibrationRunRecord
         record.low_confidence_prediction_count,
         record.confidence_threshold,
         record.min_label_count,
+        record.min_label_source_count,
         record.max_average_absolute_error_micros,
         record.promotable
     );
@@ -9174,6 +9237,20 @@ impl RankingCalibrationGateContext {
             Self::Settlement => "ranking utility settlement requires a fresh calibration run",
         }
     }
+
+    fn underdiverse_message(self) -> &'static str {
+        match self {
+            Self::ModelPromotion => {
+                "ranking model promotion requires calibration label-source diversity"
+            }
+            Self::PredictionCredit => {
+                "ranking prediction credit requires calibration label-source diversity"
+            }
+            Self::Settlement => {
+                "ranking utility settlement requires calibration label-source diversity"
+            }
+        }
+    }
 }
 
 const RANKING_PREDICTION_EXTERNAL_REF_PREFIX: &str = "ranking_prediction:";
@@ -9220,6 +9297,20 @@ fn ensure_ranking_calibration_fresh(
     let age = Utc::now().signed_duration_since(run.created_at);
     if age > max_age {
         return Err(api_error(StatusCode::CONFLICT, context.stale_message()));
+    }
+    Ok(())
+}
+
+fn ensure_ranking_calibration_label_source_diversity(
+    state: &AppState,
+    run: &TraceRankingCalibrationRunRecord,
+    context: RankingCalibrationGateContext,
+) -> ApiResult<()> {
+    if run.joined_label_source_count < state.ranking_min_label_source_count {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            context.underdiverse_message(),
+        ));
     }
     Ok(())
 }
@@ -26458,6 +26549,7 @@ mod tests {
             artifact_store,
             near_credit_submitter: None,
             ranking_calibration_max_age: None,
+            ranking_min_label_source_count: DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT,
         })
     }
 
@@ -28487,6 +28579,10 @@ mod tests {
         assert_eq!(
             value["max_export_items_per_request"],
             serde_json::json!(DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST)
+        );
+        assert_eq!(
+            value["ranking_min_label_source_count"],
+            serde_json::json!(DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT)
         );
         assert_eq!(
             value["submission_quota"],
@@ -31863,6 +31959,7 @@ mod tests {
             artifact_store: None,
             near_credit_submitter: None,
             ranking_calibration_max_age: None,
+            ranking_min_label_source_count: DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT,
         });
 
         let mut envelope = sample_envelope().await;
@@ -35207,7 +35304,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ranking_credit_paths_reject_stale_calibration_when_freshness_gate_enabled() {
+    async fn ranking_credit_paths_reject_stale_or_underdiverse_calibration_when_gates_enabled() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
         let mut envelope = sample_envelope().await;
@@ -35311,6 +35408,25 @@ mod tests {
         .await
         .expect("utility worker can persist promotable calibration");
         assert!(calibration.promotable);
+
+        Arc::make_mut(&mut state).ranking_min_label_source_count = 2;
+        let underdiverse_promotion_error = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "underdiverse calibration should not promote".to_string(),
+            }),
+        )
+        .await
+        .expect_err("underdiverse calibration blocks model promotion");
+        assert_eq!(underdiverse_promotion_error.0, StatusCode::CONFLICT);
+        Arc::make_mut(&mut state).ranking_min_label_source_count =
+            DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT;
+
         Arc::make_mut(&mut state).ranking_calibration_max_age = Some(Duration::zero());
         let stale_promotion_error = ranking_model_promotion_handler(
             State(state.clone()),
@@ -36276,6 +36392,129 @@ mod tests {
         let runs_json = serde_json::to_string(&runs).expect("calibration runs serialize");
         assert!(!runs_json.contains("private-frontier-lab-calibration-batch"));
         assert!(!runs_json.contains("trace body"));
+    }
+
+    #[tokio::test]
+    async fn ranking_calibration_run_requires_label_source_diversity() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).ranking_min_label_source_count = 2;
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(model) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-diversity-v1".to_string(),
+                feature_schema_version: "ranking-features-diversity-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:training-set-diversity".to_string(),
+                calibration_dataset_hash: "sha256:calibration-set-diversity".to_string(),
+                model_artifact_hash: "sha256:model-artifact-diversity".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can register ranking model version");
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                feature_schema_version: model.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:feature-vector-diversity".to_string(),
+                feature_names_hash: "sha256:feature-names-diversity".to_string(),
+                source_feature_hash: "sha256:redacted-summary-features-diversity".to_string(),
+                duplicate_score: Some(0.05),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.88),
+                coverage_tags: vec!["tool:terminal".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking feature record");
+        let Json(_) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                model_version: model.model_version.clone(),
+                feature_schema_version: model.feature_schema_version.clone(),
+                prediction_policy_version: model.policy_version.clone(),
+                feature_vector_hash: feature.feature_vector_hash,
+                predicted_utility_micros: 2_100_000,
+                uncertainty_micros: 300_000,
+                confidence: 0.82,
+                risk_penalty_micros: 50_000,
+                novelty_bonus_micros: 125_000,
+                explanation_codes: vec!["novel_tool_success".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking prediction");
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 2_500_000,
+                evidence_hash: "sha256:frontier-lab-evidence-diversity".to_string(),
+                external_ref: "private-frontier-lab-diversity-batch".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking label");
+
+        let Json(run) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: model.model_version,
+                target_use: TraceAllowedUse::ModelTraining,
+                policy_version: model.policy_version,
+                evaluation_dataset_hash: "sha256:calibration-eval-dataset-diversity".to_string(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(500_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist calibration run");
+        assert!(!run.promotable);
+        assert_eq!(run.joined_label_prediction_count, 1);
+        assert_eq!(run.joined_label_source_count, 1);
+        assert_eq!(run.min_label_source_count, 2);
+        assert_eq!(
+            run.reason_codes,
+            vec!["insufficient_label_source_diversity".to_string()]
+        );
+
+        let Json(runs) =
+            ranking_calibration_runs_handler(State(state), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list calibration runs");
+        assert_eq!(runs[0].joined_label_source_count, 1);
+        assert_eq!(runs[0].min_label_source_count, 2);
     }
 
     #[tokio::test]

@@ -136,10 +136,12 @@ const TRACE_RANKING_LABEL_COLUMNS: &str = "\
 const TRACE_RANKING_CALIBRATION_RUN_COLUMNS: &str = "\
     tenant_id, calibration_run_id, model_version, target_use, policy_version, \
     evaluation_dataset_hash, prediction_count, label_count, joined_label_prediction_count, \
+    joined_label_source_count, \
     average_predicted_utility_micros, average_label_utility_delta_micros, \
     average_absolute_error_micros, mean_signed_error_micros, low_confidence_prediction_count, \
-    confidence_threshold, min_label_count, max_average_absolute_error_micros, promotable, \
-    reason_codes, report_hash, actor_principal_ref, created_at";
+    confidence_threshold, min_label_count, min_label_source_count, \
+    max_average_absolute_error_micros, promotable, reason_codes, report_hash, actor_principal_ref, \
+    created_at";
 
 async fn ensure_pg_object_ref_belongs_to_submission(
     tx: &Transaction<'_>,
@@ -680,6 +682,7 @@ fn row_to_ranking_calibration_run(
         prediction_count: row_i32_to_u32(row, "prediction_count")?,
         label_count: row_i32_to_u32(row, "label_count")?,
         joined_label_prediction_count: row_i32_to_u32(row, "joined_label_prediction_count")?,
+        joined_label_source_count: row_i32_to_u32(row, "joined_label_source_count")?,
         average_predicted_utility_micros: row.get("average_predicted_utility_micros"),
         average_label_utility_delta_micros: row.get("average_label_utility_delta_micros"),
         average_absolute_error_micros: row.get("average_absolute_error_micros"),
@@ -687,6 +690,7 @@ fn row_to_ranking_calibration_run(
         low_confidence_prediction_count: row_i32_to_u32(row, "low_confidence_prediction_count")?,
         confidence_threshold: row.get("confidence_threshold"),
         min_label_count: row_i32_to_u32(row, "min_label_count")?,
+        min_label_source_count: row_i32_to_u32(row, "min_label_source_count")?,
         max_average_absolute_error_micros: row.get("max_average_absolute_error_micros"),
         promotable: row.get("promotable"),
         reason_codes: json_array_strings(reason_codes, "ranking_calibration_runs.reason_codes")?,
@@ -2276,6 +2280,12 @@ impl TraceCorpusStore for PgBackend {
                     "trace ranking calibration joined_label_prediction_count exceeds PostgreSQL integer range: {e}"
                 ))
             })?;
+        let joined_label_source_count =
+            i32::try_from(run.joined_label_source_count).map_err(|e| {
+                DatabaseError::Serialization(format!(
+                    "trace ranking calibration joined_label_source_count exceeds PostgreSQL integer range: {e}"
+                ))
+            })?;
         let low_confidence_prediction_count =
             i32::try_from(run.low_confidence_prediction_count).map_err(|e| {
                 DatabaseError::Serialization(format!(
@@ -2285,6 +2295,11 @@ impl TraceCorpusStore for PgBackend {
         let min_label_count = i32::try_from(run.min_label_count).map_err(|e| {
             DatabaseError::Serialization(format!(
                 "trace ranking calibration min_label_count exceeds PostgreSQL integer range: {e}"
+            ))
+        })?;
+        let min_label_source_count = i32::try_from(run.min_label_source_count).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace ranking calibration min_label_source_count exceeds PostgreSQL integer range: {e}"
             ))
         })?;
         let reason_codes = serde_json::to_value(&run.reason_codes).map_err(|e| {
@@ -2298,14 +2313,15 @@ impl TraceCorpusStore for PgBackend {
                     "INSERT INTO trace_ranking_calibration_runs (
                         tenant_id, calibration_run_id, model_version, target_use, policy_version,
                         evaluation_dataset_hash, prediction_count, label_count,
-                        joined_label_prediction_count, average_predicted_utility_micros,
-                        average_label_utility_delta_micros, average_absolute_error_micros,
-                        mean_signed_error_micros, low_confidence_prediction_count,
-                        confidence_threshold, min_label_count, max_average_absolute_error_micros,
-                        promotable, reason_codes, report_hash, actor_principal_ref
+                        joined_label_prediction_count, joined_label_source_count,
+                        average_predicted_utility_micros, average_label_utility_delta_micros,
+                        average_absolute_error_micros, mean_signed_error_micros,
+                        low_confidence_prediction_count, confidence_threshold, min_label_count,
+                        min_label_source_count, max_average_absolute_error_micros, promotable,
+                        reason_codes, report_hash, actor_principal_ref
                      ) VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                        $17, $18, $19, $20, $21
+                        $17, $18, $19, $20, $21, $22, $23
                      )
                      ON CONFLICT (tenant_id, calibration_run_id) DO UPDATE SET
                         model_version = excluded.model_version,
@@ -2315,6 +2331,7 @@ impl TraceCorpusStore for PgBackend {
                         prediction_count = excluded.prediction_count,
                         label_count = excluded.label_count,
                         joined_label_prediction_count = excluded.joined_label_prediction_count,
+                        joined_label_source_count = excluded.joined_label_source_count,
                         average_predicted_utility_micros = excluded.average_predicted_utility_micros,
                         average_label_utility_delta_micros = excluded.average_label_utility_delta_micros,
                         average_absolute_error_micros = excluded.average_absolute_error_micros,
@@ -2322,6 +2339,7 @@ impl TraceCorpusStore for PgBackend {
                         low_confidence_prediction_count = excluded.low_confidence_prediction_count,
                         confidence_threshold = excluded.confidence_threshold,
                         min_label_count = excluded.min_label_count,
+                        min_label_source_count = excluded.min_label_source_count,
                         max_average_absolute_error_micros = excluded.max_average_absolute_error_micros,
                         promotable = excluded.promotable,
                         reason_codes = excluded.reason_codes,
@@ -2339,6 +2357,7 @@ impl TraceCorpusStore for PgBackend {
                     &prediction_count,
                     &label_count,
                     &joined_label_prediction_count,
+                    &joined_label_source_count,
                     &run.average_predicted_utility_micros,
                     &run.average_label_utility_delta_micros,
                     &run.average_absolute_error_micros,
@@ -2346,6 +2365,7 @@ impl TraceCorpusStore for PgBackend {
                     &low_confidence_prediction_count,
                     &run.confidence_threshold,
                     &min_label_count,
+                    &min_label_source_count,
                     &run.max_average_absolute_error_micros,
                     &run.promotable,
                     &reason_codes,

@@ -566,6 +566,7 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
             prediction_count: 1,
             label_count: 1,
             joined_label_prediction_count: 1,
+            joined_label_source_count: 1,
             average_predicted_utility_micros: Some(2_100_000),
             average_label_utility_delta_micros: Some(2_500_000),
             average_absolute_error_micros: Some(400_000),
@@ -573,6 +574,7 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
             low_confidence_prediction_count: 0,
             confidence_threshold: 0.5,
             min_label_count: 1,
+            min_label_source_count: 1,
             max_average_absolute_error_micros: 500_000,
             promotable: true,
             reason_codes: Vec::new(),
@@ -582,6 +584,8 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
         .await
         .expect("upsert ranking calibration run");
     assert_eq!(calibration_run.calibration_run_id, calibration_run_id);
+    assert_eq!(calibration_run.joined_label_source_count, 1);
+    assert_eq!(calibration_run.min_label_source_count, 1);
     assert_eq!(calibration_run.mean_signed_error_micros, Some(-400_000));
     assert!(calibration_run.promotable);
 
