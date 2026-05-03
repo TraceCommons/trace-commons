@@ -15,9 +15,10 @@ use trace_commons_server::trace_corpus_storage::{
     TraceObjectRefWrite, TraceRankingCalibrationRunWrite, TraceRankingFeatureWrite,
     TraceRankingLabelOutcome, TraceRankingLabelSource, TraceRankingLabelWrite,
     TraceRankingModelStatus, TraceRankingModelVersionWrite, TraceRankingPredictionWrite,
-    TraceRankingUtilityCategory, TraceRankingWorkerRunKind, TraceRankingWorkerRunWrite,
-    TraceSubmissionWrite, TraceUtilityAttestationWrite, TraceVectorEntrySourceProjection,
-    TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWorkerKind,
+    TraceRankingUtilityCategory, TraceRankingWorkerRunKind, TraceRankingWorkerRunStatus,
+    TraceRankingWorkerRunWrite, TraceSubmissionWrite, TraceUtilityAttestationWrite,
+    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
+    TraceWorkerKind,
 };
 use uuid::Uuid;
 
@@ -612,6 +613,7 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
             tenant_id: tenant_alpha.clone(),
             ranking_worker_run_id: worker_run_id,
             run_kind: TraceRankingWorkerRunKind::ModelPromotion,
+            status: TraceRankingWorkerRunStatus::Completed,
             dry_run: false,
             reason_hash: "sha256:ranking-worker-run-reason".to_string(),
             model_version: Some(model.model_version.clone()),
@@ -628,6 +630,8 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
             reason_counts,
             actor_principal_ref: "principal:ranker-worker".to_string(),
             created_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            last_error_hash: None,
         })
         .await
         .expect("upsert ranking worker run");
@@ -636,7 +640,9 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
         worker_run.run_kind,
         TraceRankingWorkerRunKind::ModelPromotion
     );
+    assert_eq!(worker_run.status, TraceRankingWorkerRunStatus::Completed);
     assert_eq!(worker_run.succeeded_count, 1);
+    assert!(worker_run.completed_at.is_some());
     assert_eq!(
         worker_run.result_refs,
         vec![format!("ranking_model:{}", model.model_version)]

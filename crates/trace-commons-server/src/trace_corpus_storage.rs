@@ -20,6 +20,10 @@ fn default_trace_ranking_joined_evidence_hash() -> String {
     "sha256:legacy".to_string()
 }
 
+fn default_trace_ranking_worker_run_status() -> TraceRankingWorkerRunStatus {
+    TraceRankingWorkerRunStatus::Completed
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TraceCorpusStatus {
@@ -409,11 +413,20 @@ pub enum TraceRankingWorkerRunKind {
     ModelPromotion,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceRankingWorkerRunStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TraceRankingWorkerRunWrite {
     pub tenant_id: String,
     pub ranking_worker_run_id: Uuid,
     pub run_kind: TraceRankingWorkerRunKind,
+    pub status: TraceRankingWorkerRunStatus,
     pub dry_run: bool,
     pub reason_hash: String,
     pub model_version: Option<String>,
@@ -430,6 +443,8 @@ pub struct TraceRankingWorkerRunWrite {
     pub reason_counts: BTreeMap<String, u32>,
     pub actor_principal_ref: String,
     pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub last_error_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -437,6 +452,8 @@ pub struct TraceRankingWorkerRunRecord {
     pub tenant_id: String,
     pub ranking_worker_run_id: Uuid,
     pub run_kind: TraceRankingWorkerRunKind,
+    #[serde(default = "default_trace_ranking_worker_run_status")]
+    pub status: TraceRankingWorkerRunStatus,
     pub dry_run: bool,
     pub reason_hash: String,
     pub model_version: Option<String>,
@@ -453,6 +470,10 @@ pub struct TraceRankingWorkerRunRecord {
     pub reason_counts: BTreeMap<String, u32>,
     pub actor_principal_ref: String,
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_error_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
