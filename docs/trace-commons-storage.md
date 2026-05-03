@@ -526,7 +526,7 @@ The names below are intentionally close to the MVP concepts, but are not propose
 
 Access grants authorize service operations. Envelope contributor fields remain attribution only.
 In the current ingest service, `export_worker` is limited to replay/ranker export surfaces,
-`benchmark_worker` is limited to benchmark conversion, `retention_worker` is limited to
+`benchmark_worker` is limited to benchmark conversion and benchmark evaluation batches, `retention_worker` is limited to
 retention/cache cleanup maintenance, `revocation_worker` is limited to the
 revocation-propagation worker route, and `vector_worker` is limited to vector-index
 maintenance. `process_eval_worker` is limited to writing bounded process-evaluation
