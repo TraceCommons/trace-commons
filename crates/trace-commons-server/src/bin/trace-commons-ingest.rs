@@ -2074,6 +2074,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(credit_settlements_handler).post(credit_settlement_handler),
         )
         .route(
+            "/v1/workers/credit-settlements/run",
+            post(credit_settlement_worker_run_handler),
+        )
+        .route(
             "/v1/admin/credit-holds",
             get(credit_holds_handler).post(credit_hold_handler),
         )
@@ -6050,6 +6054,28 @@ async fn credit_settlement_handler(
 ) -> ApiResult<Json<TraceCreditSettlementRunResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
+    run_credit_settlement(state.as_ref(), &tenant, body)
+        .await
+        .map(Json)
+}
+
+async fn credit_settlement_worker_run_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceCreditSettlementRunRequest>,
+) -> ApiResult<Json<TraceCreditSettlementRunResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_utility_operator(&tenant)?;
+    run_credit_settlement(state.as_ref(), &tenant, body)
+        .await
+        .map(Json)
+}
+
+async fn run_credit_settlement(
+    state: &AppState,
+    tenant: &TenantAuth,
+    body: TraceCreditSettlementRunRequest,
+) -> ApiResult<TraceCreditSettlementRunResponse> {
     let policy_version = body.policy_version.trim().to_string();
     if policy_version.is_empty() {
         return Err(api_error(
@@ -6093,7 +6119,7 @@ async fn credit_settlement_handler(
         .ranking_target_use
         .unwrap_or(TraceAllowedUse::RankingModelTraining);
 
-    let records = read_reviewer_metadata_view(state.as_ref(), &tenant)
+    let records = read_reviewer_metadata_view(state, tenant)
         .await
         .map_err(internal_error)?
         .records;
@@ -6101,13 +6127,13 @@ async fn credit_settlement_handler(
         .iter()
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
-    let existing_batches = read_credit_settlement_batches_for_admin(state.as_ref(), &tenant)
+    let existing_batches = read_credit_settlement_batches_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
     if !body.dry_run {
         let repaired_outbox_count = repair_missing_near_credit_outbox_items_for_finalized_batches(
-            state.as_ref(),
-            &tenant,
+            state,
+            tenant,
             &existing_batches,
         )
         .await
@@ -6120,7 +6146,7 @@ async fn credit_settlement_handler(
             );
         }
     }
-    let held_credit_accounts = active_credit_hold_account_refs_for_admin(state.as_ref(), &tenant)
+    let held_credit_accounts = active_credit_hold_account_refs_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
     let already_settled_event_ids = existing_batches
@@ -6128,7 +6154,7 @@ async fn credit_settlement_handler(
         .filter(|batch| batch.status == StorageTraceCreditSettlementBatchStatus::Finalized)
         .flat_map(|batch| batch.source_credit_event_ids.iter().copied())
         .collect::<BTreeSet<_>>();
-    let credit_events = read_credit_events_for_admin(state.as_ref(), &tenant)
+    let credit_events = read_credit_events_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
     let candidate_events = credit_events
@@ -6152,8 +6178,8 @@ async fn credit_settlement_handler(
         .count();
     let ranking_calibration_gate = if ranking_candidate_count > 0 {
         ranking_settlement_calibration_gate(
-            state.as_ref(),
-            &tenant,
+            state,
+            tenant,
             &policy_version,
             ranking_model_version.as_deref(),
             ranking_target_use,
@@ -6163,7 +6189,7 @@ async fn credit_settlement_handler(
         None
     };
     let ranking_predictions = if ranking_candidate_count > 0 && ranking_calibration_gate.is_some() {
-        read_ranking_predictions_for_admin(state.as_ref(), &tenant)
+        read_ranking_predictions_for_admin(state, tenant)
             .await
             .map_err(internal_error)?
     } else {
@@ -6327,17 +6353,17 @@ async fn credit_settlement_handler(
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
         };
-        append_credit_settlement_batch_with_db_mirror(state.as_ref(), &tenant, &batch)
+        append_credit_settlement_batch_with_db_mirror(state, tenant, &batch)
             .await
             .map_err(internal_error)?;
         for item in &near_outbox_items {
-            append_near_credit_outbox_item_with_db_mirror(state.as_ref(), &tenant, item)
+            append_near_credit_outbox_item_with_db_mirror(state, tenant, item)
                 .await
                 .map_err(internal_error)?;
         }
     }
 
-    Ok(Json(TraceCreditSettlementRunResponse {
+    Ok(TraceCreditSettlementRunResponse {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref,
         settlement_batch_id,
@@ -6361,7 +6387,7 @@ async fn credit_settlement_handler(
             .as_ref()
             .map(|gate| gate.report_hash.clone()),
         ranking_credit_events_excluded_count,
-    }))
+    })
 }
 
 async fn repair_missing_near_credit_outbox_items_for_finalized_batches(
@@ -33327,6 +33353,112 @@ mod tests {
             Some("near-public-tx-hash-1")
         );
         assert!(submitted.submitted_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn credit_settlement_worker_run_finalizes_pending_utility_without_admin_scope() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("training submission succeeds");
+        let Json(credit) = utility_credit_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceUtilityCreditJobRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 2.25,
+                reason: "frontier lab training value".to_string(),
+                external_ref: "frontier:worker-settlement".to_string(),
+                submission_ids: vec![submission_id],
+            }),
+        )
+        .await
+        .expect("utility worker can append training credit");
+        assert_eq!(credit.appended_count, 1);
+
+        let admin_surface_error = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "utility worker cannot use admin settlement route".to_string(),
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect_err("utility workers cannot call the admin settlement route");
+        assert_eq!(admin_surface_error.0, StatusCode::FORBIDDEN);
+
+        let Json(settlement) = credit_settlement_worker_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "scheduled utility settlement".to_string(),
+                near_contract_id: Some("trace-credits.near".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("utility worker can run dedicated settlement surface");
+        assert_eq!(settlement.settled_source_event_count, 1);
+        assert_eq!(settlement.settled_account_count, 1);
+        assert_eq!(settlement.near_outbox_item_count, 1);
+
+        let batches =
+            read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(
+            batches[0].actor_principal_ref,
+            principal_storage_ref("utility-worker-token-a")
+        );
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(
+            outbox[0].status,
+            StorageTraceCreditSettlementNearStatus::Pending
+        );
+
+        let Json(retry) = credit_settlement_worker_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "scheduled utility settlement retry".to_string(),
+                near_contract_id: Some("trace-credits.near".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("worker settlement retry is idempotent");
+        assert_eq!(retry.settled_source_event_count, 0);
+        assert_eq!(retry.near_outbox_item_count, 0);
+        assert_eq!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("retry outbox reads")
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
