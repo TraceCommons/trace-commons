@@ -570,6 +570,8 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
             average_predicted_utility_micros: Some(2_100_000),
             average_label_utility_delta_micros: Some(2_500_000),
             average_absolute_error_micros: Some(400_000),
+            max_label_source_average_absolute_error_micros: Some(400_000),
+            max_error_label_source: Some("frontier_lab".to_string()),
             mean_signed_error_micros: Some(-400_000),
             low_confidence_prediction_count: 0,
             confidence_threshold: 0.5,
@@ -586,6 +588,14 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
     assert_eq!(calibration_run.calibration_run_id, calibration_run_id);
     assert_eq!(calibration_run.joined_label_source_count, 1);
     assert_eq!(calibration_run.min_label_source_count, 1);
+    assert_eq!(
+        calibration_run.max_label_source_average_absolute_error_micros,
+        Some(400_000)
+    );
+    assert_eq!(
+        calibration_run.max_error_label_source.as_deref(),
+        Some("frontier_lab")
+    );
     assert_eq!(calibration_run.mean_signed_error_micros, Some(-400_000));
     assert!(calibration_run.promotable);
 

@@ -138,7 +138,8 @@ const TRACE_RANKING_CALIBRATION_RUN_COLUMNS: &str = "\
     evaluation_dataset_hash, prediction_count, label_count, joined_label_prediction_count, \
     joined_label_source_count, \
     average_predicted_utility_micros, average_label_utility_delta_micros, \
-    average_absolute_error_micros, mean_signed_error_micros, low_confidence_prediction_count, \
+    average_absolute_error_micros, max_label_source_average_absolute_error_micros, \
+    max_error_label_source, mean_signed_error_micros, low_confidence_prediction_count, \
     confidence_threshold, min_label_count, min_label_source_count, \
     max_average_absolute_error_micros, promotable, reason_codes, report_hash, actor_principal_ref, \
     created_at";
@@ -686,6 +687,9 @@ fn row_to_ranking_calibration_run(
         average_predicted_utility_micros: row.get("average_predicted_utility_micros"),
         average_label_utility_delta_micros: row.get("average_label_utility_delta_micros"),
         average_absolute_error_micros: row.get("average_absolute_error_micros"),
+        max_label_source_average_absolute_error_micros: row
+            .get("max_label_source_average_absolute_error_micros"),
+        max_error_label_source: row.get("max_error_label_source"),
         mean_signed_error_micros: row.get("mean_signed_error_micros"),
         low_confidence_prediction_count: row_i32_to_u32(row, "low_confidence_prediction_count")?,
         confidence_threshold: row.get("confidence_threshold"),
@@ -2315,13 +2319,15 @@ impl TraceCorpusStore for PgBackend {
                         evaluation_dataset_hash, prediction_count, label_count,
                         joined_label_prediction_count, joined_label_source_count,
                         average_predicted_utility_micros, average_label_utility_delta_micros,
-                        average_absolute_error_micros, mean_signed_error_micros,
+                        average_absolute_error_micros,
+                        max_label_source_average_absolute_error_micros,
+                        max_error_label_source, mean_signed_error_micros,
                         low_confidence_prediction_count, confidence_threshold, min_label_count,
                         min_label_source_count, max_average_absolute_error_micros, promotable,
                         reason_codes, report_hash, actor_principal_ref
                      ) VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                        $17, $18, $19, $20, $21, $22, $23
+                        $17, $18, $19, $20, $21, $22, $23, $24, $25
                      )
                      ON CONFLICT (tenant_id, calibration_run_id) DO UPDATE SET
                         model_version = excluded.model_version,
@@ -2335,6 +2341,8 @@ impl TraceCorpusStore for PgBackend {
                         average_predicted_utility_micros = excluded.average_predicted_utility_micros,
                         average_label_utility_delta_micros = excluded.average_label_utility_delta_micros,
                         average_absolute_error_micros = excluded.average_absolute_error_micros,
+                        max_label_source_average_absolute_error_micros = excluded.max_label_source_average_absolute_error_micros,
+                        max_error_label_source = excluded.max_error_label_source,
                         mean_signed_error_micros = excluded.mean_signed_error_micros,
                         low_confidence_prediction_count = excluded.low_confidence_prediction_count,
                         confidence_threshold = excluded.confidence_threshold,
@@ -2361,6 +2369,8 @@ impl TraceCorpusStore for PgBackend {
                     &run.average_predicted_utility_micros,
                     &run.average_label_utility_delta_micros,
                     &run.average_absolute_error_micros,
+                    &run.max_label_source_average_absolute_error_micros,
+                    &run.max_error_label_source,
                     &run.mean_signed_error_micros,
                     &low_confidence_prediction_count,
                     &run.confidence_threshold,
