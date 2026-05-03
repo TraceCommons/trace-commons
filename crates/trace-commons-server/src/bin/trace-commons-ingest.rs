@@ -256,6 +256,8 @@ const TRACE_RANKING_MODEL_PROMOTION_RUN_DEFAULT_LIMIT: usize = 25;
 const TRACE_RANKING_MODEL_PROMOTION_RUN_MAX_LIMIT: usize = 100;
 const TRACE_BENCHMARK_EVALUATION_WORKER_RUN_DEFAULT_LIMIT: usize = 25;
 const TRACE_BENCHMARK_EVALUATION_WORKER_RUN_MAX_LIMIT: usize = 100;
+const TRACE_BENCHMARK_REGISTRY_PUBLICATION_WORKER_RUN_DEFAULT_LIMIT: usize = 25;
+const TRACE_BENCHMARK_REGISTRY_PUBLICATION_WORKER_RUN_MAX_LIMIT: usize = 100;
 const TRACE_RANKING_WORKER_RUN_STALE_AFTER_HOURS: i64 = 1;
 const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
 const TRACE_REVIEW_DUE_AFTER_HOURS: i64 = 24;
@@ -2111,6 +2113,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/workers/benchmark-evaluations/run",
             post(benchmark_evaluation_worker_run_handler),
+        )
+        .route(
+            "/v1/workers/benchmark-registry-publications/run",
+            post(benchmark_registry_publication_worker_run_handler),
         )
         .route(
             "/v1/workers/replay-export",
@@ -14879,6 +14885,34 @@ struct BenchmarkEvaluationWorkerRunResponse {
     skipped_reason_counts: BTreeMap<String, usize>,
 }
 
+#[derive(Debug, Deserialize)]
+struct BenchmarkRegistryPublicationWorkerRunRequest {
+    limit: Option<usize>,
+    #[serde(default)]
+    dry_run: Option<bool>,
+    #[serde(default)]
+    registry_ref_prefix: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct BenchmarkRegistryPublicationWorkerRunResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    dry_run: bool,
+    limit: usize,
+    registry_ref_prefix: String,
+    reason_hash: String,
+    checked_count: usize,
+    published_count: usize,
+    skipped_existing_count: usize,
+    skipped_ineligible_count: usize,
+    pending_after_count: usize,
+    published_conversion_ids: Vec<Uuid>,
+    skipped_reason_counts: BTreeMap<String, usize>,
+}
+
 async fn benchmark_convert_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -15062,6 +15096,168 @@ fn normalize_benchmark_evaluation_worker_reason(value: Option<String>) -> ApiRes
         ));
     };
     Ok(value)
+}
+
+async fn benchmark_registry_publication_worker_run_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<BenchmarkRegistryPublicationWorkerRunRequest>,
+) -> ApiResult<Json<BenchmarkRegistryPublicationWorkerRunResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_benchmarker(&tenant)?;
+    run_benchmark_registry_publication_worker(state.as_ref(), &tenant, body)
+        .await
+        .map(Json)
+}
+
+async fn run_benchmark_registry_publication_worker(
+    state: &AppState,
+    tenant: &TenantAuth,
+    body: BenchmarkRegistryPublicationWorkerRunRequest,
+) -> ApiResult<BenchmarkRegistryPublicationWorkerRunResponse> {
+    let limit = validate_benchmark_registry_publication_worker_limit(body.limit)?;
+    let dry_run = body.dry_run.unwrap_or(false);
+    let registry_ref_prefix = normalize_benchmark_registry_ref_prefix(body.registry_ref_prefix)?;
+    let reason = normalize_benchmark_registry_publication_worker_reason(body.reason)?;
+    let artifacts = list_benchmark_conversion_artifacts_for_worker(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let mut response = BenchmarkRegistryPublicationWorkerRunResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        dry_run,
+        limit,
+        registry_ref_prefix: registry_ref_prefix.clone(),
+        reason_hash: sha256_prefixed(&reason),
+        checked_count: 0,
+        published_count: 0,
+        skipped_existing_count: 0,
+        skipped_ineligible_count: 0,
+        pending_after_count: 0,
+        published_conversion_ids: Vec::new(),
+        skipped_reason_counts: BTreeMap::new(),
+    };
+
+    for artifact in artifacts.iter().take(limit) {
+        response.checked_count += 1;
+        if artifact.registry.status == TraceBenchmarkRegistryStatus::Published {
+            response.skipped_existing_count += 1;
+            increment_count(
+                &mut response.skipped_reason_counts,
+                "registry_already_published",
+            );
+            continue;
+        }
+        if artifact.registry.status != TraceBenchmarkRegistryStatus::Candidate {
+            response.skipped_ineligible_count += 1;
+            increment_count(
+                &mut response.skipped_reason_counts,
+                "registry_not_candidate",
+            );
+            continue;
+        }
+        if artifact.evaluation.status != TraceBenchmarkEvaluationStatus::Passed {
+            response.skipped_ineligible_count += 1;
+            increment_count(&mut response.skipped_reason_counts, "evaluation_not_passed");
+            continue;
+        }
+        if !benchmark_artifact_has_publishable_evaluation_metadata(artifact) {
+            response.skipped_ineligible_count += 1;
+            increment_count(
+                &mut response.skipped_reason_counts,
+                "evaluator_metadata_incomplete",
+            );
+            continue;
+        }
+        let registry_ref =
+            benchmark_registry_publication_ref(&registry_ref_prefix, artifact.conversion_id)?;
+        if !dry_run {
+            let _ = update_benchmark_lifecycle(
+                state,
+                tenant,
+                artifact.conversion_id,
+                BenchmarkLifecycleUpdateRequest {
+                    registry: Some(TraceBenchmarkRegistryPatch {
+                        status: Some(TraceBenchmarkRegistryStatus::Published),
+                        registry_ref: Some(registry_ref),
+                        published_at: Some(Utc::now()),
+                    }),
+                    evaluation: None,
+                    reason: Some(reason.clone()),
+                },
+            )
+            .await?;
+        }
+        response.published_count += 1;
+        response
+            .published_conversion_ids
+            .push(artifact.conversion_id);
+    }
+    response.pending_after_count = artifacts
+        .iter()
+        .skip(limit)
+        .filter(|artifact| benchmark_artifact_is_publishable_by_worker(artifact))
+        .count();
+    Ok(response)
+}
+
+fn validate_benchmark_registry_publication_worker_limit(limit: Option<usize>) -> ApiResult<usize> {
+    let limit = limit.unwrap_or(TRACE_BENCHMARK_REGISTRY_PUBLICATION_WORKER_RUN_DEFAULT_LIMIT);
+    if !(1..=TRACE_BENCHMARK_REGISTRY_PUBLICATION_WORKER_RUN_MAX_LIMIT).contains(&limit) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "benchmark registry publication worker limit must be between 1 and 100",
+        ));
+    }
+    Ok(limit)
+}
+
+fn normalize_benchmark_registry_ref_prefix(value: Option<String>) -> ApiResult<String> {
+    let Some(value) = value
+        .map(|value| value.trim().trim_end_matches(':').to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "benchmark registry publication worker requires registry_ref_prefix",
+        ));
+    };
+    if value.len() > 400 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "benchmark registry_ref_prefix is limited to 400 characters",
+        ));
+    }
+    Ok(value)
+}
+
+fn normalize_benchmark_registry_publication_worker_reason(
+    value: Option<String>,
+) -> ApiResult<String> {
+    let Some(value) = value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "benchmark registry publication worker requires reason",
+        ));
+    };
+    Ok(value)
+}
+
+fn benchmark_registry_publication_ref(
+    registry_ref_prefix: &str,
+    conversion_id: Uuid,
+) -> ApiResult<String> {
+    normalize_benchmark_lifecycle_ref(format!("{registry_ref_prefix}:{conversion_id}"))?.ok_or_else(
+        || {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "benchmark registry publication worker requires registry_ref_prefix",
+            )
+        },
+    )
 }
 
 fn increment_count(counts: &mut BTreeMap<String, usize>, label: &str) {
@@ -28752,6 +28948,22 @@ fn benchmark_artifact_is_pending_evaluation(artifact: &TraceBenchmarkConversionA
         && !artifact.candidates.is_empty()
 }
 
+fn benchmark_artifact_is_publishable_by_worker(
+    artifact: &TraceBenchmarkConversionArtifact,
+) -> bool {
+    artifact.registry.status == TraceBenchmarkRegistryStatus::Candidate
+        && artifact.evaluation.status == TraceBenchmarkEvaluationStatus::Passed
+        && benchmark_artifact_has_publishable_evaluation_metadata(artifact)
+}
+
+fn benchmark_artifact_has_publishable_evaluation_metadata(
+    artifact: &TraceBenchmarkConversionArtifact,
+) -> bool {
+    artifact.evaluation.evaluator_ref.is_some()
+        && artifact.evaluation.evaluated_at.is_some()
+        && artifact.evaluation.score.is_some()
+}
+
 fn evaluate_benchmark_artifact_for_worker(
     artifact: &TraceBenchmarkConversionArtifact,
     min_score: f32,
@@ -36726,6 +36938,115 @@ mod tests {
                 && event.export_id == Some(benchmark.conversion_id)
                 && event.reason.as_deref().is_some_and(|reason| {
                     reason.contains("registry_status=candidate")
+                        && reason.contains("evaluation_status=passed")
+                })
+        }));
+    }
+
+    #[tokio::test]
+    async fn benchmark_registry_publication_worker_publishes_passed_evaluations_only() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::BenchmarkOnly];
+        envelope.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::BenchmarkGeneration];
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("benchmark source submission succeeds");
+
+        let Json(benchmark) = benchmark_worker_convert_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("worker_registry_publication".to_string()),
+                consent_scope: Some("benchmark_only".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: Some("benchmark:registry-publication-worker".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark worker conversion succeeds");
+
+        let _ = benchmark_evaluation_worker_run_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkEvaluationWorkerRunRequest {
+                limit: Some(10),
+                dry_run: Some(false),
+                evaluator_ref: Some("deterministic-benchmark-evaluator:v1".to_string()),
+                min_score: None,
+                reason: Some("scheduled benchmark evaluator run".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark evaluation worker run succeeds");
+
+        let Json(run) = benchmark_registry_publication_worker_run_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkRegistryPublicationWorkerRunRequest {
+                limit: Some(10),
+                dry_run: Some(false),
+                registry_ref_prefix: Some("benchmark-registry:tenant-a".to_string()),
+                reason: Some("scheduled benchmark registry publication".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark registry publication worker run succeeds");
+
+        assert!(!run.dry_run);
+        assert_eq!(run.checked_count, 1);
+        assert_eq!(run.published_count, 1);
+        assert_eq!(run.skipped_existing_count, 0);
+        assert_eq!(run.skipped_ineligible_count, 0);
+        assert_eq!(run.pending_after_count, 0);
+        assert_eq!(run.published_conversion_ids, vec![benchmark.conversion_id]);
+
+        let persisted: TraceBenchmarkConversionArtifact = serde_json::from_str(
+            &std::fs::read_to_string(benchmark_artifact_path(
+                temp.path(),
+                "tenant-a",
+                benchmark.conversion_id,
+            ))
+            .expect("benchmark artifact reads"),
+        )
+        .expect("benchmark artifact parses");
+        assert_eq!(
+            persisted.registry.status,
+            TraceBenchmarkRegistryStatus::Published
+        );
+        let expected_registry_ref =
+            format!("benchmark-registry:tenant-a:{}", benchmark.conversion_id);
+        assert_eq!(
+            persisted.registry.registry_ref.as_deref(),
+            Some(expected_registry_ref.as_str())
+        );
+        assert!(persisted.registry.published_at.is_some());
+        assert_eq!(
+            persisted.evaluation.status,
+            TraceBenchmarkEvaluationStatus::Passed
+        );
+        assert_eq!(
+            persisted.evaluation.evaluator_ref.as_deref(),
+            Some("deterministic-benchmark-evaluator:v1")
+        );
+
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "benchmark_lifecycle_update"
+                && event.export_id == Some(benchmark.conversion_id)
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("registry_status=published")
                         && reason.contains("evaluation_status=passed")
                 })
         }));
