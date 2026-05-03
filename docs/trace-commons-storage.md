@@ -734,7 +734,7 @@ The consolidated Trace Commons migration implements the compact `trace_export_ma
 | `published_export_manifest_id` | Optional export linkage. |
 | `created_at`, `invalidated_at`, `deleted_at` | Lifecycle timestamps. |
 
-Benchmark conversion must fail closed if the source is revoked, expired, not approved for the target use, missing replay metadata, or out of policy.
+Benchmark conversion must fail closed if the source is revoked, expired, not approved for the target use, missing replay metadata, or out of policy. Benchmark lifecycle publication must also fail closed until the artifact has passed evaluator metadata plus registry/evaluator refs, timestamps, and score.
 
 ### Tombstones and Retention Jobs
 
@@ -1029,6 +1029,7 @@ Revocation propagation tests:
 - After revocation, status sync reports revoked, review approval fails, credit finalizes or reverses according to policy, and dataset export excludes the source.
 - Vector worker checks revocation before read and before publish; a revoked source cannot create or keep an active vector entry.
 - Benchmark conversion and export jobs fail closed when revocation occurs between selection and publish.
+- Benchmark lifecycle publication rejects registry `published` updates that lack passed evaluator metadata and concrete registry/evaluator evidence fields.
 - Existing replay export manifests and their item rows are marked invalid when a source is revoked after export.
 - Retention jobs skip or alter actions when revocation or legal hold state changes after dry-run selection.
 - Reconciliation finds active derived artifacts, vectors, benchmark artifacts, or exports whose source is revoked and invalidates them.
