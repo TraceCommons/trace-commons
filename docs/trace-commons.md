@@ -377,9 +377,14 @@ promotion gate.
 and automation gates: `ranking_min_label_count`,
 `ranking_min_confidence_threshold`,
 `ranking_max_average_absolute_error_micros`, and
-`ranking_worker_run_stale_after_hours`. This safe projection lets
-operators confirm workers cannot lower the sample-size or quality requirements
-below production credit policy.
+`ranking_worker_run_stale_after_hours`. It also reports safe NEAR settlement
+readiness fields: `near_credit_submitter_configured`,
+`near_credit_submitter_timeout_ms`, `near_credit_outbox_submit_default_limit`,
+`near_credit_outbox_submit_max_limit`, and `credit_cycle_worker_step_count`.
+This safe projection lets operators confirm workers cannot lower the
+sample-size or quality requirements below production credit policy and can see
+whether live NEAR submission is wired without exposing the relayer URL, bearer
+token, hosts, or account identities.
 
 Maintenance parity for credit settlement is first-class: backfill counts and mirrors file-backed utility attestations, credit settlement batches, credit holds, and NEAR credit outbox rows/status, while reconciliation reports file/DB counts, missing-id gaps, settlement/outbox status drift, and hold-release drift for each family before credit settlement read flags or required mirror writes are promoted. Ranking parity uses the same maintenance channel: backfill counts and mirrors file-backed ranking model versions, feature/prediction/label evidence, calibration runs, and worker-run rows, while reconciliation reports file/DB counts, missing rows, model status drift, calibration report-hash drift, and worker-run status drift before DB reviewer ranking reads or credit-bearing ranking paths are promoted.
 

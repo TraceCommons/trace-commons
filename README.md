@@ -57,6 +57,10 @@ manually mark items submitted, confirmed, or failed for fallback operations. The
 server ledger remains authoritative; NEAR payloads contain batch ids, account
 hashes, source-list hashes, policy versions, amounts, and issuer-signature
 hashes, never trace bodies or raw contributor identity.
+`GET /v1/admin/config-status` exposes only safe NEAR readiness fields for this
+path: whether a submitter is configured, the configured submit timeout, outbox
+submit bounds, and the credit-cycle step count. It does not expose the relayer
+URL, bearer token, hosts, or contributor identity.
 
 Ranking evidence is stored separately from settlement. Workers can register
 feature hashes, model predictions, lab/reviewer labels, and calibration runs
