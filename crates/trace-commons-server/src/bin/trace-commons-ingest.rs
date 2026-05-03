@@ -3872,6 +3872,9 @@ struct TraceCommonsConfigStatusResponse {
     near_credit_outbox_submit_default_limit: u32,
     near_credit_outbox_submit_max_limit: u32,
     credit_cycle_worker_step_count: usize,
+    credit_cycle_scheduler_default_limit: usize,
+    credit_cycle_scheduler_max_limit: usize,
+    credit_cycle_scheduler_preflight_only_supported: bool,
     artifact_store_configured: bool,
     artifact_object_store: Option<String>,
     artifact_object_store_io_enabled: bool,
@@ -3998,6 +4001,9 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         near_credit_outbox_submit_default_limit: TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT,
         near_credit_outbox_submit_max_limit: TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT,
         credit_cycle_worker_step_count: TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT,
+        credit_cycle_scheduler_default_limit: TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_LIMIT,
+        credit_cycle_scheduler_max_limit: TRACE_CREDIT_CYCLE_SCHEDULER_MAX_LIMIT,
+        credit_cycle_scheduler_preflight_only_supported: true,
         artifact_store_configured: state.artifact_store.is_some(),
         artifact_object_store: state
             .artifact_store
@@ -32733,6 +32739,18 @@ mod tests {
         assert_eq!(
             value["credit_cycle_worker_step_count"],
             serde_json::json!(TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT)
+        );
+        assert_eq!(
+            value["credit_cycle_scheduler_default_limit"],
+            serde_json::json!(TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_LIMIT)
+        );
+        assert_eq!(
+            value["credit_cycle_scheduler_max_limit"],
+            serde_json::json!(TRACE_CREDIT_CYCLE_SCHEDULER_MAX_LIMIT)
+        );
+        assert_eq!(
+            value["credit_cycle_scheduler_preflight_only_supported"],
+            serde_json::json!(true)
         );
         assert_eq!(
             value["submission_quota"],
