@@ -8086,9 +8086,16 @@ async fn ranking_prediction_credit_handler(
         .into_iter()
         .find(|prediction| prediction.ranking_prediction_id == body.ranking_prediction_id)
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "ranking prediction not found"))?;
-    append_ranking_prediction_credit_for_record(state.as_ref(), &tenant, prediction, &reason, false)
-        .await
-        .map(Json)
+    append_ranking_prediction_credit_for_record(
+        state.as_ref(),
+        &tenant,
+        prediction,
+        &reason,
+        false,
+        false,
+    )
+    .await
+    .map(Json)
 }
 
 async fn ranking_prediction_credit_run_handler(
@@ -8217,6 +8224,7 @@ async fn ranking_prediction_credit_run_handler(
             prediction,
             &reason,
             body.dry_run,
+            true,
         )
         .await
         {
@@ -8325,12 +8333,52 @@ async fn count_pending_ranking_prediction_credits(
         .count())
 }
 
+async fn ranking_prediction_model_risk_codes(
+    state: &AppState,
+    tenant: &TenantAuth,
+    prediction: &TraceRankingPredictionRecord,
+) -> ApiResult<Vec<String>> {
+    let model_versions = read_ranking_model_versions_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let predictions = read_ranking_predictions_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let labels = read_ranking_labels_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let calibration_runs = read_ranking_calibration_runs_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let risk_key = ranking_prediction_risk_lookup_key(prediction);
+    Ok(ranking_model_risk_report(
+        state,
+        tenant,
+        &model_versions,
+        &predictions,
+        &labels,
+        &calibration_runs,
+    )
+    .models
+    .into_iter()
+    .find(|model| {
+        ranking_model_risk_lookup_key(
+            &model.model_version,
+            model.target_use,
+            &model.policy_version,
+        ) == risk_key
+    })
+    .map(|model| model.risk_codes)
+    .unwrap_or_default())
+}
+
 async fn append_ranking_prediction_credit_for_record(
     state: &AppState,
     tenant: &TenantAuth,
     prediction: TraceRankingPredictionRecord,
     reason: &str,
     dry_run: bool,
+    allow_at_risk_model: bool,
 ) -> ApiResult<TraceRankingPredictionCreditResponse> {
     if prediction.settlement_score_micros <= 0 {
         return Err(api_error(
@@ -8391,6 +8439,18 @@ async fn append_ranking_prediction_credit_for_record(
             StatusCode::CONFLICT,
             "ranking prediction credit requires prediction confidence to meet the calibration threshold",
         ));
+    }
+    if !allow_at_risk_model {
+        let risk_codes = ranking_prediction_model_risk_codes(state, tenant, &prediction).await?;
+        if !risk_codes.is_empty() {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                format!(
+                    "ranking prediction credit requires model risk to be clear: {}",
+                    risk_codes.join(",")
+                ),
+            ));
+        }
     }
 
     let credit_points_delta = prediction.settlement_score_micros as f32 / 1_000_000.0;
@@ -36344,7 +36404,7 @@ mod tests {
         )
         .await
         .expect("utility worker can write post-calibration feature");
-        let Json(_) = ranking_prediction_handler(
+        let Json(drift_prediction) = ranking_prediction_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
             Json(TraceRankingPredictionRequest {
@@ -36390,6 +36450,17 @@ mod tests {
                 .risk_codes
                 .contains(&"joined_evidence_changed_since_calibration".to_string())
         );
+        let single_credit_error = ranking_prediction_credit_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionCreditRequest {
+                ranking_prediction_id: drift_prediction.ranking_prediction_id,
+                reason: "single prediction credit should wait for risk clearance".to_string(),
+            }),
+        )
+        .await
+        .expect_err("single prediction credit worker skips uncleared model risk");
+        assert_eq!(single_credit_error.0, StatusCode::CONFLICT);
 
         let Json(run) = ranking_prediction_credit_run_handler(
             State(state.clone()),
