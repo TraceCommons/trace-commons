@@ -29,7 +29,8 @@ use crate::trace_corpus_storage::{
     TraceRankingFeatureWrite, TraceRankingLabelOutcome, TraceRankingLabelRecord,
     TraceRankingLabelSource, TraceRankingLabelWrite, TraceRankingModelStatus,
     TraceRankingModelVersionRecord, TraceRankingModelVersionWrite, TraceRankingPredictionRecord,
-    TraceRankingPredictionWrite, TraceRankingUtilityCategory, TraceRetentionJobItemAction,
+    TraceRankingPredictionWrite, TraceRankingUtilityCategory, TraceRankingWorkerRunKind,
+    TraceRankingWorkerRunRecord, TraceRankingWorkerRunWrite, TraceRetentionJobItemAction,
     TraceRetentionJobItemRecord, TraceRetentionJobItemStatus, TraceRetentionJobItemWrite,
     TraceRetentionJobRecord, TraceRetentionJobStatus, TraceRetentionJobWrite,
     TraceRevocationPropagationAction, TraceRevocationPropagationItemRecord,
@@ -144,6 +145,12 @@ const TRACE_RANKING_CALIBRATION_RUN_COLUMNS: &str = "\
     confidence_threshold, min_label_count, min_label_source_count, \
     max_average_absolute_error_micros, promotable, reason_codes, report_hash, actor_principal_ref, \
     created_at";
+
+const TRACE_RANKING_WORKER_RUN_COLUMNS: &str = "\
+    tenant_id, ranking_worker_run_id, run_kind, dry_run, reason_hash, model_version, target_use, \
+    policy_version, limit_count, checked_count, succeeded_count, skipped_existing_count, \
+    skipped_model_risk_count, skipped_ineligible_count, pending_after_count, result_refs, \
+    reason_counts, actor_principal_ref, created_at";
 
 async fn ensure_pg_object_ref_belongs_to_submission(
     tx: &Transaction<'_>,
@@ -672,6 +679,14 @@ fn row_i32_to_u32(row: &Row, column: &str) -> Result<u32, DatabaseError> {
     })
 }
 
+fn u32_to_pg_i32(value: u32, column: &str) -> Result<i32, DatabaseError> {
+    i32::try_from(value).map_err(|e| {
+        DatabaseError::Serialization(format!(
+            "trace {column} exceeds PostgreSQL integer range: {e}"
+        ))
+    })
+}
+
 fn row_to_ranking_calibration_run(
     row: &Row,
 ) -> Result<TraceRankingCalibrationRunRecord, DatabaseError> {
@@ -703,6 +718,36 @@ fn row_to_ranking_calibration_run(
         promotable: row.get("promotable"),
         reason_codes: json_array_strings(reason_codes, "ranking_calibration_runs.reason_codes")?,
         report_hash: row.get("report_hash"),
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn row_to_ranking_worker_run(row: &Row) -> Result<TraceRankingWorkerRunRecord, DatabaseError> {
+    let run_kind: String = row.get("run_kind");
+    let result_refs: serde_json::Value = row.get("result_refs");
+    let reason_counts: serde_json::Value = row.get("reason_counts");
+    Ok(TraceRankingWorkerRunRecord {
+        tenant_id: row.get("tenant_id"),
+        ranking_worker_run_id: row.get("ranking_worker_run_id"),
+        run_kind: enum_from_storage::<TraceRankingWorkerRunKind>(
+            &run_kind,
+            "TraceRankingWorkerRunKind",
+        )?,
+        dry_run: row.get("dry_run"),
+        reason_hash: row.get("reason_hash"),
+        model_version: row.get("model_version"),
+        target_use: row.get("target_use"),
+        policy_version: row.get("policy_version"),
+        limit: row_i32_to_u32(row, "limit_count")?,
+        checked_count: row_i32_to_u32(row, "checked_count")?,
+        succeeded_count: row_i32_to_u32(row, "succeeded_count")?,
+        skipped_existing_count: row_i32_to_u32(row, "skipped_existing_count")?,
+        skipped_model_risk_count: row_i32_to_u32(row, "skipped_model_risk_count")?,
+        skipped_ineligible_count: row_i32_to_u32(row, "skipped_ineligible_count")?,
+        pending_after_count: row_i32_to_u32(row, "pending_after_count")?,
+        result_refs: json_array_strings(result_refs, "ranking_worker_runs.result_refs")?,
+        reason_counts: json_u32_map(reason_counts, "ranking_worker_runs.reason_counts")?,
         actor_principal_ref: row.get("actor_principal_ref"),
         created_at: row.get("created_at"),
     })
@@ -2415,6 +2460,129 @@ impl TraceCorpusStore for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
         let records = rows.iter().map(row_to_ranking_calibration_run).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_ranking_worker_run(
+        &self,
+        run: TraceRankingWorkerRunWrite,
+    ) -> Result<TraceRankingWorkerRunRecord, DatabaseError> {
+        self.ensure_trace_tenant(&run.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &run.tenant_id).await?;
+        let run_kind = enum_to_storage(run.run_kind)?;
+        let limit = u32_to_pg_i32(run.limit, "ranking_worker_runs.limit")?;
+        let checked_count = u32_to_pg_i32(run.checked_count, "ranking_worker_runs.checked_count")?;
+        let succeeded_count =
+            u32_to_pg_i32(run.succeeded_count, "ranking_worker_runs.succeeded_count")?;
+        let skipped_existing_count = u32_to_pg_i32(
+            run.skipped_existing_count,
+            "ranking_worker_runs.skipped_existing_count",
+        )?;
+        let skipped_model_risk_count = u32_to_pg_i32(
+            run.skipped_model_risk_count,
+            "ranking_worker_runs.skipped_model_risk_count",
+        )?;
+        let skipped_ineligible_count = u32_to_pg_i32(
+            run.skipped_ineligible_count,
+            "ranking_worker_runs.skipped_ineligible_count",
+        )?;
+        let pending_after_count = u32_to_pg_i32(
+            run.pending_after_count,
+            "ranking_worker_runs.pending_after_count",
+        )?;
+        let result_refs = serde_json::to_value(&run.result_refs).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace ranking worker run result_refs encode failed: {e}"
+            ))
+        })?;
+        let reason_counts = serde_json::to_value(&run.reason_counts).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace ranking worker run reason_counts encode failed: {e}"
+            ))
+        })?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_ranking_worker_runs (
+                        tenant_id, ranking_worker_run_id, run_kind, dry_run, reason_hash,
+                        model_version, target_use, policy_version, limit_count, checked_count,
+                        succeeded_count, skipped_existing_count, skipped_model_risk_count,
+                        skipped_ineligible_count, pending_after_count, result_refs, reason_counts,
+                        actor_principal_ref, created_at
+                     ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                        $17, $18, $19
+                     )
+                     ON CONFLICT (tenant_id, ranking_worker_run_id) DO UPDATE SET
+                        run_kind = excluded.run_kind,
+                        dry_run = excluded.dry_run,
+                        reason_hash = excluded.reason_hash,
+                        model_version = excluded.model_version,
+                        target_use = excluded.target_use,
+                        policy_version = excluded.policy_version,
+                        limit_count = excluded.limit_count,
+                        checked_count = excluded.checked_count,
+                        succeeded_count = excluded.succeeded_count,
+                        skipped_existing_count = excluded.skipped_existing_count,
+                        skipped_model_risk_count = excluded.skipped_model_risk_count,
+                        skipped_ineligible_count = excluded.skipped_ineligible_count,
+                        pending_after_count = excluded.pending_after_count,
+                        result_refs = excluded.result_refs,
+                        reason_counts = excluded.reason_counts,
+                        actor_principal_ref = excluded.actor_principal_ref,
+                        created_at = excluded.created_at
+                     RETURNING {TRACE_RANKING_WORKER_RUN_COLUMNS}"
+                ),
+                &[
+                    &run.tenant_id,
+                    &run.ranking_worker_run_id,
+                    &run_kind,
+                    &run.dry_run,
+                    &run.reason_hash,
+                    &run.model_version,
+                    &run.target_use,
+                    &run.policy_version,
+                    &limit,
+                    &checked_count,
+                    &succeeded_count,
+                    &skipped_existing_count,
+                    &skipped_model_risk_count,
+                    &skipped_ineligible_count,
+                    &pending_after_count,
+                    &result_refs,
+                    &reason_counts,
+                    &run.actor_principal_ref,
+                    &run.created_at,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_ranking_worker_run(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_ranking_worker_runs(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingWorkerRunRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_RANKING_WORKER_RUN_COLUMNS}
+                     FROM trace_ranking_worker_runs
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, ranking_worker_run_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_ranking_worker_run).collect();
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         records
     }

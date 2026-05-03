@@ -138,6 +138,7 @@ fn expected_trace_rls_tables() -> Vec<&'static str> {
         "trace_ranking_predictions",
         "trace_ranking_labels",
         "trace_ranking_calibration_runs",
+        "trace_ranking_worker_runs",
     ]
 }
 
@@ -772,10 +773,13 @@ async fn assert_trace_rls_policies_installed(backend: &PgBackend) {
 
 #[test]
 fn force_rls_migration_covers_every_trace_rls_table() {
-    let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../migrations/V6__trace_force_rls.sql");
-    let sql = std::fs::read_to_string(&migration_path)
+    let migrations_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+    let mut sql = std::fs::read_to_string(migrations_root.join("V6__trace_force_rls.sql"))
         .expect("read FORCE RLS production hardening migration");
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V11__trace_ranking_worker_runs.sql"))
+            .expect("read ranking worker run production hardening migration"),
+    );
     for table in expected_trace_rls_tables() {
         let statement = format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY;");
         assert!(

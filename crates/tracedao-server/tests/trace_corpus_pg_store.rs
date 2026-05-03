@@ -15,9 +15,9 @@ use tracedao_server::trace_corpus_storage::{
     TraceObjectRefWrite, TraceRankingCalibrationRunWrite, TraceRankingFeatureWrite,
     TraceRankingLabelOutcome, TraceRankingLabelSource, TraceRankingLabelWrite,
     TraceRankingModelStatus, TraceRankingModelVersionWrite, TraceRankingPredictionWrite,
-    TraceRankingUtilityCategory, TraceSubmissionWrite, TraceUtilityAttestationWrite,
-    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-    TraceWorkerKind,
+    TraceRankingUtilityCategory, TraceRankingWorkerRunKind, TraceRankingWorkerRunWrite,
+    TraceSubmissionWrite, TraceUtilityAttestationWrite, TraceVectorEntrySourceProjection,
+    TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWorkerKind,
 };
 use uuid::Uuid;
 
@@ -604,6 +604,48 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
     assert_eq!(calibration_run.mean_signed_error_micros, Some(-400_000));
     assert!(calibration_run.promotable);
 
+    let mut reason_counts = BTreeMap::new();
+    reason_counts.insert("insufficient_labels".to_string(), 1);
+    let worker_run_id = Uuid::new_v4();
+    let worker_run = backend
+        .upsert_trace_ranking_worker_run(TraceRankingWorkerRunWrite {
+            tenant_id: tenant_alpha.clone(),
+            ranking_worker_run_id: worker_run_id,
+            run_kind: TraceRankingWorkerRunKind::ModelPromotion,
+            dry_run: false,
+            reason_hash: "sha256:ranking-worker-run-reason".to_string(),
+            model_version: Some(model.model_version.clone()),
+            target_use: Some("model_training".to_string()),
+            policy_version: Some("trace-credit-policy-v2".to_string()),
+            limit: 10,
+            checked_count: 2,
+            succeeded_count: 1,
+            skipped_existing_count: 0,
+            skipped_model_risk_count: 0,
+            skipped_ineligible_count: 1,
+            pending_after_count: 1,
+            result_refs: vec![format!("ranking_model:{}", model.model_version)],
+            reason_counts,
+            actor_principal_ref: "principal:ranker-worker".to_string(),
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("upsert ranking worker run");
+    assert_eq!(worker_run.ranking_worker_run_id, worker_run_id);
+    assert_eq!(
+        worker_run.run_kind,
+        TraceRankingWorkerRunKind::ModelPromotion
+    );
+    assert_eq!(worker_run.succeeded_count, 1);
+    assert_eq!(
+        worker_run.result_refs,
+        vec![format!("ranking_model:{}", model.model_version)]
+    );
+    assert_eq!(
+        worker_run.reason_counts.get("insufficient_labels"),
+        Some(&1)
+    );
+
     let alpha_models = backend
         .list_trace_ranking_model_versions(&tenant_alpha)
         .await
@@ -624,11 +666,16 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
         .list_trace_ranking_calibration_runs(&tenant_alpha)
         .await
         .expect("list alpha ranking calibration runs");
+    let alpha_worker_runs = backend
+        .list_trace_ranking_worker_runs(&tenant_alpha)
+        .await
+        .expect("list alpha ranking worker runs");
     assert_eq!(alpha_models.len(), 1);
     assert_eq!(alpha_features.len(), 1);
     assert_eq!(alpha_predictions.len(), 1);
     assert_eq!(alpha_labels.len(), 1);
     assert_eq!(alpha_calibration_runs.len(), 1);
+    assert_eq!(alpha_worker_runs.len(), 1);
 
     assert!(
         backend
@@ -645,6 +692,14 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
             .expect("list beta ranking calibration runs")
             .is_empty(),
         "ranking calibration runs must stay tenant scoped"
+    );
+    assert!(
+        backend
+            .list_trace_ranking_worker_runs(&tenant_beta)
+            .await
+            .expect("list beta ranking worker runs")
+            .is_empty(),
+        "ranking worker runs must stay tenant scoped"
     );
 
     cleanup_tenant(&backend, &tenant_alpha).await;
