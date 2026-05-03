@@ -5451,6 +5451,8 @@ struct TraceCreditCycleSchedulerRunRequest {
     #[serde(default)]
     dry_run: bool,
     #[serde(default)]
+    preflight_only: bool,
+    #[serde(default)]
     submit_near_outbox: bool,
     target_use: TraceAllowedUse,
     #[serde(default)]
@@ -5487,6 +5489,7 @@ struct TraceCreditCycleSchedulerRunResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     dry_run: bool,
+    preflight_only: bool,
     submit_near_outbox: bool,
     target_use: TraceAllowedUse,
     model_version: Option<String>,
@@ -5494,6 +5497,7 @@ struct TraceCreditCycleSchedulerRunResponse {
     reason_hash: String,
     limit: usize,
     checked_count: usize,
+    eligible_count: usize,
     started_count: usize,
     skipped_active_count: usize,
     skipped_count: usize,
@@ -5516,6 +5520,7 @@ struct TraceCreditCycleSchedulerCandidateDecision {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum TraceCreditCycleSchedulerDecisionAction {
+    Eligible,
     Started,
     Skipped,
 }
@@ -6729,6 +6734,7 @@ async fn credit_cycle_scheduler_run_handler(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         dry_run: body.dry_run,
+        preflight_only: body.preflight_only,
         submit_near_outbox: body.submit_near_outbox,
         target_use: body.target_use,
         model_version: model_version.clone(),
@@ -6736,6 +6742,7 @@ async fn credit_cycle_scheduler_run_handler(
         reason_hash: sha256_prefixed(&reason),
         limit,
         checked_count: 0,
+        eligible_count: 0,
         started_count: 0,
         skipped_active_count: 0,
         skipped_count: 0,
@@ -6751,7 +6758,7 @@ async fn credit_cycle_scheduler_run_handler(
             state.as_ref(),
             &tenant,
             TraceRankingWorkerRunKind::CreditCycle,
-            body.dry_run,
+            body.dry_run && !body.preflight_only,
             Some(&candidate.model_version),
             Some(body.target_use),
             Some(&candidate.policy_version),
@@ -6790,6 +6797,17 @@ async fn credit_cycle_scheduler_run_handler(
                 body.target_use,
                 TraceCreditCycleSchedulerDecisionAction::Skipped,
                 Some(skip_reason),
+            );
+            continue;
+        }
+        if body.preflight_only {
+            response.eligible_count += 1;
+            credit_cycle_scheduler_record_decision(
+                &mut response,
+                &candidate,
+                body.target_use,
+                TraceCreditCycleSchedulerDecisionAction::Eligible,
+                None,
             );
             continue;
         }
@@ -41424,6 +41442,7 @@ mod tests {
             auth_headers("utility-worker-token-a"),
             Json(TraceCreditCycleSchedulerRunRequest {
                 dry_run: false,
+                preflight_only: false,
                 submit_near_outbox: false,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 model_version: None,
@@ -41472,6 +41491,72 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_preflight_only_reports_eligible_without_side_effects() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let (candidate, _) = seed_credit_cycle_ready_candidate(
+            state.clone(),
+            "trace-ranker-credit-cycle-preflight-v1",
+        )
+        .await;
+        let request = serde_json::from_value(serde_json::json!({
+            "dry_run": true,
+            "preflight_only": true,
+            "submit_near_outbox": false,
+            "target_use": "ranking_model_training",
+            "policy_version": candidate.policy_version,
+            "reason": "preview next eligible credit cycle",
+            "near_contract_id": "trace-credits.testnet",
+            "limit": 1,
+            "calibration_limit": 10,
+            "model_promotion_limit": 10,
+            "prediction_credit_limit": 10,
+            "credit_settlement_limit": 10,
+            "near_outbox_limit": 10,
+            "min_label_count": 1,
+            "confidence_threshold": 0.5,
+            "max_average_absolute_error_micros": 100000,
+            "allow_at_risk_models": false
+        }))
+        .expect("preflight-only request deserializes");
+
+        let Json(scheduler) = credit_cycle_scheduler_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(request),
+        )
+        .await
+        .expect("scheduler preflight reports eligible candidate");
+
+        let scheduler_value =
+            serde_json::to_value(&scheduler).expect("scheduler response serializes");
+        assert_eq!(scheduler.checked_count, 1);
+        assert_eq!(scheduler.started_count, 0);
+        assert_eq!(scheduler.skipped_count, 0);
+        assert_eq!(scheduler_value["preflight_only"].as_bool(), Some(true));
+        assert_eq!(scheduler_value["eligible_count"].as_u64(), Some(1));
+        assert_eq!(
+            scheduler_value["decisions"][0]["action"].as_str(),
+            Some("eligible")
+        );
+        assert_eq!(
+            scheduler_value["decisions"][0]["model_version"].as_str(),
+            Some("trace-ranker-credit-cycle-preflight-v1")
+        );
+        assert!(scheduler_value["decisions"][0]["skip_reason"].is_null());
+        assert!(scheduler.cycles.is_empty());
+        let worker_runs =
+            read_all_ranking_worker_runs(temp.path(), "tenant-a").expect("worker runs read");
+        assert!(worker_runs.is_empty());
+        let credit_events =
+            read_all_credit_events(temp.path(), "tenant-a").expect("credit events read");
+        assert!(credit_events.is_empty());
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert!(outbox.is_empty());
     }
 
     #[tokio::test]
@@ -41532,6 +41617,7 @@ mod tests {
             auth_headers("utility-worker-token-a"),
             Json(TraceCreditCycleSchedulerRunRequest {
                 dry_run: false,
+                preflight_only: false,
                 submit_near_outbox: false,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 model_version: None,
@@ -41586,6 +41672,7 @@ mod tests {
             auth_headers("token-a"),
             Json(TraceCreditCycleSchedulerRunRequest {
                 dry_run: false,
+                preflight_only: false,
                 submit_near_outbox: false,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 model_version: None,
@@ -41633,6 +41720,7 @@ mod tests {
             auth_headers("utility-worker-token-a"),
             Json(TraceCreditCycleSchedulerRunRequest {
                 dry_run: false,
+                preflight_only: false,
                 submit_near_outbox: false,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 model_version: None,
@@ -41692,6 +41780,7 @@ mod tests {
             auth_headers("utility-worker-token-a"),
             Json(TraceCreditCycleSchedulerRunRequest {
                 dry_run: false,
+                preflight_only: false,
                 submit_near_outbox: false,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 model_version: None,
@@ -41793,6 +41882,7 @@ mod tests {
             auth_headers("utility-worker-token-a"),
             Json(TraceCreditCycleSchedulerRunRequest {
                 dry_run: false,
+                preflight_only: false,
                 submit_near_outbox: false,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 model_version: None,

@@ -23,7 +23,9 @@ settlement, and NEAR outbox submission checks for one model/policy/target. The
 `POST /v1/workers/credit-cycle/scheduler/run` route lets utility-worker cron
 jobs select the next eligible candidate or active model for a target/policy and
 run at most a bounded number of credit cycles while skipping live claims and
-models whose current ranking evidence is not yet promotable. The
+models whose current ranking evidence is not yet promotable. Scheduler
+`preflight_only` requests return eligible/skipped candidate decisions without
+creating worker rows, credit events, settlement batches, or NEAR outbox rows. The
 next ranking substrate is also server-owned: model
 version records, hash-only feature records, prediction records, frontier/reviewer
 labels, calibration reports, persisted model-promotion calibration runs, and
