@@ -76,8 +76,8 @@ credits wait for calibration/drift review before settlement. A scoped promotion
 run lets utility workers promote calibrated candidate models through the same
 server-owned gate without generic admin access, and a scoped calibration run
 lets utility workers schedule bounded calibration passes across active or
-candidate models. Calibration, prediction-credit, and promotion automation runs
-now persist a hash-only worker-run ledger with
+candidate models. Calibration, prediction-credit, promotion, and full
+credit-cycle automation runs now persist a hash-only worker-run ledger with
 running/completed/failed lifecycle status, limits, counts, result refs, skipped
 reason aggregates, and safe hashed fatal-error refs for admin review. Live
 non-dry-run ranking schedulers reject overlapping active non-stale runs before
