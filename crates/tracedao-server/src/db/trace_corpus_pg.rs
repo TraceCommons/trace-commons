@@ -29,7 +29,8 @@ use crate::trace_corpus_storage::{
     TraceRankingFeatureWrite, TraceRankingLabelOutcome, TraceRankingLabelRecord,
     TraceRankingLabelSource, TraceRankingLabelWrite, TraceRankingModelStatus,
     TraceRankingModelVersionRecord, TraceRankingModelVersionWrite, TraceRankingPredictionRecord,
-    TraceRankingPredictionWrite, TraceRankingUtilityCategory, TraceRankingWorkerRunKind,
+    TraceRankingPredictionWrite, TraceRankingPreferenceLabelRecord,
+    TraceRankingPreferenceLabelWrite, TraceRankingUtilityCategory, TraceRankingWorkerRunKind,
     TraceRankingWorkerRunRecord, TraceRankingWorkerRunStatus, TraceRankingWorkerRunWrite,
     TraceRetentionJobItemAction, TraceRetentionJobItemRecord, TraceRetentionJobItemStatus,
     TraceRetentionJobItemWrite, TraceRetentionJobRecord, TraceRetentionJobStatus,
@@ -134,6 +135,12 @@ const TRACE_RANKING_LABEL_COLUMNS: &str = "\
     tenant_id, ranking_label_id, submission_id, trace_id, target_use, label_source, \
     utility_category, label_outcome, utility_delta_micros, evidence_hash, external_ref_hash, \
     actor_principal_ref, created_at";
+
+const TRACE_RANKING_PREFERENCE_LABEL_COLUMNS: &str = "\
+    tenant_id, preference_label_id, preferred_submission_id, preferred_trace_id, \
+    rejected_submission_id, rejected_trace_id, target_use, label_source, utility_category, \
+    preference_strength_micros, evidence_hash, external_ref_hash, actor_principal_ref, \
+    created_at";
 
 const TRACE_RANKING_CALIBRATION_RUN_COLUMNS: &str = "\
     tenant_id, calibration_run_id, model_version, target_use, policy_version, \
@@ -676,6 +683,35 @@ fn row_to_ranking_label(row: &Row) -> Result<TraceRankingLabelRecord, DatabaseEr
             "TraceRankingLabelOutcome",
         )?,
         utility_delta_micros: row.get("utility_delta_micros"),
+        evidence_hash: row.get("evidence_hash"),
+        external_ref_hash: row.get("external_ref_hash"),
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn row_to_ranking_preference_label(
+    row: &Row,
+) -> Result<TraceRankingPreferenceLabelRecord, DatabaseError> {
+    let label_source: String = row.get("label_source");
+    let utility_category: String = row.get("utility_category");
+    Ok(TraceRankingPreferenceLabelRecord {
+        tenant_id: row.get("tenant_id"),
+        preference_label_id: row.get("preference_label_id"),
+        preferred_submission_id: row.get("preferred_submission_id"),
+        preferred_trace_id: row.get("preferred_trace_id"),
+        rejected_submission_id: row.get("rejected_submission_id"),
+        rejected_trace_id: row.get("rejected_trace_id"),
+        target_use: row.get("target_use"),
+        label_source: enum_from_storage::<TraceRankingLabelSource>(
+            &label_source,
+            "TraceRankingLabelSource",
+        )?,
+        utility_category: enum_from_storage::<TraceRankingUtilityCategory>(
+            &utility_category,
+            "TraceRankingUtilityCategory",
+        )?,
+        preference_strength_micros: row.get("preference_strength_micros"),
         evidence_hash: row.get("evidence_hash"),
         external_ref_hash: row.get("external_ref_hash"),
         actor_principal_ref: row.get("actor_principal_ref"),
@@ -2323,6 +2359,83 @@ impl TraceCorpusStore for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
         let records = rows.iter().map(row_to_ranking_label).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_ranking_preference_label(
+        &self,
+        preference: TraceRankingPreferenceLabelWrite,
+    ) -> Result<TraceRankingPreferenceLabelRecord, DatabaseError> {
+        self.ensure_trace_tenant(&preference.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &preference.tenant_id).await?;
+        let label_source = enum_to_storage(preference.label_source)?;
+        let utility_category = enum_to_storage(preference.utility_category)?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_ranking_preference_labels (
+                        tenant_id, preference_label_id, preferred_submission_id, preferred_trace_id,
+                        rejected_submission_id, rejected_trace_id, target_use, label_source,
+                        utility_category, preference_strength_micros, evidence_hash,
+                        external_ref_hash, actor_principal_ref
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                     ON CONFLICT (
+                        tenant_id, preferred_submission_id, rejected_submission_id, target_use,
+                        label_source, external_ref_hash
+                     )
+                     DO UPDATE SET
+                        preferred_trace_id = excluded.preferred_trace_id,
+                        rejected_trace_id = excluded.rejected_trace_id,
+                        utility_category = excluded.utility_category,
+                        preference_strength_micros = excluded.preference_strength_micros,
+                        evidence_hash = excluded.evidence_hash,
+                        actor_principal_ref = excluded.actor_principal_ref
+                     RETURNING {TRACE_RANKING_PREFERENCE_LABEL_COLUMNS}"
+                ),
+                &[
+                    &preference.tenant_id,
+                    &preference.preference_label_id,
+                    &preference.preferred_submission_id,
+                    &preference.preferred_trace_id,
+                    &preference.rejected_submission_id,
+                    &preference.rejected_trace_id,
+                    &preference.target_use,
+                    &label_source,
+                    &utility_category,
+                    &preference.preference_strength_micros,
+                    &preference.evidence_hash,
+                    &preference.external_ref_hash,
+                    &preference.actor_principal_ref,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_ranking_preference_label(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_ranking_preference_labels(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingPreferenceLabelRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_RANKING_PREFERENCE_LABEL_COLUMNS}
+                     FROM trace_ranking_preference_labels
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, preference_label_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_ranking_preference_label).collect();
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         records
     }

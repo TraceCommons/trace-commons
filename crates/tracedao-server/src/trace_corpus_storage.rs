@@ -341,6 +341,41 @@ pub struct TraceRankingLabelRecord {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingPreferenceLabelWrite {
+    pub tenant_id: String,
+    pub preference_label_id: Uuid,
+    pub preferred_submission_id: Uuid,
+    pub preferred_trace_id: Uuid,
+    pub rejected_submission_id: Uuid,
+    pub rejected_trace_id: Uuid,
+    pub target_use: String,
+    pub label_source: TraceRankingLabelSource,
+    pub utility_category: TraceRankingUtilityCategory,
+    pub preference_strength_micros: i64,
+    pub evidence_hash: String,
+    pub external_ref_hash: String,
+    pub actor_principal_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingPreferenceLabelRecord {
+    pub tenant_id: String,
+    pub preference_label_id: Uuid,
+    pub preferred_submission_id: Uuid,
+    pub preferred_trace_id: Uuid,
+    pub rejected_submission_id: Uuid,
+    pub rejected_trace_id: Uuid,
+    pub target_use: String,
+    pub label_source: TraceRankingLabelSource,
+    pub utility_category: TraceRankingUtilityCategory,
+    pub preference_strength_micros: i64,
+    pub evidence_hash: String,
+    pub external_ref_hash: String,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceRankingCalibrationRunWrite {
     pub tenant_id: String,
@@ -1657,6 +1692,16 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceRankingLabelRecord>, DatabaseError>;
+
+    async fn upsert_trace_ranking_preference_label(
+        &self,
+        preference: TraceRankingPreferenceLabelWrite,
+    ) -> Result<TraceRankingPreferenceLabelRecord, DatabaseError>;
+
+    async fn list_trace_ranking_preference_labels(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingPreferenceLabelRecord>, DatabaseError>;
 
     async fn upsert_trace_ranking_calibration_run(
         &self,
