@@ -2084,6 +2084,10 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/admin/ranking/model-versions",
             get(ranking_model_versions_handler).post(ranking_model_version_handler),
         )
+        .route(
+            "/v1/admin/ranking/model-promotions",
+            post(ranking_model_promotion_handler),
+        )
         .route("/v1/admin/ranking/features", get(ranking_features_handler))
         .route(
             "/v1/admin/ranking/predictions",
@@ -5296,6 +5300,31 @@ struct TraceRankingModelVersionRequest {
     model_artifact_hash: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceRankingModelPromotionRequest {
+    #[serde(default)]
+    dry_run: bool,
+    model_version: String,
+    target_use: TraceAllowedUse,
+    policy_version: String,
+    reason: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingModelPromotionResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    dry_run: bool,
+    promoted: bool,
+    model_version: String,
+    target_use: TraceAllowedUse,
+    policy_version: String,
+    model_status: StorageTraceRankingModelStatus,
+    calibration_run_id: Uuid,
+    calibration_report_hash: String,
+    reason_hash: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TraceRankingModelVersionRecord {
     tenant_id: String,
@@ -7256,6 +7285,105 @@ async fn ranking_model_versions_handler(
     Ok(Json(records))
 }
 
+async fn ranking_model_promotion_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceRankingModelPromotionRequest>,
+) -> ApiResult<Json<TraceRankingModelPromotionResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let model_version = validate_ranking_identifier(&body.model_version, "model_version")?;
+    let policy_version = validate_ranking_identifier(&body.policy_version, "policy_version")?;
+    let reason = body.reason.trim();
+    if reason.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranking model promotion requires a non-empty reason",
+        ));
+    }
+    if reason.len() > 1024 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranking model promotion reason is too long",
+        ));
+    }
+
+    let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let model = latest_ranking_model_version(&model_versions, &model_version)
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "ranking model version not found"))?;
+    if model.policy_version != policy_version {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "ranking model promotion policy does not match the registered model",
+        ));
+    }
+    match model.status {
+        StorageTraceRankingModelStatus::Candidate | StorageTraceRankingModelStatus::Active => {}
+        StorageTraceRankingModelStatus::Deprecated | StorageTraceRankingModelStatus::Archived => {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "ranking model promotion requires a candidate or active model",
+            ));
+        }
+    }
+
+    let calibration_run = latest_promotable_ranking_calibration_run(
+        state.as_ref(),
+        &tenant,
+        &model_version,
+        body.target_use,
+        &policy_version,
+    )
+    .await?;
+    ensure_active_ranking_model_has_promotable_calibration(
+        state.as_ref(),
+        &tenant,
+        &model_version,
+        &policy_version,
+    )
+    .await?;
+
+    let promoted = !body.dry_run && model.status == StorageTraceRankingModelStatus::Candidate;
+    if promoted {
+        let active_record = TraceRankingModelVersionRecord {
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            model_version: model.model_version.clone(),
+            feature_schema_version: model.feature_schema_version.clone(),
+            policy_version: model.policy_version.clone(),
+            status: StorageTraceRankingModelStatus::Active,
+            training_dataset_hash: model.training_dataset_hash.clone(),
+            calibration_dataset_hash: model.calibration_dataset_hash.clone(),
+            model_artifact_hash: model.model_artifact_hash.clone(),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            created_at: Utc::now(),
+        };
+        append_ranking_model_version_with_db_mirror(state.as_ref(), &tenant, &active_record)
+            .await
+            .map_err(internal_error)?;
+    }
+
+    Ok(Json(TraceRankingModelPromotionResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        dry_run: body.dry_run,
+        promoted,
+        model_version,
+        target_use: body.target_use,
+        policy_version,
+        model_status: if body.dry_run {
+            model.status
+        } else {
+            StorageTraceRankingModelStatus::Active
+        },
+        calibration_run_id: calibration_run.calibration_run_id,
+        calibration_report_hash: calibration_run.report_hash,
+        reason_hash: sha256_prefixed(reason),
+    }))
+}
+
 async fn ensure_active_ranking_model_has_promotable_calibration(
     state: &AppState,
     tenant: &TenantAuth,
@@ -7282,6 +7410,39 @@ async fn ensure_active_ranking_model_has_promotable_calibration(
         ));
     }
     Ok(())
+}
+
+async fn latest_promotable_ranking_calibration_run(
+    state: &AppState,
+    tenant: &TenantAuth,
+    model_version: &str,
+    target_use: TraceAllowedUse,
+    policy_version: &str,
+) -> ApiResult<TraceRankingCalibrationRunRecord> {
+    let calibration_runs = read_ranking_calibration_runs_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let Some(run) = calibration_runs
+        .into_iter()
+        .filter(|run| {
+            run.model_version == model_version
+                && run.target_use == target_use
+                && run.policy_version == policy_version
+        })
+        .max_by_key(|run| run.created_at)
+    else {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "ranking model promotion requires a calibration run for the requested model, target use, and policy",
+        ));
+    };
+    if !run.promotable {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "ranking model promotion requires the latest calibration run to be promotable",
+        ));
+    }
+    Ok(run)
 }
 
 async fn ranking_feature_handler(
@@ -8498,7 +8659,10 @@ async fn ranking_settlement_calibration_gate(
 }
 
 fn average_i128(sum: i128, count: usize) -> Option<i64> {
-    (count > 0).then_some((sum / count as i128) as i64)
+    if count == 0 {
+        return None;
+    }
+    Some((sum / count as i128) as i64)
 }
 
 fn trace_credit_event_type_is_settlement_eligible(event_type: TraceCreditLedgerEventType) -> bool {
@@ -33376,6 +33540,193 @@ mod tests {
         .await
         .expect_err("candidate model cannot settle ranking utility credit");
         assert_eq!(candidate_error.0, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn ranking_model_promotion_activates_promotable_candidate() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("ranking submission succeeds");
+
+        let Json(candidate) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-promote-v1".to_string(),
+                feature_schema_version: "ranking-features-promote-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:ranking-training-promote".to_string(),
+                calibration_dataset_hash: "sha256:ranking-calibration-promote".to_string(),
+                model_artifact_hash: "sha256:ranking-model-artifact-promote".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can stage candidate ranking model");
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:ranking-feature-promote".to_string(),
+                feature_names_hash: "sha256:ranking-feature-names-promote".to_string(),
+                source_feature_hash: "sha256:ranking-source-feature-promote".to_string(),
+                duplicate_score: Some(0.05),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.88),
+                coverage_tags: vec!["tool:terminal".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking feature");
+        let Json(_) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: candidate.model_version.clone(),
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                prediction_policy_version: candidate.policy_version.clone(),
+                feature_vector_hash: feature.feature_vector_hash,
+                predicted_utility_micros: 1_250_000,
+                uncertainty_micros: 250_000,
+                confidence: 0.9,
+                risk_penalty_micros: 0,
+                novelty_bonus_micros: 0,
+                explanation_codes: vec!["ranking_pair_utility".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking prediction");
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_300_000,
+                evidence_hash: "sha256:ranking-frontier-evidence-promote".to_string(),
+                external_ref: "private-ranking-promote".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking label");
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: "sha256:ranking-eval-promote".to_string(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration");
+        assert!(calibration.promotable);
+
+        let Json(promotion) = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "nightly calibration passed".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can promote promotable candidate model");
+        assert!(promotion.promoted);
+        assert_eq!(promotion.model_version, candidate.model_version);
+        assert_eq!(
+            promotion.model_status,
+            StorageTraceRankingModelStatus::Active
+        );
+        assert_eq!(promotion.calibration_run_id, calibration.calibration_run_id);
+        assert_eq!(promotion.calibration_report_hash, calibration.report_hash);
+
+        let model_versions =
+            read_all_ranking_model_versions(temp.path(), "tenant-a").expect("model versions read");
+        let latest =
+            latest_ranking_model_version(&model_versions, "trace-ranker-promote-v1").unwrap();
+        assert_eq!(latest.status, StorageTraceRankingModelStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn ranking_model_promotion_rejects_nonpromotable_calibration() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let Json(candidate) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-promote-blocked-v1".to_string(),
+                feature_schema_version: "ranking-features-promote-blocked-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:ranking-training-promote-blocked".to_string(),
+                calibration_dataset_hash: "sha256:ranking-calibration-promote-blocked".to_string(),
+                model_artifact_hash: "sha256:ranking-model-artifact-promote-blocked".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can stage candidate ranking model");
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: "sha256:ranking-eval-promote-blocked".to_string(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist non-promotable calibration");
+        assert!(!calibration.promotable);
+
+        let promotion_error = ranking_model_promotion_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version,
+                reason: "nightly calibration failed".to_string(),
+            }),
+        )
+        .await
+        .expect_err("non-promotable calibration cannot activate model");
+        assert_eq!(promotion_error.0, StatusCode::CONFLICT);
     }
 
     #[tokio::test]
