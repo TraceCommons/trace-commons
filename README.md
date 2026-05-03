@@ -67,10 +67,12 @@ run lets utility workers promote calibrated candidate models through the same
 server-owned gate without generic admin access. Prediction-credit and promotion
 automation runs now persist a hash-only worker-run ledger with
 running/completed/failed lifecycle status, limits, counts, result refs, skipped
-reason aggregates, and safe hashed fatal-error refs for admin review; stale
-running rows surface as operational-summary blockers. With the DB mirror
-configured, ranking evidence, calibration runs, and ranking worker runs are
-dual-written to PostgreSQL and
+reason aggregates, and safe hashed fatal-error refs for admin review. Live
+non-dry-run ranking schedulers reject overlapping active non-stale runs before
+appending a new running row; stale running rows surface as operational-summary
+blockers until an admin append-finalizes them through the stale recovery API.
+With the DB mirror configured, ranking evidence, calibration runs, and ranking
+worker runs are dual-written to PostgreSQL and
 `TRACE_COMMONS_DB_REVIEWER_READS=true` serves admin ranking lists, calibration
 reports, model-risk reports, credit-readiness reports, calibration-run history,
 and worker-run history from the tenant-scoped DB mirror.
