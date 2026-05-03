@@ -8468,6 +8468,27 @@ async fn ranking_settlement_calibration_gate(
             "ranking utility settlement requires a promotable calibration run",
         ));
     }
+    let model_versions = read_ranking_model_versions_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let model = latest_ranking_model_version(&model_versions, model_version).ok_or_else(|| {
+        api_error(
+            StatusCode::NOT_FOUND,
+            "ranking utility settlement model version not found",
+        )
+    })?;
+    if model.status != StorageTraceRankingModelStatus::Active {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "ranking utility settlement requires an active ranking model",
+        ));
+    }
+    if model.policy_version != policy_version {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "ranking utility settlement policy does not match the active model",
+        ));
+    }
     Ok(Some(RankingSettlementCalibrationGate {
         model_version: run.model_version,
         target_use: run.target_use,
@@ -33163,6 +33184,22 @@ mod tests {
         .await
         .expect("utility worker can persist promotable ranking calibration");
         assert!(calibration.promotable);
+        let Json(active_model) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: model.model_version.clone(),
+                feature_schema_version: model.feature_schema_version.clone(),
+                policy_version: model.policy_version.clone(),
+                status: StorageTraceRankingModelStatus::Active,
+                training_dataset_hash: model.training_dataset_hash.clone(),
+                calibration_dataset_hash: model.calibration_dataset_hash.clone(),
+                model_artifact_hash: model.model_artifact_hash.clone(),
+            }),
+        )
+        .await
+        .expect("admin can activate calibrated ranking settlement model");
+        assert_eq!(active_model.status, StorageTraceRankingModelStatus::Active);
 
         let Json(finalized) = credit_settlement_handler(
             State(state.clone()),
@@ -33172,7 +33209,7 @@ mod tests {
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "ranking settlement with calibrated model".to_string(),
                 near_contract_id: None,
-                ranking_model_version: Some(model.model_version.clone()),
+                ranking_model_version: Some(active_model.model_version.clone()),
                 ranking_target_use: Some(TraceAllowedUse::RankingModelTraining),
             }),
         )
@@ -33201,6 +33238,144 @@ mod tests {
             batches[0].ranking_calibration_report_hash,
             Some(calibration.report_hash)
         );
+    }
+
+    #[tokio::test]
+    async fn ranking_utility_settlement_requires_active_model() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("ranking submission succeeds");
+
+        let Json(_) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::RankingUtility,
+                credit_points_delta: 1.25,
+                reason: Some("ranker utility selected source".to_string()),
+                external_ref: Some("ranker:active-model-required".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append ranking utility credit");
+
+        let Json(candidate) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-active-settlement-v1".to_string(),
+                feature_schema_version: "ranking-features-active-settlement-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:ranking-training-active-settlement".to_string(),
+                calibration_dataset_hash: "sha256:ranking-calibration-active-settlement"
+                    .to_string(),
+                model_artifact_hash: "sha256:ranking-model-artifact-active-settlement".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can register candidate ranking model");
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:ranking-feature-active-settlement".to_string(),
+                feature_names_hash: "sha256:ranking-feature-names-active-settlement".to_string(),
+                source_feature_hash: "sha256:ranking-source-feature-active-settlement".to_string(),
+                duplicate_score: Some(0.05),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.88),
+                coverage_tags: vec!["tool:terminal".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking feature");
+        let Json(_) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: candidate.model_version.clone(),
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                prediction_policy_version: candidate.policy_version.clone(),
+                feature_vector_hash: feature.feature_vector_hash.clone(),
+                predicted_utility_micros: 1_250_000,
+                uncertainty_micros: 250_000,
+                confidence: 0.9,
+                risk_penalty_micros: 0,
+                novelty_bonus_micros: 0,
+                explanation_codes: vec!["ranking_pair_utility".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking prediction");
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_300_000,
+                evidence_hash: "sha256:ranking-frontier-evidence-active-settlement".to_string(),
+                external_ref: "private-ranking-active-settlement".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking label");
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: "sha256:ranking-eval-active-settlement".to_string(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration");
+        assert!(calibration.promotable);
+
+        let candidate_error = credit_settlement_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: true,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "ranking settlement with candidate model".to_string(),
+                near_contract_id: None,
+                ranking_model_version: Some(candidate.model_version),
+                ranking_target_use: Some(TraceAllowedUse::RankingModelTraining),
+            }),
+        )
+        .await
+        .expect_err("candidate model cannot settle ranking utility credit");
+        assert_eq!(candidate_error.0, StatusCode::CONFLICT);
     }
 
     #[tokio::test]
