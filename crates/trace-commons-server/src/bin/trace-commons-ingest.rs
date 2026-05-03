@@ -7935,19 +7935,64 @@ async fn ranking_model_promotion_worker_run_handler(
                     .entry(error.error)
                     .or_insert(0) += 1;
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                update_model_promotion_worker_run_from_response(&mut worker_run, &response);
+                let public_error = error.1.0.error.clone();
+                finalize_failed_ranking_worker_run_with_db_mirror(
+                    state.as_ref(),
+                    &tenant,
+                    &mut worker_run,
+                    error.0,
+                    &public_error,
+                )
+                .await?;
+                return Err(error);
+            }
         }
     }
-    response.pending_after_count = count_pending_ranking_model_promotions(
+    response.pending_after_count = match count_pending_ranking_model_promotions(
         state.as_ref(),
         &tenant,
         model_version.as_deref(),
         policy_version.as_deref(),
     )
     .await
-    .map_err(internal_error)?;
+    {
+        Ok(pending_after_count) => pending_after_count,
+        Err(error) => {
+            let api_error = internal_error(error);
+            update_model_promotion_worker_run_from_response(&mut worker_run, &response);
+            let public_error = api_error.1.0.error.clone();
+            finalize_failed_ranking_worker_run_with_db_mirror(
+                state.as_ref(),
+                &tenant,
+                &mut worker_run,
+                api_error.0,
+                &public_error,
+            )
+            .await?;
+            return Err(api_error);
+        }
+    };
 
+    update_model_promotion_worker_run_from_response(&mut worker_run, &response);
     worker_run.status = TraceRankingWorkerRunStatus::Completed;
+    worker_run.completed_at = Some(Utc::now());
+    append_ranking_worker_run_with_db_mirror(state.as_ref(), &tenant, &worker_run)
+        .await
+        .map_err(internal_error)?;
+
+    Ok(Json(response))
+}
+
+fn ranking_model_promotion_run_can_skip_status(status: StatusCode) -> bool {
+    matches!(status, StatusCode::NOT_FOUND | StatusCode::CONFLICT)
+}
+
+fn update_model_promotion_worker_run_from_response(
+    worker_run: &mut TraceRankingWorkerRunRecord,
+    response: &TraceRankingModelPromotionRunResponse,
+) {
     worker_run.checked_count = response.checked_count;
     worker_run.succeeded_count = response.promoted_count;
     worker_run.skipped_ineligible_count = response.skipped_ineligible_count;
@@ -7959,16 +8004,6 @@ async fn ranking_model_promotion_worker_run_handler(
         .map(|promotion| format!("ranking_model:{}", promotion.model_version))
         .collect();
     worker_run.reason_counts = response.skipped_reason_counts.clone();
-    worker_run.completed_at = Some(Utc::now());
-    append_ranking_worker_run_with_db_mirror(state.as_ref(), &tenant, &worker_run)
-        .await
-        .map_err(internal_error)?;
-
-    Ok(Json(response))
-}
-
-fn ranking_model_promotion_run_can_skip_status(status: StatusCode) -> bool {
-    matches!(status, StatusCode::NOT_FOUND | StatusCode::CONFLICT)
 }
 
 fn validate_ranking_model_promotion_reason(reason: &str) -> ApiResult<String> {
@@ -8482,10 +8517,31 @@ async fn ranking_prediction_credit_run_handler(
                 &prediction.prediction_policy_version == policy_version
             })
     }) {
-        if ranking_prediction_credit_already_exists(state.as_ref(), &tenant, &prediction)
-            .await
-            .map_err(internal_error)?
-        {
+        let already_credited =
+            match ranking_prediction_credit_already_exists(state.as_ref(), &tenant, &prediction)
+                .await
+            {
+                Ok(already_credited) => already_credited,
+                Err(error) => {
+                    let api_error = internal_error(error);
+                    update_prediction_credit_worker_run_from_response(
+                        &mut worker_run,
+                        &response,
+                        &result_refs,
+                    );
+                    let public_error = api_error.1.0.error.clone();
+                    finalize_failed_ranking_worker_run_with_db_mirror(
+                        state.as_ref(),
+                        &tenant,
+                        &mut worker_run,
+                        api_error.0,
+                        &public_error,
+                    )
+                    .await?;
+                    return Err(api_error);
+                }
+            };
+        if already_credited {
             response.checked_count += 1;
             response.skipped_existing_count += 1;
             continue;
@@ -8528,10 +8584,26 @@ async fn ranking_prediction_credit_run_handler(
             Err((status, _)) if ranking_prediction_credit_run_can_skip_status(status) => {
                 response.skipped_ineligible_count += 1;
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                update_prediction_credit_worker_run_from_response(
+                    &mut worker_run,
+                    &response,
+                    &result_refs,
+                );
+                let public_error = error.1.0.error.clone();
+                finalize_failed_ranking_worker_run_with_db_mirror(
+                    state.as_ref(),
+                    &tenant,
+                    &mut worker_run,
+                    error.0,
+                    &public_error,
+                )
+                .await?;
+                return Err(error);
+            }
         }
     }
-    response.pending_after_count = count_pending_ranking_prediction_credits(
+    response.pending_after_count = match count_pending_ranking_prediction_credits(
         state.as_ref(),
         &tenant,
         model_version.as_deref(),
@@ -8539,16 +8611,29 @@ async fn ranking_prediction_credit_run_handler(
         policy_version.as_deref(),
     )
     .await
-    .map_err(internal_error)?;
+    {
+        Ok(pending_after_count) => pending_after_count,
+        Err(error) => {
+            let api_error = internal_error(error);
+            update_prediction_credit_worker_run_from_response(
+                &mut worker_run,
+                &response,
+                &result_refs,
+            );
+            let public_error = api_error.1.0.error.clone();
+            finalize_failed_ranking_worker_run_with_db_mirror(
+                state.as_ref(),
+                &tenant,
+                &mut worker_run,
+                api_error.0,
+                &public_error,
+            )
+            .await?;
+            return Err(api_error);
+        }
+    };
+    update_prediction_credit_worker_run_from_response(&mut worker_run, &response, &result_refs);
     worker_run.status = TraceRankingWorkerRunStatus::Completed;
-    worker_run.checked_count = response.checked_count;
-    worker_run.succeeded_count = response.credited_count;
-    worker_run.skipped_existing_count = response.skipped_existing_count;
-    worker_run.skipped_model_risk_count = response.skipped_model_risk_count;
-    worker_run.skipped_ineligible_count = response.skipped_ineligible_count;
-    worker_run.pending_after_count = response.pending_after_count;
-    worker_run.result_refs = result_refs;
-    worker_run.reason_counts = response.blocked_model_risk_reason_counts.clone();
     worker_run.completed_at = Some(Utc::now());
     append_ranking_worker_run_with_db_mirror(state.as_ref(), &tenant, &worker_run)
         .await
@@ -8584,6 +8669,43 @@ fn ranking_prediction_credit_run_can_skip_status(status: StatusCode) -> bool {
         status,
         StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND | StatusCode::CONFLICT
     )
+}
+
+fn update_prediction_credit_worker_run_from_response(
+    worker_run: &mut TraceRankingWorkerRunRecord,
+    response: &TraceRankingPredictionCreditRunResponse,
+    result_refs: &[String],
+) {
+    worker_run.checked_count = response.checked_count;
+    worker_run.succeeded_count = response.credited_count;
+    worker_run.skipped_existing_count = response.skipped_existing_count;
+    worker_run.skipped_model_risk_count = response.skipped_model_risk_count;
+    worker_run.skipped_ineligible_count = response.skipped_ineligible_count;
+    worker_run.pending_after_count = response.pending_after_count;
+    worker_run.result_refs = result_refs.to_vec();
+    worker_run.reason_counts = response.blocked_model_risk_reason_counts.clone();
+}
+
+fn ranking_worker_run_error_hash(http_status: StatusCode, public_error: &str) -> String {
+    sha256_prefixed(&format!(
+        "status={};error={public_error}",
+        http_status.as_u16()
+    ))
+}
+
+async fn finalize_failed_ranking_worker_run_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    worker_run: &mut TraceRankingWorkerRunRecord,
+    http_status: StatusCode,
+    public_error: &str,
+) -> ApiResult<()> {
+    worker_run.status = TraceRankingWorkerRunStatus::Failed;
+    worker_run.completed_at = Some(Utc::now());
+    worker_run.last_error_hash = Some(ranking_worker_run_error_hash(http_status, public_error));
+    append_ranking_worker_run_with_db_mirror(state, tenant, worker_run)
+        .await
+        .map_err(internal_error)
 }
 
 fn ranking_prediction_credit_event_id(
@@ -36816,6 +36938,150 @@ mod tests {
             assert_eq!(chunk[0].status, TraceRankingWorkerRunStatus::Running);
             assert_eq!(chunk[1].status, TraceRankingWorkerRunStatus::Completed);
         }
+    }
+
+    #[tokio::test]
+    async fn ranking_prediction_credit_worker_run_records_failed_status_on_fatal_error() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let Json(candidate) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-credit-failed-run-v1".to_string(),
+                feature_schema_version: "ranking-features-credit-failed-run-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:ranking-training-credit-failed-run".to_string(),
+                calibration_dataset_hash: "sha256:ranking-calibration-credit-failed-run"
+                    .to_string(),
+                model_artifact_hash: "sha256:ranking-model-artifact-credit-failed-run".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can stage candidate ranking model");
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("ranking submission succeeds");
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:ranking-feature-credit-failed-run".to_string(),
+                feature_names_hash: "sha256:ranking-feature-names-credit-failed-run".to_string(),
+                source_feature_hash: "sha256:ranking-source-feature-credit-failed-run".to_string(),
+                duplicate_score: Some(0.05),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.88),
+                coverage_tags: vec!["tool:terminal".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking feature");
+        let Json(_) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: candidate.model_version.clone(),
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                prediction_policy_version: candidate.policy_version.clone(),
+                feature_vector_hash: feature.feature_vector_hash,
+                predicted_utility_micros: 1_250_000,
+                uncertainty_micros: 250_000,
+                confidence: 0.9,
+                risk_penalty_micros: 0,
+                novelty_bonus_micros: 0,
+                explanation_codes: vec!["ranking_pair_utility".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking prediction");
+
+        let credit_path = credit_ledger_path(temp.path(), "tenant-a");
+        std::fs::create_dir_all(
+            credit_path
+                .parent()
+                .expect("credit ledger path has parent directory"),
+        )
+        .expect("credit ledger dir writes");
+        std::fs::write(&credit_path, "{not-json").expect("malformed credit ledger writes");
+
+        let error = ranking_prediction_credit_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionCreditRunRequest {
+                dry_run: false,
+                allow_at_risk_models: false,
+                reason: "scheduled ranking prediction credit fatal path".to_string(),
+                limit: Some(1),
+                model_version: None,
+                target_use: None,
+                policy_version: None,
+            }),
+        )
+        .await
+        .expect_err("fatal read error fails the worker run");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let Json(worker_runs) =
+            ranking_worker_runs_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list failed ranking worker run");
+        assert_eq!(worker_runs.len(), 1);
+        assert_eq!(
+            worker_runs[0].run_kind,
+            TraceRankingWorkerRunKind::PredictionCredit
+        );
+        assert_eq!(worker_runs[0].status, TraceRankingWorkerRunStatus::Failed);
+        assert_eq!(worker_runs[0].checked_count, 0);
+        assert_eq!(worker_runs[0].succeeded_count, 0);
+        assert!(worker_runs[0].completed_at.is_some());
+        let expected_error_hash =
+            sha256_prefixed("status=500;error=trace commons operation failed");
+        assert_eq!(
+            worker_runs[0].last_error_hash.as_deref(),
+            Some(expected_error_hash.as_str())
+        );
+
+        let raw_worker_runs: Vec<TraceRankingWorkerRunRecord> = read_jsonl_records(
+            &ranking_worker_runs_path(temp.path(), "tenant-a"),
+            "ranking worker run",
+        )
+        .expect("raw worker runs read");
+        assert_eq!(raw_worker_runs.len(), 2);
+        assert_eq!(
+            raw_worker_runs[0].ranking_worker_run_id,
+            raw_worker_runs[1].ranking_worker_run_id
+        );
+        assert_eq!(
+            raw_worker_runs[0].status,
+            TraceRankingWorkerRunStatus::Running
+        );
+        assert_eq!(
+            raw_worker_runs[1].status,
+            TraceRankingWorkerRunStatus::Failed
+        );
+        assert_eq!(
+            raw_worker_runs[1].last_error_hash.as_deref(),
+            Some(expected_error_hash.as_str())
+        );
     }
 
     #[tokio::test]
