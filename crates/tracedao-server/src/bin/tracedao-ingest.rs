@@ -2148,6 +2148,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(ranking_model_risk_report_handler),
         )
         .route(
+            "/v1/admin/ranking/credit-readiness-report",
+            get(ranking_credit_readiness_report_handler),
+        )
+        .route(
             "/v1/admin/ranking/calibration-runs",
             get(ranking_calibration_runs_handler),
         )
@@ -5722,6 +5726,33 @@ struct TraceRankingModelRiskRecord {
     risk_codes: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct TraceRankingCreditReadinessReport {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    pending_ranking_credit_event_count: usize,
+    ready_count: usize,
+    blocked_count: usize,
+    blocked_reason_counts: BTreeMap<String, usize>,
+    events: Vec<TraceRankingCreditReadinessEvent>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingCreditReadinessEvent {
+    event_id: Uuid,
+    submission_id: Uuid,
+    credit_points_delta: f32,
+    ranking_prediction_id: Option<Uuid>,
+    model_version: Option<String>,
+    target_use: Option<TraceAllowedUse>,
+    policy_version: Option<String>,
+    ranking_calibration_run_id: Option<Uuid>,
+    ranking_calibration_report_hash: Option<String>,
+    ranking_calibration_joined_evidence_hash: Option<String>,
+    ready: bool,
+    reason_codes: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct TraceRankingCalibrationRunRequest {
     model_version: String,
@@ -8491,6 +8522,44 @@ async fn ranking_model_risk_report_handler(
     )))
 }
 
+async fn ranking_credit_readiness_report_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<TraceRankingCreditReadinessReport>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let credit_events = read_credit_events_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let settlement_batches = read_credit_settlement_batches_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let held_credit_accounts = active_credit_hold_account_refs_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let predictions = read_ranking_predictions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let calibration_runs = read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(ranking_credit_readiness_report(
+        RankingCreditReadinessInputs {
+            state: state.as_ref(),
+            tenant: &tenant,
+            credit_events: &credit_events,
+            settlement_batches: &settlement_batches,
+            held_credit_accounts: &held_credit_accounts,
+            predictions: &predictions,
+            model_versions: &model_versions,
+            calibration_runs: &calibration_runs,
+        },
+    )))
+}
+
 async fn ranking_calibration_run_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -9548,6 +9617,196 @@ fn ranking_model_risk_record(
         labels_since_calibration_count,
         low_confidence_predictions_since_calibration_count,
         risk_codes,
+    }
+}
+
+struct RankingCreditReadinessInputs<'a> {
+    state: &'a AppState,
+    tenant: &'a TenantAuth,
+    credit_events: &'a [TraceCommonsCreditLedgerRecord],
+    settlement_batches: &'a [TraceCreditSettlementBatchRecord],
+    held_credit_accounts: &'a BTreeSet<String>,
+    predictions: &'a [TraceRankingPredictionRecord],
+    model_versions: &'a [TraceRankingModelVersionRecord],
+    calibration_runs: &'a [TraceRankingCalibrationRunRecord],
+}
+
+fn ranking_credit_readiness_report(
+    inputs: RankingCreditReadinessInputs<'_>,
+) -> TraceRankingCreditReadinessReport {
+    let already_settled_event_ids = inputs
+        .settlement_batches
+        .iter()
+        .filter(|batch| batch.status == StorageTraceCreditSettlementBatchStatus::Finalized)
+        .flat_map(|batch| batch.source_credit_event_ids.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let mut events = inputs
+        .credit_events
+        .iter()
+        .filter(|event| event.event_type == TraceCreditLedgerEventType::RankingUtility)
+        .filter(|event| event.credit_points_delta > 0.0)
+        .filter(|event| !already_settled_event_ids.contains(&event.event_id))
+        .map(|event| {
+            ranking_credit_readiness_event(
+                inputs.state,
+                event,
+                inputs.held_credit_accounts,
+                inputs.predictions,
+                inputs.model_versions,
+                inputs.calibration_runs,
+            )
+        })
+        .collect::<Vec<_>>();
+    events.sort_by_key(|event| (event.ready, event.event_id));
+    let ready_count = events.iter().filter(|event| event.ready).count();
+    let blocked_count = events.len().saturating_sub(ready_count);
+    let mut blocked_reason_counts = BTreeMap::new();
+    for event in events.iter().filter(|event| !event.ready) {
+        for reason in &event.reason_codes {
+            *blocked_reason_counts.entry(reason.clone()).or_insert(0) += 1;
+        }
+    }
+    TraceRankingCreditReadinessReport {
+        tenant_id: inputs.tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&inputs.tenant.tenant_id),
+        pending_ranking_credit_event_count: events.len(),
+        ready_count,
+        blocked_count,
+        blocked_reason_counts,
+        events,
+    }
+}
+
+fn ranking_credit_readiness_event(
+    state: &AppState,
+    event: &TraceCommonsCreditLedgerRecord,
+    held_credit_accounts: &BTreeSet<String>,
+    predictions: &[TraceRankingPredictionRecord],
+    model_versions: &[TraceRankingModelVersionRecord],
+    calibration_runs: &[TraceRankingCalibrationRunRecord],
+) -> TraceRankingCreditReadinessEvent {
+    let mut reason_codes = Vec::new();
+    if held_credit_accounts.contains(&event.auth_principal_ref) {
+        reason_codes.push("held_credit_account".to_string());
+    }
+
+    let ranking_prediction_id =
+        parse_ranking_prediction_external_ref(event.external_ref.as_deref());
+    let mut model_version = None;
+    let mut target_use = None;
+    let mut policy_version = None;
+    let mut ranking_calibration_run_id = None;
+    let mut ranking_calibration_report_hash = None;
+    let mut ranking_calibration_joined_evidence_hash = None;
+
+    let Some(parsed_prediction_id) = ranking_prediction_id else {
+        reason_codes.push("missing_prediction_ref".to_string());
+        reason_codes.sort();
+        reason_codes.dedup();
+        return TraceRankingCreditReadinessEvent {
+            event_id: event.event_id,
+            submission_id: event.submission_id,
+            credit_points_delta: event.credit_points_delta,
+            ranking_prediction_id: None,
+            model_version,
+            target_use,
+            policy_version,
+            ranking_calibration_run_id,
+            ranking_calibration_report_hash,
+            ranking_calibration_joined_evidence_hash,
+            ready: false,
+            reason_codes,
+        };
+    };
+
+    let prediction = predictions
+        .iter()
+        .find(|prediction| prediction.ranking_prediction_id == parsed_prediction_id);
+    let Some(prediction) = prediction else {
+        reason_codes.push("missing_prediction".to_string());
+        reason_codes.sort();
+        reason_codes.dedup();
+        return TraceRankingCreditReadinessEvent {
+            event_id: event.event_id,
+            submission_id: event.submission_id,
+            credit_points_delta: event.credit_points_delta,
+            ranking_prediction_id,
+            model_version,
+            target_use,
+            policy_version,
+            ranking_calibration_run_id,
+            ranking_calibration_report_hash,
+            ranking_calibration_joined_evidence_hash,
+            ready: false,
+            reason_codes,
+        };
+    };
+
+    model_version = Some(prediction.model_version.clone());
+    target_use = Some(prediction.target_use);
+    policy_version = Some(prediction.prediction_policy_version.clone());
+    if prediction.submission_id != event.submission_id {
+        reason_codes.push("prediction_submission_mismatch".to_string());
+    }
+    if prediction.settlement_score_micros != credit_delta_micros(event.credit_points_delta) {
+        reason_codes.push("settlement_score_mismatch".to_string());
+    }
+
+    match latest_ranking_model_version(model_versions, &prediction.model_version) {
+        Some(model) => {
+            if model.status != StorageTraceRankingModelStatus::Active {
+                reason_codes.push("inactive_model".to_string());
+            }
+            if model.feature_schema_version != prediction.feature_schema_version {
+                reason_codes.push("feature_schema_mismatch".to_string());
+            }
+            if model.policy_version != prediction.prediction_policy_version {
+                reason_codes.push("policy_mismatch".to_string());
+            }
+            match latest_calibration_run_for_model_target(
+                model,
+                prediction.target_use,
+                calibration_runs,
+            ) {
+                Some(run) => {
+                    ranking_calibration_run_id = Some(run.calibration_run_id);
+                    ranking_calibration_report_hash = Some(run.report_hash.clone());
+                    ranking_calibration_joined_evidence_hash =
+                        Some(run.joined_evidence_hash.clone());
+                    if !run.promotable {
+                        reason_codes.push("calibration_not_promotable".to_string());
+                    }
+                    if ranking_calibration_is_stale(state, run) {
+                        reason_codes.push("calibration_stale".to_string());
+                    }
+                    if run.joined_label_source_count < state.ranking_min_label_source_count {
+                        reason_codes.push("calibration_label_source_underdiverse".to_string());
+                    }
+                    if prediction.confidence < run.confidence_threshold {
+                        reason_codes.push("low_confidence_prediction".to_string());
+                    }
+                }
+                None => reason_codes.push("missing_calibration".to_string()),
+            }
+        }
+        None => reason_codes.push("missing_model".to_string()),
+    }
+
+    reason_codes.sort();
+    reason_codes.dedup();
+    TraceRankingCreditReadinessEvent {
+        event_id: event.event_id,
+        submission_id: event.submission_id,
+        credit_points_delta: event.credit_points_delta,
+        ranking_prediction_id,
+        model_version,
+        target_use,
+        policy_version,
+        ranking_calibration_run_id,
+        ranking_calibration_report_hash,
+        ranking_calibration_joined_evidence_hash,
+        ready: reason_codes.is_empty(),
+        reason_codes,
     }
 }
 
@@ -36092,6 +36351,30 @@ mod tests {
         .await
         .expect("prediction credit can append when freshness gate is disabled");
 
+        Arc::make_mut(&mut state).ranking_min_label_source_count = 2;
+        let Json(readiness) = ranking_credit_readiness_report_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+        )
+        .await
+        .expect("admin can inspect underdiverse ranking credit readiness");
+        assert_eq!(readiness.pending_ranking_credit_event_count, 1);
+        assert_eq!(readiness.ready_count, 0);
+        assert_eq!(readiness.blocked_count, 1);
+        assert_eq!(
+            readiness
+                .blocked_reason_counts
+                .get("calibration_label_source_underdiverse"),
+            Some(&1)
+        );
+        assert!(
+            readiness.events[0]
+                .reason_codes
+                .contains(&"calibration_label_source_underdiverse".to_string())
+        );
+        Arc::make_mut(&mut state).ranking_min_label_source_count =
+            DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT;
+
         Arc::make_mut(&mut state).ranking_calibration_max_age = Some(Duration::zero());
         let stale_settlement_error = credit_settlement_handler(
             State(state.clone()),
@@ -38068,7 +38351,7 @@ mod tests {
         );
         assert_eq!(
             model.latest_joined_evidence_hash,
-            Some(calibration.joined_evidence_hash)
+            Some(calibration.joined_evidence_hash.clone())
         );
         assert!(model.current_joined_evidence_hash.starts_with("sha256:"));
         assert!(model.joined_evidence_changed);
@@ -38098,7 +38381,7 @@ mod tests {
         .expect_err("low-confidence active-model predictions cannot mint credit");
         assert_eq!(low_confidence_credit_error.0, StatusCode::CONFLICT);
 
-        let Json(_) = append_credit_event_handler(
+        let Json(manual_credit) = append_credit_event_handler(
             State(state.clone()),
             auth_headers("review-token-a"),
             AxumPath(drift_submission_id),
@@ -38114,6 +38397,38 @@ mod tests {
         )
         .await
         .expect("reviewer can append manually bound ranking utility credit");
+
+        let Json(readiness) = ranking_credit_readiness_report_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+        )
+        .await
+        .expect("admin can inspect pending ranking credit readiness");
+        assert_eq!(readiness.pending_ranking_credit_event_count, 1);
+        assert_eq!(readiness.ready_count, 0);
+        assert_eq!(readiness.blocked_count, 1);
+        assert_eq!(
+            readiness
+                .blocked_reason_counts
+                .get("low_confidence_prediction"),
+            Some(&1)
+        );
+        assert_eq!(readiness.events.len(), 1);
+        assert_eq!(readiness.events[0].event_id, manual_credit.event_id);
+        assert_eq!(
+            readiness.events[0].ranking_prediction_id,
+            Some(low_confidence_prediction.ranking_prediction_id)
+        );
+        assert_eq!(
+            readiness.events[0].ranking_calibration_joined_evidence_hash,
+            Some(calibration.joined_evidence_hash.clone())
+        );
+        assert!(
+            readiness.events[0]
+                .reason_codes
+                .contains(&"low_confidence_prediction".to_string())
+        );
+
         let Json(settlement) = credit_settlement_handler(
             State(state),
             auth_headers("admin-token-a"),
