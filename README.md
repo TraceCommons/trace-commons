@@ -22,7 +22,8 @@ coordinator that sequences calibration, model promotion, prediction credit,
 settlement, and NEAR outbox submission checks for one model/policy/target. The
 `POST /v1/workers/credit-cycle/scheduler/run` route lets utility-worker cron
 jobs select the next eligible candidate or active model for a target/policy and
-run at most a bounded number of credit cycles while skipping live claims. The
+run at most a bounded number of credit cycles while skipping live claims and
+models whose current ranking evidence is not yet promotable. The
 next ranking substrate is also server-owned: model
 version records, hash-only feature records, prediction records, frontier/reviewer
 labels, calibration reports, persisted model-promotion calibration runs, and
