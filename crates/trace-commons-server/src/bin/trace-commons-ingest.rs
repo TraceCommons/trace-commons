@@ -222,6 +222,10 @@ const TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS: &str =
     "TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS";
 const TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS: &str =
     "TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS";
+const TRACE_COMMONS_RANKING_MIN_CONFIDENCE_THRESHOLD: &str =
+    "TRACE_COMMONS_RANKING_MIN_CONFIDENCE_THRESHOLD";
+const TRACE_COMMONS_RANKING_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS: &str =
+    "TRACE_COMMONS_RANKING_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS";
 const TRACE_COMMONS_RANKING_MIN_LABEL_COUNT: &str = "TRACE_COMMONS_RANKING_MIN_LABEL_COUNT";
 const TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT: &str =
     "TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT";
@@ -241,6 +245,8 @@ const TRACE_EXPORT_ONE_SHOT_GRANT_TTL_SECONDS: i64 = 300;
 const TRACE_RANKING_DEFAULT_MIN_LABEL_COUNT: usize = 25;
 const TRACE_RANKING_DEFAULT_CONFIDENCE_THRESHOLD: f32 = 0.5;
 const TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS: i64 = 1_000_000;
+const DEFAULT_TRACE_RANKING_MIN_CONFIDENCE_THRESHOLD: f32 = 0.0;
+const MAX_TRACE_RANKING_AVERAGE_ABSOLUTE_ERROR_MICROS: i64 = 1_000_000_000_000;
 const DEFAULT_TRACE_RANKING_MIN_LABEL_COUNT: usize = 1;
 const MAX_TRACE_RANKING_MIN_LABEL_COUNT: usize = 1_000_000;
 const DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT: usize = 1;
@@ -302,6 +308,8 @@ struct AppState {
     artifact_store: Option<ConfiguredTraceArtifactStore>,
     near_credit_submitter: Option<Arc<dyn TraceNearCreditSubmitter>>,
     ranking_calibration_max_age: Option<Duration>,
+    ranking_min_confidence_threshold: f32,
+    ranking_max_average_absolute_error_micros: i64,
     ranking_min_label_count: usize,
     ranking_min_label_source_count: usize,
 }
@@ -1412,6 +1420,9 @@ impl AppState {
         let artifact_store = trace_artifact_store_from_env(&root)?;
         let near_credit_submitter = trace_near_credit_submitter_from_env()?;
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
+        let ranking_min_confidence_threshold = parse_ranking_min_confidence_threshold_from_env()?;
+        let ranking_max_average_absolute_error_micros =
+            parse_ranking_max_average_absolute_error_micros_from_env()?;
         let ranking_min_label_count = parse_ranking_min_label_count_from_env()?;
         let ranking_min_label_source_count = parse_ranking_min_label_source_count_from_env()?;
         let object_primary_submit_review = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW);
@@ -1557,6 +1568,8 @@ impl AppState {
             artifact_store,
             near_credit_submitter,
             ranking_calibration_max_age,
+            ranking_min_confidence_threshold,
+            ranking_max_average_absolute_error_micros,
             ranking_min_label_count,
             ranking_min_label_source_count,
         })
@@ -3470,6 +3483,42 @@ fn parse_ranking_calibration_max_age_from_env() -> anyhow::Result<Option<Duratio
     Ok(Some(Duration::hours(hours)))
 }
 
+fn parse_ranking_min_confidence_threshold_from_env() -> anyhow::Result<f32> {
+    match optional_trimmed_env(TRACE_COMMONS_RANKING_MIN_CONFIDENCE_THRESHOLD)? {
+        Some(value) => parse_ranking_min_confidence_threshold(&value),
+        None => Ok(DEFAULT_TRACE_RANKING_MIN_CONFIDENCE_THRESHOLD),
+    }
+}
+
+fn parse_ranking_min_confidence_threshold(configured: &str) -> anyhow::Result<f32> {
+    let parsed = configured.trim().parse::<f32>().with_context(|| {
+        format!("{TRACE_COMMONS_RANKING_MIN_CONFIDENCE_THRESHOLD} must be a number")
+    })?;
+    anyhow::ensure!(
+        parsed.is_finite() && (0.0..=1.0).contains(&parsed),
+        "{TRACE_COMMONS_RANKING_MIN_CONFIDENCE_THRESHOLD} must be between 0 and 1"
+    );
+    Ok(parsed)
+}
+
+fn parse_ranking_max_average_absolute_error_micros_from_env() -> anyhow::Result<i64> {
+    match optional_trimmed_env(TRACE_COMMONS_RANKING_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS)? {
+        Some(value) => parse_ranking_max_average_absolute_error_micros(&value),
+        None => Ok(TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS),
+    }
+}
+
+fn parse_ranking_max_average_absolute_error_micros(configured: &str) -> anyhow::Result<i64> {
+    let parsed = configured.trim().parse::<i64>().with_context(|| {
+        format!("{TRACE_COMMONS_RANKING_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS} must be an integer")
+    })?;
+    anyhow::ensure!(
+        (0..=MAX_TRACE_RANKING_AVERAGE_ABSOLUTE_ERROR_MICROS).contains(&parsed),
+        "{TRACE_COMMONS_RANKING_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS} must be between 0 and {MAX_TRACE_RANKING_AVERAGE_ABSOLUTE_ERROR_MICROS}"
+    );
+    Ok(parsed)
+}
+
 fn parse_ranking_min_label_count_from_env() -> anyhow::Result<usize> {
     match optional_trimmed_env(TRACE_COMMONS_RANKING_MIN_LABEL_COUNT)? {
         Some(value) => parse_ranking_min_label_count(&value),
@@ -3741,6 +3790,8 @@ struct TraceCommonsConfigStatusResponse {
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Vec<String>,
     ranking_calibration_max_age_hours: Option<i64>,
+    ranking_min_confidence_threshold: f32,
+    ranking_max_average_absolute_error_micros: i64,
     ranking_min_label_count: usize,
     ranking_min_label_source_count: usize,
     artifact_store_configured: bool,
@@ -3857,6 +3908,8 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         ranking_calibration_max_age_hours: state
             .ranking_calibration_max_age
             .map(|max_age| max_age.num_hours()),
+        ranking_min_confidence_threshold: state.ranking_min_confidence_threshold,
+        ranking_max_average_absolute_error_micros: state.ranking_max_average_absolute_error_micros,
         ranking_min_label_count: state.ranking_min_label_count,
         ranking_min_label_source_count: state.ranking_min_label_source_count,
         artifact_store_configured: state.artifact_store.is_some(),
@@ -8361,6 +8414,7 @@ async fn ranking_calibration_run_handler(
         .confidence_threshold
         .unwrap_or(TRACE_RANKING_DEFAULT_CONFIDENCE_THRESHOLD);
     validate_unit_score(confidence_threshold, "confidence_threshold")?;
+    let confidence_threshold = confidence_threshold.max(state.ranking_min_confidence_threshold);
     let min_label_count = body
         .min_label_count
         .unwrap_or(TRACE_RANKING_DEFAULT_MIN_LABEL_COUNT);
@@ -8378,6 +8432,8 @@ async fn ranking_calibration_run_handler(
         max_average_absolute_error_micros,
         "max_average_absolute_error_micros",
     )?;
+    let max_average_absolute_error_micros =
+        max_average_absolute_error_micros.min(state.ranking_max_average_absolute_error_micros);
 
     let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
         .await
@@ -26670,6 +26726,9 @@ mod tests {
             artifact_store,
             near_credit_submitter: None,
             ranking_calibration_max_age: None,
+            ranking_min_confidence_threshold: DEFAULT_TRACE_RANKING_MIN_CONFIDENCE_THRESHOLD,
+            ranking_max_average_absolute_error_micros:
+                TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS,
             ranking_min_label_count: DEFAULT_TRACE_RANKING_MIN_LABEL_COUNT,
             ranking_min_label_source_count: DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT,
         })
@@ -28705,6 +28764,14 @@ mod tests {
         assert_eq!(
             value["ranking_min_label_source_count"],
             serde_json::json!(DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT)
+        );
+        assert_eq!(
+            value["ranking_min_confidence_threshold"],
+            serde_json::json!(DEFAULT_TRACE_RANKING_MIN_CONFIDENCE_THRESHOLD)
+        );
+        assert_eq!(
+            value["ranking_max_average_absolute_error_micros"],
+            serde_json::json!(TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS)
         );
         assert_eq!(
             value["ranking_min_label_count"],
@@ -32085,6 +32152,9 @@ mod tests {
             artifact_store: None,
             near_credit_submitter: None,
             ranking_calibration_max_age: None,
+            ranking_min_confidence_threshold: DEFAULT_TRACE_RANKING_MIN_CONFIDENCE_THRESHOLD,
+            ranking_max_average_absolute_error_micros:
+                TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS,
             ranking_min_label_count: DEFAULT_TRACE_RANKING_MIN_LABEL_COUNT,
             ranking_min_label_source_count: DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT,
         });
@@ -36827,6 +36897,127 @@ mod tests {
         assert_eq!(run.joined_label_prediction_count, 1);
         assert_eq!(run.min_label_count, 2);
         assert_eq!(run.reason_codes, vec!["insufficient_labels".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn ranking_calibration_run_applies_server_quality_thresholds() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).ranking_min_confidence_threshold = 0.5;
+        Arc::make_mut(&mut state).ranking_max_average_absolute_error_micros = 1_000_000;
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(model) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-quality-floor-v1".to_string(),
+                feature_schema_version: "ranking-features-quality-floor-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:training-set-quality-floor".to_string(),
+                calibration_dataset_hash: "sha256:calibration-set-quality-floor".to_string(),
+                model_artifact_hash: "sha256:model-artifact-quality-floor".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can register ranking model version");
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                feature_schema_version: model.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:feature-vector-quality-floor".to_string(),
+                feature_names_hash: "sha256:feature-names-quality-floor".to_string(),
+                source_feature_hash: "sha256:redacted-summary-features-quality-floor".to_string(),
+                duplicate_score: Some(0.05),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.88),
+                coverage_tags: vec!["tool:terminal".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking feature record");
+        let Json(_) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                model_version: model.model_version.clone(),
+                feature_schema_version: model.feature_schema_version.clone(),
+                prediction_policy_version: model.policy_version.clone(),
+                feature_vector_hash: feature.feature_vector_hash,
+                predicted_utility_micros: 2_000_000,
+                uncertainty_micros: 300_000,
+                confidence: 0.4,
+                risk_penalty_micros: 0,
+                novelty_bonus_micros: 0,
+                explanation_codes: vec!["novel_tool_success".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking prediction");
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 500_000,
+                evidence_hash: "sha256:frontier-lab-evidence-quality-floor".to_string(),
+                external_ref: "private-frontier-lab-quality-floor".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking label");
+
+        let Json(run) = ranking_calibration_run_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: model.model_version,
+                target_use: TraceAllowedUse::ModelTraining,
+                policy_version: model.policy_version,
+                evaluation_dataset_hash: model.calibration_dataset_hash,
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.0),
+                max_average_absolute_error_micros: Some(2_000_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist calibration run");
+        assert!(!run.promotable);
+        assert_eq!(run.confidence_threshold, 0.5);
+        assert_eq!(run.max_average_absolute_error_micros, 1_000_000);
+        assert_eq!(run.average_absolute_error_micros, Some(1_500_000));
+        assert_eq!(
+            run.reason_codes,
+            vec![
+                "average_error_above_threshold".to_string(),
+                "label_source_error_above_threshold".to_string(),
+                "low_confidence_predictions_present".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]
