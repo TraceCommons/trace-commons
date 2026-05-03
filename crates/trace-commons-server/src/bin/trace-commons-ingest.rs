@@ -5055,29 +5055,56 @@ fn trace_review_lease_action_name(action: StorageTraceReviewLeaseAuditAction) ->
     }
 }
 
+fn trace_audit_reason_value<'a>(reason: Option<&'a str>, key: &str) -> Option<&'a str> {
+    let prefix = format!("{key}=");
+    reason?
+        .split(';')
+        .find_map(|part| part.strip_prefix(&prefix))
+}
+
 fn trace_review_lease_audit_action_from_reason(
     reason: Option<&str>,
 ) -> Option<StorageTraceReviewLeaseAuditAction> {
-    reason?
-        .split(';')
-        .find_map(|part| part.strip_prefix("action="))
-        .and_then(|action| match action {
-            "claim" => Some(StorageTraceReviewLeaseAuditAction::Claim),
-            "release" => Some(StorageTraceReviewLeaseAuditAction::Release),
-            _ => None,
-        })
+    trace_audit_reason_value(reason, "action").and_then(|action| match action {
+        "claim" => Some(StorageTraceReviewLeaseAuditAction::Claim),
+        "release" => Some(StorageTraceReviewLeaseAuditAction::Release),
+        _ => None,
+    })
 }
 
 fn trace_review_lease_timestamp_from_reason(
     reason: Option<&str>,
     key: &str,
 ) -> Option<DateTime<Utc>> {
-    let prefix = format!("{key}=");
-    reason?
-        .split(';')
-        .find_map(|part| part.strip_prefix(&prefix))
+    trace_audit_reason_value(reason, key)
         .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
         .map(|timestamp| timestamp.with_timezone(&Utc))
+}
+
+fn ranking_worker_run_recovery_audit_metadata_from_reason(
+    reason: Option<&str>,
+) -> Option<StorageTraceAuditSafeMetadata> {
+    let ranking_worker_run_id = trace_audit_reason_value(reason, "ranking_worker_run_id")
+        .and_then(|value| Uuid::parse_str(value).ok())?;
+    let run_kind = trace_audit_reason_value(reason, "run_kind").and_then(|value| {
+        serde_json::from_value::<StorageTraceRankingWorkerRunKind>(serde_json::Value::String(
+            value.to_string(),
+        ))
+        .ok()
+    })?;
+    let recovered_status = trace_audit_reason_value(reason, "status").and_then(|value| {
+        serde_json::from_value::<StorageTraceRankingWorkerRunStatus>(serde_json::Value::String(
+            value.to_string(),
+        ))
+        .ok()
+    })?;
+    let reason_hash = trace_audit_reason_value(reason, "reason_hash")?.to_string();
+    Some(StorageTraceAuditSafeMetadata::RankingWorkerRunRecovery {
+        ranking_worker_run_id,
+        run_kind,
+        recovered_status,
+        reason_hash,
+    })
 }
 
 fn trace_review_lease_reason(
@@ -8798,6 +8825,31 @@ fn ranking_worker_run_recovery_error_hash(reason: &str) -> String {
     ))
 }
 
+fn ranking_worker_run_recovery_audit_reason(
+    ranking_worker_run_id: Uuid,
+    run_kind: StorageTraceRankingWorkerRunKind,
+    status: StorageTraceRankingWorkerRunStatus,
+    reason_hash: &str,
+) -> String {
+    format!(
+        "ranking_worker_run_id={ranking_worker_run_id};run_kind={};status={};reason_hash={reason_hash}",
+        serde_enum_tag(&run_kind),
+        serde_enum_tag(&status)
+    )
+}
+
+fn ranking_worker_run_recovery_audit_metadata(
+    record: &TraceRankingWorkerRunRecord,
+    reason_hash: &str,
+) -> StorageTraceAuditSafeMetadata {
+    StorageTraceAuditSafeMetadata::RankingWorkerRunRecovery {
+        ranking_worker_run_id: record.ranking_worker_run_id,
+        run_kind: record.run_kind,
+        recovered_status: record.status,
+        reason_hash: reason_hash.to_string(),
+    }
+}
+
 async fn finalize_failed_ranking_worker_run_with_db_mirror(
     state: &AppState,
     tenant: &TenantAuth,
@@ -9350,10 +9402,24 @@ async fn recover_stale_ranking_worker_run_handler(
     }
     record.status = TraceRankingWorkerRunStatus::Failed;
     record.completed_at = Some(Utc::now());
+    let recovery_reason_hash = sha256_prefixed(&reason);
     record.last_error_hash = Some(ranking_worker_run_recovery_error_hash(&reason));
     append_ranking_worker_run_with_db_mirror(state.as_ref(), &tenant, &record)
         .await
         .map_err(internal_error)?;
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::ranking_worker_run_recovery(
+            &tenant,
+            &record,
+            &recovery_reason_hash,
+        ),
+        StorageTraceAuditAction::RankingWorkerRunRecovery,
+        ranking_worker_run_recovery_audit_metadata(&record, &recovery_reason_hash),
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(record))
 }
 
@@ -16717,6 +16783,21 @@ fn trace_commons_audit_event_from_storage(
             allowed_use_count: _,
             grant_projection_hash: _,
         } => (None, event.reason.clone(), None),
+        StorageTraceAuditSafeMetadata::RankingWorkerRunRecovery {
+            ranking_worker_run_id,
+            run_kind,
+            recovered_status,
+            reason_hash,
+        } => (
+            None,
+            Some(ranking_worker_run_recovery_audit_reason(
+                *ranking_worker_run_id,
+                *run_kind,
+                *recovered_status,
+                reason_hash,
+            )),
+            None,
+        ),
         StorageTraceAuditSafeMetadata::Empty => (None, event.reason.clone(), None),
     };
     Ok(TraceCommonsAuditEvent {
@@ -16783,6 +16864,7 @@ fn storage_audit_action_kind(action: StorageTraceAuditAction) -> &'static str {
         StorageTraceAuditAction::BenchmarkConvert => "benchmark_conversion",
         StorageTraceAuditAction::ProcessEvaluate => "process_evaluation",
         StorageTraceAuditAction::PolicyUpdate => "tenant_policy_update",
+        StorageTraceAuditAction::RankingWorkerRunRecovery => "ranking_worker_run_recovery",
     }
 }
 
@@ -22963,6 +23045,7 @@ fn audit_backfill_storage_projection(
         }
         "process_evaluation" => StorageTraceAuditAction::ProcessEvaluate,
         "tenant_policy_update" => StorageTraceAuditAction::PolicyUpdate,
+        "ranking_worker_run_recovery" => StorageTraceAuditAction::RankingWorkerRunRecovery,
         _ => StorageTraceAuditAction::Read,
     };
     let metadata = match event.kind.as_str() {
@@ -23005,6 +23088,10 @@ fn audit_backfill_storage_projection(
                     .unwrap_or_default()
                     .min(u32::MAX as usize) as u32,
             }
+        }
+        "ranking_worker_run_recovery" => {
+            ranking_worker_run_recovery_audit_metadata_from_reason(event.reason.as_deref())
+                .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
         }
         _ => StorageTraceAuditSafeMetadata::Empty,
     };
@@ -27023,6 +27110,34 @@ impl TraceCommonsAuditEvent {
             export_count: Some(vector_entries_indexed),
             export_id: None,
             decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    fn ranking_worker_run_recovery(
+        auth: &TenantAuth,
+        record: &TraceRankingWorkerRunRecord,
+        reason_hash: &str,
+    ) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "ranking_worker_run_recovery".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(ranking_worker_run_recovery_audit_reason(
+                record.ranking_worker_run_id,
+                record.run_kind,
+                record.status,
+                reason_hash,
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: Some(reason_hash.to_string()),
             previous_event_hash: None,
             event_hash: None,
         }
@@ -37269,6 +37384,32 @@ mod tests {
         assert!(recovered.last_error_hash.is_some());
         let recovered_json = serde_json::to_string(&recovered).expect("recovered serializes");
         assert!(!recovered_json.contains("scheduler pod was replaced"));
+
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
+        let recovery_audit = audit_events
+            .iter()
+            .find(|event| event.kind == "ranking_worker_run_recovery")
+            .expect("ranking worker run recovery writes audit event");
+        let recovery_reason_hash = sha256_prefixed("scheduler pod was replaced");
+        assert_eq!(recovery_audit.tenant_id, "tenant-a");
+        assert_eq!(recovery_audit.submission_id, Uuid::nil());
+        assert_eq!(recovery_audit.actor_role, Some(TokenRole::Admin));
+        let expected_admin_principal_ref = principal_storage_ref("admin-token-a");
+        assert_eq!(
+            recovery_audit.actor_principal_ref.as_deref(),
+            Some(expected_admin_principal_ref.as_str())
+        );
+        let expected_recovery_reason = format!(
+            "ranking_worker_run_id={ranking_worker_run_id};run_kind=prediction_credit;status=failed;reason_hash={recovery_reason_hash}"
+        );
+        assert_eq!(
+            recovery_audit.reason.as_deref(),
+            Some(expected_recovery_reason.as_str())
+        );
+        let audit_json = serde_json::to_string(&audit_events).expect("audit events serialize");
+        assert!(audit_json.contains(&recovery_reason_hash));
+        assert!(!audit_json.contains("scheduler pod was replaced"));
 
         let raw_worker_runs: Vec<TraceRankingWorkerRunRecord> = read_jsonl_records(
             &ranking_worker_runs_path(temp.path(), "tenant-a"),

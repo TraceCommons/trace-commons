@@ -525,8 +525,10 @@ model-promotion runs refuse active overlapping non-stale rows before appending a
 new `running` entry. Admins can call
 `POST /v1/admin/ranking/worker-runs/{ranking_worker_run_id}/recover-stale` with
 a non-empty recovery reason to append-finalize a stale running row as `failed`;
-the raw reason is hashed, fresh active runs are rejected, and the recovered row
-no longer contributes to the stale-run promotion blocker.
+the raw reason is hashed, a `ranking_worker_run_recovery` audit event is
+appended with only the run id, run kind, recovered status, and reason hash,
+fresh active runs are rejected, and the recovered row no longer contributes to
+the stale-run promotion blocker.
 
 `GET /v1/admin/ranking/model-risk-report` recomputes the current joined-evidence hash for each active model/target-use pair and reports post-calibration prediction/label counts, low-confidence fresh predictions, stale or non-promotable calibration status, evidence-hash drift, and machine-readable risk codes without exposing trace bodies or raw lab references.
 
