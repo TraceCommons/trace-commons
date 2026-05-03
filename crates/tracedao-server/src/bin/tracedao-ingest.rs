@@ -5576,6 +5576,8 @@ struct TraceCreditSettlementBatchRecord {
     ranking_calibration_joined_evidence_hash: Option<String>,
     #[serde(default)]
     ranking_credit_events_excluded_count: usize,
+    #[serde(default)]
+    ranking_credit_events_excluded_reason_counts: BTreeMap<String, usize>,
     actor_principal_ref: String,
     created_at: DateTime<Utc>,
 }
@@ -7616,6 +7618,8 @@ async fn run_credit_settlement(
                 .as_ref()
                 .map(|gate| gate.joined_evidence_hash.clone()),
             ranking_credit_events_excluded_count,
+            ranking_credit_events_excluded_reason_counts:
+                ranking_credit_events_excluded_reason_counts.clone(),
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
         };
@@ -8621,6 +8625,18 @@ fn credit_settlement_batch_to_storage_write(
                 record.settlement_batch_id
             )
         })?;
+    let mut ranking_credit_events_excluded_reason_counts = BTreeMap::new();
+    for (reason, count) in &record.ranking_credit_events_excluded_reason_counts {
+        ranking_credit_events_excluded_reason_counts.insert(
+            reason.clone(),
+            u32::try_from(*count).with_context(|| {
+                format!(
+                    "ranking_credit_events_excluded_reason_counts value is too large for settlement batch {}",
+                    record.settlement_batch_id
+                )
+            })?,
+        );
+    }
     Ok(StorageTraceCreditSettlementBatchWrite {
         tenant_id: record.tenant_id.clone(),
         settlement_batch_id: record.settlement_batch_id,
@@ -8642,6 +8658,7 @@ fn credit_settlement_batch_to_storage_write(
             .ranking_calibration_joined_evidence_hash
             .clone(),
         ranking_credit_events_excluded_count,
+        ranking_credit_events_excluded_reason_counts,
         actor_principal_ref: record.actor_principal_ref.clone(),
     })
 }
@@ -8688,6 +8705,11 @@ fn credit_settlement_batch_from_storage(
         ranking_calibration_report_hash: record.ranking_calibration_report_hash,
         ranking_calibration_joined_evidence_hash: record.ranking_calibration_joined_evidence_hash,
         ranking_credit_events_excluded_count: record.ranking_credit_events_excluded_count as usize,
+        ranking_credit_events_excluded_reason_counts: record
+            .ranking_credit_events_excluded_reason_counts
+            .into_iter()
+            .map(|(reason, count)| (reason, count as usize))
+            .collect(),
         actor_principal_ref: record.actor_principal_ref,
         created_at: record.created_at,
     })
@@ -36747,6 +36769,7 @@ mod tests {
                 ranking_calibration_report_hash: None,
                 ranking_calibration_joined_evidence_hash: None,
                 ranking_credit_events_excluded_count: 0,
+                ranking_credit_events_excluded_reason_counts: BTreeMap::new(),
                 actor_principal_ref: principal_storage_ref("admin-token-a"),
                 created_at: Utc::now(),
             },
@@ -36994,6 +37017,7 @@ mod tests {
             ranking_calibration_report_hash: None,
             ranking_calibration_joined_evidence_hash: None,
             ranking_credit_events_excluded_count: 0,
+            ranking_credit_events_excluded_reason_counts: BTreeMap::new(),
             actor_principal_ref: principal_storage_ref("admin-token-a"),
             created_at: Utc::now(),
         };
@@ -38677,6 +38701,7 @@ mod tests {
             ranking_calibration_report_hash: None,
             ranking_calibration_joined_evidence_hash: None,
             ranking_credit_events_excluded_count: 0,
+            ranking_credit_events_excluded_reason_counts: BTreeMap::new(),
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
         };
@@ -43154,6 +43179,7 @@ mod tests {
             ranking_calibration_report_hash: None,
             ranking_calibration_joined_evidence_hash: None,
             ranking_credit_events_excluded_count: 0,
+            ranking_credit_events_excluded_reason_counts: BTreeMap::new(),
             actor_principal_ref: principal_storage_ref("admin-token-a"),
             created_at: Utc::now(),
         };
