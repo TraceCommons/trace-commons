@@ -8277,7 +8277,7 @@ async fn append_ranking_prediction_credit_for_record(
             "ranking prediction credit policy does not match the active model",
         ));
     }
-    let _calibration_run = latest_promotable_ranking_calibration_run(
+    let calibration_run = latest_promotable_ranking_calibration_run(
         state,
         tenant,
         &prediction.model_version,
@@ -8287,6 +8287,12 @@ async fn append_ranking_prediction_credit_for_record(
         RankingCalibrationGateContext::PredictionCredit,
     )
     .await?;
+    if prediction.confidence < calibration_run.confidence_threshold {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "ranking prediction credit requires prediction confidence to meet the calibration threshold",
+        ));
+    }
 
     let credit_points_delta = prediction.settlement_score_micros as f32 / 1_000_000.0;
     if !credit_points_delta.is_finite() {
@@ -9741,6 +9747,7 @@ struct RankingSettlementCalibrationGate {
     target_use: TraceAllowedUse,
     calibration_run_id: Uuid,
     report_hash: String,
+    confidence_threshold: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -9830,6 +9837,7 @@ fn ranking_credit_event_matches_active_prediction(
             && prediction.target_use == gate.target_use
             && prediction.prediction_policy_version == policy_version
             && prediction.settlement_score_micros == settlement_score_micros
+            && prediction.confidence >= gate.confidence_threshold
     })
 }
 
@@ -9908,6 +9916,7 @@ async fn ranking_settlement_calibration_gate(
         target_use: run.target_use,
         calibration_run_id: run.calibration_run_id,
         report_hash: run.report_hash,
+        confidence_threshold: run.confidence_threshold,
     }))
 }
 
@@ -37832,13 +37841,13 @@ mod tests {
         make_metadata_only_low_risk(&mut calibration_envelope);
         calibration_envelope.consent.scopes = vec![ConsentScope::ModelTraining];
         calibration_envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
-        calibration_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        calibration_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
         let calibration_submission_id = calibration_envelope.submission_id;
         let mut drift_envelope = sample_envelope().await;
         make_metadata_only_low_risk(&mut drift_envelope);
         drift_envelope.consent.scopes = vec![ConsentScope::ModelTraining];
         drift_envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
-        drift_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        drift_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
         let drift_submission_id = drift_envelope.submission_id;
 
         let _ = submit_trace_handler(
@@ -37876,7 +37885,7 @@ mod tests {
             auth_headers("utility-worker-token-a"),
             Json(TraceRankingFeatureRequest {
                 submission_id: calibration_submission_id,
-                target_use: TraceAllowedUse::ModelTraining,
+                target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
                 feature_vector_hash: "sha256:feature-vector-risk-report-calibration".to_string(),
                 feature_names_hash: "sha256:feature-names-risk-report-calibration".to_string(),
@@ -37895,7 +37904,7 @@ mod tests {
             auth_headers("utility-worker-token-a"),
             Json(TraceRankingPredictionRequest {
                 submission_id: calibration_submission_id,
-                target_use: TraceAllowedUse::ModelTraining,
+                target_use: TraceAllowedUse::RankingModelTraining,
                 model_version: candidate.model_version.clone(),
                 feature_schema_version: candidate.feature_schema_version.clone(),
                 prediction_policy_version: candidate.policy_version.clone(),
@@ -37915,9 +37924,9 @@ mod tests {
             auth_headers("utility-worker-token-a"),
             Json(TraceRankingLabelRequest {
                 submission_id: calibration_submission_id,
-                target_use: TraceAllowedUse::ModelTraining,
+                target_use: TraceAllowedUse::RankingModelTraining,
                 label_source: StorageTraceRankingLabelSource::FrontierLab,
-                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 2_500_000,
                 evidence_hash: "sha256:frontier-lab-evidence-risk-report-calibration".to_string(),
@@ -37931,7 +37940,7 @@ mod tests {
             auth_headers("utility-worker-token-a"),
             Json(TraceRankingCalibrationRunRequest {
                 model_version: candidate.model_version.clone(),
-                target_use: TraceAllowedUse::ModelTraining,
+                target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: candidate.policy_version.clone(),
                 evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
                 min_label_count: Some(1),
@@ -37948,7 +37957,7 @@ mod tests {
             Json(TraceRankingModelPromotionRequest {
                 dry_run: false,
                 model_version: candidate.model_version.clone(),
-                target_use: TraceAllowedUse::ModelTraining,
+                target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: candidate.policy_version.clone(),
                 reason: "promote calibrated model for risk reporting".to_string(),
             }),
@@ -37962,7 +37971,7 @@ mod tests {
             auth_headers("utility-worker-token-a"),
             Json(TraceRankingFeatureRequest {
                 submission_id: drift_submission_id,
-                target_use: TraceAllowedUse::ModelTraining,
+                target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
                 feature_vector_hash: "sha256:feature-vector-risk-report-drift".to_string(),
                 feature_names_hash: "sha256:feature-names-risk-report-drift".to_string(),
@@ -37976,12 +37985,12 @@ mod tests {
         )
         .await
         .expect("utility worker can write drift feature");
-        let Json(_) = ranking_prediction_handler(
+        let Json(low_confidence_prediction) = ranking_prediction_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
             Json(TraceRankingPredictionRequest {
                 submission_id: drift_submission_id,
-                target_use: TraceAllowedUse::ModelTraining,
+                target_use: TraceAllowedUse::RankingModelTraining,
                 model_version: candidate.model_version.clone(),
                 feature_schema_version: candidate.feature_schema_version.clone(),
                 prediction_policy_version: candidate.policy_version.clone(),
@@ -38001,9 +38010,9 @@ mod tests {
             auth_headers("utility-worker-token-a"),
             Json(TraceRankingLabelRequest {
                 submission_id: drift_submission_id,
-                target_use: TraceAllowedUse::ModelTraining,
+                target_use: TraceAllowedUse::RankingModelTraining,
                 label_source: StorageTraceRankingLabelSource::Reviewer,
-                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 3_000_000,
                 evidence_hash: "sha256:reviewer-evidence-risk-report-drift".to_string(),
@@ -38014,7 +38023,7 @@ mod tests {
         .expect("utility worker can write post-calibration label");
 
         let Json(report) =
-            ranking_model_risk_report_handler(State(state), auth_headers("admin-token-a"))
+            ranking_model_risk_report_handler(State(state.clone()), auth_headers("admin-token-a"))
                 .await
                 .expect("admin can read active ranking model risk report");
         assert_eq!(report.active_model_count, 1);
@@ -38022,7 +38031,7 @@ mod tests {
         assert_eq!(report.models.len(), 1);
         let model = &report.models[0];
         assert_eq!(model.model_version, candidate.model_version);
-        assert_eq!(model.target_use, TraceAllowedUse::ModelTraining);
+        assert_eq!(model.target_use, TraceAllowedUse::RankingModelTraining);
         assert_eq!(
             model.latest_calibration_run_id,
             Some(calibration.calibration_run_id)
@@ -38050,6 +38059,51 @@ mod tests {
                 .risk_codes
                 .contains(&"low_confidence_predictions_since_calibration".to_string())
         );
+
+        let low_confidence_credit_error = ranking_prediction_credit_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionCreditRequest {
+                ranking_prediction_id: low_confidence_prediction.ranking_prediction_id,
+                reason: "low-confidence prediction should not mint credit".to_string(),
+            }),
+        )
+        .await
+        .expect_err("low-confidence active-model predictions cannot mint credit");
+        assert_eq!(low_confidence_credit_error.0, StatusCode::CONFLICT);
+
+        let Json(_) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(drift_submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::RankingUtility,
+                credit_points_delta: low_confidence_prediction.settlement_score_micros as f32
+                    / 1_000_000.0,
+                reason: Some("manual low-confidence ranking credit should not settle".to_string()),
+                external_ref: Some(ranking_prediction_external_ref(
+                    low_confidence_prediction.ranking_prediction_id,
+                )),
+            }),
+        )
+        .await
+        .expect("reviewer can append manually bound ranking utility credit");
+        let Json(settlement) = credit_settlement_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: candidate.policy_version,
+                reason: "settlement excludes low-confidence ranking credit".to_string(),
+                near_contract_id: None,
+                ranking_model_version: Some(active.model_version),
+                ranking_target_use: Some(TraceAllowedUse::RankingModelTraining),
+            }),
+        )
+        .await
+        .expect("settlement can evaluate low-confidence ranking credit");
+        assert_eq!(settlement.settled_source_event_count, 0);
+        assert_eq!(settlement.ranking_credit_events_excluded_count, 1);
     }
 
     #[tokio::test]
