@@ -7276,6 +7276,42 @@ async fn ranking_prediction_handler(
     validate_nonnegative_micros(body.risk_penalty_micros, "risk_penalty_micros")?;
     validate_nonnegative_micros(body.novelty_bonus_micros, "novelty_bonus_micros")?;
     validate_ranking_codes(&body.explanation_codes, "explanation_codes")?;
+    let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let model = latest_ranking_model_version(&model_versions, &model_version).ok_or_else(|| {
+        api_error(
+            StatusCode::NOT_FOUND,
+            "ranking prediction model version not found",
+        )
+    })?;
+    ensure_ranking_model_accepts_evidence(model)?;
+    if model.feature_schema_version != feature_schema_version {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "ranking prediction feature schema does not match the registered model",
+        ));
+    }
+    if model.policy_version != prediction_policy_version {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "ranking prediction policy does not match the registered model",
+        ));
+    }
+    let features = read_ranking_features_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    if !features.iter().any(|feature| {
+        feature.submission_id == submission.submission_id
+            && feature.target_use == body.target_use
+            && feature.feature_schema_version == feature_schema_version
+            && feature.feature_vector_hash == feature_vector_hash
+    }) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "ranking prediction must reference an existing feature vector for the source and model schema",
+        ));
+    }
 
     let settlement_score_micros =
         body.predicted_utility_micros + body.novelty_bonus_micros - body.risk_penalty_micros;
@@ -7442,15 +7478,16 @@ async fn ranking_calibration_run_handler(
     let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
-    if !model_versions
-        .iter()
-        .any(|model| model.model_version == model_version)
-    {
+    let model = latest_ranking_model_version(&model_versions, &model_version)
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "ranking model version not found"))?;
+    ensure_ranking_model_accepts_evidence(model)?;
+    if model.policy_version != policy_version {
         return Err(api_error(
-            StatusCode::NOT_FOUND,
-            "ranking model version not found",
+            StatusCode::CONFLICT,
+            "ranking calibration policy does not match the registered model",
         ));
     }
+    let feature_schema_version = model.feature_schema_version.clone();
     let predictions = read_ranking_predictions_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
@@ -7464,6 +7501,7 @@ async fn ranking_calibration_run_handler(
             model_version,
             target_use: body.target_use,
             policy_version,
+            feature_schema_version,
             evaluation_dataset_hash,
             min_label_count,
             confidence_threshold,
@@ -7966,6 +8004,29 @@ fn ranking_calibration_run_from_storage(
     })
 }
 
+fn latest_ranking_model_version<'a>(
+    records: &'a [TraceRankingModelVersionRecord],
+    model_version: &str,
+) -> Option<&'a TraceRankingModelVersionRecord> {
+    records
+        .iter()
+        .filter(|record| record.model_version == model_version)
+        .max_by_key(|record| record.created_at)
+}
+
+fn ensure_ranking_model_accepts_evidence(model: &TraceRankingModelVersionRecord) -> ApiResult<()> {
+    if matches!(
+        model.status,
+        StorageTraceRankingModelStatus::Candidate | StorageTraceRankingModelStatus::Active
+    ) {
+        return Ok(());
+    }
+    Err(api_error(
+        StatusCode::CONFLICT,
+        "ranking evidence requires an active or candidate model version",
+    ))
+}
+
 async fn read_ranking_source_submission(
     state: &AppState,
     tenant: &TenantAuth,
@@ -8133,6 +8194,7 @@ struct RankingCalibrationRunInputs {
     model_version: String,
     target_use: TraceAllowedUse,
     policy_version: String,
+    feature_schema_version: String,
     evaluation_dataset_hash: String,
     min_label_count: usize,
     confidence_threshold: f32,
@@ -8152,6 +8214,8 @@ fn ranking_calibration_run_record(
         .filter(|prediction| {
             prediction.model_version == inputs.model_version
                 && prediction.target_use == inputs.target_use
+                && prediction.prediction_policy_version == inputs.policy_version
+                && prediction.feature_schema_version == inputs.feature_schema_version
         })
         .collect::<Vec<_>>();
     let matching_labels = labels
@@ -33410,6 +33474,150 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ranking_predictions_require_registered_model_policy_and_feature_hash() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                feature_schema_version: "ranking-features-bound-v1".to_string(),
+                feature_vector_hash: "sha256:feature-vector-bound".to_string(),
+                feature_names_hash: "sha256:feature-names-bound".to_string(),
+                source_feature_hash: "sha256:redacted-summary-features-bound".to_string(),
+                duplicate_score: Some(0.05),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.88),
+                coverage_tags: vec!["tool:terminal".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write feature first");
+
+        let missing_model = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                model_version: "trace-ranker-bound-v1".to_string(),
+                feature_schema_version: feature.feature_schema_version.clone(),
+                prediction_policy_version: "trace-credit-policy-v1".to_string(),
+                feature_vector_hash: feature.feature_vector_hash.clone(),
+                predicted_utility_micros: 2_100_000,
+                uncertainty_micros: 300_000,
+                confidence: 0.82,
+                risk_penalty_micros: 50_000,
+                novelty_bonus_micros: 125_000,
+                explanation_codes: vec!["novel_tool_success".to_string()],
+            }),
+        )
+        .await
+        .expect_err("ranking prediction must name a registered model");
+        assert_eq!(missing_model.0, StatusCode::NOT_FOUND);
+
+        let Json(model) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-bound-v1".to_string(),
+                feature_schema_version: feature.feature_schema_version.clone(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:training-set-bound".to_string(),
+                calibration_dataset_hash: "sha256:calibration-set-bound".to_string(),
+                model_artifact_hash: "sha256:model-artifact-bound".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can register ranking model version");
+
+        let wrong_policy = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                model_version: model.model_version.clone(),
+                feature_schema_version: model.feature_schema_version.clone(),
+                prediction_policy_version: "trace-credit-policy-v2".to_string(),
+                feature_vector_hash: feature.feature_vector_hash.clone(),
+                predicted_utility_micros: 2_100_000,
+                uncertainty_micros: 300_000,
+                confidence: 0.82,
+                risk_penalty_micros: 50_000,
+                novelty_bonus_micros: 125_000,
+                explanation_codes: vec!["novel_tool_success".to_string()],
+            }),
+        )
+        .await
+        .expect_err("ranking prediction policy must match the registered model policy");
+        assert_eq!(wrong_policy.0, StatusCode::CONFLICT);
+
+        let wrong_feature = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                model_version: model.model_version.clone(),
+                feature_schema_version: model.feature_schema_version.clone(),
+                prediction_policy_version: model.policy_version.clone(),
+                feature_vector_hash: "sha256:missing-feature-vector-bound".to_string(),
+                predicted_utility_micros: 2_100_000,
+                uncertainty_micros: 300_000,
+                confidence: 0.82,
+                risk_penalty_micros: 50_000,
+                novelty_bonus_micros: 125_000,
+                explanation_codes: vec!["novel_tool_success".to_string()],
+            }),
+        )
+        .await
+        .expect_err("ranking prediction must reference a stored source feature hash");
+        assert_eq!(wrong_feature.0, StatusCode::CONFLICT);
+
+        let Json(prediction) = ranking_prediction_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                model_version: model.model_version,
+                feature_schema_version: model.feature_schema_version,
+                prediction_policy_version: model.policy_version,
+                feature_vector_hash: feature.feature_vector_hash,
+                predicted_utility_micros: 2_100_000,
+                uncertainty_micros: 300_000,
+                confidence: 0.82,
+                risk_penalty_micros: 50_000,
+                novelty_bonus_micros: 125_000,
+                explanation_codes: vec!["novel_tool_success".to_string()],
+            }),
+        )
+        .await
+        .expect("ranking prediction with registered model and feature succeeds");
+        assert_eq!(prediction.settlement_score_micros, 2_175_000);
+    }
+
+    #[tokio::test]
     async fn ranking_calibration_run_persists_hash_only_model_quality_gate() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -33462,7 +33670,7 @@ mod tests {
         )
         .await
         .expect("utility worker can write ranking feature record");
-        let Json(_) = ranking_prediction_handler(
+        let Json(prediction) = ranking_prediction_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
             Json(TraceRankingPredictionRequest {
@@ -33482,6 +33690,14 @@ mod tests {
         )
         .await
         .expect("utility worker can write ranking prediction");
+        let mut stale_policy_prediction = prediction.clone();
+        stale_policy_prediction.ranking_prediction_id = Uuid::new_v4();
+        stale_policy_prediction.prediction_policy_version = "trace-credit-policy-stale".to_string();
+        stale_policy_prediction.predicted_utility_micros = 8_000_000;
+        stale_policy_prediction.settlement_score_micros = 8_075_000;
+        stale_policy_prediction.created_at = prediction.created_at + Duration::seconds(1);
+        append_ranking_prediction(temp.path(), "tenant-a", &stale_policy_prediction)
+            .expect("legacy stale-policy prediction can exist on disk");
         let Json(_) = ranking_label_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
