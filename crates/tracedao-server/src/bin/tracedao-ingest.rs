@@ -7723,6 +7723,11 @@ async fn ensure_active_ranking_model_has_promotable_calibration(
         &latest_run,
         RankingCalibrationGateContext::ModelPromotion,
     )?;
+    ensure_ranking_calibration_fresh(
+        state,
+        &latest_run,
+        RankingCalibrationGateContext::ModelPromotion,
+    )?;
     Ok(())
 }
 
@@ -35564,6 +35569,22 @@ mod tests {
         .await
         .expect_err("stale calibration blocks model promotion");
         assert_eq!(stale_promotion_error.0, StatusCode::CONFLICT);
+        let stale_direct_activation_error = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: candidate.model_version.clone(),
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                policy_version: candidate.policy_version.clone(),
+                status: StorageTraceRankingModelStatus::Active,
+                training_dataset_hash: candidate.training_dataset_hash.clone(),
+                calibration_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                model_artifact_hash: candidate.model_artifact_hash.clone(),
+            }),
+        )
+        .await
+        .expect_err("stale calibration blocks direct active model registration");
+        assert_eq!(stale_direct_activation_error.0, StatusCode::CONFLICT);
 
         Arc::make_mut(&mut state).ranking_calibration_max_age = None;
         let Json(_) = ranking_model_promotion_handler(

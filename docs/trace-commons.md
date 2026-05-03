@@ -486,7 +486,9 @@ deployment-owned floors. In production, set
 `TRACE_COMMONS_RANKING_MIN_LABEL_COUNT` high enough that a small ad hoc label
 set cannot promote a credit-bearing model, then layer
 `TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT` and per-source cohort error gates
-on top so the sample is broad enough across reviewers/labs.
+on top so the sample is broad enough across reviewers/labs. Direct registration
+of an `active` model uses the same calibration freshness and diversity gates as
+the explicit model-promotion route.
 
 Vector indexing now follows the same downstream ABAC model: tenant policy and
 signed-claim allowed-use filters are enforced before the worker runs, then both
