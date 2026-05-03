@@ -228,6 +228,8 @@ const DEFAULT_EDDSA_KEYSET_REFRESH_INTERVAL_SECONDS: u64 = 300;
 const MAX_EDDSA_KEYSET_URL_BYTES: usize = 256 * 1024;
 const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT: u32 = 100;
 const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT: u32 = 500;
+const TRACE_CREDIT_SETTLEMENT_WORKER_RUN_DEFAULT_LIMIT: usize = 100;
+const TRACE_CREDIT_SETTLEMENT_WORKER_RUN_MAX_LIMIT: usize = 500;
 const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
 const TRACE_REVIEW_DUE_AFTER_HOURS: i64 = 24;
 const TRACE_REVIEW_OVERDUE_AFTER_HOURS: i64 = 72;
@@ -5142,6 +5144,14 @@ struct TraceCreditSettlementRunRequest {
     ranking_target_use: Option<TraceAllowedUse>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceCreditSettlementWorkerRunRequest {
+    #[serde(flatten)]
+    request: TraceCreditSettlementRunRequest,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TraceCreditSettlementBatchRecord {
     settlement_batch_id: Uuid,
@@ -5315,7 +5325,10 @@ struct TraceCreditSettlementRunResponse {
     dry_run: bool,
     policy_version: String,
     source_list_hash: String,
+    limit: Option<usize>,
     settled_source_event_count: usize,
+    eligible_source_event_count: usize,
+    pending_after_count: usize,
     settled_account_count: usize,
     settled_credit_points: f32,
     near_outbox_item_count: usize,
@@ -6054,7 +6067,7 @@ async fn credit_settlement_handler(
 ) -> ApiResult<Json<TraceCreditSettlementRunResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
-    run_credit_settlement(state.as_ref(), &tenant, body)
+    run_credit_settlement(state.as_ref(), &tenant, body, None)
         .await
         .map(Json)
 }
@@ -6062,11 +6075,15 @@ async fn credit_settlement_handler(
 async fn credit_settlement_worker_run_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(body): Json<TraceCreditSettlementRunRequest>,
+    Json(body): Json<TraceCreditSettlementWorkerRunRequest>,
 ) -> ApiResult<Json<TraceCreditSettlementRunResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_utility_operator(&tenant)?;
-    run_credit_settlement(state.as_ref(), &tenant, body)
+    let limit = validate_credit_settlement_run_limit(
+        body.limit
+            .or(Some(TRACE_CREDIT_SETTLEMENT_WORKER_RUN_DEFAULT_LIMIT)),
+    )?;
+    run_credit_settlement(state.as_ref(), &tenant, body.request, limit)
         .await
         .map(Json)
 }
@@ -6075,6 +6092,7 @@ async fn run_credit_settlement(
     state: &AppState,
     tenant: &TenantAuth,
     body: TraceCreditSettlementRunRequest,
+    limit: Option<usize>,
 ) -> ApiResult<TraceCreditSettlementRunResponse> {
     let policy_version = body.policy_version.trim().to_string();
     if policy_version.is_empty() {
@@ -6218,6 +6236,15 @@ async fn run_credit_settlement(
         }
     }
     selected_events.sort_by_key(|event| event.event_id);
+    let eligible_source_event_count = selected_events.len();
+    if let Some(limit) = limit {
+        selected_events.truncate(limit);
+    }
+    let pending_after_count = if body.dry_run {
+        eligible_source_event_count
+    } else {
+        eligible_source_event_count.saturating_sub(selected_events.len())
+    };
 
     let source_credit_event_ids = selected_events
         .iter()
@@ -6370,7 +6397,10 @@ async fn run_credit_settlement(
         dry_run: body.dry_run,
         policy_version,
         source_list_hash,
+        limit,
         settled_source_event_count: source_credit_event_ids.len(),
+        eligible_source_event_count,
+        pending_after_count,
         settled_account_count: line_items.len(),
         settled_credit_points,
         near_outbox_item_count: near_outbox_items.len(),
@@ -6388,6 +6418,20 @@ async fn run_credit_settlement(
             .map(|gate| gate.report_hash.clone()),
         ranking_credit_events_excluded_count,
     })
+}
+
+fn validate_credit_settlement_run_limit(limit: Option<usize>) -> ApiResult<Option<usize>> {
+    if let Some(limit) = limit {
+        if !(1..=TRACE_CREDIT_SETTLEMENT_WORKER_RUN_MAX_LIMIT).contains(&limit) {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "credit settlement run limit must be between 1 and 500",
+            ));
+        }
+        Ok(Some(limit))
+    } else {
+        Ok(None)
+    }
 }
 
 async fn repair_missing_near_credit_outbox_items_for_finalized_batches(
@@ -33407,13 +33451,16 @@ mod tests {
         let Json(settlement) = credit_settlement_worker_run_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
-            Json(TraceCreditSettlementRunRequest {
-                dry_run: false,
-                policy_version: "trace-credit-policy-v1".to_string(),
-                reason: "scheduled utility settlement".to_string(),
-                near_contract_id: Some("trace-credits.near".to_string()),
-                ranking_model_version: None,
-                ranking_target_use: None,
+            Json(TraceCreditSettlementWorkerRunRequest {
+                request: TraceCreditSettlementRunRequest {
+                    dry_run: false,
+                    policy_version: "trace-credit-policy-v1".to_string(),
+                    reason: "scheduled utility settlement".to_string(),
+                    near_contract_id: Some("trace-credits.near".to_string()),
+                    ranking_model_version: None,
+                    ranking_target_use: None,
+                },
+                limit: None,
             }),
         )
         .await
@@ -33440,13 +33487,16 @@ mod tests {
         let Json(retry) = credit_settlement_worker_run_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
-            Json(TraceCreditSettlementRunRequest {
-                dry_run: false,
-                policy_version: "trace-credit-policy-v1".to_string(),
-                reason: "scheduled utility settlement retry".to_string(),
-                near_contract_id: Some("trace-credits.near".to_string()),
-                ranking_model_version: None,
-                ranking_target_use: None,
+            Json(TraceCreditSettlementWorkerRunRequest {
+                request: TraceCreditSettlementRunRequest {
+                    dry_run: false,
+                    policy_version: "trace-credit-policy-v1".to_string(),
+                    reason: "scheduled utility settlement retry".to_string(),
+                    near_contract_id: Some("trace-credits.near".to_string()),
+                    ranking_model_version: None,
+                    ranking_target_use: None,
+                },
+                limit: None,
             }),
         )
         .await
@@ -33458,6 +33508,114 @@ mod tests {
                 .expect("retry outbox reads")
                 .len(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_settlement_worker_run_respects_source_event_limit() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut submission_ids = Vec::new();
+        for _ in 0..3 {
+            let mut envelope = sample_envelope().await;
+            make_metadata_only_low_risk(&mut envelope);
+            envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+            envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+            envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+            submission_ids.push(envelope.submission_id);
+            let _ = submit_trace_handler(
+                State(state.clone()),
+                auth_headers("token-a"),
+                Json(envelope),
+            )
+            .await
+            .expect("training submission succeeds");
+        }
+        let Json(credit) = utility_credit_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceUtilityCreditJobRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.0,
+                reason: "frontier lab training value".to_string(),
+                external_ref: "frontier:worker-limited-settlement".to_string(),
+                submission_ids,
+            }),
+        )
+        .await
+        .expect("utility worker can append training credits");
+        assert_eq!(credit.appended_count, 3);
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/workers/credit-settlements/run")
+                    .header(AUTHORIZATION, "Bearer utility-worker-token-a")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "dry_run": false,
+                            "policy_version": "trace-credit-policy-v1",
+                            "reason": "scheduled bounded utility settlement",
+                            "limit": 1
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("worker response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json parses");
+        assert_eq!(value["limit"], serde_json::json!(1));
+        assert_eq!(value["settled_source_event_count"], serde_json::json!(1));
+        assert_eq!(value["pending_after_count"], serde_json::json!(2));
+
+        let batches =
+            read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].source_credit_event_ids.len(), 1);
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/workers/credit-settlements/run")
+                    .header(AUTHORIZATION, "Bearer utility-worker-token-a")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "dry_run": false,
+                            "policy_version": "trace-credit-policy-v1",
+                            "reason": "scheduled bounded utility settlement retry",
+                            "limit": 1
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("worker response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json parses");
+        assert_eq!(value["limit"], serde_json::json!(1));
+        assert_eq!(value["settled_source_event_count"], serde_json::json!(1));
+        assert_eq!(value["pending_after_count"], serde_json::json!(1));
+        assert_eq!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement reads")
+                .len(),
+            2
         );
     }
 
