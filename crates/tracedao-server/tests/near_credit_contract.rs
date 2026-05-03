@@ -66,3 +66,32 @@ fn near_credit_receipt_call_rejects_unknown_credit_methods() {
 
     assert!(error.to_string().contains("non-transferable"));
 }
+
+#[test]
+fn near_credit_receipt_call_rejects_malformed_contract_ids() {
+    let receipt = NearCreditReceipt {
+        settlement_batch_id: Uuid::from_u128(0x200),
+        credit_account_hash: "sha256:account".to_string(),
+        policy_version: "trace-credit-policy-v1".to_string(),
+        source_list_hash: "sha256:sources".to_string(),
+        attestation_hash: "sha256:attestation".to_string(),
+        amount_micros: 1_750_000,
+        issuer_signature_hash: "sha256:issuer-signature".to_string(),
+    };
+
+    for contract_id in [
+        " Trace-Credits.testnet",
+        "Trace-Credits.testnet",
+        "trace credits.testnet",
+        "trace-credits..testnet",
+        "-trace-credits.testnet",
+        "trace-credits.testnet-",
+    ] {
+        let error = NearCreditReceiptCall::settle(contract_id, receipt.clone())
+            .expect_err("malformed NEAR account ids are rejected");
+        assert!(
+            error.to_string().contains("NEAR contract id"),
+            "unexpected error for {contract_id}: {error}"
+        );
+    }
+}
