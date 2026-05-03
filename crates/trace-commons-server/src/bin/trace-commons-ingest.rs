@@ -243,6 +243,7 @@ const TRACE_CREDIT_SETTLEMENT_WORKER_RUN_DEFAULT_LIMIT: usize = 100;
 const TRACE_CREDIT_SETTLEMENT_WORKER_RUN_MAX_LIMIT: usize = 500;
 const TRACE_RANKING_MODEL_PROMOTION_RUN_DEFAULT_LIMIT: usize = 25;
 const TRACE_RANKING_MODEL_PROMOTION_RUN_MAX_LIMIT: usize = 100;
+const TRACE_RANKING_WORKER_RUN_STALE_AFTER_HOURS: i64 = 1;
 const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
 const TRACE_REVIEW_DUE_AFTER_HOURS: i64 = 24;
 const TRACE_REVIEW_OVERDUE_AFTER_HOURS: i64 = 72;
@@ -12394,6 +12395,7 @@ async fn operational_summary_handler(
 ) -> ApiResult<Json<TraceOperationalSummaryResponse>> {
     let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(tenant.auth())?;
+    let generated_at = Utc::now();
     let TraceCommonsMetadataView { records, derived } =
         read_reviewer_metadata_view(state.as_ref(), tenant.auth())
             .await
@@ -12404,9 +12406,14 @@ async fn operational_summary_handler(
     let db_summary = read_operational_db_summary(state.as_ref(), tenant.auth())
         .await
         .map_err(internal_error)?;
-    let ranking = read_operational_ranking_summary(state.as_ref(), tenant.auth(), &credit_events)
-        .await
-        .map_err(internal_error)?;
+    let ranking = read_operational_ranking_summary(
+        state.as_ref(),
+        tenant.auth(),
+        &credit_events,
+        generated_at,
+    )
+    .await
+    .map_err(internal_error)?;
     let response = TraceOperationalSummaryResponse::from_parts(TraceOperationalSummaryInputs {
         state: state.as_ref(),
         tenant_id: tenant.tenant_id().to_string(),
@@ -12415,7 +12422,7 @@ async fn operational_summary_handler(
         credit_events,
         db_summary,
         ranking,
-        generated_at: Utc::now(),
+        generated_at,
     });
     append_audit_event_with_db_mirror(
         state.as_ref(),
@@ -12455,6 +12462,7 @@ async fn read_operational_ranking_summary(
     state: &AppState,
     tenant: &TenantAuth,
     credit_events: &[TraceCommonsCreditLedgerRecord],
+    generated_at: DateTime<Utc>,
 ) -> anyhow::Result<TraceOperationalRankingSummary> {
     let settlement_batches = read_credit_settlement_batches_for_admin(state, tenant).await?;
     let held_credit_accounts = active_credit_hold_account_refs_for_admin(state, tenant).await?;
@@ -12462,6 +12470,7 @@ async fn read_operational_ranking_summary(
     let predictions = read_ranking_predictions_for_admin(state, tenant).await?;
     let labels = read_ranking_labels_for_admin(state, tenant).await?;
     let calibration_runs = read_ranking_calibration_runs_for_admin(state, tenant).await?;
+    let worker_runs = read_ranking_worker_runs_for_admin(state, tenant).await?;
     Ok(TraceOperationalRankingSummary::from_inputs(
         TraceOperationalRankingInputs {
             state,
@@ -12473,6 +12482,8 @@ async fn read_operational_ranking_summary(
             predictions: &predictions,
             labels: &labels,
             calibration_runs: &calibration_runs,
+            worker_runs: &worker_runs,
+            generated_at,
         },
     ))
 }
@@ -27289,6 +27300,7 @@ struct TraceOperationalPromotionGateSummary {
     vector_missing_count: usize,
     at_risk_ranking_model_count: usize,
     blocked_ranking_credit_event_count: usize,
+    stale_ranking_worker_run_count: usize,
 }
 
 impl TraceOperationalPromotionGateSummary {
@@ -27313,6 +27325,7 @@ impl TraceOperationalPromotionGateSummary {
             .saturating_sub(vectors.accepted_current_derived_with_active_vector);
         let at_risk_ranking_model_count = ranking.at_risk_model_count;
         let blocked_ranking_credit_event_count = ranking.blocked_credit_event_count;
+        let stale_ranking_worker_run_count = ranking.stale_running_worker_run_count;
         let mut blocking_gates = Vec::new();
         let mut warning_gates = Vec::new();
 
@@ -27361,6 +27374,11 @@ impl TraceOperationalPromotionGateSummary {
             "blocked_ranking_credit_events",
             blocked_ranking_credit_event_count,
         );
+        push_gap_count(
+            &mut blocking_gates,
+            "stale_ranking_worker_runs",
+            stale_ranking_worker_run_count,
+        );
 
         push_gap_count(
             &mut warning_gates,
@@ -27396,6 +27414,7 @@ impl TraceOperationalPromotionGateSummary {
             vector_missing_count,
             at_risk_ranking_model_count,
             blocked_ranking_credit_event_count,
+            stale_ranking_worker_run_count,
         }
     }
 }
@@ -27639,6 +27658,8 @@ struct TraceOperationalRankingInputs<'a> {
     predictions: &'a [TraceRankingPredictionRecord],
     labels: &'a [TraceRankingLabelRecord],
     calibration_runs: &'a [TraceRankingCalibrationRunRecord],
+    worker_runs: &'a [TraceRankingWorkerRunRecord],
+    generated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -27651,6 +27672,9 @@ struct TraceOperationalRankingSummary {
     ready_credit_event_count: usize,
     blocked_credit_event_count: usize,
     blocked_credit_reason_counts: BTreeMap<String, usize>,
+    running_worker_run_count: usize,
+    stale_running_worker_run_count: usize,
+    failed_worker_run_count: usize,
 }
 
 impl TraceOperationalRankingSummary {
@@ -27679,6 +27703,25 @@ impl TraceOperationalRankingSummary {
                 *risk_code_counts.entry(code.clone()).or_insert(0) += 1;
             }
         }
+        let stale_running_cutoff =
+            inputs.generated_at - Duration::hours(TRACE_RANKING_WORKER_RUN_STALE_AFTER_HOURS);
+        let mut running_worker_run_count = 0;
+        let mut stale_running_worker_run_count = 0;
+        let mut failed_worker_run_count = 0;
+        for worker_run in inputs.worker_runs {
+            match worker_run.status {
+                TraceRankingWorkerRunStatus::Running => {
+                    running_worker_run_count += 1;
+                    if worker_run.created_at <= stale_running_cutoff {
+                        stale_running_worker_run_count += 1;
+                    }
+                }
+                TraceRankingWorkerRunStatus::Failed => {
+                    failed_worker_run_count += 1;
+                }
+                TraceRankingWorkerRunStatus::Completed => {}
+            }
+        }
         Self {
             active_model_count: risk.active_model_count,
             monitored_model_count: risk.monitored_model_count,
@@ -27688,6 +27731,9 @@ impl TraceOperationalRankingSummary {
             ready_credit_event_count: readiness.ready_count,
             blocked_credit_event_count: readiness.blocked_count,
             blocked_credit_reason_counts: readiness.blocked_reason_counts,
+            running_worker_run_count,
+            stale_running_worker_run_count,
+            failed_worker_run_count,
         }
     }
 }
@@ -40242,6 +40288,67 @@ mod tests {
         .await
         .expect_err("latest nonpromotable calibration blocks activation");
         assert_eq!(active_error.0, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn operational_summary_blocks_stale_running_ranking_worker_runs() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        append_ranking_worker_run(
+            temp.path(),
+            "tenant-a",
+            &TraceRankingWorkerRunRecord {
+                ranking_worker_run_id: Uuid::new_v4(),
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                run_kind: TraceRankingWorkerRunKind::PredictionCredit,
+                status: TraceRankingWorkerRunStatus::Running,
+                dry_run: false,
+                reason_hash: sha256_prefixed("stale running worker reason"),
+                model_version: None,
+                target_use: None,
+                policy_version: None,
+                limit: 100,
+                checked_count: 0,
+                succeeded_count: 0,
+                skipped_existing_count: 0,
+                skipped_model_risk_count: 0,
+                skipped_ineligible_count: 0,
+                pending_after_count: 0,
+                result_refs: Vec::new(),
+                reason_counts: BTreeMap::new(),
+                actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+                created_at: Utc::now() - Duration::hours(2),
+                completed_at: None,
+                last_error_hash: None,
+            },
+        )
+        .expect("stale running worker run writes");
+
+        let Json(operational) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary");
+        let operational_json =
+            serde_json::to_value(&operational).expect("operational summary serializes");
+        assert_eq!(
+            operational_json["ranking"]["running_worker_run_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["ranking"]["stale_running_worker_run_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["ranking"]["failed_worker_run_count"],
+            serde_json::json!(0)
+        );
+        assert!(
+            operational
+                .promotion_gates
+                .blocking_gates
+                .contains(&"stale_ranking_worker_runs=1".to_string())
+        );
     }
 
     #[tokio::test]
