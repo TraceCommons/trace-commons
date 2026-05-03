@@ -2163,6 +2163,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(ranking_worker_runs_handler),
         )
         .route(
+            "/v1/admin/ranking/worker-runs/{ranking_worker_run_id}/recover-stale",
+            post(recover_stale_ranking_worker_run_handler),
+        )
+        .route(
             "/v1/admin/ranking/calibration-runs",
             get(ranking_calibration_runs_handler),
         )
@@ -5580,6 +5584,11 @@ struct TraceRankingWorkerRunRecord {
     last_error_hash: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceRankingWorkerRunRecoveryRequest {
+    reason: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TraceRankingModelVersionRecord {
     tenant_id: String,
@@ -8782,6 +8791,13 @@ fn ranking_worker_run_error_hash(http_status: StatusCode, public_error: &str) ->
     ))
 }
 
+fn ranking_worker_run_recovery_error_hash(reason: &str) -> String {
+    sha256_prefixed(&format!(
+        "status=409;error=stale_ranking_worker_run_recovered;reason_hash={}",
+        sha256_prefixed(reason)
+    ))
+}
+
 async fn finalize_failed_ranking_worker_run_with_db_mirror(
     state: &AppState,
     tenant: &TenantAuth,
@@ -9301,6 +9317,61 @@ async fn ranking_worker_runs_handler(
         .await
         .map_err(internal_error)?;
     Ok(Json(records))
+}
+
+async fn recover_stale_ranking_worker_run_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(ranking_worker_run_id): AxumPath<Uuid>,
+    Json(body): Json<TraceRankingWorkerRunRecoveryRequest>,
+) -> ApiResult<Json<TraceRankingWorkerRunRecord>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let reason = validate_ranking_worker_run_recovery_reason(&body.reason)?;
+    let worker_runs = read_ranking_worker_runs_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let mut record = worker_runs
+        .into_iter()
+        .find(|record| record.ranking_worker_run_id == ranking_worker_run_id)
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "ranking worker run not found"))?;
+    if record.status != TraceRankingWorkerRunStatus::Running {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "ranking worker run is not running",
+        ));
+    }
+    let stale_cutoff = Utc::now() - Duration::hours(TRACE_RANKING_WORKER_RUN_STALE_AFTER_HOURS);
+    if record.created_at > stale_cutoff {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "ranking worker run is not stale",
+        ));
+    }
+    record.status = TraceRankingWorkerRunStatus::Failed;
+    record.completed_at = Some(Utc::now());
+    record.last_error_hash = Some(ranking_worker_run_recovery_error_hash(&reason));
+    append_ranking_worker_run_with_db_mirror(state.as_ref(), &tenant, &record)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(record))
+}
+
+fn validate_ranking_worker_run_recovery_reason(reason: &str) -> ApiResult<String> {
+    let reason = reason.trim().to_string();
+    if reason.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranking worker run recovery requires a non-empty reason",
+        ));
+    }
+    if reason.len() > 1024 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranking worker run recovery reason is too long",
+        ));
+    }
+    Ok(reason)
 }
 
 async fn append_ranking_model_version_with_db_mirror(
@@ -37133,6 +37204,168 @@ mod tests {
             error.1.0.error,
             "ranking prediction credit worker run is already active for overlapping filters"
         );
+
+        let raw_worker_runs =
+            read_all_ranking_worker_runs(temp.path(), "tenant-a").expect("worker runs read");
+        assert_eq!(raw_worker_runs.len(), 1);
+        assert_eq!(
+            raw_worker_runs[0].status,
+            TraceRankingWorkerRunStatus::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_can_recover_stale_ranking_worker_run_as_failed() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let ranking_worker_run_id = Uuid::new_v4();
+        append_ranking_worker_run(
+            temp.path(),
+            "tenant-a",
+            &TraceRankingWorkerRunRecord {
+                ranking_worker_run_id,
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                run_kind: TraceRankingWorkerRunKind::PredictionCredit,
+                status: TraceRankingWorkerRunStatus::Running,
+                dry_run: false,
+                reason_hash: sha256_prefixed("dead prediction credit scheduler"),
+                model_version: None,
+                target_use: None,
+                policy_version: None,
+                limit: 25,
+                checked_count: 3,
+                succeeded_count: 1,
+                skipped_existing_count: 1,
+                skipped_model_risk_count: 1,
+                skipped_ineligible_count: 0,
+                pending_after_count: 5,
+                result_refs: vec!["ranking_prediction:recovered-before-failure".to_string()],
+                reason_counts: BTreeMap::from([("calibration_stale".to_string(), 1)]),
+                actor_principal_ref: "utility-worker-a".to_string(),
+                created_at: Utc::now()
+                    - Duration::hours(TRACE_RANKING_WORKER_RUN_STALE_AFTER_HOURS + 1),
+                completed_at: None,
+                last_error_hash: None,
+            },
+        )
+        .expect("stale worker run writes");
+
+        let Json(recovered) = recover_stale_ranking_worker_run_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            AxumPath(ranking_worker_run_id),
+            Json(TraceRankingWorkerRunRecoveryRequest {
+                reason: "scheduler pod was replaced".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can recover stale ranking worker run");
+        assert_eq!(recovered.ranking_worker_run_id, ranking_worker_run_id);
+        assert_eq!(recovered.status, TraceRankingWorkerRunStatus::Failed);
+        assert_eq!(recovered.checked_count, 3);
+        assert_eq!(recovered.succeeded_count, 1);
+        assert!(recovered.completed_at.is_some());
+        assert!(recovered.last_error_hash.is_some());
+        let recovered_json = serde_json::to_string(&recovered).expect("recovered serializes");
+        assert!(!recovered_json.contains("scheduler pod was replaced"));
+
+        let raw_worker_runs: Vec<TraceRankingWorkerRunRecord> = read_jsonl_records(
+            &ranking_worker_runs_path(temp.path(), "tenant-a"),
+            "ranking worker run",
+        )
+        .expect("raw worker runs read");
+        assert_eq!(raw_worker_runs.len(), 2);
+        assert_eq!(
+            raw_worker_runs[0].status,
+            TraceRankingWorkerRunStatus::Running
+        );
+        assert_eq!(
+            raw_worker_runs[1].status,
+            TraceRankingWorkerRunStatus::Failed
+        );
+
+        let Json(operational) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary after recovery");
+        let operational_json = serde_json::to_value(operational).expect("operational serializes");
+        assert_eq!(
+            operational_json["ranking"]["stale_running_worker_run_count"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            operational_json["ranking"]["failed_worker_run_count"],
+            serde_json::json!(1)
+        );
+        assert!(
+            !operational_json["promotion_gates"]["blocking_gates"]
+                .as_array()
+                .expect("blocking gates array")
+                .contains(&serde_json::json!("stale_ranking_worker_runs=1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_ranking_worker_run_recovery_requires_admin_and_staleness() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let ranking_worker_run_id = Uuid::new_v4();
+        append_ranking_worker_run(
+            temp.path(),
+            "tenant-a",
+            &TraceRankingWorkerRunRecord {
+                ranking_worker_run_id,
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                run_kind: TraceRankingWorkerRunKind::ModelPromotion,
+                status: TraceRankingWorkerRunStatus::Running,
+                dry_run: false,
+                reason_hash: sha256_prefixed("fresh model promotion scheduler"),
+                model_version: None,
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                policy_version: None,
+                limit: 25,
+                checked_count: 0,
+                succeeded_count: 0,
+                skipped_existing_count: 0,
+                skipped_model_risk_count: 0,
+                skipped_ineligible_count: 0,
+                pending_after_count: 0,
+                result_refs: Vec::new(),
+                reason_counts: BTreeMap::new(),
+                actor_principal_ref: "utility-worker-a".to_string(),
+                created_at: Utc::now(),
+                completed_at: None,
+                last_error_hash: None,
+            },
+        )
+        .expect("fresh worker run writes");
+
+        let utility_error = recover_stale_ranking_worker_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            AxumPath(ranking_worker_run_id),
+            Json(TraceRankingWorkerRunRecoveryRequest {
+                reason: "utility worker should not recover".to_string(),
+            }),
+        )
+        .await
+        .expect_err("utility workers cannot recover stale runs");
+        assert_eq!(utility_error.0, StatusCode::FORBIDDEN);
+
+        let fresh_error = recover_stale_ranking_worker_run_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            AxumPath(ranking_worker_run_id),
+            Json(TraceRankingWorkerRunRecoveryRequest {
+                reason: "fresh run should not be terminalized".to_string(),
+            }),
+        )
+        .await
+        .expect_err("fresh active runs cannot be recovered");
+        assert_eq!(fresh_error.0, StatusCode::CONFLICT);
+        assert_eq!(fresh_error.1.0.error, "ranking worker run is not stale");
 
         let raw_worker_runs =
             read_all_ranking_worker_runs(temp.path(), "tenant-a").expect("worker runs read");

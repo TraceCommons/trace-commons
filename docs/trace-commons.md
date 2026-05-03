@@ -482,6 +482,7 @@ The service exposes:
 - `GET /v1/admin/ranking/model-risk-report`
 - `GET /v1/admin/ranking/credit-readiness-report`
 - `GET /v1/admin/ranking/worker-runs`
+- `POST /v1/admin/ranking/worker-runs/{ranking_worker_run_id}/recover-stale`
 - `GET /v1/admin/ranking/calibration-runs`
 - `POST /v1/workers/ranking/features`
 - `POST /v1/workers/ranking/predictions`
@@ -521,7 +522,11 @@ checked/succeeded/skipped counts, result refs, and machine-readable skip reason
 counts, but store only the reason hash rather than raw operator notes. The same
 ledger coordinates scheduler retries: live non-dry-run prediction-credit and
 model-promotion runs refuse active overlapping non-stale rows before appending a
-new `running` entry.
+new `running` entry. Admins can call
+`POST /v1/admin/ranking/worker-runs/{ranking_worker_run_id}/recover-stale` with
+a non-empty recovery reason to append-finalize a stale running row as `failed`;
+the raw reason is hashed, fresh active runs are rejected, and the recovered row
+no longer contributes to the stale-run promotion blocker.
 
 `GET /v1/admin/ranking/model-risk-report` recomputes the current joined-evidence hash for each active model/target-use pair and reports post-calibration prediction/label counts, low-confidence fresh predictions, stale or non-promotable calibration status, evidence-hash drift, and machine-readable risk codes without exposing trace bodies or raw lab references.
 
