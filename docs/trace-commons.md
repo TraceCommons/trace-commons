@@ -816,6 +816,11 @@ must be between 1 and 500. Responses include the applied `limit`, the total
 eligible source-event count, and `pending_after_count` so schedulers can retry
 bounded batches until no eligible settlement work remains.
 
+Before a non-dry-run batch is finalized, the server rereads finalized settlement
+batches and rejects any source credit event that has already been finalized in a
+different batch. This gives retries and overlapping workers a final duplicate
+issuance guard in addition to the initial idempotent source selection.
+
 Contributors can read only their own append-only central credit events:
 
 ```http
