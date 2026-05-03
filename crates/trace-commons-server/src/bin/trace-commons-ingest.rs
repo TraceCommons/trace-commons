@@ -6167,6 +6167,13 @@ struct TraceRankingModelRiskRecord {
     predictions_since_calibration_count: usize,
     labels_since_calibration_count: usize,
     low_confidence_predictions_since_calibration_count: usize,
+    pairwise_preference_label_count: usize,
+    pairwise_joined_pair_prediction_count: usize,
+    pairwise_correct_pair_count: usize,
+    pairwise_reversed_pair_count: usize,
+    pairwise_tied_pair_count: usize,
+    pairwise_accuracy_micros: Option<i64>,
+    pairwise_average_preferred_margin_micros: Option<i64>,
     risk_codes: Vec<String>,
 }
 
@@ -9693,6 +9700,9 @@ async fn ranking_prediction_credit_run_handler(
         let labels = read_ranking_labels_for_admin(state.as_ref(), &tenant)
             .await
             .map_err(internal_error)?;
+        let preference_labels = read_ranking_preference_labels_for_admin(state.as_ref(), &tenant)
+            .await
+            .map_err(internal_error)?;
         let calibration_runs = read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
             .await
             .map_err(internal_error)?;
@@ -9702,6 +9712,7 @@ async fn ranking_prediction_credit_run_handler(
             &model_versions,
             &predictions,
             &labels,
+            &preference_labels,
             &calibration_runs,
         ))
     };
@@ -10056,6 +10067,9 @@ async fn ranking_prediction_model_risk_codes(
     let labels = read_ranking_labels_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
+    let preference_labels = read_ranking_preference_labels_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
     let calibration_runs = read_ranking_calibration_runs_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
@@ -10066,6 +10080,7 @@ async fn ranking_prediction_model_risk_codes(
         &model_versions,
         &predictions,
         &labels,
+        &preference_labels,
         &calibration_runs,
     )
     .models
@@ -10438,6 +10453,9 @@ async fn ranking_model_risk_report_handler(
     let labels = read_ranking_labels_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    let preference_labels = read_ranking_preference_labels_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     let calibration_runs = read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
@@ -10447,6 +10465,7 @@ async fn ranking_model_risk_report_handler(
         &model_versions,
         &predictions,
         &labels,
+        &preference_labels,
         &calibration_runs,
     )))
 }
@@ -10475,6 +10494,9 @@ async fn ranking_credit_readiness_report_handler(
     let labels = read_ranking_labels_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    let preference_labels = read_ranking_preference_labels_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     let calibration_runs = read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
@@ -10488,6 +10510,7 @@ async fn ranking_credit_readiness_report_handler(
             predictions: &predictions,
             model_versions: &model_versions,
             labels: &labels,
+            preference_labels: &preference_labels,
             calibration_runs: &calibration_runs,
         },
     )))
@@ -12105,6 +12128,7 @@ fn ranking_model_risk_report(
     model_versions: &[TraceRankingModelVersionRecord],
     predictions: &[TraceRankingPredictionRecord],
     labels: &[TraceRankingLabelRecord],
+    preference_labels: &[TraceRankingPreferenceLabelRecord],
     calibration_runs: &[TraceRankingCalibrationRunRecord],
 ) -> TraceRankingModelRiskReport {
     let active_models = latest_ranking_model_versions(model_versions)
@@ -12113,16 +12137,16 @@ fn ranking_model_risk_report(
         .collect::<Vec<_>>();
     let active_model_count = active_models.len();
     let mut models = Vec::new();
+    let evidence = RankingModelRiskEvidence {
+        predictions,
+        labels,
+        preference_labels,
+        calibration_runs,
+    };
     for model in active_models {
         for target_use in ranking_model_target_uses(model, predictions, calibration_runs) {
             models.push(ranking_model_risk_record(
-                state,
-                tenant,
-                model,
-                target_use,
-                predictions,
-                labels,
-                calibration_runs,
+                state, tenant, model, target_use, evidence,
             ));
         }
     }
@@ -12159,17 +12183,23 @@ fn ranking_model_risk_report(
     }
 }
 
+#[derive(Clone, Copy)]
+struct RankingModelRiskEvidence<'a> {
+    predictions: &'a [TraceRankingPredictionRecord],
+    labels: &'a [TraceRankingLabelRecord],
+    preference_labels: &'a [TraceRankingPreferenceLabelRecord],
+    calibration_runs: &'a [TraceRankingCalibrationRunRecord],
+}
+
 fn ranking_model_risk_record(
     state: &AppState,
     tenant: &TenantAuth,
     model: &TraceRankingModelVersionRecord,
     target_use: TraceAllowedUse,
-    predictions: &[TraceRankingPredictionRecord],
-    labels: &[TraceRankingLabelRecord],
-    calibration_runs: &[TraceRankingCalibrationRunRecord],
+    evidence: RankingModelRiskEvidence<'_>,
 ) -> TraceRankingModelRiskRecord {
     let latest_calibration =
-        latest_calibration_run_for_model_target(model, target_use, calibration_runs);
+        latest_calibration_run_for_model_target(model, target_use, evidence.calibration_runs);
     let confidence_threshold = latest_calibration
         .map_or(state.ranking_min_confidence_threshold, |run| {
             run.confidence_threshold
@@ -12197,12 +12227,13 @@ fn ranking_model_risk_record(
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
         },
-        predictions,
-        labels,
+        evidence.predictions,
+        evidence.labels,
     );
 
     let predictions_since_calibration_count = latest_calibration.map_or(0, |run| {
-        predictions
+        evidence
+            .predictions
             .iter()
             .filter(|prediction| {
                 prediction.created_at > run.created_at
@@ -12211,13 +12242,15 @@ fn ranking_model_risk_record(
             .count()
     });
     let labels_since_calibration_count = latest_calibration.map_or(0, |run| {
-        labels
+        evidence
+            .labels
             .iter()
             .filter(|label| label.created_at > run.created_at && label.target_use == target_use)
             .count()
     });
     let low_confidence_predictions_since_calibration_count = latest_calibration.map_or(0, |run| {
-        predictions
+        evidence
+            .predictions
             .iter()
             .filter(|prediction| {
                 prediction.created_at > run.created_at
@@ -12226,6 +12259,12 @@ fn ranking_model_risk_record(
             })
             .count()
     });
+    let pairwise = ranking_pairwise_evaluation_model_report(
+        model,
+        target_use,
+        evidence.predictions,
+        evidence.preference_labels,
+    );
 
     let joined_evidence_changed = latest_calibration
         .is_some_and(|run| run.joined_evidence_hash != current.joined_evidence_hash);
@@ -12252,6 +12291,13 @@ fn ranking_model_risk_record(
     }
     if low_confidence_predictions_since_calibration_count > 0 {
         risk_codes.push("low_confidence_predictions_since_calibration".to_string());
+    }
+    if pairwise.joined_pair_prediction_count > 0
+        && pairwise
+            .pairwise_accuracy_micros
+            .is_some_and(|accuracy| accuracy < 500_000)
+    {
+        risk_codes.push("pairwise_accuracy_below_threshold".to_string());
     }
     risk_codes.sort();
     risk_codes.dedup();
@@ -12288,6 +12334,13 @@ fn ranking_model_risk_record(
         predictions_since_calibration_count,
         labels_since_calibration_count,
         low_confidence_predictions_since_calibration_count,
+        pairwise_preference_label_count: pairwise.preference_label_count,
+        pairwise_joined_pair_prediction_count: pairwise.joined_pair_prediction_count,
+        pairwise_correct_pair_count: pairwise.correct_pair_count,
+        pairwise_reversed_pair_count: pairwise.reversed_pair_count,
+        pairwise_tied_pair_count: pairwise.tied_pair_count,
+        pairwise_accuracy_micros: pairwise.pairwise_accuracy_micros,
+        pairwise_average_preferred_margin_micros: pairwise.average_preferred_margin_micros,
         risk_codes,
     }
 }
@@ -12340,6 +12393,7 @@ struct RankingCreditReadinessInputs<'a> {
     predictions: &'a [TraceRankingPredictionRecord],
     model_versions: &'a [TraceRankingModelVersionRecord],
     labels: &'a [TraceRankingLabelRecord],
+    preference_labels: &'a [TraceRankingPreferenceLabelRecord],
     calibration_runs: &'a [TraceRankingCalibrationRunRecord],
 }
 
@@ -12359,6 +12413,7 @@ fn ranking_credit_readiness_report(
             inputs.model_versions,
             inputs.predictions,
             inputs.labels,
+            inputs.preference_labels,
             inputs.calibration_runs,
         ));
     let mut events = inputs
@@ -12950,6 +13005,9 @@ async fn ranking_settlement_calibration_gate(
     let labels = read_ranking_labels_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
+    let preference_labels = read_ranking_preference_labels_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
     let calibration_runs = read_ranking_calibration_runs_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
@@ -12959,6 +13017,7 @@ async fn ranking_settlement_calibration_gate(
         &model_versions,
         &predictions,
         &labels,
+        &preference_labels,
         &calibration_runs,
     ))
     .remove(&ranking_model_risk_lookup_key(
@@ -14527,6 +14586,7 @@ async fn read_operational_ranking_summary(
     let model_versions = read_ranking_model_versions_for_admin(state, tenant).await?;
     let predictions = read_ranking_predictions_for_admin(state, tenant).await?;
     let labels = read_ranking_labels_for_admin(state, tenant).await?;
+    let preference_labels = read_ranking_preference_labels_for_admin(state, tenant).await?;
     let calibration_runs = read_ranking_calibration_runs_for_admin(state, tenant).await?;
     let worker_runs = read_ranking_worker_runs_for_admin(state, tenant).await?;
     Ok(TraceOperationalRankingSummary::from_inputs(
@@ -14539,6 +14599,7 @@ async fn read_operational_ranking_summary(
             model_versions: &model_versions,
             predictions: &predictions,
             labels: &labels,
+            preference_labels: &preference_labels,
             calibration_runs: &calibration_runs,
             worker_runs: &worker_runs,
             generated_at,
@@ -30613,6 +30674,7 @@ struct TraceOperationalRankingInputs<'a> {
     model_versions: &'a [TraceRankingModelVersionRecord],
     predictions: &'a [TraceRankingPredictionRecord],
     labels: &'a [TraceRankingLabelRecord],
+    preference_labels: &'a [TraceRankingPreferenceLabelRecord],
     calibration_runs: &'a [TraceRankingCalibrationRunRecord],
     worker_runs: &'a [TraceRankingWorkerRunRecord],
     generated_at: DateTime<Utc>,
@@ -30641,6 +30703,7 @@ impl TraceOperationalRankingSummary {
             inputs.model_versions,
             inputs.predictions,
             inputs.labels,
+            inputs.preference_labels,
             inputs.calibration_runs,
         );
         let readiness = ranking_credit_readiness_report(RankingCreditReadinessInputs {
@@ -30652,6 +30715,7 @@ impl TraceOperationalRankingSummary {
             predictions: inputs.predictions,
             model_versions: inputs.model_versions,
             labels: inputs.labels,
+            preference_labels: inputs.preference_labels,
             calibration_runs: inputs.calibration_runs,
         });
         let mut risk_code_counts = BTreeMap::new();
@@ -46042,6 +46106,142 @@ mod tests {
         .expect("settlement can evaluate low-confidence ranking credit");
         assert_eq!(settlement.settled_source_event_count, 0);
         assert_eq!(settlement.ranking_credit_events_excluded_count, 1);
+    }
+
+    #[tokio::test]
+    async fn active_ranking_model_risk_report_flags_pairwise_preference_reversal() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let (candidate, calibrated_prediction) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-pairwise-risk-v1").await;
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration");
+        assert!(calibration.promotable);
+        let Json(active) = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "promote calibrated model for pairwise risk".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can promote calibrated model");
+        assert_eq!(active.model_status, StorageTraceRankingModelStatus::Active);
+
+        let mut higher_scored = sample_envelope().await;
+        make_metadata_only_low_risk(&mut higher_scored);
+        higher_scored.consent.scopes = vec![ConsentScope::RankingTraining];
+        higher_scored.trace_card.consent_scope = ConsentScope::RankingTraining;
+        higher_scored.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let higher_scored_submission_id = higher_scored.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(higher_scored),
+        )
+        .await
+        .expect("higher-scored source submission succeeds");
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id: higher_scored_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:pairwise-risk-feature-vector".to_string(),
+                feature_names_hash: "sha256:pairwise-risk-feature-names".to_string(),
+                source_feature_hash: "sha256:pairwise-risk-source-feature".to_string(),
+                duplicate_score: Some(0.02),
+                novelty_score: Some(0.9),
+                privacy_risk_score: Some(0.01),
+                quality_score: Some(0.91),
+                coverage_tags: vec!["pairwise-risk".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write pairwise risk feature");
+        let Json(_) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id: higher_scored_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: candidate.model_version.clone(),
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                prediction_policy_version: candidate.policy_version.clone(),
+                feature_vector_hash: feature.feature_vector_hash,
+                predicted_utility_micros: 2_000_000,
+                uncertainty_micros: 100_000,
+                confidence: 0.95,
+                risk_penalty_micros: 0,
+                novelty_bonus_micros: 0,
+                explanation_codes: vec!["pairwise_risk_fixture".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write higher-scored prediction");
+        let _ = ranking_preference_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id: calibrated_prediction.submission_id,
+                rejected_submission_id: higher_scored_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 800_000,
+                evidence_hash: "sha256:pairwise-risk-preference-evidence".to_string(),
+                external_ref: "reviewer-private-pairwise-risk".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write pairwise risk preference label");
+
+        let Json(report) =
+            ranking_model_risk_report_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can read active ranking model risk report");
+        assert_eq!(report.active_model_count, 1);
+        assert_eq!(report.at_risk_model_count, 1);
+        assert_eq!(
+            report
+                .risk_code_counts
+                .get("pairwise_accuracy_below_threshold"),
+            Some(&1)
+        );
+        let model = &report.models[0];
+        assert_eq!(model.model_version, candidate.model_version);
+        assert_eq!(model.pairwise_preference_label_count, 1);
+        assert_eq!(model.pairwise_joined_pair_prediction_count, 1);
+        assert_eq!(model.pairwise_correct_pair_count, 0);
+        assert_eq!(model.pairwise_reversed_pair_count, 1);
+        assert_eq!(model.pairwise_tied_pair_count, 0);
+        assert_eq!(model.pairwise_accuracy_micros, Some(0));
+        assert!(
+            model
+                .risk_codes
+                .contains(&"pairwise_accuracy_below_threshold".to_string())
+        );
+        let report_json = serde_json::to_string(&report).expect("risk report serializes");
+        assert!(!report_json.contains("reviewer-private-pairwise-risk"));
+        assert!(!report_json.contains("trace body"));
     }
 
     #[tokio::test]
