@@ -6898,6 +6898,9 @@ fn credit_cycle_scheduler_candidate_skip_reason(
         predictions,
         labels,
     );
+    if current.joined_label_prediction_count == 0 {
+        return Some("missing_joined_label_evidence".to_string());
+    }
     if current.promotable {
         None
     } else {
@@ -41146,7 +41149,7 @@ mod tests {
         assert_eq!(latest.status, StorageTraceRankingModelStatus::Active);
     }
 
-    async fn seed_credit_cycle_ready_candidate(
+    async fn seed_credit_cycle_candidate_with_prediction(
         state: Arc<AppState>,
         model_version: &str,
     ) -> (TraceRankingModelVersionRecord, TraceRankingPredictionRecord) {
@@ -41219,11 +41222,20 @@ mod tests {
         )
         .await
         .expect("utility worker can write ranking prediction");
+        (candidate, prediction)
+    }
+
+    async fn seed_credit_cycle_ready_candidate(
+        state: Arc<AppState>,
+        model_version: &str,
+    ) -> (TraceRankingModelVersionRecord, TraceRankingPredictionRecord) {
+        let (candidate, prediction) =
+            seed_credit_cycle_candidate_with_prediction(state.clone(), model_version).await;
         let Json(_) = ranking_label_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
             Json(TraceRankingLabelRequest {
-                submission_id,
+                submission_id: prediction.submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 label_source: StorageTraceRankingLabelSource::FrontierLab,
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
@@ -41639,6 +41651,93 @@ mod tests {
             scheduler
                 .skipped_reason_counts
                 .get("missing_prediction_evidence"),
+            Some(&1)
+        );
+        assert!(scheduler.cycles.is_empty());
+        let worker_runs =
+            read_all_ranking_worker_runs(temp.path(), "tenant-a").expect("worker runs read");
+        assert!(worker_runs.is_empty());
+        let credit_events =
+            read_all_credit_events(temp.path(), "tenant-a").expect("credit events read");
+        assert!(credit_events.is_empty());
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert!(outbox.is_empty());
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_reports_missing_joined_label_evidence_before_claiming() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let (candidate, _) = seed_credit_cycle_candidate_with_prediction(
+            state.clone(),
+            "trace-ranker-credit-cycle-unjoined-v1",
+        )
+        .await;
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let unjoined_submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("unjoined ranking label source submission succeeds");
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: unjoined_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_250_000,
+                evidence_hash: "sha256:ranking-frontier-evidence-unjoined-cycle".to_string(),
+                external_ref: "private-ranking-unjoined-cycle".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write unjoined ranking label");
+
+        let Json(scheduler) = credit_cycle_scheduler_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleSchedulerRunRequest {
+                dry_run: false,
+                submit_near_outbox: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: None,
+                policy_version: Some(candidate.policy_version),
+                reason: "scheduled credit cycle should skip unjoined evidence".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: Some(1),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect("scheduler skips unjoined evidence without invoking cycle");
+
+        assert_eq!(scheduler.checked_count, 1);
+        assert_eq!(scheduler.started_count, 0);
+        assert_eq!(scheduler.skipped_count, 1);
+        assert_eq!(
+            scheduler
+                .skipped_reason_counts
+                .get("missing_joined_label_evidence"),
             Some(&1)
         );
         assert!(scheduler.cycles.is_empty());
