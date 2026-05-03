@@ -140,10 +140,13 @@ fn ensure_hash_like(label: &str, value: &str) -> anyhow::Result<()> {
 }
 
 fn ensure_non_transferable_method(method_name: &str) -> anyhow::Result<()> {
-    let normalized = method_name.trim().to_ascii_lowercase();
+    let normalized = method_name.trim();
     anyhow::ensure!(
-        !normalized.contains("transfer"),
-        "NEAR credit receipts are non-transferable; transfer methods are not allowed"
+        matches!(
+            normalized,
+            "settle_credit_receipt" | "reverse_credit_receipt" | "freeze_credit_account"
+        ),
+        "NEAR credit receipts are non-transferable; unsupported credit methods are not allowed"
     );
     Ok(())
 }
