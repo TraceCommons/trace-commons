@@ -807,6 +807,15 @@ settlement-score micros as the credit delta; otherwise the event is excluded
 from the settlement source list. Finalized batches record the calibration run id
 and report hash used for the gate.
 
+Production settlement schedulers should use
+`POST /v1/workers/credit-settlements/run` rather than the admin settlement
+surface. The worker route accepts the same settlement policy fields plus an
+optional `limit` for the maximum source credit events to settle in one run. If
+omitted, the worker route settles at most 100 source events; explicit limits
+must be between 1 and 500. Responses include the applied `limit`, the total
+eligible source-event count, and `pending_after_count` so schedulers can retry
+bounded batches until no eligible settlement work remains.
+
 Contributors can read only their own append-only central credit events:
 
 ```http
