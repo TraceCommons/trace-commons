@@ -152,6 +152,22 @@ pub enum TraceCreditSettlementNearStatus {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum TraceBenchmarkRegistryOutboxOperation {
+    Publish,
+    Revoke,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceBenchmarkRegistryOutboxStatus {
+    Pending,
+    Submitted,
+    Confirmed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum TraceCreditHoldReason {
     DuplicateClusterUnderReview,
     PrivacyRiskUnderReview,
@@ -648,6 +664,39 @@ pub struct TraceNearCreditOutboxItemRecord {
     pub created_at: DateTime<Utc>,
     pub submitted_at: Option<DateTime<Utc>>,
     pub near_transaction_hash: Option<String>,
+    pub last_error_hash: Option<String>,
+    pub confirmed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceBenchmarkRegistryOutboxItemWrite {
+    pub tenant_id: String,
+    pub benchmark_outbox_id: Uuid,
+    pub conversion_id: Uuid,
+    pub operation: TraceBenchmarkRegistryOutboxOperation,
+    pub registry_ref: String,
+    pub artifact_payload_hash: String,
+    pub source_submission_ids_hash: String,
+    pub evaluator_ref: Option<String>,
+    pub evaluation_score: Option<f32>,
+    pub status: TraceBenchmarkRegistryOutboxStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceBenchmarkRegistryOutboxItemRecord {
+    pub tenant_id: String,
+    pub benchmark_outbox_id: Uuid,
+    pub conversion_id: Uuid,
+    pub operation: TraceBenchmarkRegistryOutboxOperation,
+    pub registry_ref: String,
+    pub artifact_payload_hash: String,
+    pub source_submission_ids_hash: String,
+    pub evaluator_ref: Option<String>,
+    pub evaluation_score: Option<f32>,
+    pub status: TraceBenchmarkRegistryOutboxStatus,
+    pub created_at: DateTime<Utc>,
+    pub submitted_at: Option<DateTime<Utc>>,
+    pub external_receipt_ref: Option<String>,
     pub last_error_hash: Option<String>,
     pub confirmed_at: Option<DateTime<Utc>>,
 }
@@ -1844,6 +1893,25 @@ pub trait TraceCorpusStore: Send + Sync {
         near_transaction_hash: Option<String>,
         last_error_hash: Option<String>,
     ) -> Result<Option<TraceNearCreditOutboxItemRecord>, DatabaseError>;
+
+    async fn upsert_trace_benchmark_registry_outbox_item(
+        &self,
+        item: TraceBenchmarkRegistryOutboxItemWrite,
+    ) -> Result<TraceBenchmarkRegistryOutboxItemRecord, DatabaseError>;
+
+    async fn list_trace_benchmark_registry_outbox_items(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceBenchmarkRegistryOutboxItemRecord>, DatabaseError>;
+
+    async fn update_trace_benchmark_registry_outbox_status(
+        &self,
+        tenant_id: &str,
+        benchmark_outbox_id: Uuid,
+        status: TraceBenchmarkRegistryOutboxStatus,
+        external_receipt_ref: Option<String>,
+        last_error_hash: Option<String>,
+    ) -> Result<Option<TraceBenchmarkRegistryOutboxItemRecord>, DatabaseError>;
 
     async fn write_trace_tombstone(
         &self,

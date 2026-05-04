@@ -42,6 +42,10 @@ use tracedao_server::trace_corpus_storage::{
     TraceAuditEventRecord as StorageTraceAuditEventRecord,
     TraceAuditEventWrite as StorageTraceAuditEventWrite,
     TraceAuditSafeMetadata as StorageTraceAuditSafeMetadata,
+    TraceBenchmarkRegistryOutboxItemRecord as StorageTraceBenchmarkRegistryOutboxItemRecord,
+    TraceBenchmarkRegistryOutboxItemWrite as StorageTraceBenchmarkRegistryOutboxItemWrite,
+    TraceBenchmarkRegistryOutboxOperation as StorageTraceBenchmarkRegistryOutboxOperation,
+    TraceBenchmarkRegistryOutboxStatus as StorageTraceBenchmarkRegistryOutboxStatus,
     TraceCorpusStatus as StorageTraceCorpusStatus,
     TraceCreditAccountSettlementLineItem as StorageTraceCreditAccountSettlementLineItem,
     TraceCreditEventRecord as StorageTraceCreditEventRecord,
@@ -2199,6 +2203,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(near_credit_outbox_handler),
         )
         .route(
+            "/v1/admin/benchmark-registry-outbox",
+            get(benchmark_registry_outbox_handler),
+        )
+        .route(
             "/v1/admin/ranking/model-versions",
             get(ranking_model_versions_handler).post(ranking_model_version_handler),
         )
@@ -2265,6 +2273,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/workers/near-credit-outbox/mark-status",
             post(mark_near_credit_outbox_status_handler),
+        )
+        .route(
+            "/v1/workers/benchmark-registry-outbox/mark-status",
+            post(mark_benchmark_registry_outbox_status_handler),
         )
         .route(
             "/v1/workers/ranking/features",
@@ -5679,6 +5691,36 @@ struct TraceNearCreditOutboxItem {
     confirmed_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceBenchmarkRegistryOutboxItem {
+    benchmark_outbox_id: Uuid,
+    tenant_id: String,
+    tenant_storage_ref: String,
+    conversion_id: Uuid,
+    operation: StorageTraceBenchmarkRegistryOutboxOperation,
+    registry_ref: String,
+    artifact_payload_hash: String,
+    source_submission_ids_hash: String,
+    evaluator_ref: Option<String>,
+    evaluation_score: Option<f32>,
+    status: StorageTraceBenchmarkRegistryOutboxStatus,
+    created_at: DateTime<Utc>,
+    submitted_at: Option<DateTime<Utc>>,
+    external_receipt_ref: Option<String>,
+    last_error_hash: Option<String>,
+    confirmed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceBenchmarkRegistryOutboxStatusRequest {
+    benchmark_outbox_id: Uuid,
+    status: StorageTraceBenchmarkRegistryOutboxStatus,
+    #[serde(default)]
+    external_receipt_ref: Option<String>,
+    #[serde(default)]
+    error_detail: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct TraceNearCreditOutboxStatusRequest {
     near_outbox_id: Uuid,
@@ -8102,6 +8144,18 @@ async fn near_credit_outbox_handler(
     Ok(Json(items))
 }
 
+async fn benchmark_registry_outbox_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<TraceBenchmarkRegistryOutboxItem>>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let items = read_benchmark_registry_outbox_items_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(items))
+}
+
 async fn near_credit_outbox_submit_worker_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -8185,6 +8239,78 @@ async fn mark_near_credit_outbox_status_handler(
     .await
     .map_err(internal_error)?
     .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "NEAR credit outbox item not found"))?;
+    Ok(Json(updated))
+}
+
+async fn mark_benchmark_registry_outbox_status_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceBenchmarkRegistryOutboxStatusRequest>,
+) -> ApiResult<Json<TraceBenchmarkRegistryOutboxItem>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_benchmarker(&tenant)?;
+    let status = body.status;
+    if !matches!(
+        status,
+        StorageTraceBenchmarkRegistryOutboxStatus::Submitted
+            | StorageTraceBenchmarkRegistryOutboxStatus::Confirmed
+            | StorageTraceBenchmarkRegistryOutboxStatus::Failed
+    ) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "benchmark registry outbox workers may mark submitted, confirmed, or failed status",
+        ));
+    }
+
+    let external_receipt_ref = body
+        .external_receipt_ref
+        .as_deref()
+        .map(normalize_external_registry_receipt_ref)
+        .transpose()
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+    if matches!(
+        status,
+        StorageTraceBenchmarkRegistryOutboxStatus::Submitted
+            | StorageTraceBenchmarkRegistryOutboxStatus::Confirmed
+    ) && external_receipt_ref.is_none()
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "submitted or confirmed benchmark registry outbox status requires external_receipt_ref",
+        ));
+    }
+    let last_error_hash = if status == StorageTraceBenchmarkRegistryOutboxStatus::Failed {
+        let error_detail = body
+            .error_detail
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                api_error(
+                    StatusCode::BAD_REQUEST,
+                    "failed status requires error_detail",
+                )
+            })?;
+        Some(sha256_prefixed(error_detail))
+    } else {
+        None
+    };
+    let updated = update_benchmark_registry_outbox_item_status_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        body.benchmark_outbox_id,
+        status,
+        external_receipt_ref,
+        last_error_hash,
+    )
+    .await
+    .map_err(internal_error)?
+    .ok_or_else(|| {
+        api_error(
+            StatusCode::NOT_FOUND,
+            "benchmark registry outbox item not found",
+        )
+    })?;
     Ok(Json(updated))
 }
 
@@ -8313,6 +8439,19 @@ fn normalize_near_transaction_hash(hash: &str) -> anyhow::Result<String> {
         "near_transaction_hash contains invalid characters"
     );
     Ok(hash.to_string())
+}
+
+fn normalize_external_registry_receipt_ref(value: &str) -> anyhow::Result<String> {
+    let value = value.trim();
+    anyhow::ensure!(!value.is_empty(), "external_receipt_ref is required");
+    anyhow::ensure!(value.len() <= 512, "external_receipt_ref is too long");
+    anyhow::ensure!(
+        value
+            .chars()
+            .all(|character| character.is_ascii_graphic() && character != '"' && character != '\\'),
+        "external_receipt_ref contains invalid characters"
+    );
+    Ok(value.to_string())
 }
 
 async fn append_near_credit_outbox_submit_audit(
@@ -8506,6 +8645,28 @@ async fn append_near_credit_outbox_item_with_db_mirror(
     enforce_db_mirror_write_result(state, "NEAR credit outbox item", mirror_result)
 }
 
+async fn ensure_benchmark_registry_publish_outbox_item_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    artifact: &TraceBenchmarkConversionArtifact,
+) -> anyhow::Result<()> {
+    let item = benchmark_registry_publish_outbox_item_from_artifact(tenant, artifact)?;
+    let mirror_result = mirror_benchmark_registry_outbox_item_to_db(state, &item).await;
+    if state.require_db_mirror_writes {
+        if let Err(error) = &mirror_result {
+            tracing::warn!(%error, benchmark_outbox_id = %item.benchmark_outbox_id, "Trace Commons DB dual-write benchmark registry outbox mirror failed");
+        }
+        enforce_db_mirror_write_result(state, "benchmark registry outbox item", mirror_result)?;
+        upsert_benchmark_registry_outbox_item(&state.root, &tenant.tenant_id, &item)?;
+        return Ok(());
+    }
+    upsert_benchmark_registry_outbox_item(&state.root, &tenant.tenant_id, &item)?;
+    if let Err(error) = &mirror_result {
+        tracing::warn!(%error, benchmark_outbox_id = %item.benchmark_outbox_id, "Trace Commons DB dual-write benchmark registry outbox mirror failed");
+    }
+    enforce_db_mirror_write_result(state, "benchmark registry outbox item", mirror_result)
+}
+
 async fn update_near_credit_outbox_item_status_with_db_mirror(
     state: &AppState,
     tenant: &TenantAuth,
@@ -8563,6 +8724,70 @@ async fn update_near_credit_outbox_item_status_with_db_mirror(
     .await;
     if let Err(error) = &mirror_result {
         tracing::warn!(%error, %near_outbox_id, "Trace Commons DB dual-write NEAR credit outbox status mirror failed");
+    }
+    let db_updated = mirror_result.unwrap_or(None);
+    Ok(file_updated.or(db_updated))
+}
+
+async fn update_benchmark_registry_outbox_item_status_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    benchmark_outbox_id: Uuid,
+    status: StorageTraceBenchmarkRegistryOutboxStatus,
+    external_receipt_ref: Option<String>,
+    last_error_hash: Option<String>,
+) -> anyhow::Result<Option<TraceBenchmarkRegistryOutboxItem>> {
+    let now = Utc::now();
+    if state.require_db_mirror_writes {
+        let db_updated = mirror_benchmark_registry_outbox_item_status_to_db(
+            state,
+            &tenant.tenant_id,
+            benchmark_outbox_id,
+            status,
+            external_receipt_ref.clone(),
+            last_error_hash.clone(),
+        )
+        .await
+        .context(
+            "required Trace Commons DB mirror write failed: benchmark registry outbox status",
+        )?;
+        if state.db_mirror.is_none() {
+            anyhow::bail!(
+                "TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES requires TRACE_COMMONS_DB_DUAL_WRITE for benchmark registry outbox status"
+            );
+        }
+        let file_updated = update_benchmark_registry_outbox_item_status(
+            &state.root,
+            &tenant.tenant_id,
+            benchmark_outbox_id,
+            status,
+            external_receipt_ref,
+            last_error_hash,
+            now,
+        )?;
+        return Ok(file_updated.or(db_updated));
+    }
+
+    let file_updated = update_benchmark_registry_outbox_item_status(
+        &state.root,
+        &tenant.tenant_id,
+        benchmark_outbox_id,
+        status,
+        external_receipt_ref.clone(),
+        last_error_hash.clone(),
+        now,
+    )?;
+    let mirror_result = mirror_benchmark_registry_outbox_item_status_to_db(
+        state,
+        &tenant.tenant_id,
+        benchmark_outbox_id,
+        status,
+        external_receipt_ref,
+        last_error_hash,
+    )
+    .await;
+    if let Err(error) = &mirror_result {
+        tracing::warn!(%error, %benchmark_outbox_id, "Trace Commons DB dual-write benchmark registry outbox status mirror failed");
     }
     let db_updated = mirror_result.unwrap_or(None);
     Ok(file_updated.or(db_updated))
@@ -8639,6 +8864,21 @@ async fn mirror_near_credit_outbox_item_to_db(
     Ok(())
 }
 
+async fn mirror_benchmark_registry_outbox_item_to_db(
+    state: &AppState,
+    item: &TraceBenchmarkRegistryOutboxItem,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    db.upsert_trace_benchmark_registry_outbox_item(
+        benchmark_registry_outbox_item_to_storage_write(item)?,
+    )
+    .await
+    .context("failed to mirror benchmark registry outbox item to DB")?;
+    Ok(())
+}
+
 async fn mirror_near_credit_outbox_item_status_to_db(
     state: &AppState,
     tenant_id: &str,
@@ -8660,6 +8900,30 @@ async fn mirror_near_credit_outbox_item_status_to_db(
     .await
     .context("failed to mirror NEAR credit outbox status to DB")?
     .map(near_credit_outbox_item_from_storage)
+    .transpose()
+}
+
+async fn mirror_benchmark_registry_outbox_item_status_to_db(
+    state: &AppState,
+    tenant_id: &str,
+    benchmark_outbox_id: Uuid,
+    status: StorageTraceBenchmarkRegistryOutboxStatus,
+    external_receipt_ref: Option<String>,
+    last_error_hash: Option<String>,
+) -> anyhow::Result<Option<TraceBenchmarkRegistryOutboxItem>> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(None);
+    };
+    db.update_trace_benchmark_registry_outbox_status(
+        tenant_id,
+        benchmark_outbox_id,
+        status,
+        external_receipt_ref,
+        last_error_hash,
+    )
+    .await
+    .context("failed to mirror benchmark registry outbox status to DB")?
+    .map(benchmark_registry_outbox_item_from_storage)
     .transpose()
 }
 
@@ -8780,6 +9044,26 @@ async fn read_near_credit_outbox_items_for_admin(
             .collect();
     }
     read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)
+}
+
+async fn read_benchmark_registry_outbox_items_for_admin(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceBenchmarkRegistryOutboxItem>> {
+    if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("TRACE_COMMONS_DB_REVIEWER_READS is enabled without a DB mirror")?;
+        return db
+            .list_trace_benchmark_registry_outbox_items(&tenant.tenant_id)
+            .await
+            .context("failed to read benchmark registry outbox items from DB mirror")?
+            .into_iter()
+            .map(benchmark_registry_outbox_item_from_storage)
+            .collect();
+    }
+    read_all_benchmark_registry_outbox_items(&state.root, &tenant.tenant_id)
 }
 
 fn utility_attestation_from_storage(
@@ -8951,6 +9235,46 @@ fn near_credit_outbox_item_from_storage(
         created_at: record.created_at,
         submitted_at: record.submitted_at,
         near_transaction_hash: record.near_transaction_hash,
+        last_error_hash: record.last_error_hash,
+        confirmed_at: record.confirmed_at,
+    })
+}
+
+fn benchmark_registry_outbox_item_to_storage_write(
+    item: &TraceBenchmarkRegistryOutboxItem,
+) -> anyhow::Result<StorageTraceBenchmarkRegistryOutboxItemWrite> {
+    Ok(StorageTraceBenchmarkRegistryOutboxItemWrite {
+        tenant_id: item.tenant_id.clone(),
+        benchmark_outbox_id: item.benchmark_outbox_id,
+        conversion_id: item.conversion_id,
+        operation: item.operation,
+        registry_ref: item.registry_ref.clone(),
+        artifact_payload_hash: item.artifact_payload_hash.clone(),
+        source_submission_ids_hash: item.source_submission_ids_hash.clone(),
+        evaluator_ref: item.evaluator_ref.clone(),
+        evaluation_score: item.evaluation_score,
+        status: item.status,
+    })
+}
+
+fn benchmark_registry_outbox_item_from_storage(
+    record: StorageTraceBenchmarkRegistryOutboxItemRecord,
+) -> anyhow::Result<TraceBenchmarkRegistryOutboxItem> {
+    Ok(TraceBenchmarkRegistryOutboxItem {
+        benchmark_outbox_id: record.benchmark_outbox_id,
+        tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
+        tenant_id: record.tenant_id,
+        conversion_id: record.conversion_id,
+        operation: record.operation,
+        registry_ref: record.registry_ref,
+        artifact_payload_hash: record.artifact_payload_hash,
+        source_submission_ids_hash: record.source_submission_ids_hash,
+        evaluator_ref: record.evaluator_ref,
+        evaluation_score: record.evaluation_score,
+        status: record.status,
+        created_at: record.created_at,
+        submitted_at: record.submitted_at,
+        external_receipt_ref: record.external_receipt_ref,
         last_error_hash: record.last_error_hash,
         confirmed_at: record.confirmed_at,
     })
@@ -14642,6 +14966,10 @@ async fn operational_summary_handler(
         list_benchmark_conversion_artifacts_for_worker(state.as_ref(), tenant.auth())
             .await
             .map_err(internal_error)?;
+    let benchmark_registry_outbox =
+        read_benchmark_registry_outbox_items_for_admin(state.as_ref(), tenant.auth())
+            .await
+            .map_err(internal_error)?;
     let response = TraceOperationalSummaryResponse::from_parts(TraceOperationalSummaryInputs {
         state: state.as_ref(),
         tenant_id: tenant.tenant_id().to_string(),
@@ -14650,6 +14978,7 @@ async fn operational_summary_handler(
         credit_events,
         db_summary,
         benchmark_artifacts,
+        benchmark_registry_outbox,
         ranking,
         generated_at,
     });
@@ -15623,6 +15952,11 @@ async fn update_benchmark_lifecycle(
     persist_benchmark_lifecycle_artifact(state, tenant, &artifact, "benchmark lifecycle")
         .await
         .map_err(internal_error)?;
+    if artifact.registry.status == TraceBenchmarkRegistryStatus::Published {
+        ensure_benchmark_registry_publish_outbox_item_with_db_mirror(state, tenant, &artifact)
+            .await
+            .map_err(internal_error)?;
+    }
 
     Ok(Json(artifact))
 }
@@ -23538,6 +23872,14 @@ fn near_credit_outbox_path(root: &Path, tenant_id: &str) -> PathBuf {
         .join("items.jsonl")
 }
 
+fn benchmark_registry_outbox_path(root: &Path, tenant_id: &str) -> PathBuf {
+    let tenant_key = tenant_storage_key(tenant_id);
+    root.join("tenants")
+        .join(tenant_key)
+        .join("benchmark_registry_outbox")
+        .join("items.jsonl")
+}
+
 fn append_near_credit_outbox_item(
     root: &Path,
     tenant_id: &str,
@@ -23545,6 +23887,45 @@ fn append_near_credit_outbox_item(
 ) -> anyhow::Result<()> {
     let path = near_credit_outbox_path(root, tenant_id);
     append_jsonl_record(&path, item, "NEAR credit outbox item")
+}
+
+fn upsert_benchmark_registry_outbox_item(
+    root: &Path,
+    tenant_id: &str,
+    item: &TraceBenchmarkRegistryOutboxItem,
+) -> anyhow::Result<()> {
+    ensure_benchmark_registry_outbox_item_tenant(item, tenant_id)?;
+    let path = benchmark_registry_outbox_path(root, tenant_id);
+    let mut items = if path.exists() {
+        read_all_benchmark_registry_outbox_items(root, tenant_id)?
+    } else {
+        Vec::new()
+    };
+    let mut replaced = false;
+    for existing in &mut items {
+        if existing.benchmark_outbox_id != item.benchmark_outbox_id {
+            continue;
+        }
+        let mut replacement = item.clone();
+        replacement.status = existing.status;
+        replacement.created_at = existing.created_at;
+        replacement.submitted_at = existing.submitted_at;
+        replacement.external_receipt_ref = existing.external_receipt_ref.clone();
+        replacement.last_error_hash = existing.last_error_hash.clone();
+        replacement.confirmed_at = existing.confirmed_at;
+        *existing = replacement;
+        replaced = true;
+        break;
+    }
+    if !replaced {
+        items.push(item.clone());
+    }
+    rewrite_jsonl_file(&path, &items, "benchmark registry outbox item").with_context(|| {
+        format!(
+            "failed to rewrite benchmark registry outbox {}",
+            path.display()
+        )
+    })
 }
 
 fn read_all_near_credit_outbox_items(
@@ -23559,6 +23940,23 @@ fn read_all_near_credit_outbox_items(
         read_jsonl_records(&path, "NEAR credit outbox item")?;
     for item in &items {
         ensure_near_credit_outbox_item_tenant(item, tenant_id)?;
+    }
+    items.sort_by_key(|item| item.created_at);
+    Ok(items)
+}
+
+fn read_all_benchmark_registry_outbox_items(
+    root: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<Vec<TraceBenchmarkRegistryOutboxItem>> {
+    let path = benchmark_registry_outbox_path(root, tenant_id);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut items: Vec<TraceBenchmarkRegistryOutboxItem> =
+        read_jsonl_records(&path, "benchmark registry outbox item")?;
+    for item in &items {
+        ensure_benchmark_registry_outbox_item_tenant(item, tenant_id)?;
     }
     items.sort_by_key(|item| item.created_at);
     Ok(items)
@@ -23618,6 +24016,64 @@ fn update_near_credit_outbox_item_status(
     Ok(updated)
 }
 
+fn update_benchmark_registry_outbox_item_status(
+    root: &Path,
+    tenant_id: &str,
+    benchmark_outbox_id: Uuid,
+    status: StorageTraceBenchmarkRegistryOutboxStatus,
+    external_receipt_ref: Option<String>,
+    last_error_hash: Option<String>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Option<TraceBenchmarkRegistryOutboxItem>> {
+    let path = benchmark_registry_outbox_path(root, tenant_id);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut items = read_all_benchmark_registry_outbox_items(root, tenant_id)?;
+    let mut updated = None;
+    for item in &mut items {
+        if item.benchmark_outbox_id != benchmark_outbox_id {
+            continue;
+        }
+        item.status = status;
+        if external_receipt_ref.is_some() {
+            item.external_receipt_ref = external_receipt_ref.clone();
+        }
+        if item.submitted_at.is_none()
+            && matches!(
+                status,
+                StorageTraceBenchmarkRegistryOutboxStatus::Submitted
+                    | StorageTraceBenchmarkRegistryOutboxStatus::Confirmed
+            )
+        {
+            item.submitted_at = Some(now);
+        }
+        if status == StorageTraceBenchmarkRegistryOutboxStatus::Confirmed {
+            item.confirmed_at = Some(now);
+            item.last_error_hash = None;
+        }
+        if status == StorageTraceBenchmarkRegistryOutboxStatus::Failed {
+            item.last_error_hash = last_error_hash.clone();
+            item.confirmed_at = None;
+        }
+        if status == StorageTraceBenchmarkRegistryOutboxStatus::Submitted {
+            item.last_error_hash = None;
+            item.confirmed_at = None;
+        }
+        updated = Some(item.clone());
+        break;
+    }
+    if updated.is_some() {
+        rewrite_jsonl_file(&path, &items, "benchmark registry outbox item").with_context(|| {
+            format!(
+                "failed to rewrite benchmark registry outbox {}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(updated)
+}
+
 fn ensure_near_credit_outbox_item_tenant(
     item: &TraceNearCreditOutboxItem,
     tenant_id: &str,
@@ -23629,6 +24085,21 @@ fn ensure_near_credit_outbox_item_tenant(
     anyhow::ensure!(
         item.tenant_storage_ref == tenant_storage_ref(tenant_id),
         "NEAR credit outbox tenant storage ref mismatch"
+    );
+    Ok(())
+}
+
+fn ensure_benchmark_registry_outbox_item_tenant(
+    item: &TraceBenchmarkRegistryOutboxItem,
+    tenant_id: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        item.tenant_id == tenant_id,
+        "benchmark registry outbox tenant mismatch"
+    );
+    anyhow::ensure!(
+        item.tenant_storage_ref == tenant_storage_ref(tenant_id),
+        "benchmark registry outbox tenant storage ref mismatch"
     );
     Ok(())
 }
@@ -25557,6 +26028,8 @@ async fn backfill_db_mirror_from_files(
     let file_credit_holds = read_all_credit_holds(&state.root, &tenant.tenant_id)?;
     let file_near_credit_outbox_items =
         read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)?;
+    let file_benchmark_registry_outbox_items =
+        read_all_benchmark_registry_outbox_items(&state.root, &tenant.tenant_id)?;
     let file_ranking_model_versions =
         read_all_ranking_model_versions(&state.root, &tenant.tenant_id)?;
     let file_latest_ranking_model_versions =
@@ -25576,6 +26049,7 @@ async fn backfill_db_mirror_from_files(
             + file_credit_settlement_batches.len()
             + file_credit_holds.len()
             + file_near_credit_outbox_items.len()
+            + file_benchmark_registry_outbox_items.len()
             + file_latest_ranking_model_versions.len()
             + file_ranking_features.len()
             + file_ranking_predictions.len()
@@ -25748,6 +26222,54 @@ async fn backfill_db_mirror_from_files(
                     "near_credit_outbox_item"
                 },
                 item.near_outbox_id.to_string(),
+                error.to_string(),
+            ),
+        }
+    }
+
+    let existing_benchmark_registry_outbox_ids = db
+        .list_trace_benchmark_registry_outbox_items(&tenant.tenant_id)
+        .await
+        .context("failed to list benchmark registry outbox items for DB backfill")?
+        .into_iter()
+        .map(|item| item.benchmark_outbox_id)
+        .collect::<BTreeSet<_>>();
+    for item in &file_benchmark_registry_outbox_items {
+        let item_already_mirrored =
+            existing_benchmark_registry_outbox_ids.contains(&item.benchmark_outbox_id);
+        let mirror_result = async {
+            if !item_already_mirrored {
+                mirror_benchmark_registry_outbox_item_to_db(state, item).await?;
+            }
+            if matches!(
+                item.status,
+                StorageTraceBenchmarkRegistryOutboxStatus::Submitted
+                    | StorageTraceBenchmarkRegistryOutboxStatus::Confirmed
+                    | StorageTraceBenchmarkRegistryOutboxStatus::Failed
+            ) {
+                mirror_benchmark_registry_outbox_item_status_to_db(
+                    state,
+                    &tenant.tenant_id,
+                    item.benchmark_outbox_id,
+                    item.status,
+                    item.external_receipt_ref.clone(),
+                    item.last_error_hash.clone(),
+                )
+                .await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        match mirror_result {
+            Ok(()) if !item_already_mirrored => report.backfilled += 1,
+            Ok(()) => {}
+            Err(error) => report.record_failure(
+                if item_already_mirrored {
+                    "benchmark_registry_outbox_item_status"
+                } else {
+                    "benchmark_registry_outbox_item"
+                },
+                item.benchmark_outbox_id.to_string(),
                 error.to_string(),
             ),
         }
@@ -26325,6 +26847,10 @@ async fn reconcile_db_mirror(
         .list_trace_near_credit_outbox_items(&tenant.tenant_id)
         .await
         .context("failed to list NEAR credit outbox items for DB reconciliation")?;
+    let db_benchmark_registry_outbox_items = db
+        .list_trace_benchmark_registry_outbox_items(&tenant.tenant_id)
+        .await
+        .context("failed to list benchmark registry outbox items for DB reconciliation")?;
     let db_ranking_model_versions = db
         .list_trace_ranking_model_versions(&tenant.tenant_id)
         .await
@@ -26528,6 +27054,8 @@ async fn reconcile_db_mirror(
     let file_credit_holds = read_all_credit_holds(&state.root, &tenant.tenant_id)?;
     let file_near_credit_outbox_items =
         read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)?;
+    let file_benchmark_registry_outbox_items =
+        read_all_benchmark_registry_outbox_items(&state.root, &tenant.tenant_id)?;
     let file_ranking_model_versions =
         read_all_ranking_model_versions(&state.root, &tenant.tenant_id)?;
     let file_ranking_features = read_all_ranking_features(&state.root, &tenant.tenant_id)?;
@@ -26667,6 +27195,39 @@ async fn reconcile_db_mirror(
                         || db_item.last_error_hash != item.last_error_hash
                 })
                 .map(|_| item.near_outbox_id)
+        })
+        .collect::<Vec<_>>();
+    let file_benchmark_registry_outbox_ids = file_benchmark_registry_outbox_items
+        .iter()
+        .map(|item| item.benchmark_outbox_id)
+        .collect::<BTreeSet<_>>();
+    let db_benchmark_registry_outbox_ids = db_benchmark_registry_outbox_items
+        .iter()
+        .map(|item| item.benchmark_outbox_id)
+        .collect::<BTreeSet<_>>();
+    let missing_benchmark_registry_outbox_ids_in_db = file_benchmark_registry_outbox_ids
+        .difference(&db_benchmark_registry_outbox_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let missing_benchmark_registry_outbox_ids_in_files = db_benchmark_registry_outbox_ids
+        .difference(&file_benchmark_registry_outbox_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let db_benchmark_registry_outbox_items_by_id = db_benchmark_registry_outbox_items
+        .iter()
+        .map(|item| (item.benchmark_outbox_id, item))
+        .collect::<BTreeMap<_, _>>();
+    let benchmark_registry_outbox_status_mismatch_ids = file_benchmark_registry_outbox_items
+        .iter()
+        .filter_map(|item| {
+            db_benchmark_registry_outbox_items_by_id
+                .get(&item.benchmark_outbox_id)
+                .filter(|db_item| {
+                    db_item.status != item.status
+                        || db_item.external_receipt_ref != item.external_receipt_ref
+                        || db_item.last_error_hash != item.last_error_hash
+                })
+                .map(|_| item.benchmark_outbox_id)
         })
         .collect::<Vec<_>>();
     let file_latest_ranking_model_versions =
@@ -27179,6 +27740,11 @@ async fn reconcile_db_mirror(
         missing_near_credit_outbox_ids_in_db,
         missing_near_credit_outbox_ids_in_files,
         near_credit_outbox_status_mismatch_ids,
+        file_benchmark_registry_outbox_item_count: file_benchmark_registry_outbox_items.len(),
+        db_benchmark_registry_outbox_item_count: db_benchmark_registry_outbox_items.len(),
+        missing_benchmark_registry_outbox_ids_in_db,
+        missing_benchmark_registry_outbox_ids_in_files,
+        benchmark_registry_outbox_status_mismatch_ids,
         file_latest_ranking_model_version_count: file_latest_ranking_model_versions.len(),
         db_ranking_model_version_count: db_ranking_model_versions.len(),
         missing_ranking_model_versions_in_db,
@@ -28864,6 +29430,70 @@ fn validate_benchmark_lifecycle_state(
     Ok(())
 }
 
+fn benchmark_registry_publish_outbox_item_from_artifact(
+    tenant: &TenantAuth,
+    artifact: &TraceBenchmarkConversionArtifact,
+) -> anyhow::Result<TraceBenchmarkRegistryOutboxItem> {
+    anyhow::ensure!(
+        artifact.registry.status == TraceBenchmarkRegistryStatus::Published,
+        "benchmark registry outbox requires published artifact"
+    );
+    let registry_ref = artifact
+        .registry
+        .registry_ref
+        .clone()
+        .context("benchmark registry outbox requires registry_ref")?;
+    let artifact_payload_hash = benchmark_artifact_payload_hash(artifact)?;
+    let evaluation_score = artifact.evaluation.score;
+    if let Some(score) = evaluation_score {
+        anyhow::ensure!(
+            score.is_finite() && (0.0..=1.0).contains(&score),
+            "benchmark registry outbox evaluation score must be between 0 and 1"
+        );
+    }
+    Ok(TraceBenchmarkRegistryOutboxItem {
+        benchmark_outbox_id: deterministic_benchmark_registry_outbox_id(
+            &tenant.tenant_id,
+            artifact.conversion_id,
+            StorageTraceBenchmarkRegistryOutboxOperation::Publish,
+        ),
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        conversion_id: artifact.conversion_id,
+        operation: StorageTraceBenchmarkRegistryOutboxOperation::Publish,
+        registry_ref,
+        artifact_payload_hash,
+        source_submission_ids_hash: artifact.source_submission_ids_hash.clone(),
+        evaluator_ref: artifact.evaluation.evaluator_ref.clone(),
+        evaluation_score,
+        status: StorageTraceBenchmarkRegistryOutboxStatus::Pending,
+        created_at: Utc::now(),
+        submitted_at: None,
+        external_receipt_ref: None,
+        last_error_hash: None,
+        confirmed_at: None,
+    })
+}
+
+fn deterministic_benchmark_registry_outbox_id(
+    tenant_id: &str,
+    conversion_id: Uuid,
+    operation: StorageTraceBenchmarkRegistryOutboxOperation,
+) -> Uuid {
+    let input = format!(
+        "ironclaw.trace_commons.benchmark_registry_outbox:{tenant_id}:{conversion_id}:{operation:?}"
+    );
+    Uuid::new_v5(&Uuid::NAMESPACE_URL, input.as_bytes())
+}
+
+fn benchmark_artifact_payload_hash(
+    artifact: &TraceBenchmarkConversionArtifact,
+) -> anyhow::Result<String> {
+    let json = serde_json::to_string(artifact)
+        .context("failed to serialize benchmark artifact for outbox hash")?;
+    Ok(sha256_prefixed(&json))
+}
+
 fn normalize_benchmark_lifecycle_ref(value: String) -> ApiResult<Option<String>> {
     let value = value.trim().to_string();
     if value.is_empty() {
@@ -29437,6 +30067,11 @@ struct TraceDbReconciliationReport {
     missing_near_credit_outbox_ids_in_db: Vec<Uuid>,
     missing_near_credit_outbox_ids_in_files: Vec<Uuid>,
     near_credit_outbox_status_mismatch_ids: Vec<Uuid>,
+    file_benchmark_registry_outbox_item_count: usize,
+    db_benchmark_registry_outbox_item_count: usize,
+    missing_benchmark_registry_outbox_ids_in_db: Vec<Uuid>,
+    missing_benchmark_registry_outbox_ids_in_files: Vec<Uuid>,
+    benchmark_registry_outbox_status_mismatch_ids: Vec<Uuid>,
     file_latest_ranking_model_version_count: usize,
     db_ranking_model_version_count: usize,
     missing_ranking_model_versions_in_db: Vec<String>,
@@ -29606,6 +30241,21 @@ impl TraceDbReconciliationReport {
             &mut gaps,
             "near_credit_outbox_status_mismatch_ids",
             self.near_credit_outbox_status_mismatch_ids.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_benchmark_registry_outbox_ids_in_db",
+            self.missing_benchmark_registry_outbox_ids_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_benchmark_registry_outbox_ids_in_files",
+            self.missing_benchmark_registry_outbox_ids_in_files.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "benchmark_registry_outbox_status_mismatch_ids",
+            self.benchmark_registry_outbox_status_mismatch_ids.len(),
         );
         push_gap_count(
             &mut gaps,
@@ -30922,6 +31572,7 @@ struct TraceOperationalSummaryInputs<'a> {
     credit_events: Vec<TraceCommonsCreditLedgerRecord>,
     db_summary: TraceOperationalDbSummary,
     benchmark_artifacts: Vec<TraceBenchmarkConversionArtifact>,
+    benchmark_registry_outbox: Vec<TraceBenchmarkRegistryOutboxItem>,
     ranking: TraceOperationalRankingSummary,
     generated_at: DateTime<Utc>,
 }
@@ -30939,8 +31590,10 @@ impl TraceOperationalSummaryResponse {
             &inputs.derived,
             &inputs.db_summary,
         );
-        let benchmarks =
-            TraceOperationalBenchmarkSummary::from_artifacts(&inputs.benchmark_artifacts);
+        let benchmarks = TraceOperationalBenchmarkSummary::from_artifacts_and_registry_outbox(
+            &inputs.benchmark_artifacts,
+            &inputs.benchmark_registry_outbox,
+        );
         let promotion_gates = TraceOperationalPromotionGateSummary::from_state_and_summaries(
             inputs.state,
             &review_sla,
@@ -31362,16 +32015,45 @@ struct TraceOperationalBenchmarkSummary {
     publishable_count: usize,
     published_count: usize,
     revoked_count: usize,
+    registry_outbox_pending_count: usize,
+    registry_outbox_submitted_count: usize,
+    registry_outbox_confirmed_count: usize,
+    registry_outbox_failed_count: usize,
     external_registry_adapter_gap_count: usize,
     blocker_reasons: Vec<String>,
 }
 
 impl TraceOperationalBenchmarkSummary {
-    fn from_artifacts(artifacts: &[TraceBenchmarkConversionArtifact]) -> Self {
+    fn from_artifacts_and_registry_outbox(
+        artifacts: &[TraceBenchmarkConversionArtifact],
+        registry_outbox: &[TraceBenchmarkRegistryOutboxItem],
+    ) -> Self {
         let mut summary = Self {
             total_artifact_count: artifacts.len(),
             ..Self::default()
         };
+        let mut confirmed_publish_conversion_ids = BTreeSet::new();
+        for item in registry_outbox {
+            if item.operation == StorageTraceBenchmarkRegistryOutboxOperation::Publish
+                && item.status == StorageTraceBenchmarkRegistryOutboxStatus::Confirmed
+            {
+                confirmed_publish_conversion_ids.insert(item.conversion_id);
+            }
+            match item.status {
+                StorageTraceBenchmarkRegistryOutboxStatus::Pending => {
+                    summary.registry_outbox_pending_count += 1;
+                }
+                StorageTraceBenchmarkRegistryOutboxStatus::Submitted => {
+                    summary.registry_outbox_submitted_count += 1;
+                }
+                StorageTraceBenchmarkRegistryOutboxStatus::Confirmed => {
+                    summary.registry_outbox_confirmed_count += 1;
+                }
+                StorageTraceBenchmarkRegistryOutboxStatus::Failed => {
+                    summary.registry_outbox_failed_count += 1;
+                }
+            }
+        }
         for artifact in artifacts {
             *summary
                 .by_registry_status
@@ -31404,6 +32086,9 @@ impl TraceOperationalBenchmarkSummary {
                 },
                 TraceBenchmarkRegistryStatus::Published => {
                     summary.published_count += 1;
+                    if !confirmed_publish_conversion_ids.contains(&artifact.conversion_id) {
+                        summary.external_registry_adapter_gap_count += 1;
+                    }
                 }
                 TraceBenchmarkRegistryStatus::Revoked => {
                     summary.revoked_count += 1;
@@ -31413,7 +32098,6 @@ impl TraceOperationalBenchmarkSummary {
                 summary.publishable_count += 1;
             }
         }
-        summary.external_registry_adapter_gap_count = summary.published_count;
         push_gap_count(
             &mut summary.blocker_reasons,
             "benchmark_evaluation_pending",
@@ -31438,6 +32122,11 @@ impl TraceOperationalBenchmarkSummary {
             &mut summary.blocker_reasons,
             "external_benchmark_registry_adapter_gap",
             summary.external_registry_adapter_gap_count,
+        );
+        push_gap_count(
+            &mut summary.blocker_reasons,
+            "benchmark_registry_outbox_failed",
+            summary.registry_outbox_failed_count,
         );
         summary
     }
@@ -37168,6 +37857,158 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn benchmark_registry_publication_enqueues_external_registry_outbox() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::BenchmarkOnly];
+        envelope.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::BenchmarkGeneration];
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("benchmark source submission succeeds");
+
+        let Json(benchmark) = benchmark_worker_convert_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("registry_outbox_publish_candidate".to_string()),
+                consent_scope: Some("benchmark_only".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: Some("benchmark:registry-outbox".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark worker conversion succeeds");
+        let raw_summary = benchmark.candidates[0].canonical_summary.clone();
+
+        let _ = benchmark_evaluation_worker_run_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkEvaluationWorkerRunRequest {
+                limit: Some(10),
+                dry_run: Some(false),
+                evaluator_ref: Some("deterministic-benchmark-evaluator:v1".to_string()),
+                min_score: None,
+                reason: Some("scheduled benchmark evaluator run".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark evaluation worker run succeeds");
+
+        let _ = benchmark_registry_publication_worker_run_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkRegistryPublicationWorkerRunRequest {
+                limit: Some(10),
+                dry_run: Some(false),
+                registry_ref_prefix: Some("benchmark-registry:tenant-a".to_string()),
+                reason: Some("scheduled benchmark registry publication".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark registry publication worker run succeeds");
+
+        let Json(outbox) =
+            benchmark_registry_outbox_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect benchmark registry outbox");
+        assert_eq!(outbox.len(), 1);
+        let item = &outbox[0];
+        assert_eq!(item.conversion_id, benchmark.conversion_id);
+        assert_eq!(
+            item.operation,
+            StorageTraceBenchmarkRegistryOutboxOperation::Publish
+        );
+        assert_eq!(
+            item.status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Pending
+        );
+        let expected_registry_ref =
+            format!("benchmark-registry:tenant-a:{}", benchmark.conversion_id);
+        assert_eq!(item.registry_ref, expected_registry_ref);
+        assert_eq!(
+            item.source_submission_ids_hash,
+            benchmark.source_submission_ids_hash
+        );
+        assert_eq!(
+            item.evaluator_ref.as_deref(),
+            Some("deterministic-benchmark-evaluator:v1")
+        );
+        assert_eq!(item.evaluation_score, Some(1.0));
+        assert!(item.artifact_payload_hash.starts_with("sha256:"));
+        let outbox_json =
+            std::fs::read_to_string(benchmark_registry_outbox_path(temp.path(), "tenant-a"))
+                .expect("benchmark registry outbox reads");
+        assert!(
+            !outbox_json.contains(&raw_summary),
+            "registry outbox must not persist raw benchmark summary text"
+        );
+
+        let Json(after_publish) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect benchmark external registry gap");
+        assert_eq!(
+            after_publish.benchmarks.external_registry_adapter_gap_count,
+            1
+        );
+
+        let Json(submitted) = mark_benchmark_registry_outbox_status_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxStatusRequest {
+                benchmark_outbox_id: item.benchmark_outbox_id,
+                status: StorageTraceBenchmarkRegistryOutboxStatus::Submitted,
+                external_receipt_ref: Some("external-registry:submission:1".to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect("benchmark worker can mark registry outbox submitted");
+        assert_eq!(
+            submitted.status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Submitted
+        );
+        assert!(submitted.submitted_at.is_some());
+
+        let Json(confirmed) = mark_benchmark_registry_outbox_status_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxStatusRequest {
+                benchmark_outbox_id: item.benchmark_outbox_id,
+                status: StorageTraceBenchmarkRegistryOutboxStatus::Confirmed,
+                external_receipt_ref: Some("external-registry:receipt:1".to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect("benchmark worker can mark registry outbox confirmed");
+        assert_eq!(
+            confirmed.status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Confirmed
+        );
+        assert!(confirmed.confirmed_at.is_some());
+
+        let Json(after_confirm) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect cleared benchmark external registry gap");
+        assert_eq!(
+            after_confirm.benchmarks.external_registry_adapter_gap_count,
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn operational_summary_reports_benchmark_lifecycle_readiness() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -39011,6 +39852,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn maintenance_backfill_dry_run_counts_benchmark_registry_outbox_rows() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        upsert_benchmark_registry_outbox_item(
+            temp.path(),
+            "tenant-a",
+            &TraceBenchmarkRegistryOutboxItem {
+                benchmark_outbox_id: Uuid::new_v4(),
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                conversion_id: Uuid::new_v4(),
+                operation: StorageTraceBenchmarkRegistryOutboxOperation::Publish,
+                registry_ref: "benchmark-registry:trace-benchmark-dry-run".to_string(),
+                artifact_payload_hash: "sha256:benchmark-artifact-dry-run".to_string(),
+                source_submission_ids_hash: "sha256:benchmark-sources-dry-run".to_string(),
+                evaluator_ref: Some(principal_storage_ref("benchmark-worker-token-a")),
+                evaluation_score: Some(0.88),
+                status: StorageTraceBenchmarkRegistryOutboxStatus::Pending,
+                created_at: Utc::now(),
+                submitted_at: None,
+                external_receipt_ref: None,
+                last_error_hash: None,
+                confirmed_at: None,
+            },
+        )
+        .expect("benchmark registry outbox file writes");
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("benchmark_registry_outbox_backfill_dry_run".to_string()),
+                dry_run: true,
+                backfill_db_mirror: true,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("maintenance dry-run succeeds without a DB mirror");
+        assert_eq!(response.db_mirror_backfilled, 1);
+        assert_eq!(response.db_mirror_backfill_failed, 0);
+    }
+
+    #[tokio::test]
     async fn maintenance_backfill_mirrors_ranking_control_plane_rows() {
         let Some(backend) = postgres_backend_for_ingest_test().await else {
             return;
@@ -39260,6 +40150,101 @@ mod tests {
         assert_eq!(
             db_outbox[0].near_transaction_hash.as_deref(),
             Some("near-backfilled-tx")
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn maintenance_backfill_updates_existing_benchmark_registry_outbox_status_in_db() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        let benchmark_outbox_id = Uuid::new_v4();
+        let outbox_item = TraceBenchmarkRegistryOutboxItem {
+            benchmark_outbox_id,
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            conversion_id: Uuid::new_v4(),
+            operation: StorageTraceBenchmarkRegistryOutboxOperation::Publish,
+            registry_ref: "benchmark-registry:trace-benchmark-backfill".to_string(),
+            artifact_payload_hash: "sha256:benchmark-artifact-backfill".to_string(),
+            source_submission_ids_hash: "sha256:benchmark-sources-backfill".to_string(),
+            evaluator_ref: Some(principal_storage_ref("benchmark-worker-token-a")),
+            evaluation_score: Some(0.91),
+            status: StorageTraceBenchmarkRegistryOutboxStatus::Pending,
+            created_at: Utc::now(),
+            submitted_at: None,
+            external_receipt_ref: None,
+            last_error_hash: None,
+            confirmed_at: None,
+        };
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &outbox_item)
+            .expect("benchmark registry outbox file writes");
+        mirror_benchmark_registry_outbox_item_to_db(state.as_ref(), &outbox_item)
+            .await
+            .expect("pending benchmark registry outbox DB mirror writes");
+
+        let file_updated = update_benchmark_registry_outbox_item_status(
+            temp.path(),
+            "tenant-a",
+            benchmark_outbox_id,
+            StorageTraceBenchmarkRegistryOutboxStatus::Submitted,
+            Some("registry-submit:backfilled".to_string()),
+            None,
+            Utc::now(),
+        )
+        .expect("file status update succeeds")
+        .expect("file benchmark registry outbox item exists");
+        assert_eq!(
+            file_updated.status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Submitted
+        );
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("benchmark_registry_outbox_status_backfill".to_string()),
+                dry_run: false,
+                backfill_db_mirror: true,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("maintenance backfill succeeds");
+        assert_eq!(response.db_mirror_backfill_failed, 0);
+
+        let db_outbox = backend
+            .list_trace_benchmark_registry_outbox_items("tenant-a")
+            .await
+            .expect("DB benchmark registry outbox reads");
+        assert_eq!(db_outbox.len(), 1);
+        assert_eq!(
+            db_outbox[0].status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Submitted
+        );
+        assert_eq!(
+            db_outbox[0].external_receipt_ref.as_deref(),
+            Some("registry-submit:backfilled")
         );
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;

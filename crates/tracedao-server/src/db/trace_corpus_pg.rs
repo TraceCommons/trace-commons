@@ -13,12 +13,13 @@ use crate::db::trace_corpus_common::{
 use crate::error::DatabaseError;
 use crate::trace_corpus_storage::{
     TenantScopedTraceObjectRef, TraceArtifactInvalidationCounts, TraceAuditEventRecord,
-    TraceAuditEventWrite, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCorpusStore,
-    TraceCreditEventRecord, TraceCreditEventType, TraceCreditEventWrite, TraceCreditHoldReason,
-    TraceCreditHoldRecord, TraceCreditHoldWrite, TraceCreditSettlementBatchRecord,
-    TraceCreditSettlementBatchStatus, TraceCreditSettlementBatchWrite,
-    TraceCreditSettlementNearStatus, TraceCreditSettlementState, TraceDerivedRecord,
-    TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportAccessGrantRecord,
+    TraceAuditEventWrite, TraceAuditSafeMetadata, TraceBenchmarkRegistryOutboxItemRecord,
+    TraceBenchmarkRegistryOutboxItemWrite, TraceBenchmarkRegistryOutboxStatus, TraceCorpusStatus,
+    TraceCorpusStore, TraceCreditEventRecord, TraceCreditEventType, TraceCreditEventWrite,
+    TraceCreditHoldReason, TraceCreditHoldRecord, TraceCreditHoldWrite,
+    TraceCreditSettlementBatchRecord, TraceCreditSettlementBatchStatus,
+    TraceCreditSettlementBatchWrite, TraceCreditSettlementNearStatus, TraceCreditSettlementState,
+    TraceDerivedRecord, TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportAccessGrantRecord,
     TraceExportAccessGrantStatus, TraceExportAccessGrantWrite, TraceExportJobRecord,
     TraceExportJobStatus, TraceExportJobStatusUpdate, TraceExportJobWrite,
     TraceExportManifestItemInvalidationReason, TraceExportManifestItemRecord,
@@ -107,6 +108,11 @@ const TRACE_CREDIT_HOLD_COLUMNS: &str = "\
 const TRACE_NEAR_CREDIT_OUTBOX_COLUMNS: &str = "\
     tenant_id, near_outbox_id, settlement_batch_id, credit_account_hash, near_call_json, \
     status, created_at, submitted_at, near_transaction_hash, last_error_hash, confirmed_at";
+
+const TRACE_BENCHMARK_REGISTRY_OUTBOX_COLUMNS: &str = "\
+    tenant_id, benchmark_outbox_id, conversion_id, operation, registry_ref, \
+    artifact_payload_hash, source_submission_ids_hash, evaluator_ref, evaluation_score, \
+    status, created_at, submitted_at, external_receipt_ref, last_error_hash, confirmed_at";
 
 const TRACE_TENANT_ACCESS_GRANT_COLUMNS: &str = "\
     tenant_id, grant_id, principal_ref, role, status, allowed_consent_scopes, allowed_uses, \
@@ -512,6 +518,33 @@ fn row_to_near_credit_outbox_item(
         created_at: row.get("created_at"),
         submitted_at: row.get("submitted_at"),
         near_transaction_hash: row.get("near_transaction_hash"),
+        last_error_hash: row.get("last_error_hash"),
+        confirmed_at: row.get("confirmed_at"),
+    })
+}
+
+fn row_to_benchmark_registry_outbox_item(
+    row: &Row,
+) -> Result<TraceBenchmarkRegistryOutboxItemRecord, DatabaseError> {
+    let operation: String = row.get("operation");
+    let status: String = row.get("status");
+    Ok(TraceBenchmarkRegistryOutboxItemRecord {
+        tenant_id: row.get("tenant_id"),
+        benchmark_outbox_id: row.get("benchmark_outbox_id"),
+        conversion_id: row.get("conversion_id"),
+        operation: enum_from_storage(&operation, "TraceBenchmarkRegistryOutboxOperation")?,
+        registry_ref: row.get("registry_ref"),
+        artifact_payload_hash: row.get("artifact_payload_hash"),
+        source_submission_ids_hash: row.get("source_submission_ids_hash"),
+        evaluator_ref: row.get("evaluator_ref"),
+        evaluation_score: row.get("evaluation_score"),
+        status: enum_from_storage::<TraceBenchmarkRegistryOutboxStatus>(
+            &status,
+            "TraceBenchmarkRegistryOutboxStatus",
+        )?,
+        created_at: row.get("created_at"),
+        submitted_at: row.get("submitted_at"),
+        external_receipt_ref: row.get("external_receipt_ref"),
         last_error_hash: row.get("last_error_hash"),
         confirmed_at: row.get("confirmed_at"),
     })
@@ -3716,6 +3749,132 @@ impl TraceCorpusStore for PgBackend {
         let record = row
             .as_ref()
             .map(row_to_near_credit_outbox_item)
+            .transpose()?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn upsert_trace_benchmark_registry_outbox_item(
+        &self,
+        item: TraceBenchmarkRegistryOutboxItemWrite,
+    ) -> Result<TraceBenchmarkRegistryOutboxItemRecord, DatabaseError> {
+        self.ensure_trace_tenant(&item.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &item.tenant_id).await?;
+        let operation = enum_to_storage(item.operation)?;
+        let status = enum_to_storage(item.status)?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_benchmark_registry_outbox (
+                        tenant_id, benchmark_outbox_id, conversion_id, operation, registry_ref,
+                        artifact_payload_hash, source_submission_ids_hash, evaluator_ref,
+                        evaluation_score, status
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                     ON CONFLICT (tenant_id, benchmark_outbox_id) DO UPDATE SET
+                        conversion_id = excluded.conversion_id,
+                        operation = excluded.operation,
+                        registry_ref = excluded.registry_ref,
+                        artifact_payload_hash = excluded.artifact_payload_hash,
+                        source_submission_ids_hash = excluded.source_submission_ids_hash,
+                        evaluator_ref = excluded.evaluator_ref,
+                        evaluation_score = excluded.evaluation_score
+                     RETURNING {TRACE_BENCHMARK_REGISTRY_OUTBOX_COLUMNS}"
+                ),
+                &[
+                    &item.tenant_id,
+                    &item.benchmark_outbox_id,
+                    &item.conversion_id,
+                    &operation,
+                    &item.registry_ref,
+                    &item.artifact_payload_hash,
+                    &item.source_submission_ids_hash,
+                    &item.evaluator_ref,
+                    &item.evaluation_score,
+                    &status,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_benchmark_registry_outbox_item(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_benchmark_registry_outbox_items(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_BENCHMARK_REGISTRY_OUTBOX_COLUMNS}
+                     FROM trace_benchmark_registry_outbox
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, benchmark_outbox_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows
+            .iter()
+            .map(row_to_benchmark_registry_outbox_item)
+            .collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn update_trace_benchmark_registry_outbox_status(
+        &self,
+        tenant_id: &str,
+        benchmark_outbox_id: Uuid,
+        status: TraceBenchmarkRegistryOutboxStatus,
+        external_receipt_ref: Option<String>,
+        last_error_hash: Option<String>,
+    ) -> Result<Option<TraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let status_storage = enum_to_storage(status)?;
+        let row = tx
+            .query_opt(
+                &format!(
+                    "UPDATE trace_benchmark_registry_outbox
+                     SET status = $3,
+                         external_receipt_ref = COALESCE($4, external_receipt_ref),
+                         submitted_at = CASE
+                            WHEN submitted_at IS NULL AND $3 IN ('submitted', 'confirmed')
+                            THEN NOW()
+                            ELSE submitted_at
+                         END,
+                         confirmed_at = CASE
+                            WHEN $3 = 'confirmed' THEN NOW()
+                            WHEN $3 IN ('submitted', 'failed') THEN NULL
+                            ELSE confirmed_at
+                         END,
+                         last_error_hash = CASE
+                            WHEN $3 = 'failed' THEN $5
+                            WHEN $3 IN ('submitted', 'confirmed') THEN NULL
+                            ELSE last_error_hash
+                         END
+                     WHERE tenant_id = $1 AND benchmark_outbox_id = $2
+                     RETURNING {TRACE_BENCHMARK_REGISTRY_OUTBOX_COLUMNS}"
+                ),
+                &[
+                    &tenant_id,
+                    &benchmark_outbox_id,
+                    &status_storage,
+                    &external_receipt_ref,
+                    &last_error_hash,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row
+            .as_ref()
+            .map(row_to_benchmark_registry_outbox_item)
             .transpose()?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(record)

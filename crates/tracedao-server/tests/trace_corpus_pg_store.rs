@@ -6,19 +6,20 @@ use tracedao_server::config::{DatabaseConfig, SslMode};
 use tracedao_server::db::{Database, postgres::PgBackend};
 use tracedao_server::error::DatabaseError;
 use tracedao_server::trace_corpus_storage::{
-    TraceCorpusStatus, TraceCorpusStore, TraceCreditAccountSettlementLineItem,
-    TraceCreditEventType, TraceCreditEventWrite, TraceCreditHoldReason, TraceCreditHoldWrite,
-    TraceCreditSettlementBatchStatus, TraceCreditSettlementBatchWrite,
-    TraceCreditSettlementNearStatus, TraceCreditSettlementState, TraceDerivedRecordWrite,
-    TraceDerivedStatus, TraceExportManifestItemWrite, TraceExportManifestMirrorWrite,
-    TraceExportManifestWrite, TraceNearCreditOutboxItemWrite, TraceObjectArtifactKind,
-    TraceObjectRefWrite, TraceRankingCalibrationRunWrite, TraceRankingFeatureWrite,
-    TraceRankingLabelOutcome, TraceRankingLabelSource, TraceRankingLabelWrite,
-    TraceRankingModelStatus, TraceRankingModelVersionWrite, TraceRankingPredictionWrite,
-    TraceRankingPreferenceLabelWrite, TraceRankingUtilityCategory, TraceRankingWorkerRunKind,
-    TraceRankingWorkerRunStatus, TraceRankingWorkerRunWrite, TraceSubmissionWrite,
-    TraceUtilityAttestationWrite, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
-    TraceVectorEntryWrite, TraceWorkerKind,
+    TraceBenchmarkRegistryOutboxItemWrite, TraceBenchmarkRegistryOutboxOperation,
+    TraceBenchmarkRegistryOutboxStatus, TraceCorpusStatus, TraceCorpusStore,
+    TraceCreditAccountSettlementLineItem, TraceCreditEventType, TraceCreditEventWrite,
+    TraceCreditHoldReason, TraceCreditHoldWrite, TraceCreditSettlementBatchStatus,
+    TraceCreditSettlementBatchWrite, TraceCreditSettlementNearStatus, TraceCreditSettlementState,
+    TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportManifestItemWrite,
+    TraceExportManifestMirrorWrite, TraceExportManifestWrite, TraceNearCreditOutboxItemWrite,
+    TraceObjectArtifactKind, TraceObjectRefWrite, TraceRankingCalibrationRunWrite,
+    TraceRankingFeatureWrite, TraceRankingLabelOutcome, TraceRankingLabelSource,
+    TraceRankingLabelWrite, TraceRankingModelStatus, TraceRankingModelVersionWrite,
+    TraceRankingPredictionWrite, TraceRankingPreferenceLabelWrite, TraceRankingUtilityCategory,
+    TraceRankingWorkerRunKind, TraceRankingWorkerRunStatus, TraceRankingWorkerRunWrite,
+    TraceSubmissionWrite, TraceUtilityAttestationWrite, TraceVectorEntrySourceProjection,
+    TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWorkerKind,
 };
 use uuid::Uuid;
 
@@ -424,6 +425,78 @@ async fn pg_store_invalidates_exact_vector_entry_with_tenant_submission_scope() 
         .await
         .expect("repeat exact vector invalidation");
     assert_eq!(idempotent, 0);
+
+    cleanup_tenant(&backend, &tenant_alpha).await;
+    cleanup_tenant(&backend, &tenant_beta).await;
+}
+
+#[tokio::test]
+async fn pg_store_round_trips_tenant_scoped_benchmark_registry_outbox() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_alpha = format!("pg-benchmark-outbox-alpha-{}", Uuid::new_v4());
+    let tenant_beta = format!("pg-benchmark-outbox-beta-{}", Uuid::new_v4());
+    let benchmark_outbox_id = Uuid::new_v4();
+    let conversion_id = Uuid::new_v4();
+
+    let inserted = backend
+        .upsert_trace_benchmark_registry_outbox_item(TraceBenchmarkRegistryOutboxItemWrite {
+            tenant_id: tenant_alpha.clone(),
+            benchmark_outbox_id,
+            conversion_id,
+            operation: TraceBenchmarkRegistryOutboxOperation::Publish,
+            registry_ref: "benchmark-registry:tenant-alpha:conversion".to_string(),
+            artifact_payload_hash: "sha256:benchmark-artifact-payload".to_string(),
+            source_submission_ids_hash: "sha256:benchmark-sources".to_string(),
+            evaluator_ref: Some("deterministic-benchmark-evaluator:v1".to_string()),
+            evaluation_score: Some(1.0),
+            status: TraceBenchmarkRegistryOutboxStatus::Pending,
+        })
+        .await
+        .expect("upsert benchmark registry outbox item");
+    assert_eq!(inserted.benchmark_outbox_id, benchmark_outbox_id);
+    assert_eq!(inserted.status, TraceBenchmarkRegistryOutboxStatus::Pending);
+
+    let submitted = backend
+        .update_trace_benchmark_registry_outbox_status(
+            &tenant_alpha,
+            benchmark_outbox_id,
+            TraceBenchmarkRegistryOutboxStatus::Submitted,
+            Some("external-registry:submission:alpha".to_string()),
+            None,
+        )
+        .await
+        .expect("update benchmark registry outbox")
+        .expect("updated item exists");
+    assert_eq!(
+        submitted.status,
+        TraceBenchmarkRegistryOutboxStatus::Submitted
+    );
+    assert_eq!(
+        submitted.external_receipt_ref.as_deref(),
+        Some("external-registry:submission:alpha")
+    );
+    assert!(submitted.submitted_at.is_some());
+
+    assert_eq!(
+        backend
+            .list_trace_benchmark_registry_outbox_items(&tenant_alpha)
+            .await
+            .expect("list alpha benchmark registry outbox")
+            .len(),
+        1
+    );
+    assert!(
+        backend
+            .list_trace_benchmark_registry_outbox_items(&tenant_beta)
+            .await
+            .expect("list beta benchmark registry outbox")
+            .is_empty(),
+        "benchmark registry outbox items must stay tenant scoped"
+    );
 
     cleanup_tenant(&backend, &tenant_alpha).await;
     cleanup_tenant(&backend, &tenant_beta).await;

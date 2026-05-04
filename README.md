@@ -31,6 +31,12 @@ version records, hash-only feature records, prediction records, frontier/reviewe
 labels, calibration reports, persisted model-promotion calibration runs, and
 PostgreSQL-backed ranking evidence reads/writes behind the same DB mirror
 cutover gates.
+Benchmark publication now has the same server-side control-plane shape:
+passed benchmark artifacts enqueue hash-only registry outbox rows, workers can
+mark external submit/confirm/fail status with receipt refs and hashed errors,
+operators can inspect the outbox through the admin API, and maintenance
+backfill/reconciliation covers registry outbox drift before external registry
+adapter readiness is promoted.
 
 ## Trace Credits
 
@@ -50,6 +56,13 @@ configured, utility attestations, settlement batches, credit holds, and NEAR
 receipt outbox rows are dual-written to PostgreSQL;
 `TRACE_COMMONS_DB_REVIEWER_READS=true` serves the admin credit control-plane
 lists from the tenant-scoped DB mirror.
+
+Benchmark registry status is treated as a credit-readiness input, not as a raw
+artifact transport. Published benchmark artifacts enqueue durable outbox rows
+containing ids, registry refs, artifact/source hashes, evaluator refs, scores,
+and lifecycle status only. The operational summary counts pending, submitted,
+confirmed, and failed registry outbox work, and a published artifact remains in
+the external-registry-adapter gap until a confirmed outbox receipt is recorded.
 
 The NEAR path is intentionally an outbox of deterministic method-call payloads
 for a non-transferable receipt contract. The payload builder only emits
