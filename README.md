@@ -133,9 +133,11 @@ Prediction writes must name a registered active or candidate model, match its
 policy and feature schema, and reference an existing feature vector hash for the
 same source. Utility workers can derive server-provenanced ranking features
 through `/v1/workers/ranking/features/run`, which projects accepted
-redacted-summary metadata into deterministic feature hashes and reserves the
-`feature_provenance:server_derived` coverage tag so manually posted feature
-rows cannot claim that provenance. Production deployments can set
+redacted-summary metadata into deterministic feature hashes, can require active
+vector metadata for vector-backed duplicate/novelty signals, and reserves the
+`feature_provenance:server_derived` and `feature_input:*` coverage tags so
+manually posted feature rows cannot claim that provenance. Production
+deployments can set
 `TRACE_COMMONS_RANKING_REQUIRE_SERVER_FEATURE_PROVENANCE=true` to make
 prediction-credit, readiness, and settlement require that server-owned feature
 evidence before ranking utility credit can mint or settle. Calibration treats
