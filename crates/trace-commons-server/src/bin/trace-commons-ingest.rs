@@ -36897,6 +36897,7 @@ struct TraceOperationalPromotionGateSummary {
     published_benchmark_external_registry_gap_count: usize,
     revoked_benchmark_external_registry_invalidation_gap_count: usize,
     at_risk_ranking_model_count: usize,
+    failing_ranking_model_backtest_count: usize,
     blocked_ranking_credit_event_count: usize,
     ranking_calibration_dataset_manifest_conflict_count: usize,
     stale_ranking_worker_run_count: usize,
@@ -36928,6 +36929,7 @@ impl TraceOperationalPromotionGateSummary {
         let revoked_benchmark_external_registry_invalidation_gap_count =
             benchmarks.external_registry_invalidation_gap_count;
         let at_risk_ranking_model_count = ranking.at_risk_model_count;
+        let failing_ranking_model_backtest_count = ranking.failing_backtest_model_target_count;
         let blocked_ranking_credit_event_count = ranking.blocked_credit_event_count;
         let ranking_calibration_dataset_manifest_conflict_count =
             ranking.calibration_dataset_manifest_conflict_count;
@@ -36974,6 +36976,11 @@ impl TraceOperationalPromotionGateSummary {
             &mut blocking_gates,
             "at_risk_ranking_models",
             at_risk_ranking_model_count,
+        );
+        push_gap_count(
+            &mut blocking_gates,
+            "failing_ranking_model_backtests",
+            failing_ranking_model_backtest_count,
         );
         push_gap_count(
             &mut blocking_gates,
@@ -37036,6 +37043,7 @@ impl TraceOperationalPromotionGateSummary {
             published_benchmark_external_registry_gap_count,
             revoked_benchmark_external_registry_invalidation_gap_count,
             at_risk_ranking_model_count,
+            failing_ranking_model_backtest_count,
             blocked_ranking_credit_event_count,
             ranking_calibration_dataset_manifest_conflict_count,
             stale_ranking_worker_run_count,
@@ -37443,6 +37451,10 @@ struct TraceOperationalRankingSummary {
     monitored_model_count: usize,
     at_risk_model_count: usize,
     risk_code_counts: BTreeMap<String, usize>,
+    backtest_model_target_count: usize,
+    passing_backtest_model_target_count: usize,
+    failing_backtest_model_target_count: usize,
+    backtest_reason_counts: BTreeMap<String, usize>,
     pending_credit_event_count: usize,
     ready_credit_event_count: usize,
     blocked_credit_event_count: usize,
@@ -37456,6 +37468,18 @@ struct TraceOperationalRankingSummary {
 impl TraceOperationalRankingSummary {
     fn from_inputs(inputs: TraceOperationalRankingInputs<'_>) -> Self {
         let risk = ranking_model_risk_report(
+            inputs.state,
+            inputs.tenant,
+            inputs.model_versions,
+            RankingModelRiskEvidence {
+                predictions: inputs.predictions,
+                labels: inputs.labels,
+                preference_labels: inputs.preference_labels,
+                calibration_datasets: inputs.calibration_datasets,
+                calibration_runs: inputs.calibration_runs,
+            },
+        );
+        let backtest = ranking_model_backtest_report(
             inputs.state,
             inputs.tenant,
             inputs.model_versions,
@@ -37519,6 +37543,10 @@ impl TraceOperationalRankingSummary {
             monitored_model_count: risk.monitored_model_count,
             at_risk_model_count: risk.at_risk_model_count,
             risk_code_counts,
+            backtest_model_target_count: backtest.evaluated_model_target_count,
+            passing_backtest_model_target_count: backtest.passing_model_target_count,
+            failing_backtest_model_target_count: backtest.failing_model_target_count,
+            backtest_reason_counts: backtest.reason_code_counts,
             pending_credit_event_count: readiness.pending_ranking_credit_event_count,
             ready_credit_event_count: readiness.ready_count,
             blocked_credit_event_count: readiness.blocked_count,
@@ -52168,6 +52196,87 @@ mod tests {
             latest_ranking_model_version(&model_versions, "trace-ranker-worker-backtest-v1")
                 .unwrap();
         assert_eq!(latest.status, StorageTraceRankingModelStatus::Candidate);
+    }
+
+    #[tokio::test]
+    async fn operational_summary_reports_candidate_backtest_failures() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).ranking_min_pairwise_label_count = 1;
+        Arc::make_mut(&mut state).ranking_min_pairwise_accuracy_micros = 600_000;
+        let (candidate, calibrated_prediction) = seed_credit_cycle_ready_candidate(
+            state.clone(),
+            "trace-ranker-operational-backtest-v1",
+        )
+        .await;
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration");
+        assert!(calibration.promotable);
+
+        let higher_scored = seed_pairwise_ranking_prediction_source(
+            state.clone(),
+            &candidate,
+            "operational-backtest-pairwise-reversal",
+            2_000_000,
+        )
+        .await;
+        let _ = ranking_preference_label_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id: calibrated_prediction.submission_id,
+                rejected_submission_id: higher_scored.submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 800_000,
+                evidence_hash: "sha256:operational-backtest-pairwise-reversal".to_string(),
+                external_ref: "reviewer-private-operational-backtest-pairwise-reversal".to_string(),
+            }),
+        )
+        .await
+        .expect("reviewer can write pairwise operational backtest label");
+
+        let Json(operational) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary");
+        let operational_json =
+            serde_json::to_value(&operational).expect("operational summary serializes");
+        assert_eq!(
+            operational_json["ranking"]["failing_backtest_model_target_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["ranking"]["backtest_reason_counts"]["pairwise_accuracy_below_threshold"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["promotion_gates"]["failing_ranking_model_backtest_count"],
+            serde_json::json!(1)
+        );
+        assert!(
+            operational
+                .promotion_gates
+                .blocking_gates
+                .contains(&"failing_ranking_model_backtests=1".to_string())
+        );
+        let operational_text =
+            serde_json::to_string(&operational_json).expect("operational json serializes");
+        assert!(!operational_text.contains("reviewer-private-operational-backtest"));
     }
 
     async fn seed_credit_cycle_candidate_with_prediction(
