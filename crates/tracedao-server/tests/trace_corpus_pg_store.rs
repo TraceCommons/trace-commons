@@ -504,6 +504,69 @@ async fn pg_store_round_trips_tenant_scoped_benchmark_registry_outbox() {
 }
 
 #[tokio::test]
+async fn pg_store_preserves_ranking_calibration_dataset_manifest_on_status_update() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_id = format!("pg-ranking-calibration-{}", Uuid::new_v4());
+    let initial = TraceRankingCalibrationDatasetWrite {
+        tenant_id: tenant_id.clone(),
+        calibration_dataset_hash: "sha256:pg-calibration-dataset".to_string(),
+        target_use: "model_training".to_string(),
+        policy_version: "trace-credit-policy-v2".to_string(),
+        source_manifest_hash: "sha256:pg-calibration-source-manifest-v1".to_string(),
+        source_count: 32,
+        label_source_count: 2,
+        label_actor_count: 2,
+        status: TraceRankingCalibrationDatasetStatus::Candidate,
+        actor_principal_ref: "principal:ranker-admin".to_string(),
+    };
+
+    backend
+        .upsert_trace_ranking_calibration_dataset(initial.clone())
+        .await
+        .expect("insert ranking calibration dataset");
+
+    let mut status_update = initial.clone();
+    status_update.status = TraceRankingCalibrationDatasetStatus::Active;
+    let active = backend
+        .upsert_trace_ranking_calibration_dataset(status_update.clone())
+        .await
+        .expect("status-only update keeps immutable manifest metadata");
+    assert_eq!(active.status, TraceRankingCalibrationDatasetStatus::Active);
+    assert_eq!(active.source_manifest_hash, initial.source_manifest_hash);
+
+    let mut rewrite = status_update;
+    rewrite.source_manifest_hash = "sha256:pg-calibration-source-manifest-v2".to_string();
+    let error = backend
+        .upsert_trace_ranking_calibration_dataset(rewrite)
+        .await
+        .expect_err("manifest rewrite is rejected by the database store");
+    assert!(matches!(
+        error,
+        DatabaseError::Constraint(message) if message.contains("immutable")
+    ));
+
+    let records = backend
+        .list_trace_ranking_calibration_datasets(&tenant_id)
+        .await
+        .expect("list ranking calibration datasets");
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].source_manifest_hash,
+        initial.source_manifest_hash
+    );
+    assert_eq!(
+        records[0].status,
+        TraceRankingCalibrationDatasetStatus::Active
+    );
+
+    cleanup_tenant(&backend, &tenant_id).await;
+}
+
+#[tokio::test]
 async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
     let Some(backend) = postgres_backend().await else {
         return;

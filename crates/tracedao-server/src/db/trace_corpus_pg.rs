@@ -2194,7 +2194,7 @@ impl TraceCorpusStore for PgBackend {
         )?;
         let status = enum_to_storage(dataset.status)?;
         let row = tx
-            .query_one(
+            .query_opt(
                 &format!(
                     "INSERT INTO trace_ranking_calibration_datasets (
                         tenant_id, calibration_dataset_hash, target_use, policy_version,
@@ -2203,13 +2203,13 @@ impl TraceCorpusStore for PgBackend {
                      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                      ON CONFLICT (tenant_id, calibration_dataset_hash, target_use, policy_version)
                      DO UPDATE SET
-                        source_manifest_hash = excluded.source_manifest_hash,
-                        source_count = excluded.source_count,
-                        label_source_count = excluded.label_source_count,
-                        label_actor_count = excluded.label_actor_count,
                         status = excluded.status,
                         actor_principal_ref = excluded.actor_principal_ref,
                         created_at = NOW()
+                     WHERE trace_ranking_calibration_datasets.source_manifest_hash = excluded.source_manifest_hash
+                        AND trace_ranking_calibration_datasets.source_count = excluded.source_count
+                        AND trace_ranking_calibration_datasets.label_source_count = excluded.label_source_count
+                        AND trace_ranking_calibration_datasets.label_actor_count = excluded.label_actor_count
                      RETURNING {TRACE_RANKING_CALIBRATION_DATASET_COLUMNS}"
                 ),
                 &[
@@ -2227,6 +2227,12 @@ impl TraceCorpusStore for PgBackend {
             )
             .await
             .map_err(DatabaseError::Postgres)?;
+        let row = row.ok_or_else(|| {
+            DatabaseError::Constraint(
+                "ranking calibration dataset manifest is immutable for this target use and policy"
+                    .to_string(),
+            )
+        })?;
         let record = row_to_ranking_calibration_dataset(&row)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(record)

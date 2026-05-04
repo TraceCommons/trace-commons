@@ -125,7 +125,8 @@ digest.
 For an existing `(calibration_dataset_hash, target_use, policy_version)` holdout
 key, lifecycle status updates must keep the source manifest hash and count
 metadata unchanged; changing those manifest fields requires a new dataset hash
-or policy version.
+or policy version. File-backed writes and the PostgreSQL mirror enforce the
+same invariant before the row can become ranking-credit evidence.
 Prediction writes must name a registered active or candidate model, match its
 policy and feature schema, and reference an existing feature vector hash for the
 same source. Calibration treats repeated labels from the same source on the same

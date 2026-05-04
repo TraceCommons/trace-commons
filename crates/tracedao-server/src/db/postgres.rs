@@ -399,6 +399,29 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _tracedao_migrations WHERE version = $1",
+                &[&17_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V17__trace_ranking_calibration_dataset_manifest_immutability.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _tracedao_migrations (version, name) VALUES ($1, $2)",
+                    &[
+                        &17_i32,
+                        &"trace_ranking_calibration_dataset_manifest_immutability",
+                    ],
+                )
+                .await?;
+        }
         Ok(())
     }
 
