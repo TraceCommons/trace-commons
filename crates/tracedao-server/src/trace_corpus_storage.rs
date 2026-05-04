@@ -266,6 +266,16 @@ pub struct TraceRankingCalibrationDatasetWrite {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingCalibrationDatasetStatusUpdate {
+    pub tenant_id: String,
+    pub calibration_dataset_hash: String,
+    pub target_use: String,
+    pub policy_version: String,
+    pub status: TraceRankingCalibrationDatasetStatus,
+    pub actor_principal_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TraceRankingCalibrationDatasetRecord {
     pub tenant_id: String,
     pub calibration_dataset_hash: String,
@@ -1753,6 +1763,11 @@ pub trait TraceCorpusStore: Send + Sync {
     async fn upsert_trace_ranking_calibration_dataset(
         &self,
         dataset: TraceRankingCalibrationDatasetWrite,
+    ) -> Result<TraceRankingCalibrationDatasetRecord, DatabaseError>;
+
+    async fn update_trace_ranking_calibration_dataset_status(
+        &self,
+        update: TraceRankingCalibrationDatasetStatusUpdate,
     ) -> Result<TraceRankingCalibrationDatasetRecord, DatabaseError>;
 
     async fn list_trace_ranking_calibration_datasets(

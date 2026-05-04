@@ -14,13 +14,14 @@ use tracedao_server::trace_corpus_storage::{
     TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportManifestItemWrite,
     TraceExportManifestMirrorWrite, TraceExportManifestWrite, TraceNearCreditOutboxItemWrite,
     TraceObjectArtifactKind, TraceObjectRefWrite, TraceRankingCalibrationDatasetStatus,
-    TraceRankingCalibrationDatasetWrite, TraceRankingCalibrationRunWrite, TraceRankingFeatureWrite,
-    TraceRankingLabelOutcome, TraceRankingLabelSource, TraceRankingLabelWrite,
-    TraceRankingModelStatus, TraceRankingModelVersionWrite, TraceRankingPredictionWrite,
-    TraceRankingPreferenceLabelWrite, TraceRankingUtilityCategory, TraceRankingWorkerRunKind,
-    TraceRankingWorkerRunStatus, TraceRankingWorkerRunWrite, TraceSubmissionWrite,
-    TraceUtilityAttestationWrite, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
-    TraceVectorEntryWrite, TraceWorkerKind,
+    TraceRankingCalibrationDatasetStatusUpdate, TraceRankingCalibrationDatasetWrite,
+    TraceRankingCalibrationRunWrite, TraceRankingFeatureWrite, TraceRankingLabelOutcome,
+    TraceRankingLabelSource, TraceRankingLabelWrite, TraceRankingModelStatus,
+    TraceRankingModelVersionWrite, TraceRankingPredictionWrite, TraceRankingPreferenceLabelWrite,
+    TraceRankingUtilityCategory, TraceRankingWorkerRunKind, TraceRankingWorkerRunStatus,
+    TraceRankingWorkerRunWrite, TraceSubmissionWrite, TraceUtilityAttestationWrite,
+    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
+    TraceWorkerKind,
 };
 use uuid::Uuid;
 
@@ -561,6 +562,63 @@ async fn pg_store_preserves_ranking_calibration_dataset_manifest_on_status_updat
     assert_eq!(
         records[0].status,
         TraceRankingCalibrationDatasetStatus::Active
+    );
+
+    cleanup_tenant(&backend, &tenant_id).await;
+}
+
+#[tokio::test]
+async fn pg_store_archives_ranking_calibration_dataset_without_manifest_update() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_id = format!("pg-ranking-calibration-archive-{}", Uuid::new_v4());
+    let initial = TraceRankingCalibrationDatasetWrite {
+        tenant_id: tenant_id.clone(),
+        calibration_dataset_hash: "sha256:pg-calibration-dataset-archive".to_string(),
+        target_use: "model_training".to_string(),
+        policy_version: "trace-credit-policy-v2".to_string(),
+        source_manifest_hash: "sha256:pg-calibration-source-manifest-original".to_string(),
+        source_count: 32,
+        label_source_count: 2,
+        label_actor_count: 2,
+        status: TraceRankingCalibrationDatasetStatus::Candidate,
+        actor_principal_ref: "principal:ranker-admin".to_string(),
+    };
+
+    backend
+        .upsert_trace_ranking_calibration_dataset(initial.clone())
+        .await
+        .expect("insert ranking calibration dataset");
+
+    let archived = backend
+        .update_trace_ranking_calibration_dataset_status(
+            TraceRankingCalibrationDatasetStatusUpdate {
+                tenant_id: tenant_id.clone(),
+                calibration_dataset_hash: initial.calibration_dataset_hash.clone(),
+                target_use: initial.target_use.clone(),
+                policy_version: initial.policy_version.clone(),
+                status: TraceRankingCalibrationDatasetStatus::Archived,
+                actor_principal_ref: "principal:ranker-admin-quarantine".to_string(),
+            },
+        )
+        .await
+        .expect("archive status update preserves immutable manifest metadata");
+
+    assert_eq!(
+        archived.source_manifest_hash,
+        "sha256:pg-calibration-source-manifest-original"
+    );
+    assert_eq!(archived.source_count, 32);
+    assert_eq!(
+        archived.status,
+        TraceRankingCalibrationDatasetStatus::Archived
+    );
+    assert_eq!(
+        archived.actor_principal_ref,
+        "principal:ranker-admin-quarantine"
     );
 
     cleanup_tenant(&backend, &tenant_id).await;
