@@ -206,7 +206,11 @@ model/target pair to have no uncleared model-risk report codes by default so new
 credits wait for calibration/drift review before settlement. Readiness reports
 and settlement re-check the same active-model risk codes, so manually appended
 prediction-bound ranking credits cannot settle while current evidence is still
-at risk. Process-evaluation workers can also attach an idempotent hash-only
+at risk. Admins can inspect candidate and active model/target backtests through
+`/v1/admin/ranking/model-backtest-report`, which combines current calibration
+metrics, pairwise preference ordering checks, latest calibration hashes, and the
+same machine-readable reason codes before a model is allowed to influence
+credit. Process-evaluation workers can also attach an idempotent hash-only
 ranking label for ranking-allowed traces, letting trusted rubric evaluators feed
 calibration without storing raw evaluator notes in ranking metadata. Settlement
 responses report aggregate ranking-credit exclusion reason counts for dry-runs
