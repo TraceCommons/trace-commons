@@ -101,6 +101,7 @@ pub enum TraceAuditAction {
     ProcessEvaluate,
     PolicyUpdate,
     RankingWorkerRunRecovery,
+    RankingCalibrationDatasetQuarantine,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1211,6 +1212,14 @@ pub enum TraceAuditSafeMetadata {
         ranking_worker_run_id: Uuid,
         run_kind: TraceRankingWorkerRunKind,
         recovered_status: TraceRankingWorkerRunStatus,
+        reason_hash: String,
+    },
+    RankingCalibrationDatasetQuarantine {
+        calibration_dataset_hash: String,
+        target_use: String,
+        policy_version: String,
+        archived_source_manifest_hash: String,
+        conflict_key_hash: String,
         reason_hash: String,
     },
 }

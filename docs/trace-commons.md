@@ -412,7 +412,9 @@ without rewriting the old rows, while any model still depending on the retired
 holdout remains blocked by `calibration_dataset_retired`. When strict DB mirror
 writes are enabled and the DB already has older immutable manifest metadata for
 that key, quarantine mirrors a status-only archive update so the DB preserves its
-existing manifest fields instead of accepting a manifest rewrite.
+existing manifest fields instead of accepting a manifest rewrite. The route also
+appends a `ranking_calibration_dataset_quarantine` audit event with hash-only
+conflict-key and operator-reason metadata.
 
 Ranking worker-run ledger rows are part of the ranking DB mirror, the
 DB-backed reviewer ranking read surface, and the maintenance reconciliation

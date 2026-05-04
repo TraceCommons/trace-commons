@@ -11267,6 +11267,7 @@ async fn ranking_calibration_dataset_conflict_quarantine_handler(
         validate_sha256_hash(&body.calibration_dataset_hash, "calibration_dataset_hash")?;
     let policy_version = validate_ranking_identifier(&body.policy_version, "policy_version")?;
     let reason = validate_ranking_calibration_dataset_conflict_quarantine_reason(&body.reason)?;
+    let reason_hash = sha256_prefixed(&reason);
     let conflict_key = ranking_calibration_dataset_key(
         &calibration_dataset_hash,
         body.target_use,
@@ -11317,6 +11318,25 @@ async fn ranking_calibration_dataset_conflict_quarantine_handler(
     )
     .await
     .map_err(internal_error)?;
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::ranking_calibration_dataset_quarantine(
+            &tenant,
+            &archived_record,
+            &conflict_key,
+            &reason_hash,
+        ),
+        StorageTraceAuditAction::RankingCalibrationDatasetQuarantine,
+        ranking_calibration_dataset_quarantine_audit_metadata(
+            &archived_record,
+            &conflict_key,
+            &reason_hash,
+        )
+        .map_err(internal_error)?,
+    )
+    .await
+    .map_err(internal_error)?;
     let remaining_conflict_count =
         read_ranking_calibration_datasets_for_admin_reconciliation(state.as_ref(), &tenant)
             .await
@@ -11328,7 +11348,7 @@ async fn ranking_calibration_dataset_conflict_quarantine_handler(
             tenant_id: tenant.tenant_id.clone(),
             tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
             conflict_key,
-            reason_hash: sha256_prefixed(&reason),
+            reason_hash,
             archived_record,
             remaining_conflict_count,
         },
@@ -11352,6 +11372,33 @@ fn validate_ranking_calibration_dataset_conflict_quarantine_reason(
         ));
     }
     Ok(reason)
+}
+
+fn ranking_calibration_dataset_quarantine_decision_hash(
+    conflict_key: &str,
+    reason_hash: &str,
+    archived_source_manifest_hash: &str,
+) -> String {
+    sha256_prefixed(&format!(
+        "{conflict_key}\n{reason_hash}\n{archived_source_manifest_hash}"
+    ))
+}
+
+fn ranking_calibration_dataset_quarantine_audit_metadata(
+    record: &TraceRankingCalibrationDatasetRecord,
+    conflict_key: &str,
+    reason_hash: &str,
+) -> anyhow::Result<StorageTraceAuditSafeMetadata> {
+    Ok(
+        StorageTraceAuditSafeMetadata::RankingCalibrationDatasetQuarantine {
+            calibration_dataset_hash: record.calibration_dataset_hash.clone(),
+            target_use: serde_storage_string(&record.target_use)?,
+            policy_version: record.policy_version.clone(),
+            archived_source_manifest_hash: record.source_manifest_hash.clone(),
+            conflict_key_hash: sha256_prefixed(conflict_key),
+            reason_hash: reason_hash.to_string(),
+        },
+    )
 }
 
 fn ranking_calibration_dataset_conflict_report(
@@ -23543,6 +23590,22 @@ fn trace_commons_audit_event_from_storage(
             )),
             None,
         ),
+        StorageTraceAuditSafeMetadata::RankingCalibrationDatasetQuarantine {
+            calibration_dataset_hash: _,
+            target_use: _,
+            policy_version: _,
+            archived_source_manifest_hash,
+            conflict_key_hash,
+            reason_hash,
+        } => (
+            None,
+            event.reason.clone().or_else(|| {
+                Some(format!(
+                    "conflict_key_hash={conflict_key_hash};reason_hash={reason_hash};archived_source_manifest_hash={archived_source_manifest_hash}"
+                ))
+            }),
+            None,
+        ),
         StorageTraceAuditSafeMetadata::Empty => (None, event.reason.clone(), None),
     };
     Ok(TraceCommonsAuditEvent {
@@ -23610,6 +23673,9 @@ fn storage_audit_action_kind(action: StorageTraceAuditAction) -> &'static str {
         StorageTraceAuditAction::ProcessEvaluate => "process_evaluation",
         StorageTraceAuditAction::PolicyUpdate => "tenant_policy_update",
         StorageTraceAuditAction::RankingWorkerRunRecovery => "ranking_worker_run_recovery",
+        StorageTraceAuditAction::RankingCalibrationDatasetQuarantine => {
+            "ranking_calibration_dataset_quarantine"
+        }
     }
 }
 
@@ -30628,6 +30694,9 @@ fn audit_backfill_storage_projection(
             StorageTraceAuditAction::PolicyUpdate
         }
         "ranking_worker_run_recovery" => StorageTraceAuditAction::RankingWorkerRunRecovery,
+        "ranking_calibration_dataset_quarantine" => {
+            StorageTraceAuditAction::RankingCalibrationDatasetQuarantine
+        }
         _ => StorageTraceAuditAction::Read,
     };
     let metadata = match event.kind.as_str() {
@@ -35552,6 +35621,38 @@ impl TraceCommonsAuditEvent {
             export_count: Some(counts.export_cache_files_pruned),
             export_id: None,
             decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    fn ranking_calibration_dataset_quarantine(
+        auth: &TenantAuth,
+        record: &TraceRankingCalibrationDatasetRecord,
+        conflict_key: &str,
+        reason_hash: &str,
+    ) -> Self {
+        let conflict_key_hash = sha256_prefixed(conflict_key);
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "ranking_calibration_dataset_quarantine".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(format!(
+                "conflict_key_hash={conflict_key_hash};reason_hash={reason_hash};archived_source_manifest_hash={}",
+                record.source_manifest_hash
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: Some(ranking_calibration_dataset_quarantine_decision_hash(
+                conflict_key,
+                reason_hash,
+                &record.source_manifest_hash,
+            )),
             previous_event_hash: None,
             event_hash: None,
         }
@@ -51280,6 +51381,26 @@ mod tests {
             "sha256:calibration-conflict-quarantine-manifest-v2"
         );
         assert_eq!(response.remaining_conflict_count, 0);
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
+        let audit_event = audit_events
+            .iter()
+            .find(|event| event.kind == "ranking_calibration_dataset_quarantine")
+            .expect("quarantine writes a dedicated audit event");
+        assert_eq!(audit_event.submission_id, Uuid::nil());
+        assert!(audit_event.reason.as_deref().is_some_and(|reason| {
+            reason.contains("conflict_key_hash=sha256:")
+                && reason.contains("reason_hash=sha256:")
+                && !reason.contains("legacy manifest rewrite")
+        }));
+        assert!(
+            audit_event
+                .decision_inputs_hash
+                .as_deref()
+                .is_some_and(|hash| {
+                    hash.starts_with("sha256:") && hash != response.reason_hash
+                })
+        );
 
         let read = read_ranking_calibration_datasets_for_reconciliation(temp.path(), "tenant-a")
             .expect("quarantined conflict no longer blocks reconciliation");
