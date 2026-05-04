@@ -19,7 +19,7 @@ utility attestations, admin-triggered dry-run/final settlement batches, credit
 holds, contributor pending/settled/held projections, and a NEAR non-transferable
 credit receipt outbox. Utility workers can also run a bounded credit-cycle
 coordinator that sequences calibration, model promotion, prediction credit,
-settlement, and NEAR outbox submission checks for one model/policy/target. The
+settlement, and NEAR outbox submit/confirm checks for one model/policy/target. The
 `POST /v1/workers/credit-cycle/scheduler/run` route lets utility-worker cron
 jobs select the next eligible candidate or active model for a target/policy and
 run at most a bounded number of credit cycles while skipping live claims and
@@ -49,7 +49,7 @@ batches, and optional NEAR receipt calls are queued only after off-chain
 settlement finalizes. The worker `POST /v1/workers/credit-cycle/run` route can
 run the production credit path in bounded steps for a single model/version:
 calibration, model promotion, prediction credit, settlement, then a NEAR outbox
-dry-run or explicit submit. Settlement retries repair missing NEAR outbox rows
+dry-run, explicit submit, or explicit confirmation poll. Settlement retries repair missing NEAR outbox rows
 from finalized batches, and revocation propagation can append deterministic
 negative ledger rows plus `reverse_credit_receipt` NEAR outbox calls for settled
 revoked sources. Reviewer/admin credit summaries report tenant-wide settled line
