@@ -2729,6 +2729,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(ranking_preference_labels_handler),
         )
         .route(
+            "/v1/admin/ranking/adjudication-report",
+            get(ranking_adjudication_report_handler),
+        )
+        .route(
             "/v1/admin/ranking/calibration-report",
             get(ranking_calibration_report_handler),
         )
@@ -7233,6 +7237,51 @@ struct TraceRankingPreferenceLabelRecord {
     actor_principal_ref: String,
     created_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Serialize)]
+struct TraceRankingAdjudicationReport {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    absolute_label_count: usize,
+    preference_label_count: usize,
+    absolute_label_group_count: usize,
+    unresolved_disputed_label_group_count: usize,
+    conflicting_absolute_label_group_count: usize,
+    preference_pair_count: usize,
+    conflicting_preference_pair_count: usize,
+    issue_group_count: usize,
+    reason_code_counts: BTreeMap<String, usize>,
+    absolute_label_issues: Vec<TraceRankingAbsoluteLabelAdjudicationIssue>,
+    preference_pair_issues: Vec<TraceRankingPreferencePairAdjudicationIssue>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingAbsoluteLabelAdjudicationIssue {
+    submission_id: Uuid,
+    target_use: TraceAllowedUse,
+    latest_label_count: usize,
+    label_source_count: usize,
+    label_actor_count: usize,
+    non_disputed_outcome_count: usize,
+    has_disputed_label: bool,
+    reason_codes: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingPreferencePairAdjudicationIssue {
+    left_submission_id: Uuid,
+    right_submission_id: Uuid,
+    target_use: TraceAllowedUse,
+    preference_label_count: usize,
+    label_source_count: usize,
+    label_actor_count: usize,
+    forward_preference_count: usize,
+    reverse_preference_count: usize,
+    reason_codes: Vec<String>,
+}
+
+type TraceRankingPreferencePairKey = (Uuid, Uuid, TraceAllowedUse);
+type TraceRankingPreferencePairEntries<'a> = Vec<(bool, &'a TraceRankingPreferenceLabelRecord)>;
 
 #[derive(Debug, Serialize)]
 struct TraceRankingCalibrationReport {
@@ -13685,6 +13734,25 @@ async fn ranking_preference_labels_handler(
     Ok(Json(records))
 }
 
+async fn ranking_adjudication_report_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<TraceRankingAdjudicationReport>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let labels = read_ranking_labels_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let preference_labels = read_ranking_preference_labels_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(ranking_adjudication_report(
+        &tenant.tenant_id,
+        &labels,
+        &preference_labels,
+    )))
+}
+
 async fn ranking_calibration_report_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -15479,6 +15547,180 @@ fn max_label_source_average_error(
         }
     }
     (max_average, max_source)
+}
+
+fn ranking_adjudication_report(
+    tenant_id: &str,
+    labels: &[TraceRankingLabelRecord],
+    preference_labels: &[TraceRankingPreferenceLabelRecord],
+) -> TraceRankingAdjudicationReport {
+    let mut latest_label_by_source = BTreeMap::new();
+    for label in labels {
+        let key = (label.submission_id, label.target_use, label.label_source);
+        let should_replace =
+            latest_label_by_source
+                .get(&key)
+                .is_none_or(|current: &&TraceRankingLabelRecord| {
+                    (label.created_at, label.ranking_label_id)
+                        > (current.created_at, current.ranking_label_id)
+                });
+        if should_replace {
+            latest_label_by_source.insert(key, label);
+        }
+    }
+
+    let mut label_groups: BTreeMap<(Uuid, TraceAllowedUse), Vec<&TraceRankingLabelRecord>> =
+        BTreeMap::new();
+    for label in latest_label_by_source.into_values() {
+        label_groups
+            .entry((label.submission_id, label.target_use))
+            .or_default()
+            .push(label);
+    }
+
+    let mut reason_code_counts = BTreeMap::new();
+    let mut unresolved_disputed_label_group_count = 0usize;
+    let mut conflicting_absolute_label_group_count = 0usize;
+    let mut absolute_label_issues = Vec::new();
+    for ((submission_id, target_use), mut group_labels) in
+        label_groups.iter().map(|(key, labels)| {
+            ((*key).to_owned(), {
+                let mut labels = labels.clone();
+                labels.sort_by_key(|label| {
+                    (label.label_source, label.created_at, label.ranking_label_id)
+                });
+                labels
+            })
+        })
+    {
+        let mut label_sources = BTreeSet::new();
+        let mut label_actors = BTreeSet::new();
+        let mut non_disputed_outcomes = BTreeSet::new();
+        let mut has_disputed_label = false;
+        for label in group_labels.drain(..) {
+            label_sources.insert(label.label_source);
+            label_actors.insert(label.actor_principal_ref.as_str());
+            if label.label_outcome == StorageTraceRankingLabelOutcome::Disputed {
+                has_disputed_label = true;
+            } else {
+                non_disputed_outcomes.insert(serde_enum_tag(&label.label_outcome));
+            }
+        }
+
+        let mut reason_codes = Vec::new();
+        if has_disputed_label {
+            unresolved_disputed_label_group_count += 1;
+            reason_codes.push("absolute_label_disputed".to_string());
+        }
+        if non_disputed_outcomes.len() > 1 {
+            conflicting_absolute_label_group_count += 1;
+            reason_codes.push("absolute_label_outcome_conflict".to_string());
+        }
+        if reason_codes.is_empty() {
+            continue;
+        }
+        reason_codes.sort();
+        reason_codes.dedup();
+        for reason in &reason_codes {
+            increment_count(&mut reason_code_counts, reason);
+        }
+        absolute_label_issues.push(TraceRankingAbsoluteLabelAdjudicationIssue {
+            submission_id,
+            target_use,
+            latest_label_count: label_sources.len(),
+            label_source_count: label_sources.len(),
+            label_actor_count: label_actors.len(),
+            non_disputed_outcome_count: non_disputed_outcomes.len(),
+            has_disputed_label,
+            reason_codes,
+        });
+    }
+
+    let mut preference_pairs: BTreeMap<
+        TraceRankingPreferencePairKey,
+        TraceRankingPreferencePairEntries<'_>,
+    > = BTreeMap::new();
+    for label in preference_labels {
+        let (left_submission_id, right_submission_id, forward) =
+            if label.preferred_submission_id <= label.rejected_submission_id {
+                (
+                    label.preferred_submission_id,
+                    label.rejected_submission_id,
+                    true,
+                )
+            } else {
+                (
+                    label.rejected_submission_id,
+                    label.preferred_submission_id,
+                    false,
+                )
+            };
+        preference_pairs
+            .entry((left_submission_id, right_submission_id, label.target_use))
+            .or_default()
+            .push((forward, label));
+    }
+
+    let mut conflicting_preference_pair_count = 0usize;
+    let mut preference_pair_issues = Vec::new();
+    for ((left_submission_id, right_submission_id, target_use), pair_labels) in &preference_pairs {
+        let mut label_sources = BTreeSet::new();
+        let mut label_actors = BTreeSet::new();
+        let mut forward_preference_count = 0usize;
+        let mut reverse_preference_count = 0usize;
+        for (forward, label) in pair_labels {
+            label_sources.insert(label.label_source);
+            label_actors.insert(label.actor_principal_ref.as_str());
+            if *forward {
+                forward_preference_count += 1;
+            } else {
+                reverse_preference_count += 1;
+            }
+        }
+        if forward_preference_count == 0 || reverse_preference_count == 0 {
+            continue;
+        }
+        conflicting_preference_pair_count += 1;
+        let reason_codes = vec!["pairwise_preference_conflict".to_string()];
+        increment_count(&mut reason_code_counts, "pairwise_preference_conflict");
+        preference_pair_issues.push(TraceRankingPreferencePairAdjudicationIssue {
+            left_submission_id: *left_submission_id,
+            right_submission_id: *right_submission_id,
+            target_use: *target_use,
+            preference_label_count: pair_labels.len(),
+            label_source_count: label_sources.len(),
+            label_actor_count: label_actors.len(),
+            forward_preference_count,
+            reverse_preference_count,
+            reason_codes,
+        });
+    }
+
+    absolute_label_issues.sort_by_key(|issue| (issue.submission_id, issue.target_use));
+    preference_pair_issues.sort_by_key(|issue| {
+        (
+            issue.left_submission_id,
+            issue.right_submission_id,
+            issue.target_use,
+        )
+    });
+    let issue_group_count = absolute_label_issues.len() + preference_pair_issues.len();
+
+    TraceRankingAdjudicationReport {
+        tenant_id: tenant_id.to_string(),
+        tenant_storage_ref: tenant_storage_ref(tenant_id),
+        absolute_label_count: labels.len(),
+        preference_label_count: preference_labels.len(),
+        absolute_label_group_count: label_groups.len(),
+        unresolved_disputed_label_group_count,
+        conflicting_absolute_label_group_count,
+        preference_pair_count: preference_pairs.len(),
+        conflicting_preference_pair_count,
+        issue_group_count,
+        reason_code_counts,
+        absolute_label_issues,
+        preference_pair_issues,
+    }
 }
 
 fn ranking_calibration_report(
@@ -36898,6 +37140,7 @@ struct TraceOperationalPromotionGateSummary {
     revoked_benchmark_external_registry_invalidation_gap_count: usize,
     at_risk_ranking_model_count: usize,
     failing_ranking_model_backtest_count: usize,
+    ranking_adjudication_issue_count: usize,
     blocked_ranking_credit_event_count: usize,
     ranking_calibration_dataset_manifest_conflict_count: usize,
     stale_ranking_worker_run_count: usize,
@@ -36930,6 +37173,7 @@ impl TraceOperationalPromotionGateSummary {
             benchmarks.external_registry_invalidation_gap_count;
         let at_risk_ranking_model_count = ranking.at_risk_model_count;
         let failing_ranking_model_backtest_count = ranking.failing_backtest_model_target_count;
+        let ranking_adjudication_issue_count = ranking.adjudication_issue_group_count;
         let blocked_ranking_credit_event_count = ranking.blocked_credit_event_count;
         let ranking_calibration_dataset_manifest_conflict_count =
             ranking.calibration_dataset_manifest_conflict_count;
@@ -36981,6 +37225,11 @@ impl TraceOperationalPromotionGateSummary {
             &mut blocking_gates,
             "failing_ranking_model_backtests",
             failing_ranking_model_backtest_count,
+        );
+        push_gap_count(
+            &mut blocking_gates,
+            "ranking_adjudication_issues",
+            ranking_adjudication_issue_count,
         );
         push_gap_count(
             &mut blocking_gates,
@@ -37044,6 +37293,7 @@ impl TraceOperationalPromotionGateSummary {
             revoked_benchmark_external_registry_invalidation_gap_count,
             at_risk_ranking_model_count,
             failing_ranking_model_backtest_count,
+            ranking_adjudication_issue_count,
             blocked_ranking_credit_event_count,
             ranking_calibration_dataset_manifest_conflict_count,
             stale_ranking_worker_run_count,
@@ -37455,6 +37705,11 @@ struct TraceOperationalRankingSummary {
     passing_backtest_model_target_count: usize,
     failing_backtest_model_target_count: usize,
     backtest_reason_counts: BTreeMap<String, usize>,
+    adjudication_issue_group_count: usize,
+    unresolved_disputed_label_group_count: usize,
+    conflicting_absolute_label_group_count: usize,
+    conflicting_preference_pair_count: usize,
+    adjudication_reason_counts: BTreeMap<String, usize>,
     pending_credit_event_count: usize,
     ready_credit_event_count: usize,
     blocked_credit_event_count: usize,
@@ -37490,6 +37745,11 @@ impl TraceOperationalRankingSummary {
                 calibration_datasets: inputs.calibration_datasets,
                 calibration_runs: inputs.calibration_runs,
             },
+        );
+        let adjudication = ranking_adjudication_report(
+            &inputs.tenant.tenant_id,
+            inputs.labels,
+            inputs.preference_labels,
         );
         let readiness = ranking_credit_readiness_report(RankingCreditReadinessInputs {
             state: inputs.state,
@@ -37547,6 +37807,13 @@ impl TraceOperationalRankingSummary {
             passing_backtest_model_target_count: backtest.passing_model_target_count,
             failing_backtest_model_target_count: backtest.failing_model_target_count,
             backtest_reason_counts: backtest.reason_code_counts,
+            adjudication_issue_group_count: adjudication.issue_group_count,
+            unresolved_disputed_label_group_count: adjudication
+                .unresolved_disputed_label_group_count,
+            conflicting_absolute_label_group_count: adjudication
+                .conflicting_absolute_label_group_count,
+            conflicting_preference_pair_count: adjudication.conflicting_preference_pair_count,
+            adjudication_reason_counts: adjudication.reason_code_counts,
             pending_credit_event_count: readiness.pending_ranking_credit_event_count,
             ready_credit_event_count: readiness.ready_count,
             blocked_credit_event_count: readiness.blocked_count,
@@ -52279,6 +52546,86 @@ mod tests {
         assert!(!operational_text.contains("reviewer-private-operational-backtest"));
     }
 
+    #[tokio::test]
+    async fn operational_summary_reports_ranking_adjudication_issues() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("source submission succeeds");
+
+        let _ = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_000_000,
+                evidence_hash: "sha256:operational-adjudication-frontier".to_string(),
+                external_ref: "private-operational-adjudication-frontier".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking label");
+        let _ = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Rejected,
+                utility_delta_micros: -250_000,
+                evidence_hash: "sha256:operational-adjudication-reviewer".to_string(),
+                external_ref: "private-operational-adjudication-reviewer".to_string(),
+            }),
+        )
+        .await
+        .expect("reviewer can write conflicting ranking label");
+
+        let Json(operational) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary");
+        let operational_json =
+            serde_json::to_value(&operational).expect("operational summary serializes");
+        assert_eq!(
+            operational_json["ranking"]["adjudication_issue_group_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["ranking"]["adjudication_reason_counts"]["absolute_label_outcome_conflict"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["promotion_gates"]["ranking_adjudication_issue_count"],
+            serde_json::json!(1)
+        );
+        assert!(
+            operational
+                .promotion_gates
+                .blocking_gates
+                .contains(&"ranking_adjudication_issues=1".to_string())
+        );
+        let operational_text =
+            serde_json::to_string(&operational_json).expect("operational json serializes");
+        assert!(!operational_text.contains("private-operational-adjudication"));
+    }
+
     async fn seed_credit_cycle_candidate_with_prediction(
         state: Arc<AppState>,
         model_version: &str,
@@ -56202,6 +56549,186 @@ mod tests {
         let report_json = serde_json::to_string(&report).expect("report serializes");
         assert!(!report_json.contains("reviewer-private-backtest-pairwise-reversal"));
         assert!(!report_json.contains("trace body"));
+    }
+
+    #[tokio::test]
+    async fn ranking_adjudication_report_surfaces_unresolved_label_and_pairwise_conflicts() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut disputed_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut disputed_envelope);
+        disputed_envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        disputed_envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        disputed_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let disputed_submission_id = disputed_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(disputed_envelope),
+        )
+        .await
+        .expect("disputed source submission succeeds");
+
+        let mut conflicting_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut conflicting_envelope);
+        conflicting_envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        conflicting_envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        conflicting_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let conflicting_submission_id = conflicting_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(conflicting_envelope),
+        )
+        .await
+        .expect("conflicting source submission succeeds");
+
+        let _ = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: disputed_submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_000_000,
+                evidence_hash: "sha256:adjudication-disputed-useful".to_string(),
+                external_ref: "private-adjudication-disputed-useful".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write initial label");
+        let _ = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: disputed_submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Disputed,
+                utility_delta_micros: 1_000_000,
+                evidence_hash: "sha256:adjudication-disputed-latest".to_string(),
+                external_ref: "private-adjudication-disputed-latest".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can dispute latest label");
+        let _ = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: conflicting_submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 900_000,
+                evidence_hash: "sha256:adjudication-conflict-frontier".to_string(),
+                external_ref: "private-adjudication-conflict-frontier".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write frontier label");
+        let _ = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: conflicting_submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Rejected,
+                utility_delta_micros: -250_000,
+                evidence_hash: "sha256:adjudication-conflict-reviewer".to_string(),
+                external_ref: "private-adjudication-conflict-reviewer".to_string(),
+            }),
+        )
+        .await
+        .expect("reviewer can write conflicting label");
+        let _ = ranking_preference_label_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id: disputed_submission_id,
+                rejected_submission_id: conflicting_submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 700_000,
+                evidence_hash: "sha256:adjudication-pair-reviewer".to_string(),
+                external_ref: "private-adjudication-pair-reviewer".to_string(),
+            }),
+        )
+        .await
+        .expect("reviewer can write pairwise preference");
+        let _ = ranking_preference_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id: conflicting_submission_id,
+                rejected_submission_id: disputed_submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 700_000,
+                evidence_hash: "sha256:adjudication-pair-frontier".to_string(),
+                external_ref: "private-adjudication-pair-frontier".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write reversed pairwise preference");
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/ranking/adjudication-report")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("adjudication response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let report: serde_json::Value =
+            serde_json::from_slice(&body).expect("adjudication report parses");
+
+        assert_eq!(report["absolute_label_group_count"], serde_json::json!(2));
+        assert_eq!(
+            report["unresolved_disputed_label_group_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            report["conflicting_absolute_label_group_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            report["conflicting_preference_pair_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(report["issue_group_count"], serde_json::json!(3));
+        assert_eq!(
+            report["reason_code_counts"]["absolute_label_disputed"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            report["reason_code_counts"]["absolute_label_outcome_conflict"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            report["reason_code_counts"]["pairwise_preference_conflict"],
+            serde_json::json!(1)
+        );
+        let report_text = serde_json::to_string(&report).expect("report serializes");
+        assert!(!report_text.contains("private-adjudication"));
     }
 
     #[tokio::test]
