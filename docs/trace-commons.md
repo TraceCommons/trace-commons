@@ -800,7 +800,7 @@ On submit, the service also writes a derived redacted-only record with:
 
 - canonical summary and hash
 - hash-based duplicate precheck
-- placeholder novelty score for later vector replacement
+- deterministic redacted-summary novelty score for worker-side feature provenance
 - coverage tags for channel, tool, tool category, outcome, failure mode, and privacy risk
 - aggregate analytics by status, privacy risk, task success, tool, tool category, and coverage tag
 
@@ -890,7 +890,7 @@ The current implementation is a usable MVP for local development and controlled 
 
 - Generate embeddings only from redacted summaries and approved redacted trace fields. Never embed raw traces, sidecar raw text, or unreviewed high-risk content.
 - Keep vector ids tenant-scoped and source-linked so index entries can be deleted or invalidated on revocation/retention.
-- Replace placeholder novelty scoring with a private vector duplicate/novelty worker that records nearest neighbors, duplicate score, cluster id, and coverage contribution.
+- Promote deterministic novelty/duplicate scoring into private vector-backed feature workers. The first ranking feature worker already reserves `feature_provenance:server_derived` and can be required for prediction-credit, readiness, and settlement with `TRACE_COMMONS_RANKING_REQUIRE_SERVER_FEATURE_PROVENANCE=true`; production still needs the full embedding backend with nearest neighbors, cluster id, and coverage contribution.
 - Add ranking/model-utility jobs as offline analysis. Their outputs may append delayed credit events, but should not become immediate automatic payment signals.
 - Convert approved traces into benchmark/replay datasets through a controlled job that records consent scope, review state, redaction version, deterministic replay requirements, and export manifest id.
 - Require benchmark conversion to fail closed when the trace is revoked, expired, not approved for the target use, or missing replayability metadata.

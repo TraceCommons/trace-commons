@@ -267,6 +267,8 @@ const TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS: &str =
     "TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS";
 const TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY: &str =
     "TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY";
+const TRACE_COMMONS_RANKING_REQUIRE_SERVER_FEATURE_PROVENANCE: &str =
+    "TRACE_COMMONS_RANKING_REQUIRE_SERVER_FEATURE_PROVENANCE";
 const TRACE_COMMONS_RANKING_MIN_CONFIDENCE_THRESHOLD: &str =
     "TRACE_COMMONS_RANKING_MIN_CONFIDENCE_THRESHOLD";
 const TRACE_COMMONS_RANKING_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS: &str =
@@ -329,6 +331,9 @@ const DEFAULT_TRACE_RANKING_MIN_PAIRWISE_LABEL_COUNT: usize = 0;
 const MAX_TRACE_RANKING_MIN_PAIRWISE_LABEL_COUNT: usize = 1_000_000;
 const DEFAULT_TRACE_RANKING_MIN_PAIRWISE_ACCURACY_MICROS: i64 = 500_000;
 const MAX_TRACE_RANKING_PAIRWISE_ACCURACY_MICROS: i64 = 1_000_000;
+const RANKING_FEATURE_SERVER_PROVENANCE_TAG: &str = "feature_provenance:server_derived";
+const DEFAULT_RANKING_FEATURE_RUN_LIMIT: usize = 100;
+const MAX_RANKING_FEATURE_RUN_LIMIT: usize = 500;
 
 fn default_trace_ranking_min_label_source_count() -> usize {
     DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT
@@ -402,6 +407,7 @@ struct AppState {
     process_evaluator_timeout_ms: Option<u64>,
     ranking_calibration_max_age: Option<Duration>,
     ranking_require_calibration_dataset_registry: bool,
+    ranking_require_server_feature_provenance: bool,
     ranking_min_confidence_threshold: f32,
     ranking_max_average_absolute_error_micros: i64,
     ranking_min_label_count: usize,
@@ -1561,6 +1567,8 @@ impl AppState {
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
         let ranking_require_calibration_dataset_registry =
             env_truthy(TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY);
+        let ranking_require_server_feature_provenance =
+            env_truthy(TRACE_COMMONS_RANKING_REQUIRE_SERVER_FEATURE_PROVENANCE);
         let ranking_min_confidence_threshold = parse_ranking_min_confidence_threshold_from_env()?;
         let ranking_max_average_absolute_error_micros =
             parse_ranking_max_average_absolute_error_micros_from_env()?;
@@ -1724,6 +1732,7 @@ impl AppState {
             process_evaluator_timeout_ms,
             ranking_calibration_max_age,
             ranking_require_calibration_dataset_registry,
+            ranking_require_server_feature_provenance,
             ranking_min_confidence_threshold,
             ranking_max_average_absolute_error_micros,
             ranking_min_label_count,
@@ -2782,6 +2791,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/workers/ranking/features",
             post(ranking_feature_handler),
+        )
+        .route(
+            "/v1/workers/ranking/features/run",
+            post(ranking_feature_run_handler),
         )
         .route(
             "/v1/workers/ranking/predictions",
@@ -4457,6 +4470,7 @@ struct TraceCommonsConfigStatusResponse {
     legal_hold_retention_policy_ids: Vec<String>,
     ranking_calibration_max_age_hours: Option<i64>,
     ranking_require_calibration_dataset_registry: bool,
+    ranking_require_server_feature_provenance: bool,
     ranking_min_confidence_threshold: f32,
     ranking_max_average_absolute_error_micros: i64,
     ranking_min_label_count: usize,
@@ -4608,6 +4622,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .map(|max_age| max_age.num_hours()),
         ranking_require_calibration_dataset_registry: state
             .ranking_require_calibration_dataset_registry,
+        ranking_require_server_feature_provenance: state.ranking_require_server_feature_provenance,
         ranking_min_confidence_threshold: state.ranking_min_confidence_threshold,
         ranking_max_average_absolute_error_micros: state.ranking_max_average_absolute_error_micros,
         ranking_min_label_count: state.ranking_min_label_count,
@@ -7001,6 +7016,34 @@ struct TraceRankingFeatureRequest {
     coverage_tags: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceRankingFeatureRunRequest {
+    #[serde(default)]
+    dry_run: bool,
+    target_use: TraceAllowedUse,
+    feature_schema_version: String,
+    reason: String,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingFeatureRunResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    dry_run: bool,
+    target_use: TraceAllowedUse,
+    feature_schema_version: String,
+    reason_hash: String,
+    limit: usize,
+    checked_count: usize,
+    generated_count: usize,
+    skipped_existing_count: usize,
+    skipped_ineligible_count: usize,
+    pending_after_count: usize,
+    feature_refs: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TraceRankingFeatureRecord {
     ranking_feature_id: Uuid,
@@ -8842,6 +8885,16 @@ async fn run_credit_settlement(
     } else {
         Vec::new()
     };
+    let ranking_features = if ranking_candidate_count > 0
+        && ranking_calibration_gate.is_some()
+        && state.ranking_require_server_feature_provenance
+    {
+        read_ranking_features_for_admin(state, tenant)
+            .await
+            .map_err(internal_error)?
+    } else {
+        Vec::new()
+    };
     let mut ranking_credit_events_excluded_count = 0usize;
     let mut ranking_credit_events_excluded_reason_counts = BTreeMap::new();
     let mut selected_events = Vec::new();
@@ -8851,7 +8904,9 @@ async fn run_credit_settlement(
             continue;
         }
         let exclusion_reason_codes = ranking_credit_event_exclusion_reason_codes(
+            state,
             &event,
+            &ranking_features,
             &ranking_predictions,
             ranking_calibration_gate.as_ref(),
             &policy_version,
@@ -12125,6 +12180,16 @@ async fn ranking_feature_handler(
     validate_optional_unit_score(body.privacy_risk_score, "privacy_risk_score")?;
     validate_optional_unit_score(body.quality_score, "quality_score")?;
     validate_ranking_codes(&body.coverage_tags, "coverage_tags")?;
+    if body
+        .coverage_tags
+        .iter()
+        .any(|tag| tag == RANKING_FEATURE_SERVER_PROVENANCE_TAG)
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranking feature server provenance is reserved for the feature worker",
+        ));
+    }
 
     let record = TraceRankingFeatureRecord {
         ranking_feature_id: Uuid::new_v4(),
@@ -12149,6 +12214,319 @@ async fn ranking_feature_handler(
         .await
         .map_err(internal_error)?;
     Ok(Json(record))
+}
+
+async fn ranking_feature_run_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceRankingFeatureRunRequest>,
+) -> ApiResult<Json<TraceRankingFeatureRunResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_utility_operator(&tenant)?;
+    let feature_schema_version =
+        validate_ranking_identifier(&body.feature_schema_version, "feature_schema_version")?;
+    let reason = validate_ranking_feature_run_reason(&body.reason)?;
+    let limit = body.limit.unwrap_or(DEFAULT_RANKING_FEATURE_RUN_LIMIT);
+    if !(1..=MAX_RANKING_FEATURE_RUN_LIMIT).contains(&limit) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranking feature run limit must be between 1 and 500",
+        ));
+    }
+    let tenant_policy =
+        tenant_utility_credit_policy_for_request(state.as_ref(), &tenant, &[body.target_use])
+            .await?;
+    let metadata = read_reviewer_metadata_view(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let existing_features = read_ranking_features_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let mut existing_server_feature_keys = existing_features
+        .iter()
+        .filter(|feature| ranking_feature_is_server_provenanced(feature))
+        .map(|feature| {
+            (
+                feature.submission_id,
+                feature.target_use,
+                feature.feature_schema_version.clone(),
+                feature.source_feature_hash.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let records_by_submission = metadata
+        .records
+        .iter()
+        .map(|record| (record.submission_id, record))
+        .collect::<BTreeMap<_, _>>();
+    let mut derived = metadata
+        .derived
+        .iter()
+        .filter(|record| record.status == TraceCorpusStatus::Accepted)
+        .filter(|record| !record.canonical_summary_hash.trim().is_empty())
+        .collect::<Vec<_>>();
+    derived.sort_by_key(|record| (record.created_at, record.submission_id));
+
+    let mut response = TraceRankingFeatureRunResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        dry_run: body.dry_run,
+        target_use: body.target_use,
+        feature_schema_version: feature_schema_version.clone(),
+        reason_hash: sha256_prefixed(&reason),
+        limit,
+        checked_count: 0,
+        generated_count: 0,
+        skipped_existing_count: 0,
+        skipped_ineligible_count: 0,
+        pending_after_count: 0,
+        feature_refs: Vec::new(),
+    };
+
+    for derived in derived {
+        if response.generated_count >= limit {
+            break;
+        }
+        response.checked_count += 1;
+        let Some(record) = records_by_submission.get(&derived.submission_id) else {
+            response.skipped_ineligible_count += 1;
+            continue;
+        };
+        if record.status != TraceCorpusStatus::Accepted
+            || !record_matches_utility_credit_policy_abac(
+                record,
+                &tenant,
+                tenant_policy.as_ref(),
+                &[body.target_use],
+            )
+        {
+            response.skipped_ineligible_count += 1;
+            continue;
+        }
+        let feature_key = (
+            derived.submission_id,
+            body.target_use,
+            feature_schema_version.clone(),
+            derived.canonical_summary_hash.clone(),
+        );
+        if existing_server_feature_keys.contains(&feature_key) {
+            response.skipped_existing_count += 1;
+            continue;
+        }
+        let feature = server_derived_ranking_feature_record(
+            &tenant,
+            record,
+            derived,
+            body.target_use,
+            &feature_schema_version,
+        );
+        response
+            .feature_refs
+            .push(ranking_feature_external_ref(feature.ranking_feature_id));
+        response.generated_count += 1;
+        existing_server_feature_keys.insert(feature_key);
+        if !body.dry_run {
+            append_ranking_feature_with_db_mirror(state.as_ref(), &tenant, &feature)
+                .await
+                .map_err(internal_error)?;
+        }
+    }
+
+    let pending_before_current_run = count_pending_server_ranking_features(
+        &metadata,
+        &existing_features,
+        &records_by_submission,
+        &tenant,
+        tenant_policy.as_ref(),
+        body.target_use,
+        &feature_schema_version,
+    );
+    response.pending_after_count = if body.dry_run {
+        pending_before_current_run
+    } else {
+        pending_before_current_run.saturating_sub(response.generated_count)
+    };
+    Ok(Json(response))
+}
+
+fn validate_ranking_feature_run_reason(reason: &str) -> ApiResult<String> {
+    let reason = reason.trim().to_string();
+    if reason.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranking feature runs require a non-empty reason",
+        ));
+    }
+    if reason.len() > 1024 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ranking feature run reason is too long",
+        ));
+    }
+    Ok(reason)
+}
+
+fn ranking_feature_external_ref(ranking_feature_id: Uuid) -> String {
+    format!("ranking_feature:{ranking_feature_id}")
+}
+
+fn ranking_feature_is_server_provenanced(feature: &TraceRankingFeatureRecord) -> bool {
+    feature
+        .coverage_tags
+        .iter()
+        .any(|tag| tag == RANKING_FEATURE_SERVER_PROVENANCE_TAG)
+}
+
+fn ranking_prediction_has_server_feature_provenance(
+    features: &[TraceRankingFeatureRecord],
+    prediction: &TraceRankingPredictionRecord,
+) -> bool {
+    features.iter().any(|feature| {
+        feature.submission_id == prediction.submission_id
+            && feature.target_use == prediction.target_use
+            && feature.feature_schema_version == prediction.feature_schema_version
+            && feature.feature_vector_hash == prediction.feature_vector_hash
+            && ranking_feature_is_server_provenanced(feature)
+    })
+}
+
+fn server_derived_ranking_feature_record(
+    tenant: &TenantAuth,
+    submission: &TraceCommonsSubmissionRecord,
+    derived: &TraceCommonsDerivedRecord,
+    target_use: TraceAllowedUse,
+    feature_schema_version: &str,
+) -> TraceRankingFeatureRecord {
+    let source_feature_hash = derived.canonical_summary_hash.clone();
+    let feature_vector_hash = server_derived_ranking_feature_vector_hash(
+        tenant,
+        submission,
+        derived,
+        target_use,
+        feature_schema_version,
+    );
+    let ranking_feature_id = deterministic_trace_uuid_for_external_ref(
+        "ranking_feature_server_derived",
+        &tenant.tenant_id,
+        submission.submission_id,
+        &format!("{feature_schema_version}:{target_use:?}:{source_feature_hash}"),
+    );
+    let coverage_tags = server_derived_ranking_feature_coverage_tags(derived);
+    TraceRankingFeatureRecord {
+        ranking_feature_id,
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        submission_id: submission.submission_id,
+        trace_id: submission.trace_id,
+        target_use,
+        feature_schema_version: feature_schema_version.to_string(),
+        feature_vector_hash,
+        feature_names_hash: server_derived_ranking_feature_names_hash(feature_schema_version),
+        source_feature_hash,
+        duplicate_score: Some(derived.duplicate_score),
+        novelty_score: Some(derived.novelty_score),
+        privacy_risk_score: Some(privacy_risk_feature_score(submission.privacy_risk)),
+        quality_score: Some(submission.submission_score.clamp(0.0, 1.0)),
+        coverage_tags,
+        actor_principal_ref: tenant.principal_ref.clone(),
+        created_at: Utc::now(),
+    }
+}
+
+fn server_derived_ranking_feature_names_hash(feature_schema_version: &str) -> String {
+    sha256_prefixed(&format!(
+        "ranking_feature_names:server_derived:v1\n{feature_schema_version}\nduplicate_score\nnovelty_score\nprivacy_risk_score\nquality_score\ncoverage_tags"
+    ))
+}
+
+fn server_derived_ranking_feature_coverage_tags(
+    derived: &TraceCommonsDerivedRecord,
+) -> Vec<String> {
+    let mut coverage_tags = derived.coverage_tags.clone();
+    coverage_tags.push(RANKING_FEATURE_SERVER_PROVENANCE_TAG.to_string());
+    coverage_tags.sort();
+    coverage_tags.dedup();
+    coverage_tags
+}
+
+fn server_derived_ranking_feature_vector_hash(
+    tenant: &TenantAuth,
+    submission: &TraceCommonsSubmissionRecord,
+    derived: &TraceCommonsDerivedRecord,
+    target_use: TraceAllowedUse,
+    feature_schema_version: &str,
+) -> String {
+    let coverage_tags = server_derived_ranking_feature_coverage_tags(derived).join(",");
+    sha256_prefixed(&format!(
+        "ranking_feature_vector:server_derived:v1\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        tenant_storage_ref(&tenant.tenant_id),
+        submission.submission_id,
+        submission.trace_id,
+        serde_enum_tag(&target_use),
+        feature_schema_version,
+        derived.canonical_summary_hash,
+        derived.duplicate_score.to_bits(),
+        derived.novelty_score.to_bits(),
+        serde_enum_tag(&submission.privacy_risk),
+        submission.submission_score.to_bits(),
+        coverage_tags
+    ))
+}
+
+fn privacy_risk_feature_score(privacy_risk: ResidualPiiRisk) -> f32 {
+    match privacy_risk {
+        ResidualPiiRisk::Low => 0.05,
+        ResidualPiiRisk::Medium => 0.5,
+        ResidualPiiRisk::High => 0.95,
+    }
+}
+
+fn count_pending_server_ranking_features(
+    metadata: &TraceCommonsMetadataView,
+    features: &[TraceRankingFeatureRecord],
+    records_by_submission: &BTreeMap<Uuid, &TraceCommonsSubmissionRecord>,
+    tenant: &TenantAuth,
+    tenant_policy: Option<&TenantSubmissionPolicy>,
+    target_use: TraceAllowedUse,
+    feature_schema_version: &str,
+) -> usize {
+    let existing_server_feature_keys = features
+        .iter()
+        .filter(|feature| ranking_feature_is_server_provenanced(feature))
+        .map(|feature| {
+            (
+                feature.submission_id,
+                feature.target_use,
+                feature.feature_schema_version.clone(),
+                feature.source_feature_hash.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    metadata
+        .derived
+        .iter()
+        .filter(|derived| derived.status == TraceCorpusStatus::Accepted)
+        .filter(|derived| !derived.canonical_summary_hash.trim().is_empty())
+        .filter_map(|derived| {
+            let record = records_by_submission.get(&derived.submission_id)?;
+            (record.status == TraceCorpusStatus::Accepted
+                && record_matches_utility_credit_policy_abac(
+                    record,
+                    tenant,
+                    tenant_policy,
+                    &[target_use],
+                ))
+            .then_some(derived)
+        })
+        .filter(|derived| {
+            !existing_server_feature_keys.contains(&(
+                derived.submission_id,
+                target_use,
+                feature_schema_version.to_string(),
+                derived.canonical_summary_hash.clone(),
+            ))
+        })
+        .count()
 }
 
 async fn ranking_features_handler(
@@ -12797,6 +13175,17 @@ async fn append_ranking_prediction_credit_for_record(
             "ranking prediction credit policy does not match the active model",
         ));
     }
+    if state.ranking_require_server_feature_provenance {
+        let features = read_ranking_features_for_admin(state, tenant)
+            .await
+            .map_err(internal_error)?;
+        if !ranking_prediction_has_server_feature_provenance(&features, &prediction) {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "ranking prediction credit requires server-provenanced ranking feature evidence",
+            ));
+        }
+    }
     let calibration_run = latest_promotable_ranking_calibration_run(
         state,
         tenant,
@@ -13184,6 +13573,9 @@ async fn ranking_credit_readiness_report_handler(
     let predictions = read_ranking_predictions_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    let features = read_ranking_features_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
@@ -13210,6 +13602,7 @@ async fn ranking_credit_readiness_report_handler(
             credit_events: &credit_events,
             settlement_batches: &settlement_batches,
             held_credit_accounts: &held_credit_accounts,
+            features: &features,
             predictions: &predictions,
             model_versions: &model_versions,
             labels: &labels,
@@ -15743,6 +16136,7 @@ struct RankingCreditReadinessInputs<'a> {
     credit_events: &'a [TraceCommonsCreditLedgerRecord],
     settlement_batches: &'a [TraceCreditSettlementBatchRecord],
     held_credit_accounts: &'a BTreeSet<String>,
+    features: &'a [TraceRankingFeatureRecord],
     predictions: &'a [TraceRankingPredictionRecord],
     model_versions: &'a [TraceRankingModelVersionRecord],
     labels: &'a [TraceRankingLabelRecord],
@@ -15785,6 +16179,7 @@ fn ranking_credit_readiness_report(
                 state: inputs.state,
                 event,
                 held_credit_accounts: inputs.held_credit_accounts,
+                features: inputs.features,
                 predictions: inputs.predictions,
                 model_versions: inputs.model_versions,
                 calibration_runs: inputs.calibration_runs,
@@ -15820,6 +16215,7 @@ struct RankingCreditReadinessEventInputs<'a> {
     state: &'a AppState,
     event: &'a TraceCommonsCreditLedgerRecord,
     held_credit_accounts: &'a BTreeSet<String>,
+    features: &'a [TraceRankingFeatureRecord],
     predictions: &'a [TraceRankingPredictionRecord],
     model_versions: &'a [TraceRankingModelVersionRecord],
     calibration_runs: &'a [TraceRankingCalibrationRunRecord],
@@ -15834,6 +16230,7 @@ fn ranking_credit_readiness_event(
         state,
         event,
         held_credit_accounts,
+        features,
         predictions,
         model_versions,
         calibration_runs,
@@ -15913,6 +16310,11 @@ fn ranking_credit_readiness_event(
     }
     if prediction.settlement_score_micros != credit_delta_micros(event.credit_points_delta) {
         reason_codes.push("settlement_score_mismatch".to_string());
+    }
+    if state.ranking_require_server_feature_provenance
+        && !ranking_prediction_has_server_feature_provenance(features, prediction)
+    {
+        reason_codes.push("unprovenanced_ranking_feature".to_string());
     }
 
     match latest_ranking_model_version(model_versions, &prediction.model_version) {
@@ -16332,7 +16734,9 @@ fn parse_ranking_prediction_external_ref(external_ref: Option<&str>) -> Option<U
 }
 
 fn ranking_credit_event_exclusion_reason_codes(
+    state: &AppState,
     event: &TraceCommonsCreditLedgerRecord,
+    features: &[TraceRankingFeatureRecord],
     predictions: &[TraceRankingPredictionRecord],
     gate: Option<&RankingSettlementCalibrationGate>,
     policy_version: &str,
@@ -16375,6 +16779,11 @@ fn ranking_credit_event_exclusion_reason_codes(
     }
     if prediction.settlement_score_micros != settlement_score_micros {
         reason_codes.push("settlement_score_mismatch".to_string());
+    }
+    if state.ranking_require_server_feature_provenance
+        && !ranking_prediction_has_server_feature_provenance(features, prediction)
+    {
+        reason_codes.push("unprovenanced_ranking_feature".to_string());
     }
     if prediction.confidence < gate.confidence_threshold {
         reason_codes.push("low_confidence_prediction".to_string());
@@ -18765,6 +19174,7 @@ async fn read_operational_ranking_summary(
     let settlement_batches = read_credit_settlement_batches_for_admin(state, tenant).await?;
     let held_credit_accounts = active_credit_hold_account_refs_for_admin(state, tenant).await?;
     let model_versions = read_ranking_model_versions_for_admin(state, tenant).await?;
+    let features = read_ranking_features_for_admin(state, tenant).await?;
     let predictions = read_ranking_predictions_for_admin(state, tenant).await?;
     let labels = read_ranking_labels_for_admin(state, tenant).await?;
     let preference_labels = read_ranking_preference_labels_for_admin(state, tenant).await?;
@@ -18783,6 +19193,7 @@ async fn read_operational_ranking_summary(
             settlement_batches: &settlement_batches,
             held_credit_accounts: &held_credit_accounts,
             model_versions: &model_versions,
+            features: &features,
             predictions: &predictions,
             labels: &labels,
             preference_labels: &preference_labels,
@@ -36616,6 +37027,7 @@ struct TraceOperationalRankingInputs<'a> {
     settlement_batches: &'a [TraceCreditSettlementBatchRecord],
     held_credit_accounts: &'a BTreeSet<String>,
     model_versions: &'a [TraceRankingModelVersionRecord],
+    features: &'a [TraceRankingFeatureRecord],
     predictions: &'a [TraceRankingPredictionRecord],
     labels: &'a [TraceRankingLabelRecord],
     preference_labels: &'a [TraceRankingPreferenceLabelRecord],
@@ -36662,6 +37074,7 @@ impl TraceOperationalRankingSummary {
             credit_events: inputs.credit_events,
             settlement_batches: inputs.settlement_batches,
             held_credit_accounts: inputs.held_credit_accounts,
+            features: inputs.features,
             predictions: inputs.predictions,
             model_versions: inputs.model_versions,
             labels: inputs.labels,
@@ -37515,6 +37928,7 @@ mod tests {
             process_evaluator_timeout_ms: None,
             ranking_calibration_max_age: None,
             ranking_require_calibration_dataset_registry: false,
+            ranking_require_server_feature_provenance: false,
             ranking_min_confidence_threshold: DEFAULT_TRACE_RANKING_MIN_CONFIDENCE_THRESHOLD,
             ranking_max_average_absolute_error_micros:
                 TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS,
@@ -44865,6 +45279,7 @@ mod tests {
             process_evaluator_timeout_ms: None,
             ranking_calibration_max_age: None,
             ranking_require_calibration_dataset_registry: false,
+            ranking_require_server_feature_provenance: false,
             ranking_min_confidence_threshold: DEFAULT_TRACE_RANKING_MIN_CONFIDENCE_THRESHOLD,
             ranking_max_average_absolute_error_micros:
                 TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS,
@@ -49326,6 +49741,145 @@ mod tests {
             Some(response.external_ref.as_str())
         );
         assert_eq!(events[0].credit_points_delta, 1.25);
+    }
+
+    #[tokio::test]
+    async fn ranking_feature_worker_creates_reserved_server_provenance_features() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("ranking submission succeeds");
+
+        let manual_reserved_tag_error = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                feature_schema_version: "ranking-features-server-v1".to_string(),
+                feature_vector_hash: "sha256:manual-reserved-feature".to_string(),
+                feature_names_hash: "sha256:manual-reserved-feature-names".to_string(),
+                source_feature_hash: "sha256:manual-reserved-source-feature".to_string(),
+                duplicate_score: Some(0.05),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.88),
+                coverage_tags: vec![RANKING_FEATURE_SERVER_PROVENANCE_TAG.to_string()],
+            }),
+        )
+        .await
+        .expect_err("manual ranking feature writes cannot claim reserved server provenance");
+        assert_eq!(manual_reserved_tag_error.0, StatusCode::BAD_REQUEST);
+
+        let Json(run) = ranking_feature_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRunRequest {
+                dry_run: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                feature_schema_version: "ranking-features-server-v1".to_string(),
+                reason: "derive server-owned ranking features".to_string(),
+                limit: Some(10),
+            }),
+        )
+        .await
+        .expect("utility worker can derive server-provenanced ranking features");
+        assert_eq!(run.checked_count, 1);
+        assert_eq!(run.generated_count, 1);
+        assert_eq!(run.skipped_existing_count, 0);
+        assert_eq!(run.pending_after_count, 0);
+        assert_eq!(run.feature_refs.len(), 1);
+
+        let derived = read_derived_record(temp.path(), "tenant-a", submission_id)
+            .expect("derived reads")
+            .expect("derived exists");
+        let features =
+            read_all_ranking_features(temp.path(), "tenant-a").expect("ranking features read");
+        assert_eq!(features.len(), 1);
+        let feature = &features[0];
+        assert_eq!(feature.submission_id, submission_id);
+        assert_eq!(feature.target_use, TraceAllowedUse::RankingModelTraining);
+        assert_eq!(feature.feature_schema_version, "ranking-features-server-v1");
+        assert_eq!(feature.source_feature_hash, derived.canonical_summary_hash);
+        assert_eq!(feature.duplicate_score, Some(derived.duplicate_score));
+        assert_eq!(feature.novelty_score, Some(derived.novelty_score));
+        assert!(
+            feature
+                .coverage_tags
+                .contains(&RANKING_FEATURE_SERVER_PROVENANCE_TAG.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn ranking_prediction_credit_requires_server_provenanced_feature_when_enabled() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let (candidate, prediction) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-server-feature-gate-v1")
+                .await;
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration");
+        assert!(calibration.promotable);
+        let Json(_) = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version,
+                reason: "promote calibrated model before provenance gate".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can promote calibrated model");
+
+        Arc::make_mut(&mut state).ranking_require_server_feature_provenance = true;
+        let error = ranking_prediction_credit_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionCreditRequest {
+                ranking_prediction_id: prediction.ranking_prediction_id,
+                reason: "manual feature should not mint credit".to_string(),
+            }),
+        )
+        .await
+        .expect_err("credit-bearing ranking predictions require server feature provenance");
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(
+            error.1.0.error,
+            "ranking prediction credit requires server-provenanced ranking feature evidence"
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit reads")
+                .is_empty()
+        );
     }
 
     #[tokio::test]

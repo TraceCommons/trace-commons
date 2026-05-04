@@ -131,8 +131,16 @@ file-backed readers fail closed if legacy JSONL history contains conflicting
 manifest rows for the same holdout key.
 Prediction writes must name a registered active or candidate model, match its
 policy and feature schema, and reference an existing feature vector hash for the
-same source. Calibration treats repeated labels from the same source on the same
-submission and target use as corrections, so only the latest
+same source. Utility workers can derive server-provenanced ranking features
+through `/v1/workers/ranking/features/run`, which projects accepted
+redacted-summary metadata into deterministic feature hashes and reserves the
+`feature_provenance:server_derived` coverage tag so manually posted feature
+rows cannot claim that provenance. Production deployments can set
+`TRACE_COMMONS_RANKING_REQUIRE_SERVER_FEATURE_PROVENANCE=true` to make
+prediction-credit, readiness, and settlement require that server-owned feature
+evidence before ranking utility credit can mint or settle. Calibration treats
+repeated labels from the same source on the same submission and target use as
+corrections, so only the latest
 `(submission_id, target_use, label_source)` non-disputed label contributes to
 sample counts, joined evidence, and error metrics. A latest `disputed` label
 suppresses that source's calibration evidence until a newer non-disputed label
