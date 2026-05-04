@@ -395,6 +395,12 @@ Maintenance reconciliation also reports
 `ranking_calibration_dataset_manifest_conflict_keys` for legacy file-backed
 holdout registries whose history contains conflicting manifest/count metadata
 for one `(calibration_dataset_hash, target_use, policy_version)` key.
+Admin dataset-readiness, ranking-credit readiness, and operational-summary
+routes project the same legacy conflict class into safe aggregate
+`calibration_dataset_manifest_conflict_count` fields and
+`ranking_calibration_dataset_manifest_conflicts` promotion-gate blockers, so
+operators can hold credit issuance without exposing the underlying manifest
+history.
 
 Ranking worker-run ledger rows are part of the ranking DB mirror, the
 DB-backed reviewer ranking read surface, and the maintenance reconciliation

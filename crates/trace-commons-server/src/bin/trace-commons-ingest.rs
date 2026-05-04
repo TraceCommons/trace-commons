@@ -7222,6 +7222,7 @@ struct TraceRankingDatasetReadinessReport {
     tenant_id: String,
     tenant_storage_ref: String,
     calibration_dataset_count: usize,
+    calibration_dataset_manifest_conflict_count: usize,
     model_version_count: usize,
     candidate_model_count: usize,
     active_model_count: usize,
@@ -7286,6 +7287,7 @@ struct TraceRankingCreditReadinessReport {
     tenant_id: String,
     tenant_storage_ref: String,
     pending_ranking_credit_event_count: usize,
+    calibration_dataset_manifest_conflict_count: usize,
     ready_count: usize,
     blocked_count: usize,
     blocked_reason_counts: BTreeMap<String, usize>,
@@ -12856,20 +12858,27 @@ async fn ranking_dataset_readiness_report_handler(
     let labels = read_ranking_labels_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
-    let calibration_datasets = read_ranking_calibration_datasets_for_admin(state.as_ref(), &tenant)
-        .await
-        .map_err(internal_error)?;
+    let calibration_dataset_read =
+        read_ranking_calibration_datasets_for_admin_reconciliation(state.as_ref(), &tenant)
+            .await
+            .map_err(internal_error)?;
+    let calibration_dataset_manifest_conflict_count =
+        calibration_dataset_read.manifest_conflict_keys.len();
+    let calibration_datasets = calibration_dataset_read.records;
     let calibration_runs = read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
     Ok(Json(ranking_dataset_readiness_report(
-        state.as_ref(),
-        &tenant,
-        &model_versions,
-        &predictions,
-        &labels,
-        &calibration_datasets,
-        &calibration_runs,
+        RankingDatasetReadinessReportInputs {
+            state: state.as_ref(),
+            tenant: &tenant,
+            model_versions: &model_versions,
+            predictions: &predictions,
+            labels: &labels,
+            calibration_datasets: &calibration_datasets,
+            calibration_dataset_manifest_conflict_count,
+            calibration_runs: &calibration_runs,
+        },
     )))
 }
 
@@ -12900,9 +12909,13 @@ async fn ranking_credit_readiness_report_handler(
     let preference_labels = read_ranking_preference_labels_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
-    let calibration_datasets = read_ranking_calibration_datasets_for_admin(state.as_ref(), &tenant)
-        .await
-        .map_err(internal_error)?;
+    let calibration_dataset_read =
+        read_ranking_calibration_datasets_for_admin_reconciliation(state.as_ref(), &tenant)
+            .await
+            .map_err(internal_error)?;
+    let calibration_dataset_manifest_conflict_count =
+        calibration_dataset_read.manifest_conflict_keys.len();
+    let calibration_datasets = calibration_dataset_read.records;
     let calibration_runs = read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
@@ -12918,6 +12931,7 @@ async fn ranking_credit_readiness_report_handler(
             labels: &labels,
             preference_labels: &preference_labels,
             calibration_datasets: &calibration_datasets,
+            calibration_dataset_manifest_conflict_count,
             calibration_runs: &calibration_runs,
         },
     )))
@@ -13864,6 +13878,19 @@ async fn read_ranking_calibration_datasets_for_admin(
             .collect();
     }
     read_all_ranking_calibration_datasets(&state.root, &tenant.tenant_id)
+}
+
+async fn read_ranking_calibration_datasets_for_admin_reconciliation(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<RankingCalibrationDatasetReconciliationRead> {
+    if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
+        return Ok(RankingCalibrationDatasetReconciliationRead {
+            records: read_ranking_calibration_datasets_for_admin(state, tenant).await?,
+            manifest_conflict_keys: Vec::new(),
+        });
+    }
+    read_ranking_calibration_datasets_for_reconciliation(&state.root, &tenant.tenant_id)
 }
 
 async fn read_ranking_features_for_admin(
@@ -15009,15 +15036,30 @@ fn ranking_model_risk_record(
     }
 }
 
+struct RankingDatasetReadinessReportInputs<'a> {
+    state: &'a AppState,
+    tenant: &'a TenantAuth,
+    model_versions: &'a [TraceRankingModelVersionRecord],
+    predictions: &'a [TraceRankingPredictionRecord],
+    labels: &'a [TraceRankingLabelRecord],
+    calibration_datasets: &'a [TraceRankingCalibrationDatasetRecord],
+    calibration_dataset_manifest_conflict_count: usize,
+    calibration_runs: &'a [TraceRankingCalibrationRunRecord],
+}
+
 fn ranking_dataset_readiness_report(
-    state: &AppState,
-    tenant: &TenantAuth,
-    model_versions: &[TraceRankingModelVersionRecord],
-    predictions: &[TraceRankingPredictionRecord],
-    labels: &[TraceRankingLabelRecord],
-    calibration_datasets: &[TraceRankingCalibrationDatasetRecord],
-    calibration_runs: &[TraceRankingCalibrationRunRecord],
+    inputs: RankingDatasetReadinessReportInputs<'_>,
 ) -> TraceRankingDatasetReadinessReport {
+    let RankingDatasetReadinessReportInputs {
+        state,
+        tenant,
+        model_versions,
+        predictions,
+        labels,
+        calibration_datasets,
+        calibration_dataset_manifest_conflict_count,
+        calibration_runs,
+    } = inputs;
     let latest_models = latest_ranking_model_versions(model_versions);
     let mut models_by_dataset = BTreeMap::new();
     for model in latest_models {
@@ -15041,6 +15083,12 @@ fn ranking_dataset_readiness_report(
         calibration_datasets,
         calibration_runs,
     };
+    if calibration_dataset_manifest_conflict_count > 0 {
+        reason_code_counts.insert(
+            RANKING_CALIBRATION_DATASET_MANIFEST_CONFLICT_REASON.to_string(),
+            calibration_dataset_manifest_conflict_count,
+        );
+    }
 
     for (calibration_dataset_hash, mut models) in models_by_dataset {
         models.sort_by(|left, right| left.model_version.cmp(&right.model_version));
@@ -15138,6 +15186,7 @@ fn ranking_dataset_readiness_report(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         calibration_dataset_count: datasets.len(),
+        calibration_dataset_manifest_conflict_count,
         model_version_count,
         candidate_model_count,
         active_model_count,
@@ -15310,6 +15359,7 @@ struct RankingCreditReadinessInputs<'a> {
     labels: &'a [TraceRankingLabelRecord],
     preference_labels: &'a [TraceRankingPreferenceLabelRecord],
     calibration_datasets: &'a [TraceRankingCalibrationDatasetRecord],
+    calibration_dataset_manifest_conflict_count: usize,
     calibration_runs: &'a [TraceRankingCalibrationRunRecord],
 }
 
@@ -15342,15 +15392,17 @@ fn ranking_credit_readiness_report(
         .filter(|event| event.credit_points_delta > 0.0)
         .filter(|event| !already_settled_event_ids.contains(&event.event_id))
         .map(|event| {
-            ranking_credit_readiness_event(
-                inputs.state,
+            ranking_credit_readiness_event(RankingCreditReadinessEventInputs {
+                state: inputs.state,
                 event,
-                inputs.held_credit_accounts,
-                inputs.predictions,
-                inputs.model_versions,
-                inputs.calibration_runs,
-                &model_risk_codes_by_key,
-            )
+                held_credit_accounts: inputs.held_credit_accounts,
+                predictions: inputs.predictions,
+                model_versions: inputs.model_versions,
+                calibration_runs: inputs.calibration_runs,
+                calibration_dataset_manifest_conflict_count: inputs
+                    .calibration_dataset_manifest_conflict_count,
+                model_risk_codes_by_key: &model_risk_codes_by_key,
+            })
         })
         .collect::<Vec<_>>();
     events.sort_by_key(|event| (event.ready, event.event_id));
@@ -15366,6 +15418,8 @@ fn ranking_credit_readiness_report(
         tenant_id: inputs.tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&inputs.tenant.tenant_id),
         pending_ranking_credit_event_count: events.len(),
+        calibration_dataset_manifest_conflict_count: inputs
+            .calibration_dataset_manifest_conflict_count,
         ready_count,
         blocked_count,
         blocked_reason_counts,
@@ -15373,16 +15427,34 @@ fn ranking_credit_readiness_report(
     }
 }
 
+struct RankingCreditReadinessEventInputs<'a> {
+    state: &'a AppState,
+    event: &'a TraceCommonsCreditLedgerRecord,
+    held_credit_accounts: &'a BTreeSet<String>,
+    predictions: &'a [TraceRankingPredictionRecord],
+    model_versions: &'a [TraceRankingModelVersionRecord],
+    calibration_runs: &'a [TraceRankingCalibrationRunRecord],
+    calibration_dataset_manifest_conflict_count: usize,
+    model_risk_codes_by_key: &'a BTreeMap<String, Vec<String>>,
+}
+
 fn ranking_credit_readiness_event(
-    state: &AppState,
-    event: &TraceCommonsCreditLedgerRecord,
-    held_credit_accounts: &BTreeSet<String>,
-    predictions: &[TraceRankingPredictionRecord],
-    model_versions: &[TraceRankingModelVersionRecord],
-    calibration_runs: &[TraceRankingCalibrationRunRecord],
-    model_risk_codes_by_key: &BTreeMap<String, Vec<String>>,
+    inputs: RankingCreditReadinessEventInputs<'_>,
 ) -> TraceRankingCreditReadinessEvent {
+    let RankingCreditReadinessEventInputs {
+        state,
+        event,
+        held_credit_accounts,
+        predictions,
+        model_versions,
+        calibration_runs,
+        calibration_dataset_manifest_conflict_count,
+        model_risk_codes_by_key,
+    } = inputs;
     let mut reason_codes = Vec::new();
+    if calibration_dataset_manifest_conflict_count > 0 {
+        reason_codes.push(RANKING_CALIBRATION_DATASET_MANIFEST_CONFLICT_REASON.to_string());
+    }
     if held_credit_accounts.contains(&event.auth_principal_ref) {
         reason_codes.push("held_credit_account".to_string());
     }
@@ -18307,7 +18379,11 @@ async fn read_operational_ranking_summary(
     let predictions = read_ranking_predictions_for_admin(state, tenant).await?;
     let labels = read_ranking_labels_for_admin(state, tenant).await?;
     let preference_labels = read_ranking_preference_labels_for_admin(state, tenant).await?;
-    let calibration_datasets = read_ranking_calibration_datasets_for_admin(state, tenant).await?;
+    let calibration_dataset_read =
+        read_ranking_calibration_datasets_for_admin_reconciliation(state, tenant).await?;
+    let calibration_dataset_manifest_conflict_count =
+        calibration_dataset_read.manifest_conflict_keys.len();
+    let calibration_datasets = calibration_dataset_read.records;
     let calibration_runs = read_ranking_calibration_runs_for_admin(state, tenant).await?;
     let worker_runs = read_ranking_worker_runs_for_admin(state, tenant).await?;
     Ok(TraceOperationalRankingSummary::from_inputs(
@@ -18322,6 +18398,7 @@ async fn read_operational_ranking_summary(
             labels: &labels,
             preference_labels: &preference_labels,
             calibration_datasets: &calibration_datasets,
+            calibration_dataset_manifest_conflict_count,
             calibration_runs: &calibration_runs,
             worker_runs: &worker_runs,
             generated_at,
@@ -27725,6 +27802,8 @@ fn append_ranking_calibration_dataset(
 
 const RANKING_CALIBRATION_DATASET_IMMUTABLE_MANIFEST_MESSAGE: &str =
     "ranking calibration dataset manifest is immutable for this target use and policy";
+const RANKING_CALIBRATION_DATASET_MANIFEST_CONFLICT_REASON: &str =
+    "calibration_dataset_manifest_conflict";
 
 #[derive(Debug)]
 struct RankingCalibrationDatasetReconciliationRead {
@@ -35542,6 +35621,7 @@ struct TraceOperationalPromotionGateSummary {
     revoked_benchmark_external_registry_invalidation_gap_count: usize,
     at_risk_ranking_model_count: usize,
     blocked_ranking_credit_event_count: usize,
+    ranking_calibration_dataset_manifest_conflict_count: usize,
     stale_ranking_worker_run_count: usize,
 }
 
@@ -35572,6 +35652,8 @@ impl TraceOperationalPromotionGateSummary {
             benchmarks.external_registry_invalidation_gap_count;
         let at_risk_ranking_model_count = ranking.at_risk_model_count;
         let blocked_ranking_credit_event_count = ranking.blocked_credit_event_count;
+        let ranking_calibration_dataset_manifest_conflict_count =
+            ranking.calibration_dataset_manifest_conflict_count;
         let stale_ranking_worker_run_count = ranking.stale_running_worker_run_count;
         let mut blocking_gates = Vec::new();
         let mut warning_gates = Vec::new();
@@ -35620,6 +35702,11 @@ impl TraceOperationalPromotionGateSummary {
             &mut blocking_gates,
             "blocked_ranking_credit_events",
             blocked_ranking_credit_event_count,
+        );
+        push_gap_count(
+            &mut blocking_gates,
+            "ranking_calibration_dataset_manifest_conflicts",
+            ranking_calibration_dataset_manifest_conflict_count,
         );
         push_gap_count(
             &mut blocking_gates,
@@ -35673,6 +35760,7 @@ impl TraceOperationalPromotionGateSummary {
             revoked_benchmark_external_registry_invalidation_gap_count,
             at_risk_ranking_model_count,
             blocked_ranking_credit_event_count,
+            ranking_calibration_dataset_manifest_conflict_count,
             stale_ranking_worker_run_count,
         }
     }
@@ -36065,6 +36153,7 @@ struct TraceOperationalRankingInputs<'a> {
     labels: &'a [TraceRankingLabelRecord],
     preference_labels: &'a [TraceRankingPreferenceLabelRecord],
     calibration_datasets: &'a [TraceRankingCalibrationDatasetRecord],
+    calibration_dataset_manifest_conflict_count: usize,
     calibration_runs: &'a [TraceRankingCalibrationRunRecord],
     worker_runs: &'a [TraceRankingWorkerRunRecord],
     generated_at: DateTime<Utc>,
@@ -36080,6 +36169,7 @@ struct TraceOperationalRankingSummary {
     ready_credit_event_count: usize,
     blocked_credit_event_count: usize,
     blocked_credit_reason_counts: BTreeMap<String, usize>,
+    calibration_dataset_manifest_conflict_count: usize,
     running_worker_run_count: usize,
     stale_running_worker_run_count: usize,
     failed_worker_run_count: usize,
@@ -36110,6 +36200,8 @@ impl TraceOperationalRankingSummary {
             labels: inputs.labels,
             preference_labels: inputs.preference_labels,
             calibration_datasets: inputs.calibration_datasets,
+            calibration_dataset_manifest_conflict_count: inputs
+                .calibration_dataset_manifest_conflict_count,
             calibration_runs: inputs.calibration_runs,
         });
         let mut risk_code_counts = BTreeMap::new();
@@ -36117,6 +36209,12 @@ impl TraceOperationalRankingSummary {
             for code in &model.risk_codes {
                 *risk_code_counts.entry(code.clone()).or_insert(0) += 1;
             }
+        }
+        if inputs.calibration_dataset_manifest_conflict_count > 0 {
+            risk_code_counts.insert(
+                RANKING_CALIBRATION_DATASET_MANIFEST_CONFLICT_REASON.to_string(),
+                inputs.calibration_dataset_manifest_conflict_count,
+            );
         }
         let stale_running_cutoff =
             inputs.generated_at - Duration::hours(TRACE_RANKING_WORKER_RUN_STALE_AFTER_HOURS);
@@ -36146,6 +36244,8 @@ impl TraceOperationalRankingSummary {
             ready_credit_event_count: readiness.ready_count,
             blocked_credit_event_count: readiness.blocked_count,
             blocked_credit_reason_counts: readiness.blocked_reason_counts,
+            calibration_dataset_manifest_conflict_count: inputs
+                .calibration_dataset_manifest_conflict_count,
             running_worker_run_count,
             stale_running_worker_run_count,
             failed_worker_run_count,
@@ -36973,6 +37073,40 @@ mod tests {
             HeaderValue::from_str(&value).expect("valid auth header"),
         );
         headers
+    }
+
+    fn append_legacy_calibration_dataset_manifest_conflict(
+        root: &Path,
+        tenant_id: &str,
+        fixture_key: &str,
+    ) -> String {
+        let path = ranking_calibration_datasets_path(root, tenant_id);
+        let initial = TraceRankingCalibrationDatasetRecord {
+            tenant_id: tenant_id.to_string(),
+            tenant_storage_ref: tenant_storage_ref(tenant_id),
+            calibration_dataset_hash: format!("sha256:{fixture_key}-holdout-v1"),
+            target_use: TraceAllowedUse::RankingModelTraining,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            source_manifest_hash: format!("sha256:{fixture_key}-manifest-v1"),
+            source_count: 128,
+            label_source_count: 3,
+            label_actor_count: 3,
+            status: StorageTraceRankingCalibrationDatasetStatus::Candidate,
+            actor_principal_ref: "principal_sha256:ranker-admin".to_string(),
+            created_at: Utc::now(),
+        };
+        let conflict_key =
+            ranking_calibration_dataset_file_key(&initial).expect("calibration dataset key");
+        let mut rewrite = initial.clone();
+        rewrite.source_manifest_hash = format!("sha256:{fixture_key}-manifest-v2");
+        rewrite.status = StorageTraceRankingCalibrationDatasetStatus::Active;
+        rewrite.created_at = Utc::now();
+
+        append_jsonl_record(&path, &initial, "ranking calibration dataset")
+            .expect("legacy initial row written");
+        append_jsonl_record(&path, &rewrite, "ranking calibration dataset")
+            .expect("legacy rewritten row written");
+        conflict_key
     }
 
     fn test_reviewer_auth(tenant_id: &str) -> TenantAuth {
@@ -50699,6 +50833,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ranking_dataset_readiness_report_reports_calibration_dataset_manifest_conflicts() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        append_legacy_calibration_dataset_manifest_conflict(
+            temp.path(),
+            "tenant-a",
+            "dataset-readiness-conflict",
+        );
+
+        let Json(report) = ranking_dataset_readiness_report_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+        )
+        .await
+        .expect("admin can inspect dataset readiness despite manifest conflict");
+        let report_json = serde_json::to_value(&report).expect("dataset readiness serializes");
+        assert_eq!(
+            report_json["calibration_dataset_manifest_conflict_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            report
+                .reason_code_counts
+                .get(RANKING_CALIBRATION_DATASET_MANIFEST_CONFLICT_REASON),
+            Some(&1)
+        );
+    }
+
+    #[tokio::test]
     async fn ranking_calibration_dataset_registry_records_hash_only_holdout_metadata() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -56609,6 +56772,91 @@ mod tests {
                 .promotion_gates
                 .blocking_gates
                 .contains(&"stale_ranking_worker_runs=1".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn operational_summary_reports_calibration_dataset_manifest_conflict_blocker() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        append_legacy_calibration_dataset_manifest_conflict(
+            temp.path(),
+            "tenant-a",
+            "operational-conflict",
+        );
+
+        let Json(operational) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary despite manifest conflict");
+        let operational_json =
+            serde_json::to_value(&operational).expect("operational summary serializes");
+        assert_eq!(
+            operational_json["ranking"]["calibration_dataset_manifest_conflict_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["promotion_gates"]["ranking_calibration_dataset_manifest_conflict_count"],
+            serde_json::json!(1)
+        );
+        assert!(
+            operational
+                .promotion_gates
+                .blocking_gates
+                .contains(&"ranking_calibration_dataset_manifest_conflicts=1".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn ranking_credit_readiness_report_blocks_on_calibration_dataset_manifest_conflicts() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        append_legacy_calibration_dataset_manifest_conflict(
+            temp.path(),
+            "tenant-a",
+            "credit-readiness-conflict",
+        );
+        let credit_event = TraceCommonsCreditLedgerRecord {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            submission_id: Uuid::new_v4(),
+            trace_id: Uuid::new_v4(),
+            auth_principal_ref: principal_storage_ref("token-a"),
+            event_type: TraceCreditLedgerEventType::RankingUtility,
+            credit_points_delta: 1.0,
+            reason: Some("pending ranking utility credit should be held".to_string()),
+            external_ref: None,
+            actor_role: TokenRole::UtilityWorker,
+            actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+            created_at: Utc::now(),
+        };
+        append_credit_event(temp.path(), "tenant-a", &credit_event).expect("credit event writes");
+
+        let Json(readiness) = ranking_credit_readiness_report_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+        )
+        .await
+        .expect("admin can inspect credit readiness despite manifest conflict");
+        let readiness_json = serde_json::to_value(&readiness).expect("readiness serializes");
+        assert_eq!(
+            readiness_json["calibration_dataset_manifest_conflict_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(readiness.pending_ranking_credit_event_count, 1);
+        assert_eq!(readiness.ready_count, 0);
+        assert_eq!(readiness.blocked_count, 1);
+        assert_eq!(
+            readiness
+                .blocked_reason_counts
+                .get(RANKING_CALIBRATION_DATASET_MANIFEST_CONFLICT_REASON),
+            Some(&1)
+        );
+        assert!(
+            readiness.events[0]
+                .reason_codes
+                .contains(&RANKING_CALIBRATION_DATASET_MANIFEST_CONFLICT_REASON.to_string())
         );
     }
 

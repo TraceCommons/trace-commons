@@ -158,7 +158,11 @@ Admins can
 inspect calibration reports, persisted calibration runs, dataset-readiness
 reports, active-model risk reports, ranking-credit readiness reports, and
 operational summary blocker counts before deciding whether model-derived credit
-can settle. Dataset-readiness reports group candidate and active models by
+can settle. Dataset-readiness and ranking-credit readiness reports also surface
+legacy calibration-registry manifest conflicts as safe aggregate blocker counts,
+and operational summaries promote the same signal into
+`ranking_calibration_dataset_manifest_conflicts` promotion-gate blockers.
+Dataset-readiness reports group candidate and active models by
 registered holdout calibration dataset hash and show target-use readiness,
 current evidence hashes, effective thresholds, error metrics, and blocker reason
 counts without raw trace or lab evidence. Model promotion rechecks the current
@@ -205,7 +209,8 @@ versions, calibration dataset registry rows, feature/prediction/label evidence,
 calibration report hashes, and worker-run lifecycle rows across file and DB
 storage, and it reports legacy calibration-registry manifest conflicts as
 `ranking_calibration_dataset_manifest_conflict_keys` blockers before DB reviewer
-reads or credit-bearing ranking paths are promoted.
+reads or credit-bearing ranking paths are promoted; the admin readiness and
+operational-summary surfaces expose only counts for the same conflict class.
 `TRACE_COMMONS_DB_REVIEWER_READS=true` serves admin ranking lists, calibration
 reports, model-risk reports, credit-readiness reports, calibration-run history,
 and worker-run history from the tenant-scoped DB mirror.
