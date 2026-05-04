@@ -230,6 +230,12 @@ const TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN: &str =
     "TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN";
 const TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS: &str =
     "TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS";
+const TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL: &str =
+    "TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL";
+const TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN: &str =
+    "TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN";
+const TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_TIMEOUT_MS: &str =
+    "TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_TIMEOUT_MS";
 const TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS: &str =
     "TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS";
 const TRACE_COMMONS_RANKING_MIN_CONFIDENCE_THRESHOLD: &str =
@@ -245,10 +251,13 @@ const TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS: &str =
     "TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS";
 const DEFAULT_EDDSA_KEYSET_URL_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_BENCHMARK_REGISTRY_SUBMITTER_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_EDDSA_KEYSET_REFRESH_INTERVAL_SECONDS: u64 = 300;
 const MAX_EDDSA_KEYSET_URL_BYTES: usize = 256 * 1024;
 const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT: u32 = 100;
 const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT: u32 = 500;
+const TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_DEFAULT_LIMIT: u32 = 100;
+const TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_MAX_LIMIT: u32 = 500;
 const TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT: usize = 5;
 const TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_LIMIT: usize = 1;
 const TRACE_CREDIT_CYCLE_SCHEDULER_MAX_LIMIT: usize = 25;
@@ -342,6 +351,8 @@ struct AppState {
     artifact_store: Option<ConfiguredTraceArtifactStore>,
     near_credit_submitter: Option<Arc<dyn TraceNearCreditSubmitter>>,
     near_credit_submitter_timeout_ms: Option<u64>,
+    benchmark_registry_submitter: Option<Arc<dyn TraceBenchmarkRegistrySubmitter>>,
+    benchmark_registry_submitter_timeout_ms: Option<u64>,
     ranking_calibration_max_age: Option<Duration>,
     ranking_min_confidence_threshold: f32,
     ranking_max_average_absolute_error_micros: i64,
@@ -1472,6 +1483,12 @@ impl AppState {
             .as_ref()
             .map(|config| config.timeout_ms);
         let near_credit_submitter = near_credit_submitter_config.map(|config| config.submitter);
+        let benchmark_registry_submitter_config = trace_benchmark_registry_submitter_from_env()?;
+        let benchmark_registry_submitter_timeout_ms = benchmark_registry_submitter_config
+            .as_ref()
+            .map(|config| config.timeout_ms);
+        let benchmark_registry_submitter =
+            benchmark_registry_submitter_config.map(|config| config.submitter);
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
         let ranking_min_confidence_threshold = parse_ranking_min_confidence_threshold_from_env()?;
         let ranking_max_average_absolute_error_micros =
@@ -1624,6 +1641,8 @@ impl AppState {
             artifact_store,
             near_credit_submitter,
             near_credit_submitter_timeout_ms,
+            benchmark_registry_submitter,
+            benchmark_registry_submitter_timeout_ms,
             ranking_calibration_max_age,
             ranking_min_confidence_threshold,
             ranking_max_average_absolute_error_micros,
@@ -1880,6 +1899,11 @@ struct ConfiguredTraceNearCreditSubmitter {
     timeout_ms: u64,
 }
 
+struct ConfiguredTraceBenchmarkRegistrySubmitter {
+    submitter: Arc<dyn TraceBenchmarkRegistrySubmitter>,
+    timeout_ms: u64,
+}
+
 fn trace_near_credit_submitter_from_env()
 -> anyhow::Result<Option<ConfiguredTraceNearCreditSubmitter>> {
     let Some(url) = optional_trimmed_env(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL)? else {
@@ -1903,6 +1927,36 @@ fn trace_near_credit_submitter_from_env()
             url,
             bearer_token: optional_trimmed_env(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN)?
                 .map(SecretString::from),
+        }),
+        timeout_ms,
+    }))
+}
+
+fn trace_benchmark_registry_submitter_from_env()
+-> anyhow::Result<Option<ConfiguredTraceBenchmarkRegistrySubmitter>> {
+    let Some(url) = optional_trimmed_env(TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL)? else {
+        return Ok(None);
+    };
+    let parsed = reqwest::Url::parse(&url)
+        .with_context(|| format!("invalid {TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL}"))?;
+    validate_trace_benchmark_registry_submitter_url(&parsed)?;
+    let timeout = parse_trace_benchmark_registry_submitter_timeout_from_env()?;
+    let timeout_ms = timeout.as_millis() as u64;
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout.min(StdDuration::from_secs(3)))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("trace-commons-benchmark-registry-submitter/0.1")
+        .build()
+        .context("failed to build benchmark registry submitter HTTP client")?;
+    Ok(Some(ConfiguredTraceBenchmarkRegistrySubmitter {
+        submitter: Arc::new(HttpTraceBenchmarkRegistrySubmitter {
+            client,
+            url,
+            bearer_token: optional_trimmed_env(
+                TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN,
+            )?
+            .map(SecretString::from),
         }),
         timeout_ms,
     }))
@@ -1933,6 +1987,31 @@ fn validate_trace_near_credit_submitter_url(url: &reqwest::Url) -> anyhow::Resul
     Ok(())
 }
 
+fn validate_trace_benchmark_registry_submitter_url(url: &reqwest::Url) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        matches!(url.scheme(), "https" | "http"),
+        "{TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL} must use http or https"
+    );
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "{TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL} must not include embedded credentials"
+    );
+    anyhow::ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "{TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL} must not include query strings or fragments"
+    );
+    let host = url.host_str().map(str::to_ascii_lowercase).ok_or_else(|| {
+        anyhow::anyhow!("{TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL} requires a host")
+    })?;
+    if url.scheme() == "http" {
+        anyhow::ensure!(
+            is_loopback_or_localhost_host(&host),
+            "{TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL} may use http only for localhost loopback submitters"
+        );
+    }
+    Ok(())
+}
+
 fn is_loopback_or_localhost_host(host: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     if host == "localhost" || host.ends_with(".localhost") {
@@ -1956,6 +2035,23 @@ fn parse_trace_near_credit_submitter_timeout_from_env() -> anyhow::Result<StdDur
     anyhow::ensure!(
         (1..=30_000).contains(&timeout_ms),
         "{TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS} must be between 1 and 30000"
+    );
+    Ok(StdDuration::from_millis(timeout_ms))
+}
+
+fn parse_trace_benchmark_registry_submitter_timeout_from_env() -> anyhow::Result<StdDuration> {
+    let timeout_ms =
+        match optional_trimmed_env(TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_TIMEOUT_MS)? {
+            Some(configured) => configured.parse::<u64>().with_context(|| {
+                format!(
+                    "{TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_TIMEOUT_MS} must be milliseconds"
+                )
+            })?,
+            None => DEFAULT_BENCHMARK_REGISTRY_SUBMITTER_TIMEOUT_MS,
+        };
+    anyhow::ensure!(
+        (1..=30_000).contains(&timeout_ms),
+        "{TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_TIMEOUT_MS} must be between 1 and 30000"
     );
     Ok(StdDuration::from_millis(timeout_ms))
 }
@@ -2121,6 +2217,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/workers/benchmark-registry-publications/run",
             post(benchmark_registry_publication_worker_run_handler),
+        )
+        .route(
+            "/v1/workers/benchmark-registry-outbox/submit",
+            post(benchmark_registry_outbox_submit_worker_handler),
         )
         .route(
             "/v1/workers/replay-export",
@@ -3962,6 +4062,10 @@ struct TraceCommonsConfigStatusResponse {
     near_credit_submitter_timeout_ms: Option<u64>,
     near_credit_outbox_submit_default_limit: u32,
     near_credit_outbox_submit_max_limit: u32,
+    benchmark_registry_submitter_configured: bool,
+    benchmark_registry_submitter_timeout_ms: Option<u64>,
+    benchmark_registry_outbox_submit_default_limit: u32,
+    benchmark_registry_outbox_submit_max_limit: u32,
     credit_cycle_worker_step_count: usize,
     credit_cycle_scheduler_default_limit: usize,
     credit_cycle_scheduler_max_limit: usize,
@@ -4093,6 +4197,12 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         near_credit_submitter_timeout_ms: state.near_credit_submitter_timeout_ms,
         near_credit_outbox_submit_default_limit: TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT,
         near_credit_outbox_submit_max_limit: TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT,
+        benchmark_registry_submitter_configured: state.benchmark_registry_submitter.is_some(),
+        benchmark_registry_submitter_timeout_ms: state.benchmark_registry_submitter_timeout_ms,
+        benchmark_registry_outbox_submit_default_limit:
+            TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_DEFAULT_LIMIT,
+        benchmark_registry_outbox_submit_max_limit:
+            TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_MAX_LIMIT,
         credit_cycle_worker_step_count: TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT,
         credit_cycle_scheduler_default_limit: TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_LIMIT,
         credit_cycle_scheduler_max_limit: TRACE_CREDIT_CYCLE_SCHEDULER_MAX_LIMIT,
@@ -5795,6 +5905,74 @@ impl TraceNearCreditSubmitter for HttpTraceNearCreditSubmitter {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceBenchmarkRegistrySubmitterRequest {
+    tenant_storage_ref: String,
+    benchmark_outbox_id: Uuid,
+    conversion_id: Uuid,
+    operation: StorageTraceBenchmarkRegistryOutboxOperation,
+    registry_ref: String,
+    artifact_payload_hash: String,
+    source_submission_ids_hash: String,
+    evaluator_ref: Option<String>,
+    evaluation_score: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceBenchmarkRegistrySubmitterResponse {
+    external_receipt_ref: String,
+}
+
+#[async_trait::async_trait]
+trait TraceBenchmarkRegistrySubmitter: Send + Sync {
+    async fn submit(
+        &self,
+        request: TraceBenchmarkRegistrySubmitterRequest,
+    ) -> anyhow::Result<TraceBenchmarkRegistrySubmitterResponse>;
+}
+
+#[derive(Clone)]
+struct HttpTraceBenchmarkRegistrySubmitter {
+    client: reqwest::Client,
+    url: String,
+    bearer_token: Option<SecretString>,
+}
+
+#[async_trait::async_trait]
+impl TraceBenchmarkRegistrySubmitter for HttpTraceBenchmarkRegistrySubmitter {
+    async fn submit(
+        &self,
+        request: TraceBenchmarkRegistrySubmitterRequest,
+    ) -> anyhow::Result<TraceBenchmarkRegistrySubmitterResponse> {
+        let mut builder = self
+            .client
+            .post(&self.url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&request);
+        if let Some(bearer_token) = &self.bearer_token {
+            builder = builder.bearer_auth(bearer_token.expose_secret());
+        }
+        let response = builder
+            .send()
+            .await
+            .context("failed to submit benchmark registry outbox item")?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!(
+                "benchmark registry submitter returned HTTP {}",
+                status.as_u16()
+            );
+        }
+        let mut response: TraceBenchmarkRegistrySubmitterResponse = response
+            .json()
+            .await
+            .context("failed to decode benchmark registry submitter response")?;
+        response.external_receipt_ref =
+            normalize_external_registry_receipt_ref(&response.external_receipt_ref)?;
+        Ok(response)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct TraceNearCreditOutboxSubmitWorkerRequest {
     #[serde(default)]
@@ -5811,6 +5989,31 @@ fn default_near_credit_outbox_submit_limit() -> u32 {
 
 #[derive(Debug, Serialize)]
 struct TraceNearCreditOutboxSubmitWorkerResponse {
+    purpose: String,
+    dry_run: bool,
+    checked: usize,
+    submitted: usize,
+    failed: usize,
+    skipped: usize,
+    pending: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceBenchmarkRegistryOutboxSubmitWorkerRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default = "default_benchmark_registry_outbox_submit_limit")]
+    limit: u32,
+}
+
+fn default_benchmark_registry_outbox_submit_limit() -> u32 {
+    TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_DEFAULT_LIMIT
+}
+
+#[derive(Debug, Serialize)]
+struct TraceBenchmarkRegistryOutboxSubmitWorkerResponse {
     purpose: String,
     dry_run: bool,
     checked: usize,
@@ -8156,6 +8359,25 @@ async fn benchmark_registry_outbox_handler(
     Ok(Json(items))
 }
 
+async fn benchmark_registry_outbox_submit_worker_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceBenchmarkRegistryOutboxSubmitWorkerRequest>,
+) -> ApiResult<Json<TraceBenchmarkRegistryOutboxSubmitWorkerResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_benchmarker(&tenant)?;
+    if !body.dry_run && state.benchmark_registry_submitter.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "benchmark registry outbox submit worker requires TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL",
+        ));
+    }
+    let response = run_benchmark_registry_outbox_submit_worker(state.as_ref(), &tenant, body)
+        .await
+        .map_err(maintenance_error)?;
+    Ok(Json(response))
+}
+
 async fn near_credit_outbox_submit_worker_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -8312,6 +8534,127 @@ async fn mark_benchmark_registry_outbox_status_handler(
         )
     })?;
     Ok(Json(updated))
+}
+
+async fn run_benchmark_registry_outbox_submit_worker(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceBenchmarkRegistryOutboxSubmitWorkerRequest,
+) -> anyhow::Result<TraceBenchmarkRegistryOutboxSubmitWorkerResponse> {
+    let purpose = normalized_export_purpose(
+        request.purpose.as_deref(),
+        "trace_commons_benchmark_registry_submit_worker",
+    );
+    let limit = request
+        .limit
+        .clamp(1, TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_MAX_LIMIT) as usize;
+    let items = read_benchmark_registry_outbox_items_for_admin(state, tenant).await?;
+    let pending_total = items
+        .iter()
+        .filter(|item| benchmark_registry_outbox_item_is_submit_candidate(item))
+        .count();
+    let candidates: Vec<_> = items
+        .into_iter()
+        .filter(benchmark_registry_outbox_item_is_submit_candidate)
+        .take(limit)
+        .collect();
+    let mut response = TraceBenchmarkRegistryOutboxSubmitWorkerResponse {
+        purpose,
+        dry_run: request.dry_run,
+        checked: candidates.len(),
+        submitted: 0,
+        failed: 0,
+        skipped: pending_total.saturating_sub(candidates.len()),
+        pending: pending_total,
+    };
+    if request.dry_run {
+        append_benchmark_registry_outbox_submit_audit(state, tenant, &response).await?;
+        return Ok(response);
+    }
+
+    let submitter = state
+        .benchmark_registry_submitter
+        .as_ref()
+        .context("benchmark registry outbox submitter is not configured")?
+        .clone();
+    for item in candidates {
+        let submit_request = benchmark_registry_submitter_request_from_outbox_item(&item);
+        match submitter.submit(submit_request).await {
+            Ok(submit_response) => {
+                let external_receipt_ref =
+                    normalize_external_registry_receipt_ref(&submit_response.external_receipt_ref)?;
+                let updated = update_benchmark_registry_outbox_item_status_with_db_mirror(
+                    state,
+                    tenant,
+                    item.benchmark_outbox_id,
+                    StorageTraceBenchmarkRegistryOutboxStatus::Submitted,
+                    Some(external_receipt_ref),
+                    None,
+                )
+                .await?
+                .with_context(|| {
+                    format!(
+                        "benchmark registry outbox item {} disappeared before submitted status update",
+                        item.benchmark_outbox_id
+                    )
+                })?;
+                anyhow::ensure!(
+                    updated.status == StorageTraceBenchmarkRegistryOutboxStatus::Submitted,
+                    "benchmark registry outbox item {} did not update to submitted status",
+                    item.benchmark_outbox_id
+                );
+                response.submitted += 1;
+            }
+            Err(error) => {
+                let last_error_hash = sha256_prefixed(&safe_worker_error(&error));
+                update_benchmark_registry_outbox_item_status_with_db_mirror(
+                    state,
+                    tenant,
+                    item.benchmark_outbox_id,
+                    StorageTraceBenchmarkRegistryOutboxStatus::Failed,
+                    None,
+                    Some(last_error_hash),
+                )
+                .await?
+                .with_context(|| {
+                    format!(
+                        "benchmark registry outbox item {} disappeared before failed status update",
+                        item.benchmark_outbox_id
+                    )
+                })?;
+                response.failed += 1;
+            }
+        }
+    }
+    response.pending = pending_total.saturating_sub(response.submitted);
+    append_benchmark_registry_outbox_submit_audit(state, tenant, &response).await?;
+    Ok(response)
+}
+
+fn benchmark_registry_outbox_item_is_submit_candidate(
+    item: &TraceBenchmarkRegistryOutboxItem,
+) -> bool {
+    matches!(
+        item.status,
+        StorageTraceBenchmarkRegistryOutboxStatus::Pending
+            | StorageTraceBenchmarkRegistryOutboxStatus::Failed
+    )
+}
+
+fn benchmark_registry_submitter_request_from_outbox_item(
+    item: &TraceBenchmarkRegistryOutboxItem,
+) -> TraceBenchmarkRegistrySubmitterRequest {
+    TraceBenchmarkRegistrySubmitterRequest {
+        tenant_storage_ref: item.tenant_storage_ref.clone(),
+        benchmark_outbox_id: item.benchmark_outbox_id,
+        conversion_id: item.conversion_id,
+        operation: item.operation,
+        registry_ref: item.registry_ref.clone(),
+        artifact_payload_hash: item.artifact_payload_hash.clone(),
+        source_submission_ids_hash: item.source_submission_ids_hash.clone(),
+        evaluator_ref: item.evaluator_ref.clone(),
+        evaluation_score: item.evaluation_score,
+    }
 }
 
 async fn run_near_credit_outbox_submit_worker(
@@ -8488,6 +8831,69 @@ async fn append_near_credit_outbox_submit_audit(
             tenant_id: tenant.tenant_id.clone(),
             submission_id: Uuid::nil(),
             kind: "near_credit_outbox_submit".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(tenant.role),
+            actor_principal_ref: Some(tenant.principal_ref.clone()),
+            reason: Some(format!(
+                "purpose={};dry_run={};checked={};submitted={};failed={};skipped={};pending={}",
+                response.purpose,
+                response.dry_run,
+                response.checked,
+                response.submitted,
+                response.failed,
+                response.skipped,
+                response.pending
+            )),
+            export_count: Some(response.checked),
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        },
+        StorageTraceAuditAction::Retain,
+        StorageTraceAuditSafeMetadata::Maintenance {
+            dry_run: response.dry_run,
+            action_counts,
+        },
+    )
+    .await
+}
+
+async fn append_benchmark_registry_outbox_submit_audit(
+    state: &AppState,
+    tenant: &TenantAuth,
+    response: &TraceBenchmarkRegistryOutboxSubmitWorkerResponse,
+) -> anyhow::Result<()> {
+    let mut action_counts = BTreeMap::new();
+    action_counts.insert(
+        "checked".to_string(),
+        response.checked.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "submitted".to_string(),
+        response.submitted.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "failed".to_string(),
+        response.failed.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "skipped".to_string(),
+        response.skipped.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "pending".to_string(),
+        response.pending.min(u32::MAX as usize) as u32,
+    );
+    append_audit_event_with_db_mirror(
+        state,
+        tenant,
+        TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "benchmark_registry_outbox_submit".to_string(),
             created_at: Utc::now(),
             status: None,
             actor_role: Some(tenant.role),
@@ -33009,6 +33415,8 @@ mod tests {
             artifact_store,
             near_credit_submitter: None,
             near_credit_submitter_timeout_ms: None,
+            benchmark_registry_submitter: None,
+            benchmark_registry_submitter_timeout_ms: None,
             ranking_calibration_max_age: None,
             ranking_min_confidence_threshold: DEFAULT_TRACE_RANKING_MIN_CONFIDENCE_THRESHOLD,
             ranking_max_average_absolute_error_micros:
@@ -35179,6 +35587,22 @@ mod tests {
             serde_json::json!(TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT)
         );
         assert_eq!(
+            value["benchmark_registry_submitter_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["benchmark_registry_submitter_timeout_ms"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            value["benchmark_registry_outbox_submit_default_limit"],
+            serde_json::json!(TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_DEFAULT_LIMIT)
+        );
+        assert_eq!(
+            value["benchmark_registry_outbox_submit_max_limit"],
+            serde_json::json!(TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_MAX_LIMIT)
+        );
+        assert_eq!(
             value["credit_cycle_worker_step_count"],
             serde_json::json!(TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT)
         );
@@ -35237,6 +35661,8 @@ mod tests {
             "signed_token_revoked_jtis",
             "near_credit_submitter_url",
             "near_credit_submitter_bearer_token",
+            "benchmark_registry_submitter_url",
+            "benchmark_registry_submitter_bearer_token",
         ] {
             assert!(
                 !object.contains_key(forbidden_key),
@@ -35320,6 +35746,59 @@ mod tests {
         let body_text = std::str::from_utf8(&body).expect("body is utf8");
         assert!(!body_text.contains(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL));
         assert!(!body_text.contains(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN));
+    }
+
+    #[tokio::test]
+    async fn admin_config_status_reports_benchmark_registry_submitter_readiness_without_endpoint_secrets()
+     {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).benchmark_registry_submitter =
+            Some(Arc::new(FakeBenchmarkRegistrySubmitter::default()));
+        Arc::make_mut(&mut state).benchmark_registry_submitter_timeout_ms = Some(2_345);
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/config-status")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("admin response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("status json parses");
+        assert_eq!(
+            value["benchmark_registry_submitter_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["benchmark_registry_submitter_timeout_ms"],
+            serde_json::json!(2_345)
+        );
+        assert_eq!(
+            value["benchmark_registry_outbox_submit_default_limit"],
+            serde_json::json!(TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_DEFAULT_LIMIT)
+        );
+        assert_eq!(
+            value["benchmark_registry_outbox_submit_max_limit"],
+            serde_json::json!(TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_MAX_LIMIT)
+        );
+
+        let object = value.as_object().expect("status response is object");
+        assert!(!object.contains_key("benchmark_registry_submitter_url"));
+        assert!(!object.contains_key("benchmark_registry_submitter_bearer_token"));
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains(TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL));
+        assert!(!body_text.contains(TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN));
     }
 
     #[tokio::test]
@@ -39303,6 +39782,8 @@ mod tests {
             artifact_store: None,
             near_credit_submitter: None,
             near_credit_submitter_timeout_ms: None,
+            benchmark_registry_submitter: None,
+            benchmark_registry_submitter_timeout_ms: None,
             ranking_calibration_max_age: None,
             ranking_min_confidence_threshold: DEFAULT_TRACE_RANKING_MIN_CONFIDENCE_THRESHOLD,
             ranking_max_average_absolute_error_micros:
@@ -42056,6 +42537,214 @@ mod tests {
                 near_transaction_hash: "near-worker-tx-hash-1".to_string(),
             })
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeBenchmarkRegistrySubmitter {
+        calls: Arc<std::sync::Mutex<Vec<TraceBenchmarkRegistrySubmitterRequest>>>,
+        failure: Option<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl TraceBenchmarkRegistrySubmitter for FakeBenchmarkRegistrySubmitter {
+        async fn submit(
+            &self,
+            request: TraceBenchmarkRegistrySubmitterRequest,
+        ) -> anyhow::Result<TraceBenchmarkRegistrySubmitterResponse> {
+            if let Some(failure) = &self.failure {
+                anyhow::bail!("{failure}");
+            }
+            self.calls
+                .lock()
+                .expect("fake benchmark registry submitter calls lock")
+                .push(request);
+            Ok(TraceBenchmarkRegistrySubmitterResponse {
+                external_receipt_ref: "external-registry:receipt:worker-1".to_string(),
+            })
+        }
+    }
+
+    fn pending_benchmark_registry_outbox_item(
+        benchmark_outbox_id: Uuid,
+    ) -> TraceBenchmarkRegistryOutboxItem {
+        TraceBenchmarkRegistryOutboxItem {
+            benchmark_outbox_id,
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            conversion_id: Uuid::new_v4(),
+            operation: StorageTraceBenchmarkRegistryOutboxOperation::Publish,
+            registry_ref: "benchmark-registry:worker-submit".to_string(),
+            artifact_payload_hash: "sha256:benchmark-registry-worker-artifact".to_string(),
+            source_submission_ids_hash: "sha256:benchmark-registry-worker-sources".to_string(),
+            evaluator_ref: Some(principal_storage_ref("benchmark-worker-token-a")),
+            evaluation_score: Some(0.97),
+            status: StorageTraceBenchmarkRegistryOutboxStatus::Pending,
+            created_at: Utc::now(),
+            submitted_at: None,
+            external_receipt_ref: None,
+            last_error_hash: None,
+            confirmed_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn benchmark_registry_outbox_submit_worker_sends_pending_items_and_marks_submitted() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let fake_submitter = FakeBenchmarkRegistrySubmitter::default();
+        let submitted_calls = fake_submitter.calls.clone();
+        Arc::make_mut(&mut state).benchmark_registry_submitter = Some(Arc::new(fake_submitter));
+
+        let benchmark_outbox_id = Uuid::new_v4();
+        let item = pending_benchmark_registry_outbox_item(benchmark_outbox_id);
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &item)
+            .expect("benchmark registry outbox file writes");
+
+        let Json(response) = benchmark_registry_outbox_submit_worker_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxSubmitWorkerRequest {
+                purpose: Some("submit_benchmark_registry_items".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("benchmark worker submits registry outbox item");
+        assert_eq!(response.checked, 1);
+        assert_eq!(response.submitted, 1);
+        assert_eq!(response.failed, 0);
+        assert_eq!(response.pending, 0);
+
+        let calls = submitted_calls
+            .lock()
+            .expect("fake benchmark registry submitter calls lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tenant_storage_ref, tenant_storage_ref("tenant-a"));
+        assert_eq!(calls[0].benchmark_outbox_id, benchmark_outbox_id);
+        assert_eq!(
+            calls[0].operation,
+            StorageTraceBenchmarkRegistryOutboxOperation::Publish
+        );
+        assert_eq!(calls[0].registry_ref, "benchmark-registry:worker-submit");
+        assert_eq!(
+            calls[0].artifact_payload_hash,
+            "sha256:benchmark-registry-worker-artifact"
+        );
+        assert_eq!(
+            calls[0].source_submission_ids_hash,
+            "sha256:benchmark-registry-worker-sources"
+        );
+        let call_json = serde_json::to_string(&calls[0]).expect("call serializes");
+        assert!(!call_json.contains("token-a"));
+        assert!(!call_json.contains("raw benchmark summary"));
+
+        let outbox = read_all_benchmark_registry_outbox_items(temp.path(), "tenant-a")
+            .expect("benchmark registry outbox reads");
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(
+            outbox[0].status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Submitted
+        );
+        assert_eq!(
+            outbox[0].external_receipt_ref.as_deref(),
+            Some("external-registry:receipt:worker-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn benchmark_registry_outbox_submit_worker_keeps_failed_items_retryable() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).benchmark_registry_submitter =
+            Some(Arc::new(FakeBenchmarkRegistrySubmitter {
+                calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+                failure: Some("temporary registry outage".to_string()),
+            }));
+        let benchmark_outbox_id = Uuid::new_v4();
+        let item = pending_benchmark_registry_outbox_item(benchmark_outbox_id);
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &item)
+            .expect("benchmark registry outbox file writes");
+
+        let Json(failed) = benchmark_registry_outbox_submit_worker_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxSubmitWorkerRequest {
+                purpose: Some("submit_benchmark_registry_retry".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("registry failure is recorded, not surfaced as a worker crash");
+        assert_eq!(failed.checked, 1);
+        assert_eq!(failed.submitted, 0);
+        assert_eq!(failed.failed, 1);
+        assert_eq!(failed.pending, 1);
+        let failed_outbox = read_all_benchmark_registry_outbox_items(temp.path(), "tenant-a")
+            .expect("benchmark registry outbox reads");
+        assert_eq!(
+            failed_outbox[0].status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Failed
+        );
+        assert!(failed_outbox[0].last_error_hash.is_some());
+
+        Arc::make_mut(&mut state).benchmark_registry_submitter =
+            Some(Arc::new(FakeBenchmarkRegistrySubmitter::default()));
+        let Json(submitted) = benchmark_registry_outbox_submit_worker_handler(
+            State(state),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxSubmitWorkerRequest {
+                purpose: Some("submit_benchmark_registry_retry".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("failed item is retried by the submit worker");
+        assert_eq!(submitted.checked, 1);
+        assert_eq!(submitted.submitted, 1);
+        assert_eq!(submitted.pending, 0);
+    }
+
+    #[tokio::test]
+    async fn benchmark_registry_outbox_submit_worker_requires_configured_submitter_for_live_run() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        upsert_benchmark_registry_outbox_item(
+            temp.path(),
+            "tenant-a",
+            &pending_benchmark_registry_outbox_item(Uuid::new_v4()),
+        )
+        .expect("benchmark registry outbox file writes");
+
+        let error = benchmark_registry_outbox_submit_worker_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxSubmitWorkerRequest {
+                purpose: Some("registry_submitter_config_gate".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect_err("live submit worker requires configured registry submitter");
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+
+        let Json(dry_run) = benchmark_registry_outbox_submit_worker_handler(
+            State(state),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxSubmitWorkerRequest {
+                purpose: Some("registry_submitter_config_gate_dry_run".to_string()),
+                dry_run: true,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("dry-run does not require configured registry submitter");
+        assert_eq!(dry_run.checked, 1);
+        assert_eq!(dry_run.submitted, 0);
+        assert_eq!(dry_run.pending, 1);
     }
 
     #[tokio::test]

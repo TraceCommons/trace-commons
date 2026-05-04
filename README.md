@@ -33,10 +33,11 @@ PostgreSQL-backed ranking evidence reads/writes behind the same DB mirror
 cutover gates.
 Benchmark publication now has the same server-side control-plane shape:
 passed benchmark artifacts enqueue hash-only registry outbox rows, workers can
-mark external submit/confirm/fail status with receipt refs and hashed errors,
-operators can inspect the outbox through the admin API, and maintenance
-backfill/reconciliation covers registry outbox drift before external registry
-adapter readiness is promoted.
+submit those rows to a configured external registry adapter, mark external
+submit/confirm/fail status with receipt refs and hashed errors, operators can
+inspect the outbox through the admin API, and maintenance backfill/reconciliation
+covers registry outbox drift before external registry adapter readiness is
+promoted.
 
 ## Trace Credits
 
@@ -63,6 +64,11 @@ containing ids, registry refs, artifact/source hashes, evaluator refs, scores,
 and lifecycle status only. The operational summary counts pending, submitted,
 confirmed, and failed registry outbox work, and a published artifact remains in
 the external-registry-adapter gap until a confirmed outbox receipt is recorded.
+Configure `TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL` to let benchmark
+workers submit pending or failed rows to an operator-owned registry adapter;
+optional bearer auth and timeout are controlled by
+`TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN` and
+`TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_TIMEOUT_MS`.
 
 The NEAR path is intentionally an outbox of deterministic method-call payloads
 for a non-transferable receipt contract. The payload builder only emits
