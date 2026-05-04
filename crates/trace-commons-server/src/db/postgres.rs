@@ -35,6 +35,7 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_credit_settlement_batches",
     "trace_credit_holds",
     "trace_near_credit_outbox",
+    "trace_benchmark_registry_outbox",
     "trace_ranking_model_versions",
     "trace_ranking_features",
     "trace_ranking_predictions",
