@@ -11561,6 +11561,7 @@ async fn ensure_ranking_promotion_current_evidence_matches_calibration(
     let labels = read_ranking_labels_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
+    let thresholds = effective_ranking_calibration_thresholds(state, Some(run));
     let current = ranking_calibration_run_record(
         tenant,
         RankingCalibrationRunInputs {
@@ -11570,10 +11571,10 @@ async fn ensure_ranking_promotion_current_evidence_matches_calibration(
             policy_version: model.policy_version.clone(),
             feature_schema_version: model.feature_schema_version.clone(),
             evaluation_dataset_hash: model.calibration_dataset_hash.clone(),
-            min_label_count: run.min_label_count,
-            min_label_source_count: run.min_label_source_count,
-            confidence_threshold: run.confidence_threshold,
-            max_average_absolute_error_micros: run.max_average_absolute_error_micros,
+            min_label_count: thresholds.min_label_count,
+            min_label_source_count: thresholds.min_label_source_count,
+            confidence_threshold: thresholds.confidence_threshold,
+            max_average_absolute_error_micros: thresholds.max_average_absolute_error_micros,
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
         },
@@ -12290,7 +12291,9 @@ async fn append_ranking_prediction_credit_for_record(
         RankingCalibrationGateContext::PredictionCredit,
     )
     .await?;
-    if prediction.confidence < calibration_run.confidence_threshold {
+    let calibration_thresholds =
+        effective_ranking_calibration_thresholds(state, Some(&calibration_run));
+    if prediction.confidence < calibration_thresholds.confidence_threshold {
         return Err(api_error(
             StatusCode::CONFLICT,
             "ranking prediction credit requires prediction confidence to meet the calibration threshold",
@@ -14394,10 +14397,8 @@ fn ranking_model_risk_record(
 ) -> TraceRankingModelRiskRecord {
     let latest_calibration =
         latest_calibration_run_for_model_target(model, target_use, evidence.calibration_runs);
-    let confidence_threshold = latest_calibration
-        .map_or(state.ranking_min_confidence_threshold, |run| {
-            run.confidence_threshold
-        });
+    let calibration_thresholds =
+        effective_ranking_calibration_thresholds(state, latest_calibration);
     let current = ranking_calibration_run_record(
         tenant,
         RankingCalibrationRunInputs {
@@ -14407,17 +14408,11 @@ fn ranking_model_risk_record(
             policy_version: model.policy_version.clone(),
             feature_schema_version: model.feature_schema_version.clone(),
             evaluation_dataset_hash: model.calibration_dataset_hash.clone(),
-            min_label_count: latest_calibration
-                .map_or(state.ranking_min_label_count, |run| run.min_label_count),
-            min_label_source_count: latest_calibration
-                .map_or(state.ranking_min_label_source_count, |run| {
-                    run.min_label_source_count
-                }),
-            confidence_threshold,
-            max_average_absolute_error_micros: latest_calibration
-                .map_or(state.ranking_max_average_absolute_error_micros, |run| {
-                    run.max_average_absolute_error_micros
-                }),
+            min_label_count: calibration_thresholds.min_label_count,
+            min_label_source_count: calibration_thresholds.min_label_source_count,
+            confidence_threshold: calibration_thresholds.confidence_threshold,
+            max_average_absolute_error_micros: calibration_thresholds
+                .max_average_absolute_error_micros,
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
         },
@@ -14449,7 +14444,7 @@ fn ranking_model_risk_record(
             .filter(|prediction| {
                 prediction.created_at > run.created_at
                     && ranking_prediction_matches_model_target(prediction, model, target_use)
-                    && prediction.confidence < confidence_threshold
+                    && prediction.confidence < calibration_thresholds.confidence_threshold
             })
             .count()
     });
@@ -15105,6 +15100,41 @@ impl RankingCalibrationGateContext {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct EffectiveRankingCalibrationThresholds {
+    min_label_count: usize,
+    min_label_source_count: usize,
+    confidence_threshold: f32,
+    max_average_absolute_error_micros: i64,
+}
+
+fn effective_ranking_calibration_thresholds(
+    state: &AppState,
+    run: Option<&TraceRankingCalibrationRunRecord>,
+) -> EffectiveRankingCalibrationThresholds {
+    EffectiveRankingCalibrationThresholds {
+        min_label_count: run.map_or(state.ranking_min_label_count, |run| {
+            run.min_label_count.max(state.ranking_min_label_count)
+        }),
+        min_label_source_count: run.map_or(state.ranking_min_label_source_count, |run| {
+            run.min_label_source_count
+                .max(state.ranking_min_label_source_count)
+        }),
+        confidence_threshold: run
+            .map_or(state.ranking_min_confidence_threshold, |run| {
+                run.confidence_threshold
+            })
+            .max(state.ranking_min_confidence_threshold),
+        max_average_absolute_error_micros: run.map_or(
+            state.ranking_max_average_absolute_error_micros,
+            |run| {
+                run.max_average_absolute_error_micros
+                    .min(state.ranking_max_average_absolute_error_micros)
+            },
+        ),
+    }
+}
+
 const RANKING_PREDICTION_EXTERNAL_REF_PREFIX: &str = "ranking_prediction:";
 
 fn ranking_prediction_external_ref(ranking_prediction_id: Uuid) -> String {
@@ -15268,13 +15298,14 @@ async fn ranking_settlement_calibration_gate(
         policy_version,
     ))
     .unwrap_or_default();
+    let calibration_thresholds = effective_ranking_calibration_thresholds(state, Some(&run));
     Ok(Some(RankingSettlementCalibrationGate {
         model_version: run.model_version,
         target_use: run.target_use,
         calibration_run_id: run.calibration_run_id,
         report_hash: run.report_hash,
         joined_evidence_hash: run.joined_evidence_hash,
-        confidence_threshold: run.confidence_threshold,
+        confidence_threshold: calibration_thresholds.confidence_threshold,
         model_risk_codes,
     }))
 }
@@ -49236,6 +49267,58 @@ mod tests {
         .await
         .expect("utility worker can write ranking label");
         (candidate, prediction)
+    }
+
+    #[tokio::test]
+    async fn ranking_model_promotion_rechecks_current_server_calibration_floors() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let (candidate, _) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-floor-drift-v1").await;
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist calibration under old floors");
+        assert!(calibration.promotable);
+        assert_eq!(calibration.min_label_count, 1);
+        assert_eq!(calibration.joined_label_prediction_count, 1);
+
+        Arc::make_mut(&mut state).ranking_min_label_count = 2;
+        let error = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "raised server calibration floor should block old evidence".to_string(),
+            }),
+        )
+        .await
+        .expect_err("promotion rechecks current server-owned calibration floors");
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(
+            error.1.0.error,
+            "ranking model promotion requires current evidence to remain promotable"
+        );
+
+        let model_versions =
+            read_all_ranking_model_versions(temp.path(), "tenant-a").expect("model versions read");
+        let latest =
+            latest_ranking_model_version(&model_versions, &candidate.model_version).unwrap();
+        assert_eq!(latest.status, StorageTraceRankingModelStatus::Candidate);
     }
 
     async fn seed_pairwise_ranking_prediction_source(
