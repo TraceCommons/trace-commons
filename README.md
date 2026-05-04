@@ -213,10 +213,11 @@ and settlement re-check the same active-model risk codes, so manually appended
 prediction-bound ranking credits cannot settle while current evidence is still
 at risk. Admins can inspect candidate and active model/target backtests through
 `/v1/admin/ranking/model-backtest-report`, which combines current calibration
-metrics, pairwise preference ordering checks, latest calibration hashes, and the
-same machine-readable reason codes before a model is allowed to influence
-credit; model promotion now rejects candidates whose current backtest has any
-blocking reason code. Process-evaluation workers can also attach an idempotent
+metrics, pairwise preference ordering checks, label-adjudication blockers,
+latest calibration hashes, and the same machine-readable reason codes before a
+model is allowed to influence credit; model promotion now rejects candidates
+whose current backtest has any blocking reason code. Process-evaluation workers
+can also attach an idempotent
 hash-only ranking label for ranking-allowed traces, letting trusted rubric
 evaluators feed calibration without storing raw evaluator notes in ranking
 metadata. Settlement

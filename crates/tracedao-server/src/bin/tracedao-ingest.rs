@@ -15723,6 +15723,22 @@ fn ranking_adjudication_report(
     }
 }
 
+fn ranking_adjudication_issue_count_for_target(
+    report: &TraceRankingAdjudicationReport,
+    target_use: TraceAllowedUse,
+) -> usize {
+    report
+        .absolute_label_issues
+        .iter()
+        .filter(|issue| issue.target_use == target_use)
+        .count()
+        + report
+            .preference_pair_issues
+            .iter()
+            .filter(|issue| issue.target_use == target_use)
+            .count()
+}
+
 fn ranking_calibration_report(
     tenant_id: &str,
     model_version_count: usize,
@@ -16362,6 +16378,11 @@ fn ranking_model_risk_record(
         evidence.predictions,
         evidence.preference_labels,
     );
+    let adjudication = ranking_adjudication_report(
+        &tenant.tenant_id,
+        evidence.labels,
+        evidence.preference_labels,
+    );
 
     let joined_evidence_changed = latest_calibration
         .is_some_and(|run| run.joined_evidence_hash != current.joined_evidence_hash);
@@ -16401,6 +16422,9 @@ fn ranking_model_risk_record(
     }
     if ranking_model_training_calibration_datasets_overlap(model) {
         risk_codes.push("training_calibration_dataset_overlap".to_string());
+    }
+    if ranking_adjudication_issue_count_for_target(&adjudication, target_use) > 0 {
+        risk_codes.push(RANKING_ADJUDICATION_ISSUES_REASON.to_string());
     }
     if let Some(reason) = ranking_calibration_dataset_gate_reason(
         evidence.calibration_datasets,
@@ -29272,6 +29296,7 @@ const RANKING_CALIBRATION_DATASET_IMMUTABLE_MANIFEST_MESSAGE: &str =
     "ranking calibration dataset manifest is immutable for this target use and policy";
 const RANKING_CALIBRATION_DATASET_MANIFEST_CONFLICT_REASON: &str =
     "calibration_dataset_manifest_conflict";
+const RANKING_ADJUDICATION_ISSUES_REASON: &str = "ranking_adjudication_issues_present";
 
 #[derive(Debug)]
 struct RankingCalibrationDatasetReconciliationRead {
@@ -56549,6 +56574,157 @@ mod tests {
         let report_json = serde_json::to_string(&report).expect("report serializes");
         assert!(!report_json.contains("reviewer-private-backtest-pairwise-reversal"));
         assert!(!report_json.contains("trace body"));
+    }
+
+    #[tokio::test]
+    async fn ranking_model_backtest_report_flags_adjudication_issues_for_candidates() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let (candidate, calibrated_prediction) = seed_credit_cycle_ready_candidate(
+            state.clone(),
+            "trace-ranker-backtest-adjudication-v1",
+        )
+        .await;
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration");
+        assert!(calibration.promotable);
+
+        let _ = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: calibrated_prediction.submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Rejected,
+                utility_delta_micros: 1_250_000,
+                evidence_hash: "sha256:backtest-adjudication-reviewer-conflict".to_string(),
+                external_ref: "reviewer-private-backtest-adjudication-conflict".to_string(),
+            }),
+        )
+        .await
+        .expect("reviewer can write conflicting adjudication label");
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/ranking/model-backtest-report")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("backtest response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let report: serde_json::Value = serde_json::from_slice(&body).expect("report parses");
+
+        assert_eq!(report["failing_model_target_count"], serde_json::json!(1));
+        assert_eq!(
+            report["reason_code_counts"]["ranking_adjudication_issues_present"],
+            serde_json::json!(1)
+        );
+        let model = &report["models"][0];
+        assert!(
+            model["reason_codes"]
+                .as_array()
+                .expect("reason codes array")
+                .contains(&serde_json::json!("ranking_adjudication_issues_present"))
+        );
+        let report_text = serde_json::to_string(&report).expect("report serializes");
+        assert!(!report_text.contains("reviewer-private-backtest-adjudication"));
+    }
+
+    #[tokio::test]
+    async fn ranking_model_promotion_rejects_candidate_with_adjudication_issues() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let (candidate, calibrated_prediction) = seed_credit_cycle_ready_candidate(
+            state.clone(),
+            "trace-ranker-promotion-adjudication-v1",
+        )
+        .await;
+        let _ = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: calibrated_prediction.submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Rejected,
+                utility_delta_micros: 1_250_000,
+                evidence_hash: "sha256:promotion-adjudication-reviewer-conflict".to_string(),
+                external_ref: "reviewer-private-promotion-adjudication-conflict".to_string(),
+            }),
+        )
+        .await
+        .expect("reviewer can write conflicting adjudication label");
+
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration");
+        assert!(calibration.promotable);
+
+        let error = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "adjudication issue should block promotion".to_string(),
+            }),
+        )
+        .await
+        .expect_err("adjudication issues block model promotion");
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert!(error.1.0.error.contains(RANKING_ADJUDICATION_ISSUES_REASON));
+
+        let model_versions =
+            ranking_model_versions_handler(State(state), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list model versions")
+                .0;
+        assert_eq!(
+            latest_ranking_model_version(&model_versions, &candidate.model_version)
+                .expect("candidate exists")
+                .status,
+            StorageTraceRankingModelStatus::Candidate
+        );
     }
 
     #[tokio::test]

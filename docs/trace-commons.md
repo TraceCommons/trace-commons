@@ -687,8 +687,9 @@ snapshot with the effective server-owned thresholds, error metrics,
 low-confidence prediction count, promotability flag, and reason codes. Operators
 can compare these fields before activation without exposing trace bodies or raw
 frontier-lab references. The promotion gate also requires the current
-candidate/target backtest to pass, so pairwise evidence or ordering failures
-from `/v1/admin/ranking/model-backtest-report` block activation.
+candidate/target backtest to pass, so pairwise evidence, ordering failures, or
+unresolved label-adjudication issues from
+`/v1/admin/ranking/model-backtest-report` block activation.
 
 `GET /v1/admin/ranking/dataset-readiness-report` groups the latest ranking model
 manifests by registered holdout calibration dataset hash. Each dataset row
@@ -720,9 +721,9 @@ appended with only the run id, run kind, recovered status, and reason hash,
 fresh active runs are rejected, and the recovered row no longer contributes to
 the stale-run promotion blocker.
 
-`GET /v1/admin/ranking/model-backtest-report` recomputes the same current calibration and pairwise checks for latest candidate and active model/target-use pairs. Each row reports current joined-evidence hashes, latest calibration run/report hashes, joined label counts, aggregate and per-source error metrics, low-confidence counts, pairwise evidence and accuracy, pass/fail status, and machine-readable reason codes so operators can evaluate a candidate before promotion or credit issuance without exposing trace bodies or raw lab references.
+`GET /v1/admin/ranking/model-backtest-report` recomputes the same current calibration, pairwise, and label-adjudication checks for latest candidate and active model/target-use pairs. Each row reports current joined-evidence hashes, latest calibration run/report hashes, joined label counts, aggregate and per-source error metrics, low-confidence counts, pairwise evidence and accuracy, pass/fail status, and machine-readable reason codes so operators can evaluate a candidate before promotion or credit issuance without exposing trace bodies or raw lab references.
 
-`GET /v1/admin/ranking/model-risk-report` recomputes the current joined-evidence hash for each active model/target-use pair and reports post-calibration prediction/label counts, current joined-label source diversity, current calibration thresholds, current aggregate/per-label-source error metrics, pairwise preference evidence counts, pairwise policy thresholds, pairwise ordering accuracy, low-confidence fresh predictions, stale or non-promotable calibration status, training/calibration dataset overlap, evidence-hash drift, aggregate risk-code counts, and per-model machine-readable risk codes without exposing trace bodies or raw lab references.
+`GET /v1/admin/ranking/model-risk-report` recomputes the current joined-evidence hash for each active model/target-use pair and reports post-calibration prediction/label counts, current joined-label source diversity, current calibration thresholds, current aggregate/per-label-source error metrics, pairwise preference evidence counts, pairwise policy thresholds, pairwise ordering accuracy, unresolved label-adjudication blockers, low-confidence fresh predictions, stale or non-promotable calibration status, training/calibration dataset overlap, evidence-hash drift, aggregate risk-code counts, and per-model machine-readable risk codes without exposing trace bodies or raw lab references.
 
 `GET /v1/admin/ranking/credit-readiness-report` lists pending positive `ranking_utility` credit events that have not already settled and explains whether each can settle under the referenced active-model prediction. Blocked rows include machine-readable reasons such as missing prediction refs, missing or inactive models, missing/stale/non-promotable/under-diverse calibration, score mismatches, held credit accounts, low-confidence predictions, and uncleared active-model risk codes such as current evidence drift, plus the calibration run/report/joined-evidence hashes when available.
 
