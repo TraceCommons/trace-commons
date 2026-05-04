@@ -92,15 +92,21 @@ calls, rejects malformed NEAR account ids, and rejects any other NEAR credit
 method. Configure
 `TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL` to let the scoped submit worker hand
 pending or failed-retry calls to an operator-owned NEAR relayer; the server then
-records the public transaction hash or a hashed failure. Workers can still
-manually mark items submitted, confirmed, or failed for fallback operations. The
-server ledger remains authoritative; NEAR payloads contain batch ids, account
-hashes, source-list hashes, policy versions, amounts, and issuer-signature
-hashes, never trace bodies or raw contributor identity.
+records the public transaction hash or a hashed failure. Configure
+`TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL` to let the scoped confirm worker
+poll submitted transactions through an operator-owned confirmer and move rows to
+confirmed or failed status. Workers can still manually mark items submitted,
+confirmed, or failed for fallback operations. The server ledger remains
+authoritative; NEAR payloads contain batch ids, account hashes, source-list
+hashes, policy versions, amounts, and issuer-signature hashes, never trace
+bodies or raw contributor identity. Confirmation requests stay hash-only around
+the original call payload.
 `GET /v1/admin/config-status` exposes only safe NEAR readiness fields for this
 path: whether a submitter is configured, the configured submit timeout, outbox
-submit bounds, and the credit-cycle step count. It does not expose the relayer
-URL, bearer token, hosts, or contributor identity.
+submit bounds, whether a confirmer is configured, the configured confirmation
+timeout, outbox confirmation bounds, and the credit-cycle step count. It does
+not expose the relayer/confirmer URL, bearer token, hosts, or contributor
+identity.
 
 Ranking evidence is stored separately from settlement. Workers can register
 feature hashes, model predictions, lab/reviewer labels, and calibration runs

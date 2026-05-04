@@ -230,6 +230,12 @@ const TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN: &str =
     "TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN";
 const TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS: &str =
     "TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS";
+const TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL: &str =
+    "TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL";
+const TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_BEARER_TOKEN: &str =
+    "TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_BEARER_TOKEN";
+const TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_TIMEOUT_MS: &str =
+    "TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_TIMEOUT_MS";
 const TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL: &str =
     "TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL";
 const TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN: &str =
@@ -262,6 +268,7 @@ const TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS: &str =
     "TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS";
 const DEFAULT_EDDSA_KEYSET_URL_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_NEAR_CREDIT_CONFIRMATION_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_BENCHMARK_REGISTRY_SUBMITTER_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_BENCHMARK_EVALUATOR_TIMEOUT_MS: u64 = 30_000;
@@ -269,6 +276,8 @@ const DEFAULT_EDDSA_KEYSET_REFRESH_INTERVAL_SECONDS: u64 = 300;
 const MAX_EDDSA_KEYSET_URL_BYTES: usize = 256 * 1024;
 const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT: u32 = 100;
 const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT: u32 = 500;
+const TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_DEFAULT_LIMIT: u32 = 100;
+const TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_MAX_LIMIT: u32 = 500;
 const TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_DEFAULT_LIMIT: u32 = 100;
 const TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_MAX_LIMIT: u32 = 500;
 const TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_DEFAULT_LIMIT: u32 = 100;
@@ -366,6 +375,8 @@ struct AppState {
     artifact_store: Option<ConfiguredTraceArtifactStore>,
     near_credit_submitter: Option<Arc<dyn TraceNearCreditSubmitter>>,
     near_credit_submitter_timeout_ms: Option<u64>,
+    near_credit_confirmer: Option<Arc<dyn TraceNearCreditConfirmer>>,
+    near_credit_confirmer_timeout_ms: Option<u64>,
     benchmark_registry_submitter: Option<Arc<dyn TraceBenchmarkRegistrySubmitter>>,
     benchmark_registry_submitter_timeout_ms: Option<u64>,
     benchmark_registry_confirmer: Option<Arc<dyn TraceBenchmarkRegistryConfirmer>>,
@@ -1502,6 +1513,11 @@ impl AppState {
             .as_ref()
             .map(|config| config.timeout_ms);
         let near_credit_submitter = near_credit_submitter_config.map(|config| config.submitter);
+        let near_credit_confirmer_config = trace_near_credit_confirmer_from_env()?;
+        let near_credit_confirmer_timeout_ms = near_credit_confirmer_config
+            .as_ref()
+            .map(|config| config.timeout_ms);
+        let near_credit_confirmer = near_credit_confirmer_config.map(|config| config.confirmer);
         let benchmark_registry_submitter_config = trace_benchmark_registry_submitter_from_env()?;
         let benchmark_registry_submitter_timeout_ms = benchmark_registry_submitter_config
             .as_ref()
@@ -1671,6 +1687,8 @@ impl AppState {
             artifact_store,
             near_credit_submitter,
             near_credit_submitter_timeout_ms,
+            near_credit_confirmer,
+            near_credit_confirmer_timeout_ms,
             benchmark_registry_submitter,
             benchmark_registry_submitter_timeout_ms,
             benchmark_registry_confirmer,
@@ -1933,6 +1951,11 @@ struct ConfiguredTraceNearCreditSubmitter {
     timeout_ms: u64,
 }
 
+struct ConfiguredTraceNearCreditConfirmer {
+    confirmer: Arc<dyn TraceNearCreditConfirmer>,
+    timeout_ms: u64,
+}
+
 struct ConfiguredTraceBenchmarkRegistrySubmitter {
     submitter: Arc<dyn TraceBenchmarkRegistrySubmitter>,
     timeout_ms: u64,
@@ -1971,6 +1994,36 @@ fn trace_near_credit_submitter_from_env()
             url,
             bearer_token: optional_trimmed_env(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN)?
                 .map(SecretString::from),
+        }),
+        timeout_ms,
+    }))
+}
+
+fn trace_near_credit_confirmer_from_env()
+-> anyhow::Result<Option<ConfiguredTraceNearCreditConfirmer>> {
+    let Some(url) = optional_trimmed_env(TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL)? else {
+        return Ok(None);
+    };
+    let parsed = reqwest::Url::parse(&url)
+        .with_context(|| format!("invalid {TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL}"))?;
+    validate_trace_near_credit_confirmation_url(&parsed)?;
+    let timeout = parse_trace_near_credit_confirmation_timeout_from_env()?;
+    let timeout_ms = timeout.as_millis() as u64;
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout.min(StdDuration::from_secs(3)))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("trace-commons-near-credit-confirmer/0.1")
+        .build()
+        .context("failed to build NEAR credit confirmer HTTP client")?;
+    Ok(Some(ConfiguredTraceNearCreditConfirmer {
+        confirmer: Arc::new(HttpTraceNearCreditConfirmer {
+            client,
+            url,
+            bearer_token: optional_trimmed_env(
+                TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_BEARER_TOKEN,
+            )?
+            .map(SecretString::from),
         }),
         timeout_ms,
     }))
@@ -2089,6 +2142,31 @@ fn validate_trace_near_credit_submitter_url(url: &reqwest::Url) -> anyhow::Resul
     Ok(())
 }
 
+fn validate_trace_near_credit_confirmation_url(url: &reqwest::Url) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        matches!(url.scheme(), "https" | "http"),
+        "{TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL} must use http or https"
+    );
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "{TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL} must not include embedded credentials"
+    );
+    anyhow::ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "{TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL} must not include query strings or fragments"
+    );
+    let host = url.host_str().map(str::to_ascii_lowercase).ok_or_else(|| {
+        anyhow::anyhow!("{TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL} requires a host")
+    })?;
+    if url.scheme() == "http" {
+        anyhow::ensure!(
+            is_loopback_or_localhost_host(&host),
+            "{TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL} may use http only for localhost loopback confirmers"
+        );
+    }
+    Ok(())
+}
+
 fn validate_trace_benchmark_registry_submitter_url(url: &reqwest::Url) -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(url.scheme(), "https" | "http"),
@@ -2187,6 +2265,21 @@ fn parse_trace_near_credit_submitter_timeout_from_env() -> anyhow::Result<StdDur
     anyhow::ensure!(
         (1..=30_000).contains(&timeout_ms),
         "{TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS} must be between 1 and 30000"
+    );
+    Ok(StdDuration::from_millis(timeout_ms))
+}
+
+fn parse_trace_near_credit_confirmation_timeout_from_env() -> anyhow::Result<StdDuration> {
+    let timeout_ms = match optional_trimmed_env(TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_TIMEOUT_MS)?
+    {
+        Some(configured) => configured.parse::<u64>().with_context(|| {
+            format!("{TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_TIMEOUT_MS} must be milliseconds")
+        })?,
+        None => DEFAULT_NEAR_CREDIT_CONFIRMATION_TIMEOUT_MS,
+    };
+    anyhow::ensure!(
+        (1..=30_000).contains(&timeout_ms),
+        "{TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_TIMEOUT_MS} must be between 1 and 30000"
     );
     Ok(StdDuration::from_millis(timeout_ms))
 }
@@ -2557,6 +2650,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/workers/near-credit-outbox/submit",
             post(near_credit_outbox_submit_worker_handler),
+        )
+        .route(
+            "/v1/workers/near-credit-outbox/confirm",
+            post(near_credit_outbox_confirm_worker_handler),
         )
         .route(
             "/v1/workers/near-credit-outbox/mark-status",
@@ -4250,6 +4347,10 @@ struct TraceCommonsConfigStatusResponse {
     near_credit_submitter_timeout_ms: Option<u64>,
     near_credit_outbox_submit_default_limit: u32,
     near_credit_outbox_submit_max_limit: u32,
+    near_credit_confirmer_configured: bool,
+    near_credit_confirmer_timeout_ms: Option<u64>,
+    near_credit_outbox_confirm_default_limit: u32,
+    near_credit_outbox_confirm_max_limit: u32,
     benchmark_registry_submitter_configured: bool,
     benchmark_registry_submitter_timeout_ms: Option<u64>,
     benchmark_registry_outbox_submit_default_limit: u32,
@@ -4391,6 +4492,10 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         near_credit_submitter_timeout_ms: state.near_credit_submitter_timeout_ms,
         near_credit_outbox_submit_default_limit: TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT,
         near_credit_outbox_submit_max_limit: TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT,
+        near_credit_confirmer_configured: state.near_credit_confirmer.is_some(),
+        near_credit_confirmer_timeout_ms: state.near_credit_confirmer_timeout_ms,
+        near_credit_outbox_confirm_default_limit: TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_DEFAULT_LIMIT,
+        near_credit_outbox_confirm_max_limit: TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_MAX_LIMIT,
         benchmark_registry_submitter_configured: state.benchmark_registry_submitter.is_some(),
         benchmark_registry_submitter_timeout_ms: state.benchmark_registry_submitter_timeout_ms,
         benchmark_registry_outbox_submit_default_limit:
@@ -6107,6 +6212,100 @@ impl TraceNearCreditSubmitter for HttpTraceNearCreditSubmitter {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TraceNearCreditConfirmationStatus {
+    Pending,
+    Confirmed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceNearCreditConfirmationRequest {
+    tenant_storage_ref: String,
+    near_outbox_id: Uuid,
+    settlement_batch_id: Uuid,
+    credit_account_hash: String,
+    near_transaction_hash: String,
+    near_contract_id: String,
+    near_method_name: String,
+    near_call_idempotency_key: String,
+    near_call_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceNearCreditConfirmationResponse {
+    status: TraceNearCreditConfirmationStatus,
+    #[serde(default)]
+    near_transaction_hash: Option<String>,
+    #[serde(default)]
+    error_detail: Option<String>,
+}
+
+#[async_trait::async_trait]
+trait TraceNearCreditConfirmer: Send + Sync {
+    async fn confirm(
+        &self,
+        request: TraceNearCreditConfirmationRequest,
+    ) -> anyhow::Result<TraceNearCreditConfirmationResponse>;
+}
+
+#[derive(Clone)]
+struct HttpTraceNearCreditConfirmer {
+    client: reqwest::Client,
+    url: String,
+    bearer_token: Option<SecretString>,
+}
+
+#[async_trait::async_trait]
+impl TraceNearCreditConfirmer for HttpTraceNearCreditConfirmer {
+    async fn confirm(
+        &self,
+        request: TraceNearCreditConfirmationRequest,
+    ) -> anyhow::Result<TraceNearCreditConfirmationResponse> {
+        let mut builder = self
+            .client
+            .post(&self.url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&request);
+        if let Some(bearer_token) = &self.bearer_token {
+            builder = builder.bearer_auth(bearer_token.expose_secret());
+        }
+        let response = builder
+            .send()
+            .await
+            .context("failed to confirm NEAR credit receipt call")?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!("NEAR credit confirmer returned HTTP {}", status.as_u16());
+        }
+        let mut response: TraceNearCreditConfirmationResponse = response
+            .json()
+            .await
+            .context("failed to decode NEAR credit confirmer response")?;
+        if let Some(near_transaction_hash) = response.near_transaction_hash.as_deref() {
+            response.near_transaction_hash =
+                Some(normalize_near_transaction_hash(near_transaction_hash)?);
+        }
+        if response.status == TraceNearCreditConfirmationStatus::Confirmed
+            && response.near_transaction_hash.is_none()
+        {
+            anyhow::bail!("confirmed NEAR credit response requires near_transaction_hash");
+        }
+        if response.status == TraceNearCreditConfirmationStatus::Failed
+            && response
+                .error_detail
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+        {
+            anyhow::bail!("failed NEAR credit response requires error_detail");
+        }
+        Ok(response)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TraceBenchmarkRegistrySubmitterRequest {
     tenant_storage_ref: String,
@@ -6292,6 +6491,31 @@ struct TraceNearCreditOutboxSubmitWorkerResponse {
     dry_run: bool,
     checked: usize,
     submitted: usize,
+    failed: usize,
+    skipped: usize,
+    pending: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceNearCreditOutboxConfirmWorkerRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default = "default_near_credit_outbox_confirm_limit")]
+    limit: u32,
+}
+
+fn default_near_credit_outbox_confirm_limit() -> u32 {
+    TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_DEFAULT_LIMIT
+}
+
+#[derive(Debug, Serialize)]
+struct TraceNearCreditOutboxConfirmWorkerResponse {
+    purpose: String,
+    dry_run: bool,
+    checked: usize,
+    confirmed: usize,
     failed: usize,
     skipped: usize,
     pending: usize,
@@ -8740,6 +8964,25 @@ async fn near_credit_outbox_submit_worker_handler(
     Ok(Json(response))
 }
 
+async fn near_credit_outbox_confirm_worker_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceNearCreditOutboxConfirmWorkerRequest>,
+) -> ApiResult<Json<TraceNearCreditOutboxConfirmWorkerResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_utility_operator(&tenant)?;
+    if !body.dry_run && state.near_credit_confirmer.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "NEAR credit outbox confirm worker requires TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL",
+        ));
+    }
+    let response = run_near_credit_outbox_confirm_worker(state.as_ref(), &tenant, body)
+        .await
+        .map_err(maintenance_error)?;
+    Ok(Json(response))
+}
+
 async fn mark_near_credit_outbox_status_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -9246,12 +9489,139 @@ async fn run_near_credit_outbox_submit_worker(
     Ok(response)
 }
 
+async fn run_near_credit_outbox_confirm_worker(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceNearCreditOutboxConfirmWorkerRequest,
+) -> anyhow::Result<TraceNearCreditOutboxConfirmWorkerResponse> {
+    let purpose = normalized_export_purpose(
+        request.purpose.as_deref(),
+        "trace_commons_near_credit_confirm_worker",
+    );
+    let limit = request
+        .limit
+        .clamp(1, TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_MAX_LIMIT) as usize;
+    let items = read_near_credit_outbox_items_for_admin(state, tenant).await?;
+    let pending_total = items
+        .iter()
+        .filter(|item| near_credit_outbox_item_is_confirm_candidate(item))
+        .count();
+    let candidates: Vec<_> = items
+        .into_iter()
+        .filter(near_credit_outbox_item_is_confirm_candidate)
+        .take(limit)
+        .collect();
+    let mut response = TraceNearCreditOutboxConfirmWorkerResponse {
+        purpose,
+        dry_run: request.dry_run,
+        checked: candidates.len(),
+        confirmed: 0,
+        failed: 0,
+        skipped: pending_total.saturating_sub(candidates.len()),
+        pending: pending_total,
+    };
+    if request.dry_run {
+        append_near_credit_outbox_confirm_audit(state, tenant, &response).await?;
+        return Ok(response);
+    }
+
+    let confirmer = state
+        .near_credit_confirmer
+        .as_ref()
+        .context("NEAR credit outbox confirmer is not configured")?
+        .clone();
+    for item in candidates {
+        let confirm_request = near_credit_confirmation_request_from_outbox_item(&item)?;
+        match confirmer.confirm(confirm_request).await {
+            Ok(confirm_response) => match confirm_response.status {
+                TraceNearCreditConfirmationStatus::Confirmed => {
+                    let near_transaction_hash = confirm_response
+                        .near_transaction_hash
+                        .as_deref()
+                        .or(item.near_transaction_hash.as_deref())
+                        .context("confirmed NEAR credit response requires near_transaction_hash")
+                        .and_then(normalize_near_transaction_hash)?;
+                    let updated = update_near_credit_outbox_item_status_with_db_mirror(
+                        state,
+                        tenant,
+                        item.near_outbox_id,
+                        StorageTraceCreditSettlementNearStatus::Confirmed,
+                        Some(near_transaction_hash),
+                        None,
+                    )
+                    .await?
+                    .with_context(|| {
+                        format!(
+                            "NEAR credit outbox item {} disappeared before confirmed status update",
+                            item.near_outbox_id
+                        )
+                    })?;
+                    anyhow::ensure!(
+                        updated.status == StorageTraceCreditSettlementNearStatus::Confirmed,
+                        "NEAR credit outbox item {} did not update to confirmed status",
+                        item.near_outbox_id
+                    );
+                    response.confirmed += 1;
+                    response.pending = response.pending.saturating_sub(1);
+                }
+                TraceNearCreditConfirmationStatus::Failed => {
+                    let error_detail = confirm_response
+                        .error_detail
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .context("failed NEAR credit response requires error_detail")?;
+                    let last_error_hash = sha256_prefixed(error_detail);
+                    update_near_credit_outbox_item_status_with_db_mirror(
+                        state,
+                        tenant,
+                        item.near_outbox_id,
+                        StorageTraceCreditSettlementNearStatus::Failed,
+                        confirm_response
+                            .near_transaction_hash
+                            .as_deref()
+                            .or(item.near_transaction_hash.as_deref())
+                            .map(normalize_near_transaction_hash)
+                            .transpose()?,
+                        Some(last_error_hash),
+                    )
+                    .await?
+                    .with_context(|| {
+                        format!(
+                            "NEAR credit outbox item {} disappeared before failed status update",
+                            item.near_outbox_id
+                        )
+                    })?;
+                    response.failed += 1;
+                    response.pending = response.pending.saturating_sub(1);
+                }
+                TraceNearCreditConfirmationStatus::Pending => {}
+            },
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    near_outbox_id = %item.near_outbox_id,
+                    "Trace Commons NEAR credit confirmation poll failed"
+                );
+                response.failed += 1;
+            }
+        }
+    }
+    append_near_credit_outbox_confirm_audit(state, tenant, &response).await?;
+    Ok(response)
+}
+
 fn near_credit_outbox_item_is_submit_candidate(item: &TraceNearCreditOutboxItem) -> bool {
     matches!(
         item.status,
         StorageTraceCreditSettlementNearStatus::Pending
             | StorageTraceCreditSettlementNearStatus::Failed
     )
+}
+
+fn near_credit_outbox_item_is_confirm_candidate(item: &TraceNearCreditOutboxItem) -> bool {
+    item.status == StorageTraceCreditSettlementNearStatus::Submitted
+        && item.near_transaction_hash.is_some()
 }
 
 fn near_credit_submitter_request_from_outbox_item(
@@ -9264,6 +9634,33 @@ fn near_credit_submitter_request_from_outbox_item(
         credit_account_hash: item.credit_account_hash.clone(),
         near_call: item.near_call.clone(),
     }
+}
+
+fn near_credit_confirmation_request_from_outbox_item(
+    item: &TraceNearCreditOutboxItem,
+) -> anyhow::Result<TraceNearCreditConfirmationRequest> {
+    let near_transaction_hash = item
+        .near_transaction_hash
+        .as_deref()
+        .context("NEAR credit confirmation requires near_transaction_hash")
+        .and_then(normalize_near_transaction_hash)?;
+    Ok(TraceNearCreditConfirmationRequest {
+        tenant_storage_ref: item.tenant_storage_ref.clone(),
+        near_outbox_id: item.near_outbox_id,
+        settlement_batch_id: item.settlement_batch_id,
+        credit_account_hash: item.credit_account_hash.clone(),
+        near_transaction_hash,
+        near_contract_id: item.near_call.contract_id.clone(),
+        near_method_name: item.near_call.method_name.clone(),
+        near_call_idempotency_key: item.near_call.idempotency_key.clone(),
+        near_call_hash: near_credit_call_hash(&item.near_call)?,
+    })
+}
+
+fn near_credit_call_hash(call: &NearCreditReceiptCall) -> anyhow::Result<String> {
+    let canonical_call =
+        serde_json::to_string(call).context("failed to serialize NEAR credit call for hash")?;
+    Ok(sha256_prefixed(&canonical_call))
 }
 
 fn normalize_near_transaction_hash(hash: &str) -> anyhow::Result<String> {
@@ -9335,6 +9732,69 @@ async fn append_near_credit_outbox_submit_audit(
                 response.dry_run,
                 response.checked,
                 response.submitted,
+                response.failed,
+                response.skipped,
+                response.pending
+            )),
+            export_count: Some(response.checked),
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        },
+        StorageTraceAuditAction::Retain,
+        StorageTraceAuditSafeMetadata::Maintenance {
+            dry_run: response.dry_run,
+            action_counts,
+        },
+    )
+    .await
+}
+
+async fn append_near_credit_outbox_confirm_audit(
+    state: &AppState,
+    tenant: &TenantAuth,
+    response: &TraceNearCreditOutboxConfirmWorkerResponse,
+) -> anyhow::Result<()> {
+    let mut action_counts = BTreeMap::new();
+    action_counts.insert(
+        "checked".to_string(),
+        response.checked.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "confirmed".to_string(),
+        response.confirmed.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "failed".to_string(),
+        response.failed.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "skipped".to_string(),
+        response.skipped.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "pending".to_string(),
+        response.pending.min(u32::MAX as usize) as u32,
+    );
+    append_audit_event_with_db_mirror(
+        state,
+        tenant,
+        TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "near_credit_outbox_confirm".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(tenant.role),
+            actor_principal_ref: Some(tenant.principal_ref.clone()),
+            reason: Some(format!(
+                "purpose={};dry_run={};checked={};confirmed={};failed={};skipped={};pending={}",
+                response.purpose,
+                response.dry_run,
+                response.checked,
+                response.confirmed,
                 response.failed,
                 response.skipped,
                 response.pending
@@ -34282,6 +34742,8 @@ mod tests {
             artifact_store,
             near_credit_submitter: None,
             near_credit_submitter_timeout_ms: None,
+            near_credit_confirmer: None,
+            near_credit_confirmer_timeout_ms: None,
             benchmark_registry_submitter: None,
             benchmark_registry_submitter_timeout_ms: None,
             benchmark_registry_confirmer: None,
@@ -36458,6 +36920,22 @@ mod tests {
             serde_json::json!(TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT)
         );
         assert_eq!(
+            value["near_credit_confirmer_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["near_credit_confirmer_timeout_ms"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            value["near_credit_outbox_confirm_default_limit"],
+            serde_json::json!(TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_DEFAULT_LIMIT)
+        );
+        assert_eq!(
+            value["near_credit_outbox_confirm_max_limit"],
+            serde_json::json!(TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_MAX_LIMIT)
+        );
+        assert_eq!(
             value["benchmark_registry_submitter_configured"],
             serde_json::json!(false)
         );
@@ -36556,6 +37034,8 @@ mod tests {
             "signed_token_revoked_jtis",
             "near_credit_submitter_url",
             "near_credit_submitter_bearer_token",
+            "near_credit_confirmation_url",
+            "near_credit_confirmation_bearer_token",
             "benchmark_registry_submitter_url",
             "benchmark_registry_submitter_bearer_token",
             "benchmark_registry_confirmation_url",
@@ -36645,6 +37125,59 @@ mod tests {
         let body_text = std::str::from_utf8(&body).expect("body is utf8");
         assert!(!body_text.contains(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL));
         assert!(!body_text.contains(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN));
+    }
+
+    #[tokio::test]
+    async fn admin_config_status_reports_near_credit_confirmer_readiness_without_endpoint_secrets()
+    {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).near_credit_confirmer =
+            Some(Arc::new(FakeNearCreditConfirmer::default()));
+        Arc::make_mut(&mut state).near_credit_confirmer_timeout_ms = Some(2_468);
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/config-status")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("admin response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("status json parses");
+        assert_eq!(
+            value["near_credit_confirmer_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["near_credit_confirmer_timeout_ms"],
+            serde_json::json!(2_468)
+        );
+        assert_eq!(
+            value["near_credit_outbox_confirm_default_limit"],
+            serde_json::json!(TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_DEFAULT_LIMIT)
+        );
+        assert_eq!(
+            value["near_credit_outbox_confirm_max_limit"],
+            serde_json::json!(TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_MAX_LIMIT)
+        );
+
+        let object = value.as_object().expect("status response is object");
+        assert!(!object.contains_key("near_credit_confirmation_url"));
+        assert!(!object.contains_key("near_credit_confirmation_bearer_token"));
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains(TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL));
+        assert!(!body_text.contains(TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_BEARER_TOKEN));
     }
 
     #[tokio::test]
@@ -41099,6 +41632,8 @@ mod tests {
             artifact_store: None,
             near_credit_submitter: None,
             near_credit_submitter_timeout_ms: None,
+            near_credit_confirmer: None,
+            near_credit_confirmer_timeout_ms: None,
             benchmark_registry_submitter: None,
             benchmark_registry_submitter_timeout_ms: None,
             benchmark_registry_confirmer: None,
@@ -43860,6 +44395,46 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct FakeNearCreditConfirmer {
+        calls: Arc<std::sync::Mutex<Vec<TraceNearCreditConfirmationRequest>>>,
+        status: TraceNearCreditConfirmationStatus,
+        failure: Option<String>,
+        error_detail: Option<String>,
+    }
+
+    impl Default for FakeNearCreditConfirmer {
+        fn default() -> Self {
+            Self {
+                calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+                status: TraceNearCreditConfirmationStatus::Confirmed,
+                failure: None,
+                error_detail: None,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TraceNearCreditConfirmer for FakeNearCreditConfirmer {
+        async fn confirm(
+            &self,
+            request: TraceNearCreditConfirmationRequest,
+        ) -> anyhow::Result<TraceNearCreditConfirmationResponse> {
+            if let Some(failure) = &self.failure {
+                anyhow::bail!("{failure}");
+            }
+            self.calls
+                .lock()
+                .expect("fake NEAR credit confirmer calls lock")
+                .push(request);
+            Ok(TraceNearCreditConfirmationResponse {
+                status: self.status,
+                near_transaction_hash: Some("near-worker-tx-confirmed-1".to_string()),
+                error_detail: self.error_detail.clone(),
+            })
+        }
+    }
+
     #[derive(Clone, Default)]
     struct FakeBenchmarkRegistrySubmitter {
         calls: Arc<std::sync::Mutex<Vec<TraceBenchmarkRegistrySubmitterRequest>>>,
@@ -44003,6 +44578,40 @@ mod tests {
             }
         ));
         item
+    }
+
+    fn submitted_near_credit_outbox_item(
+        near_outbox_id: Uuid,
+        near_transaction_hash: &str,
+        amount_micros: i64,
+    ) -> TraceNearCreditOutboxItem {
+        let settlement_batch_id = Uuid::new_v4();
+        let receipt = NearCreditReceipt {
+            settlement_batch_id,
+            credit_account_hash: sha256_prefixed(&format!("near-credit-account:{near_outbox_id}")),
+            policy_version: "trace-credit-policy-v1".to_string(),
+            source_list_hash: sha256_prefixed(&format!("near-credit-sources:{near_outbox_id}")),
+            attestation_hash: sha256_prefixed(&format!("near-credit-attestation:{near_outbox_id}")),
+            amount_micros,
+            issuer_signature_hash: sha256_prefixed(&format!(
+                "near-credit-issuer-signature:{near_outbox_id}"
+            )),
+        };
+        TraceNearCreditOutboxItem {
+            near_outbox_id,
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            settlement_batch_id,
+            credit_account_hash: receipt.credit_account_hash.clone(),
+            near_call: NearCreditReceiptCall::settle("trace-credits.testnet", receipt)
+                .expect("NEAR call builds"),
+            status: StorageTraceCreditSettlementNearStatus::Submitted,
+            created_at: Utc::now(),
+            submitted_at: Some(Utc::now()),
+            near_transaction_hash: Some(near_transaction_hash.to_string()),
+            last_error_hash: None,
+            confirmed_at: None,
+        }
     }
 
     #[tokio::test]
@@ -44275,6 +44884,112 @@ mod tests {
         )
         .await
         .expect("dry-run does not require configured registry confirmer");
+        assert_eq!(dry_run.checked, 1);
+        assert_eq!(dry_run.confirmed, 0);
+        assert_eq!(dry_run.pending, 1);
+    }
+
+    #[tokio::test]
+    async fn near_credit_outbox_confirm_worker_confirms_submitted_items() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let fake_confirmer = FakeNearCreditConfirmer::default();
+        let confirmation_calls = fake_confirmer.calls.clone();
+        Arc::make_mut(&mut state).near_credit_confirmer = Some(Arc::new(fake_confirmer));
+
+        let first_outbox_id = Uuid::new_v4();
+        let second_outbox_id = Uuid::new_v4();
+        let first_item =
+            submitted_near_credit_outbox_item(first_outbox_id, "near-worker-tx-hash-1", 1_500_000);
+        let second_item =
+            submitted_near_credit_outbox_item(second_outbox_id, "near-worker-tx-hash-2", 2_500_000);
+        append_near_credit_outbox_item(temp.path(), "tenant-a", &first_item)
+            .expect("first NEAR outbox file writes");
+        append_near_credit_outbox_item(temp.path(), "tenant-a", &second_item)
+            .expect("second NEAR outbox file writes");
+
+        let Json(response) = near_credit_outbox_confirm_worker_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxConfirmWorkerRequest {
+                purpose: Some("confirm_near_receipts".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("utility worker confirms submitted NEAR outbox items");
+        assert_eq!(response.checked, 2);
+        assert_eq!(response.confirmed, 2);
+        assert_eq!(response.failed, 0);
+        assert_eq!(response.pending, 0);
+
+        let calls = confirmation_calls
+            .lock()
+            .expect("fake NEAR credit confirmer calls lock");
+        assert_eq!(calls.len(), 2);
+        let first_call = calls
+            .iter()
+            .find(|call| call.near_outbox_id == first_outbox_id)
+            .expect("first NEAR confirmation call recorded");
+        assert_eq!(
+            first_call.tenant_storage_ref,
+            tenant_storage_ref("tenant-a")
+        );
+        assert_eq!(first_call.near_contract_id, "trace-credits.testnet");
+        assert_eq!(first_call.near_method_name, "settle_credit_receipt");
+        assert_eq!(first_call.near_transaction_hash, "near-worker-tx-hash-1");
+        assert!(first_call.near_call_hash.starts_with("sha256:"));
+        assert!(first_call.near_call_idempotency_key.starts_with("sha256:"));
+        let call_json = serde_json::to_string(&calls[0]).expect("confirmation call serializes");
+        assert!(!call_json.contains("token-a"));
+        assert!(!call_json.contains("amount_micros"));
+        assert!(!call_json.contains("issuer_signature_hash"));
+        assert!(!call_json.contains("source_list_hash"));
+
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert_eq!(outbox.len(), 2);
+        assert!(outbox.iter().all(|item| {
+            item.status == StorageTraceCreditSettlementNearStatus::Confirmed
+                && item.confirmed_at.is_some()
+                && item.last_error_hash.is_none()
+        }));
+    }
+
+    #[tokio::test]
+    async fn near_credit_outbox_confirm_worker_requires_configured_confirmer_for_live_run() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let item =
+            submitted_near_credit_outbox_item(Uuid::new_v4(), "near-worker-tx-hash-1", 1_000_000);
+        append_near_credit_outbox_item(temp.path(), "tenant-a", &item)
+            .expect("NEAR outbox file writes");
+
+        let error = near_credit_outbox_confirm_worker_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxConfirmWorkerRequest {
+                purpose: Some("near_confirmer_config_gate".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect_err("live confirm worker requires configured NEAR confirmer");
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+
+        let Json(dry_run) = near_credit_outbox_confirm_worker_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxConfirmWorkerRequest {
+                purpose: Some("near_confirmer_config_gate_dry_run".to_string()),
+                dry_run: true,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("dry-run does not require configured NEAR confirmer");
         assert_eq!(dry_run.checked, 1);
         assert_eq!(dry_run.confirmed, 0);
         assert_eq!(dry_run.pending, 1);
