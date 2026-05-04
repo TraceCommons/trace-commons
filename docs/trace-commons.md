@@ -400,7 +400,9 @@ routes project the same legacy conflict class into safe aggregate
 `calibration_dataset_manifest_conflict_count` fields and
 `ranking_calibration_dataset_manifest_conflicts` promotion-gate blockers, so
 operators can hold credit issuance without exposing the underlying manifest
-history. `GET /v1/admin/ranking/calibration-dataset-conflicts` provides the
+history. Operational summary also projects ranking backtest pass/fail counts and
+reason-code totals into the ranking block and promotion gates. `GET
+/v1/admin/ranking/calibration-dataset-conflicts` provides the
 operator drill-down: exact conflict keys, latest projected hash-only registry
 metadata, whether the latest row still blocks credit issuance, and a remediation
 hint to register a new calibration dataset hash or policy version instead of

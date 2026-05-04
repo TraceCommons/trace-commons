@@ -227,7 +227,9 @@ reason aggregates, and safe hashed fatal-error refs for admin review. Live
 non-dry-run ranking schedulers reject overlapping active non-stale runs before
 appending a new running row; stale running rows surface as operational-summary
 blockers until an admin append-finalizes them through the stale recovery API,
-which also writes a hash-only audit event for the recovery action.
+which also writes a hash-only audit event for the recovery action. Operational
+summary ranking readiness now also includes candidate/active backtest pass/fail
+counts and backtest reason-code totals.
 With the DB mirror configured, ranking dataset registry rows, evidence,
 calibration runs, and ranking worker runs are dual-written to PostgreSQL.
 Maintenance backfill mirrors file-backed ranking model versions, calibration
