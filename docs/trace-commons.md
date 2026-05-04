@@ -683,7 +683,9 @@ hashes and joined-evidence counts, and a freshly recomputed current-evidence
 snapshot with the effective server-owned thresholds, error metrics,
 low-confidence prediction count, promotability flag, and reason codes. Operators
 can compare these fields before activation without exposing trace bodies or raw
-frontier-lab references.
+frontier-lab references. The promotion gate also requires the current
+candidate/target backtest to pass, so pairwise evidence or ordering failures
+from `/v1/admin/ranking/model-backtest-report` block activation.
 
 `GET /v1/admin/ranking/dataset-readiness-report` groups the latest ranking model
 manifests by registered holdout calibration dataset hash. Each dataset row

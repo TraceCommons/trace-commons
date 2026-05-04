@@ -12025,6 +12025,8 @@ async fn promote_ranking_model_version(
         &calibration_run,
     )
     .await?;
+    ensure_ranking_model_backtest_passes(state, tenant, &model_versions, model, body.target_use)
+        .await?;
     ensure_active_ranking_model_has_promotable_calibration(
         state,
         tenant,
@@ -12091,6 +12093,63 @@ async fn promote_ranking_model_version(
             .max_average_absolute_error_micros,
         reason_hash: sha256_prefixed(&reason),
     })
+}
+
+async fn ensure_ranking_model_backtest_passes(
+    state: &AppState,
+    tenant: &TenantAuth,
+    model_versions: &[TraceRankingModelVersionRecord],
+    model: &TraceRankingModelVersionRecord,
+    target_use: TraceAllowedUse,
+) -> ApiResult<()> {
+    let predictions = read_ranking_predictions_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let labels = read_ranking_labels_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let preference_labels = read_ranking_preference_labels_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let calibration_datasets = read_ranking_calibration_datasets_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let calibration_runs = read_ranking_calibration_runs_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let report = ranking_model_backtest_report(
+        state,
+        tenant,
+        model_versions,
+        RankingModelRiskEvidence {
+            predictions: &predictions,
+            labels: &labels,
+            preference_labels: &preference_labels,
+            calibration_datasets: &calibration_datasets,
+            calibration_runs: &calibration_runs,
+        },
+    );
+    let Some(backtest) = report.models.into_iter().find(|record| {
+        record.model_version == model.model_version
+            && record.target_use == target_use
+            && record.policy_version == model.policy_version
+            && record.feature_schema_version == model.feature_schema_version
+    }) else {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "ranking model promotion requires a current model backtest",
+        ));
+    };
+    if !backtest.passed {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            format!(
+                "ranking model promotion requires a passing current model backtest; reason_codes={}",
+                backtest.reason_codes.join(",")
+            ),
+        ));
+    }
+    Ok(())
 }
 
 async fn ensure_active_ranking_model_has_promotable_calibration(
@@ -51919,6 +51978,88 @@ mod tests {
         assert_eq!(latest.status, StorageTraceRankingModelStatus::Active);
     }
 
+    #[tokio::test]
+    async fn ranking_model_promotion_rejects_failed_candidate_backtest_pairwise_reversal() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).ranking_min_pairwise_label_count = 1;
+        Arc::make_mut(&mut state).ranking_min_pairwise_accuracy_micros = 600_000;
+        let (candidate, calibrated_prediction) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-promotion-backtest-v1")
+                .await;
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration");
+        assert!(calibration.promotable);
+
+        let higher_scored = seed_pairwise_ranking_prediction_source(
+            state.clone(),
+            &candidate,
+            "promotion-backtest-pairwise-reversal",
+            2_000_000,
+        )
+        .await;
+        let _ = ranking_preference_label_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id: calibrated_prediction.submission_id,
+                rejected_submission_id: higher_scored.submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 800_000,
+                evidence_hash: "sha256:promotion-backtest-pairwise-reversal".to_string(),
+                external_ref: "reviewer-private-promotion-backtest-pairwise-reversal".to_string(),
+            }),
+        )
+        .await
+        .expect("reviewer can write pairwise backtest label");
+
+        let promotion_error = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "pairwise failed candidate should not activate".to_string(),
+            }),
+        )
+        .await
+        .expect_err("candidate backtest failures block promotion");
+        assert_eq!(promotion_error.0, StatusCode::CONFLICT);
+        assert!(
+            promotion_error
+                .1
+                .0
+                .error
+                .contains("pairwise_accuracy_below_threshold"),
+            "{}",
+            promotion_error.1.0.error
+        );
+
+        let model_versions =
+            read_all_ranking_model_versions(temp.path(), "tenant-a").expect("model versions read");
+        let latest =
+            latest_ranking_model_version(&model_versions, "trace-ranker-promotion-backtest-v1")
+                .unwrap();
+        assert_eq!(latest.status, StorageTraceRankingModelStatus::Candidate);
+    }
+
     async fn seed_credit_cycle_candidate_with_prediction(
         state: Arc<AppState>,
         model_version: &str,
@@ -58052,8 +58193,6 @@ mod tests {
     async fn active_ranking_model_risk_report_applies_pairwise_policy_thresholds() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
-        Arc::make_mut(&mut state).ranking_min_pairwise_label_count = 2;
-        Arc::make_mut(&mut state).ranking_min_pairwise_accuracy_micros = 600_000;
         let (candidate, calibrated_prediction) =
             seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-pairwise-policy-v1")
                 .await;
@@ -58088,6 +58227,8 @@ mod tests {
         .expect("admin can promote calibrated model");
         assert_eq!(active.model_status, StorageTraceRankingModelStatus::Active);
 
+        Arc::make_mut(&mut state).ranking_min_pairwise_label_count = 2;
+        Arc::make_mut(&mut state).ranking_min_pairwise_accuracy_micros = 600_000;
         let higher_scored = seed_pairwise_ranking_prediction_source(
             state.clone(),
             &candidate,
@@ -58172,7 +58313,6 @@ mod tests {
     async fn active_ranking_model_risk_report_flags_pairwise_evidence_floor() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
-        Arc::make_mut(&mut state).ranking_min_pairwise_label_count = 2;
         let (candidate, calibrated_prediction) =
             seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-pairwise-floor-v1")
                 .await;
@@ -58207,6 +58347,7 @@ mod tests {
         .expect("admin can promote calibrated model");
         assert_eq!(active.model_status, StorageTraceRankingModelStatus::Active);
 
+        Arc::make_mut(&mut state).ranking_min_pairwise_label_count = 2;
         let lower_scored = seed_pairwise_ranking_prediction_source(
             state.clone(),
             &candidate,
