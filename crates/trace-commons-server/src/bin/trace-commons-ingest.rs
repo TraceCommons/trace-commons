@@ -11723,10 +11723,9 @@ async fn ranking_model_promotion_worker_run_handler(
             }
             Err((status, Json(error))) if ranking_model_promotion_run_can_skip_status(status) => {
                 response.skipped_ineligible_count += 1;
-                *response
-                    .skipped_reason_counts
-                    .entry(error.error)
-                    .or_insert(0) += 1;
+                for reason in ranking_model_promotion_skip_reason_codes(&error.error) {
+                    increment_count(&mut response.skipped_reason_counts, &reason);
+                }
             }
             Err(error) => {
                 update_model_promotion_worker_run_from_response(&mut worker_run, &response);
@@ -11780,6 +11779,23 @@ async fn ranking_model_promotion_worker_run_handler(
 
 fn ranking_model_promotion_run_can_skip_status(status: StatusCode) -> bool {
     matches!(status, StatusCode::NOT_FOUND | StatusCode::CONFLICT)
+}
+
+fn ranking_model_promotion_skip_reason_codes(error: &str) -> Vec<String> {
+    let Some((_, reason_codes)) = error.split_once("reason_codes=") else {
+        return vec![error.to_string()];
+    };
+    let parsed = reason_codes
+        .split(',')
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if parsed.is_empty() {
+        vec![error.to_string()]
+    } else {
+        parsed
+    }
 }
 
 async fn ensure_no_overlapping_live_ranking_worker_run(
@@ -52056,6 +52072,100 @@ mod tests {
             read_all_ranking_model_versions(temp.path(), "tenant-a").expect("model versions read");
         let latest =
             latest_ranking_model_version(&model_versions, "trace-ranker-promotion-backtest-v1")
+                .unwrap();
+        assert_eq!(latest.status, StorageTraceRankingModelStatus::Candidate);
+    }
+
+    #[tokio::test]
+    async fn ranking_model_promotion_worker_run_counts_backtest_reason_codes() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).ranking_min_pairwise_label_count = 1;
+        Arc::make_mut(&mut state).ranking_min_pairwise_accuracy_micros = 600_000;
+        let (candidate, calibrated_prediction) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-worker-backtest-v1")
+                .await;
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration");
+        assert!(calibration.promotable);
+
+        let higher_scored = seed_pairwise_ranking_prediction_source(
+            state.clone(),
+            &candidate,
+            "worker-backtest-pairwise-reversal",
+            2_000_000,
+        )
+        .await;
+        let _ = ranking_preference_label_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id: calibrated_prediction.submission_id,
+                rejected_submission_id: higher_scored.submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 800_000,
+                evidence_hash: "sha256:worker-backtest-pairwise-reversal".to_string(),
+                external_ref: "reviewer-private-worker-backtest-pairwise-reversal".to_string(),
+            }),
+        )
+        .await
+        .expect("reviewer can write pairwise worker backtest label");
+
+        let Json(run) = ranking_model_promotion_worker_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingModelPromotionRunRequest {
+                dry_run: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                reason: "scheduled backtest-gated promotion".to_string(),
+                limit: Some(10),
+                model_version: Some(candidate.model_version.clone()),
+                policy_version: Some(candidate.policy_version.clone()),
+            }),
+        )
+        .await
+        .expect("utility worker skips candidate with failed backtest");
+        assert_eq!(run.checked_count, 1);
+        assert_eq!(run.promoted_count, 0);
+        assert_eq!(run.skipped_ineligible_count, 1);
+        assert_eq!(
+            run.skipped_reason_counts
+                .get("pairwise_accuracy_below_threshold"),
+            Some(&1)
+        );
+        assert!(!run.skipped_reason_counts.keys().any(|reason| {
+            reason.contains("ranking model promotion requires a passing current model backtest")
+        }));
+
+        let Json(worker_runs) =
+            ranking_worker_runs_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list worker runs");
+        assert_eq!(
+            worker_runs[0]
+                .reason_counts
+                .get("pairwise_accuracy_below_threshold"),
+            Some(&1)
+        );
+        let model_versions =
+            read_all_ranking_model_versions(temp.path(), "tenant-a").expect("model versions read");
+        let latest =
+            latest_ranking_model_version(&model_versions, "trace-ranker-worker-backtest-v1")
                 .unwrap();
         assert_eq!(latest.status, StorageTraceRankingModelStatus::Candidate);
     }
