@@ -34,8 +34,8 @@ cutover gates.
 Benchmark publication now has the same server-side control-plane shape:
 passed benchmark artifacts enqueue hash-only registry publish outbox rows,
 source invalidation of published artifacts enqueues matching hash-only revoke
-rows, workers can submit those rows to a configured external registry adapter,
-mark external submit/confirm/fail status with receipt refs and hashed errors,
+rows, workers can submit and confirm those rows through a configured external
+registry adapter, mark external submit/confirm/fail status with receipt refs and hashed errors,
 operators can inspect the outbox through the admin API, and maintenance
 backfill/reconciliation covers registry outbox drift before external registry
 adapter readiness is promoted.
@@ -71,7 +71,11 @@ Configure `TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL` to let benchmark
 workers submit pending or failed rows to an operator-owned registry adapter;
 optional bearer auth and timeout are controlled by
 `TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN` and
-`TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_TIMEOUT_MS`.
+`TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_TIMEOUT_MS`. Configure
+`TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_URL` to let benchmark workers
+poll submitted rows to confirmation; optional bearer auth and timeout are
+controlled by `TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN` and
+`TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS`.
 
 The NEAR path is intentionally an outbox of deterministic method-call payloads
 for a non-transferable receipt contract. The payload builder only emits

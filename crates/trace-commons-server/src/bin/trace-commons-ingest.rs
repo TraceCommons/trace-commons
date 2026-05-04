@@ -236,6 +236,12 @@ const TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN: &str =
     "TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN";
 const TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_TIMEOUT_MS: &str =
     "TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_TIMEOUT_MS";
+const TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_URL: &str =
+    "TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_URL";
+const TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN: &str =
+    "TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN";
+const TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS: &str =
+    "TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS";
 const TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS: &str =
     "TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS";
 const TRACE_COMMONS_RANKING_MIN_CONFIDENCE_THRESHOLD: &str =
@@ -252,12 +258,15 @@ const TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS: &str =
 const DEFAULT_EDDSA_KEYSET_URL_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_BENCHMARK_REGISTRY_SUBMITTER_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_EDDSA_KEYSET_REFRESH_INTERVAL_SECONDS: u64 = 300;
 const MAX_EDDSA_KEYSET_URL_BYTES: usize = 256 * 1024;
 const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT: u32 = 100;
 const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT: u32 = 500;
 const TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_DEFAULT_LIMIT: u32 = 100;
 const TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_MAX_LIMIT: u32 = 500;
+const TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_DEFAULT_LIMIT: u32 = 100;
+const TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_MAX_LIMIT: u32 = 500;
 const TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT: usize = 5;
 const TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_LIMIT: usize = 1;
 const TRACE_CREDIT_CYCLE_SCHEDULER_MAX_LIMIT: usize = 25;
@@ -353,6 +362,8 @@ struct AppState {
     near_credit_submitter_timeout_ms: Option<u64>,
     benchmark_registry_submitter: Option<Arc<dyn TraceBenchmarkRegistrySubmitter>>,
     benchmark_registry_submitter_timeout_ms: Option<u64>,
+    benchmark_registry_confirmer: Option<Arc<dyn TraceBenchmarkRegistryConfirmer>>,
+    benchmark_registry_confirmer_timeout_ms: Option<u64>,
     ranking_calibration_max_age: Option<Duration>,
     ranking_min_confidence_threshold: f32,
     ranking_max_average_absolute_error_micros: i64,
@@ -1489,6 +1500,12 @@ impl AppState {
             .map(|config| config.timeout_ms);
         let benchmark_registry_submitter =
             benchmark_registry_submitter_config.map(|config| config.submitter);
+        let benchmark_registry_confirmer_config = trace_benchmark_registry_confirmer_from_env()?;
+        let benchmark_registry_confirmer_timeout_ms = benchmark_registry_confirmer_config
+            .as_ref()
+            .map(|config| config.timeout_ms);
+        let benchmark_registry_confirmer =
+            benchmark_registry_confirmer_config.map(|config| config.confirmer);
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
         let ranking_min_confidence_threshold = parse_ranking_min_confidence_threshold_from_env()?;
         let ranking_max_average_absolute_error_micros =
@@ -1643,6 +1660,8 @@ impl AppState {
             near_credit_submitter_timeout_ms,
             benchmark_registry_submitter,
             benchmark_registry_submitter_timeout_ms,
+            benchmark_registry_confirmer,
+            benchmark_registry_confirmer_timeout_ms,
             ranking_calibration_max_age,
             ranking_min_confidence_threshold,
             ranking_max_average_absolute_error_micros,
@@ -1904,6 +1923,11 @@ struct ConfiguredTraceBenchmarkRegistrySubmitter {
     timeout_ms: u64,
 }
 
+struct ConfiguredTraceBenchmarkRegistryConfirmer {
+    confirmer: Arc<dyn TraceBenchmarkRegistryConfirmer>,
+    timeout_ms: u64,
+}
+
 fn trace_near_credit_submitter_from_env()
 -> anyhow::Result<Option<ConfiguredTraceNearCreditSubmitter>> {
     let Some(url) = optional_trimmed_env(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL)? else {
@@ -1962,6 +1986,36 @@ fn trace_benchmark_registry_submitter_from_env()
     }))
 }
 
+fn trace_benchmark_registry_confirmer_from_env()
+-> anyhow::Result<Option<ConfiguredTraceBenchmarkRegistryConfirmer>> {
+    let Some(url) = optional_trimmed_env(TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_URL)? else {
+        return Ok(None);
+    };
+    let parsed = reqwest::Url::parse(&url)
+        .with_context(|| format!("invalid {TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_URL}"))?;
+    validate_trace_benchmark_registry_confirmation_url(&parsed)?;
+    let timeout = parse_trace_benchmark_registry_confirmation_timeout_from_env()?;
+    let timeout_ms = timeout.as_millis() as u64;
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout.min(StdDuration::from_secs(3)))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("trace-commons-benchmark-registry-confirmer/0.1")
+        .build()
+        .context("failed to build benchmark registry confirmer HTTP client")?;
+    Ok(Some(ConfiguredTraceBenchmarkRegistryConfirmer {
+        confirmer: Arc::new(HttpTraceBenchmarkRegistryConfirmer {
+            client,
+            url,
+            bearer_token: optional_trimmed_env(
+                TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN,
+            )?
+            .map(SecretString::from),
+        }),
+        timeout_ms,
+    }))
+}
+
 fn validate_trace_near_credit_submitter_url(url: &reqwest::Url) -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(url.scheme(), "https" | "http"),
@@ -2012,6 +2066,31 @@ fn validate_trace_benchmark_registry_submitter_url(url: &reqwest::Url) -> anyhow
     Ok(())
 }
 
+fn validate_trace_benchmark_registry_confirmation_url(url: &reqwest::Url) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        matches!(url.scheme(), "https" | "http"),
+        "{TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_URL} must use http or https"
+    );
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "{TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_URL} must not include embedded credentials"
+    );
+    anyhow::ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "{TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_URL} must not include query strings or fragments"
+    );
+    let host = url.host_str().map(str::to_ascii_lowercase).ok_or_else(|| {
+        anyhow::anyhow!("{TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_URL} requires a host")
+    })?;
+    if url.scheme() == "http" {
+        anyhow::ensure!(
+            is_loopback_or_localhost_host(&host),
+            "{TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_URL} may use http only for localhost loopback confirmers"
+        );
+    }
+    Ok(())
+}
+
 fn is_loopback_or_localhost_host(host: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     if host == "localhost" || host.ends_with(".localhost") {
@@ -2052,6 +2131,24 @@ fn parse_trace_benchmark_registry_submitter_timeout_from_env() -> anyhow::Result
     anyhow::ensure!(
         (1..=30_000).contains(&timeout_ms),
         "{TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_TIMEOUT_MS} must be between 1 and 30000"
+    );
+    Ok(StdDuration::from_millis(timeout_ms))
+}
+
+fn parse_trace_benchmark_registry_confirmation_timeout_from_env() -> anyhow::Result<StdDuration> {
+    let timeout_ms = match optional_trimmed_env(
+        TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS,
+    )? {
+        Some(configured) => configured.parse::<u64>().with_context(|| {
+            format!(
+                "{TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS} must be milliseconds"
+            )
+        })?,
+        None => DEFAULT_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS,
+    };
+    anyhow::ensure!(
+        (1..=30_000).contains(&timeout_ms),
+        "{TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS} must be between 1 and 30000"
     );
     Ok(StdDuration::from_millis(timeout_ms))
 }
@@ -2221,6 +2318,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/workers/benchmark-registry-outbox/submit",
             post(benchmark_registry_outbox_submit_worker_handler),
+        )
+        .route(
+            "/v1/workers/benchmark-registry-outbox/confirm",
+            post(benchmark_registry_outbox_confirm_worker_handler),
         )
         .route(
             "/v1/workers/replay-export",
@@ -4066,6 +4167,10 @@ struct TraceCommonsConfigStatusResponse {
     benchmark_registry_submitter_timeout_ms: Option<u64>,
     benchmark_registry_outbox_submit_default_limit: u32,
     benchmark_registry_outbox_submit_max_limit: u32,
+    benchmark_registry_confirmer_configured: bool,
+    benchmark_registry_confirmer_timeout_ms: Option<u64>,
+    benchmark_registry_outbox_confirm_default_limit: u32,
+    benchmark_registry_outbox_confirm_max_limit: u32,
     credit_cycle_worker_step_count: usize,
     credit_cycle_scheduler_default_limit: usize,
     credit_cycle_scheduler_max_limit: usize,
@@ -4203,6 +4308,12 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_DEFAULT_LIMIT,
         benchmark_registry_outbox_submit_max_limit:
             TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_MAX_LIMIT,
+        benchmark_registry_confirmer_configured: state.benchmark_registry_confirmer.is_some(),
+        benchmark_registry_confirmer_timeout_ms: state.benchmark_registry_confirmer_timeout_ms,
+        benchmark_registry_outbox_confirm_default_limit:
+            TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_DEFAULT_LIMIT,
+        benchmark_registry_outbox_confirm_max_limit:
+            TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_MAX_LIMIT,
         credit_cycle_worker_step_count: TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT,
         credit_cycle_scheduler_default_limit: TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_LIMIT,
         credit_cycle_scheduler_max_limit: TRACE_CREDIT_CYCLE_SCHEDULER_MAX_LIMIT,
@@ -5923,6 +6034,35 @@ struct TraceBenchmarkRegistrySubmitterResponse {
     external_receipt_ref: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TraceBenchmarkRegistryConfirmationStatus {
+    Pending,
+    Confirmed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceBenchmarkRegistryConfirmationRequest {
+    tenant_storage_ref: String,
+    benchmark_outbox_id: Uuid,
+    conversion_id: Uuid,
+    operation: StorageTraceBenchmarkRegistryOutboxOperation,
+    registry_ref: String,
+    external_receipt_ref: String,
+    artifact_payload_hash: String,
+    source_submission_ids_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceBenchmarkRegistryConfirmationResponse {
+    status: TraceBenchmarkRegistryConfirmationStatus,
+    #[serde(default)]
+    external_receipt_ref: Option<String>,
+    #[serde(default)]
+    error_detail: Option<String>,
+}
+
 #[async_trait::async_trait]
 trait TraceBenchmarkRegistrySubmitter: Send + Sync {
     async fn submit(
@@ -5973,6 +6113,74 @@ impl TraceBenchmarkRegistrySubmitter for HttpTraceBenchmarkRegistrySubmitter {
     }
 }
 
+#[async_trait::async_trait]
+trait TraceBenchmarkRegistryConfirmer: Send + Sync {
+    async fn confirm(
+        &self,
+        request: TraceBenchmarkRegistryConfirmationRequest,
+    ) -> anyhow::Result<TraceBenchmarkRegistryConfirmationResponse>;
+}
+
+#[derive(Clone)]
+struct HttpTraceBenchmarkRegistryConfirmer {
+    client: reqwest::Client,
+    url: String,
+    bearer_token: Option<SecretString>,
+}
+
+#[async_trait::async_trait]
+impl TraceBenchmarkRegistryConfirmer for HttpTraceBenchmarkRegistryConfirmer {
+    async fn confirm(
+        &self,
+        request: TraceBenchmarkRegistryConfirmationRequest,
+    ) -> anyhow::Result<TraceBenchmarkRegistryConfirmationResponse> {
+        let mut builder = self
+            .client
+            .post(&self.url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&request);
+        if let Some(bearer_token) = &self.bearer_token {
+            builder = builder.bearer_auth(bearer_token.expose_secret());
+        }
+        let response = builder
+            .send()
+            .await
+            .context("failed to confirm benchmark registry outbox item")?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!(
+                "benchmark registry confirmer returned HTTP {}",
+                status.as_u16()
+            );
+        }
+        let mut response: TraceBenchmarkRegistryConfirmationResponse = response
+            .json()
+            .await
+            .context("failed to decode benchmark registry confirmer response")?;
+        if let Some(external_receipt_ref) = response.external_receipt_ref.as_deref() {
+            response.external_receipt_ref = Some(normalize_external_registry_receipt_ref(
+                external_receipt_ref,
+            )?);
+        }
+        if response.status == TraceBenchmarkRegistryConfirmationStatus::Confirmed
+            && response.external_receipt_ref.is_none()
+        {
+            anyhow::bail!("confirmed benchmark registry response requires external_receipt_ref");
+        }
+        if response.status == TraceBenchmarkRegistryConfirmationStatus::Failed
+            && response
+                .error_detail
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+        {
+            anyhow::bail!("failed benchmark registry response requires error_detail");
+        }
+        Ok(response)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct TraceNearCreditOutboxSubmitWorkerRequest {
     #[serde(default)]
@@ -6018,6 +6226,31 @@ struct TraceBenchmarkRegistryOutboxSubmitWorkerResponse {
     dry_run: bool,
     checked: usize,
     submitted: usize,
+    failed: usize,
+    skipped: usize,
+    pending: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceBenchmarkRegistryOutboxConfirmWorkerRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default = "default_benchmark_registry_outbox_confirm_limit")]
+    limit: u32,
+}
+
+fn default_benchmark_registry_outbox_confirm_limit() -> u32 {
+    TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_DEFAULT_LIMIT
+}
+
+#[derive(Debug, Serialize)]
+struct TraceBenchmarkRegistryOutboxConfirmWorkerResponse {
+    purpose: String,
+    dry_run: bool,
+    checked: usize,
+    confirmed: usize,
     failed: usize,
     skipped: usize,
     pending: usize,
@@ -8378,6 +8611,25 @@ async fn benchmark_registry_outbox_submit_worker_handler(
     Ok(Json(response))
 }
 
+async fn benchmark_registry_outbox_confirm_worker_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceBenchmarkRegistryOutboxConfirmWorkerRequest>,
+) -> ApiResult<Json<TraceBenchmarkRegistryOutboxConfirmWorkerResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_benchmarker(&tenant)?;
+    if !body.dry_run && state.benchmark_registry_confirmer.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "benchmark registry outbox confirm worker requires TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_URL",
+        ));
+    }
+    let response = run_benchmark_registry_outbox_confirm_worker(state.as_ref(), &tenant, body)
+        .await
+        .map_err(maintenance_error)?;
+    Ok(Json(response))
+}
+
 async fn near_credit_outbox_submit_worker_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -8631,6 +8883,130 @@ async fn run_benchmark_registry_outbox_submit_worker(
     Ok(response)
 }
 
+async fn run_benchmark_registry_outbox_confirm_worker(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceBenchmarkRegistryOutboxConfirmWorkerRequest,
+) -> anyhow::Result<TraceBenchmarkRegistryOutboxConfirmWorkerResponse> {
+    let purpose = normalized_export_purpose(
+        request.purpose.as_deref(),
+        "trace_commons_benchmark_registry_confirm_worker",
+    );
+    let limit = request
+        .limit
+        .clamp(1, TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_MAX_LIMIT) as usize;
+    let items = read_benchmark_registry_outbox_items_for_admin(state, tenant).await?;
+    let pending_total = items
+        .iter()
+        .filter(|item| benchmark_registry_outbox_item_is_confirm_candidate(item))
+        .count();
+    let candidates: Vec<_> = items
+        .into_iter()
+        .filter(benchmark_registry_outbox_item_is_confirm_candidate)
+        .take(limit)
+        .collect();
+    let mut response = TraceBenchmarkRegistryOutboxConfirmWorkerResponse {
+        purpose,
+        dry_run: request.dry_run,
+        checked: candidates.len(),
+        confirmed: 0,
+        failed: 0,
+        skipped: pending_total.saturating_sub(candidates.len()),
+        pending: pending_total,
+    };
+    if request.dry_run {
+        append_benchmark_registry_outbox_confirm_audit(state, tenant, &response).await?;
+        return Ok(response);
+    }
+
+    let confirmer = state
+        .benchmark_registry_confirmer
+        .as_ref()
+        .context("benchmark registry outbox confirmer is not configured")?
+        .clone();
+    for item in candidates {
+        let confirm_request = benchmark_registry_confirmation_request_from_outbox_item(&item)?;
+        match confirmer.confirm(confirm_request).await {
+            Ok(confirm_response) => match confirm_response.status {
+                TraceBenchmarkRegistryConfirmationStatus::Confirmed => {
+                    let external_receipt_ref = confirm_response
+                        .external_receipt_ref
+                        .as_deref()
+                        .or(item.external_receipt_ref.as_deref())
+                        .context(
+                            "confirmed benchmark registry response requires external_receipt_ref",
+                        )
+                        .and_then(normalize_external_registry_receipt_ref)?;
+                    let updated = update_benchmark_registry_outbox_item_status_with_db_mirror(
+                        state,
+                        tenant,
+                        item.benchmark_outbox_id,
+                        StorageTraceBenchmarkRegistryOutboxStatus::Confirmed,
+                        Some(external_receipt_ref),
+                        None,
+                    )
+                    .await?
+                    .with_context(|| {
+                        format!(
+                            "benchmark registry outbox item {} disappeared before confirmed status update",
+                            item.benchmark_outbox_id
+                        )
+                    })?;
+                    anyhow::ensure!(
+                        updated.status == StorageTraceBenchmarkRegistryOutboxStatus::Confirmed,
+                        "benchmark registry outbox item {} did not update to confirmed status",
+                        item.benchmark_outbox_id
+                    );
+                    response.confirmed += 1;
+                    response.pending = response.pending.saturating_sub(1);
+                }
+                TraceBenchmarkRegistryConfirmationStatus::Failed => {
+                    let error_detail = confirm_response
+                        .error_detail
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .context("failed benchmark registry response requires error_detail")?;
+                    let last_error_hash = sha256_prefixed(error_detail);
+                    update_benchmark_registry_outbox_item_status_with_db_mirror(
+                        state,
+                        tenant,
+                        item.benchmark_outbox_id,
+                        StorageTraceBenchmarkRegistryOutboxStatus::Failed,
+                        confirm_response
+                            .external_receipt_ref
+                            .as_deref()
+                            .or(item.external_receipt_ref.as_deref())
+                            .map(normalize_external_registry_receipt_ref)
+                            .transpose()?,
+                        Some(last_error_hash),
+                    )
+                    .await?
+                    .with_context(|| {
+                        format!(
+                            "benchmark registry outbox item {} disappeared before failed status update",
+                            item.benchmark_outbox_id
+                        )
+                    })?;
+                    response.failed += 1;
+                    response.pending = response.pending.saturating_sub(1);
+                }
+                TraceBenchmarkRegistryConfirmationStatus::Pending => {}
+            },
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    benchmark_outbox_id = %item.benchmark_outbox_id,
+                    "Trace Commons benchmark registry confirmation poll failed"
+                );
+                response.failed += 1;
+            }
+        }
+    }
+    append_benchmark_registry_outbox_confirm_audit(state, tenant, &response).await?;
+    Ok(response)
+}
+
 fn benchmark_registry_outbox_item_is_submit_candidate(
     item: &TraceBenchmarkRegistryOutboxItem,
 ) -> bool {
@@ -8639,6 +9015,13 @@ fn benchmark_registry_outbox_item_is_submit_candidate(
         StorageTraceBenchmarkRegistryOutboxStatus::Pending
             | StorageTraceBenchmarkRegistryOutboxStatus::Failed
     )
+}
+
+fn benchmark_registry_outbox_item_is_confirm_candidate(
+    item: &TraceBenchmarkRegistryOutboxItem,
+) -> bool {
+    item.status == StorageTraceBenchmarkRegistryOutboxStatus::Submitted
+        && item.external_receipt_ref.is_some()
 }
 
 fn benchmark_registry_submitter_request_from_outbox_item(
@@ -8655,6 +9038,26 @@ fn benchmark_registry_submitter_request_from_outbox_item(
         evaluator_ref: item.evaluator_ref.clone(),
         evaluation_score: item.evaluation_score,
     }
+}
+
+fn benchmark_registry_confirmation_request_from_outbox_item(
+    item: &TraceBenchmarkRegistryOutboxItem,
+) -> anyhow::Result<TraceBenchmarkRegistryConfirmationRequest> {
+    let external_receipt_ref = item
+        .external_receipt_ref
+        .as_deref()
+        .context("benchmark registry confirmation requires external_receipt_ref")
+        .and_then(normalize_external_registry_receipt_ref)?;
+    Ok(TraceBenchmarkRegistryConfirmationRequest {
+        tenant_storage_ref: item.tenant_storage_ref.clone(),
+        benchmark_outbox_id: item.benchmark_outbox_id,
+        conversion_id: item.conversion_id,
+        operation: item.operation,
+        registry_ref: item.registry_ref.clone(),
+        external_receipt_ref,
+        artifact_payload_hash: item.artifact_payload_hash.clone(),
+        source_submission_ids_hash: item.source_submission_ids_hash.clone(),
+    })
 }
 
 async fn run_near_credit_outbox_submit_worker(
@@ -8904,6 +9307,69 @@ async fn append_benchmark_registry_outbox_submit_audit(
                 response.dry_run,
                 response.checked,
                 response.submitted,
+                response.failed,
+                response.skipped,
+                response.pending
+            )),
+            export_count: Some(response.checked),
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        },
+        StorageTraceAuditAction::Retain,
+        StorageTraceAuditSafeMetadata::Maintenance {
+            dry_run: response.dry_run,
+            action_counts,
+        },
+    )
+    .await
+}
+
+async fn append_benchmark_registry_outbox_confirm_audit(
+    state: &AppState,
+    tenant: &TenantAuth,
+    response: &TraceBenchmarkRegistryOutboxConfirmWorkerResponse,
+) -> anyhow::Result<()> {
+    let mut action_counts = BTreeMap::new();
+    action_counts.insert(
+        "checked".to_string(),
+        response.checked.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "confirmed".to_string(),
+        response.confirmed.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "failed".to_string(),
+        response.failed.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "skipped".to_string(),
+        response.skipped.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "pending".to_string(),
+        response.pending.min(u32::MAX as usize) as u32,
+    );
+    append_audit_event_with_db_mirror(
+        state,
+        tenant,
+        TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "benchmark_registry_outbox_confirm".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(tenant.role),
+            actor_principal_ref: Some(tenant.principal_ref.clone()),
+            reason: Some(format!(
+                "purpose={};dry_run={};checked={};confirmed={};failed={};skipped={};pending={}",
+                response.purpose,
+                response.dry_run,
+                response.checked,
+                response.confirmed,
                 response.failed,
                 response.skipped,
                 response.pending
@@ -33514,6 +33980,8 @@ mod tests {
             near_credit_submitter_timeout_ms: None,
             benchmark_registry_submitter: None,
             benchmark_registry_submitter_timeout_ms: None,
+            benchmark_registry_confirmer: None,
+            benchmark_registry_confirmer_timeout_ms: None,
             ranking_calibration_max_age: None,
             ranking_min_confidence_threshold: DEFAULT_TRACE_RANKING_MIN_CONFIDENCE_THRESHOLD,
             ranking_max_average_absolute_error_micros:
@@ -35700,6 +36168,22 @@ mod tests {
             serde_json::json!(TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_MAX_LIMIT)
         );
         assert_eq!(
+            value["benchmark_registry_confirmer_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["benchmark_registry_confirmer_timeout_ms"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            value["benchmark_registry_outbox_confirm_default_limit"],
+            serde_json::json!(TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_DEFAULT_LIMIT)
+        );
+        assert_eq!(
+            value["benchmark_registry_outbox_confirm_max_limit"],
+            serde_json::json!(TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_MAX_LIMIT)
+        );
+        assert_eq!(
             value["credit_cycle_worker_step_count"],
             serde_json::json!(TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT)
         );
@@ -35760,6 +36244,8 @@ mod tests {
             "near_credit_submitter_bearer_token",
             "benchmark_registry_submitter_url",
             "benchmark_registry_submitter_bearer_token",
+            "benchmark_registry_confirmation_url",
+            "benchmark_registry_confirmation_bearer_token",
         ] {
             assert!(
                 !object.contains_key(forbidden_key),
@@ -35896,6 +36382,59 @@ mod tests {
         let body_text = std::str::from_utf8(&body).expect("body is utf8");
         assert!(!body_text.contains(TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL));
         assert!(!body_text.contains(TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN));
+    }
+
+    #[tokio::test]
+    async fn admin_config_status_reports_benchmark_registry_confirmer_readiness_without_endpoint_secrets()
+     {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).benchmark_registry_confirmer =
+            Some(Arc::new(FakeBenchmarkRegistryConfirmer::default()));
+        Arc::make_mut(&mut state).benchmark_registry_confirmer_timeout_ms = Some(3_456);
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/config-status")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("admin response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("status json parses");
+        assert_eq!(
+            value["benchmark_registry_confirmer_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["benchmark_registry_confirmer_timeout_ms"],
+            serde_json::json!(3_456)
+        );
+        assert_eq!(
+            value["benchmark_registry_outbox_confirm_default_limit"],
+            serde_json::json!(TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_DEFAULT_LIMIT)
+        );
+        assert_eq!(
+            value["benchmark_registry_outbox_confirm_max_limit"],
+            serde_json::json!(TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_MAX_LIMIT)
+        );
+
+        let object = value.as_object().expect("status response is object");
+        assert!(!object.contains_key("benchmark_registry_confirmation_url"));
+        assert!(!object.contains_key("benchmark_registry_confirmation_bearer_token"));
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains(TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_URL));
+        assert!(!body_text.contains(TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN));
     }
 
     #[tokio::test]
@@ -39982,6 +40521,8 @@ mod tests {
             near_credit_submitter_timeout_ms: None,
             benchmark_registry_submitter: None,
             benchmark_registry_submitter_timeout_ms: None,
+            benchmark_registry_confirmer: None,
+            benchmark_registry_confirmer_timeout_ms: None,
             ranking_calibration_max_age: None,
             ranking_min_confidence_threshold: DEFAULT_TRACE_RANKING_MIN_CONFIDENCE_THRESHOLD,
             ranking_max_average_absolute_error_micros:
@@ -42762,6 +43303,46 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct FakeBenchmarkRegistryConfirmer {
+        calls: Arc<std::sync::Mutex<Vec<TraceBenchmarkRegistryConfirmationRequest>>>,
+        status: TraceBenchmarkRegistryConfirmationStatus,
+        failure: Option<String>,
+        error_detail: Option<String>,
+    }
+
+    impl Default for FakeBenchmarkRegistryConfirmer {
+        fn default() -> Self {
+            Self {
+                calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+                status: TraceBenchmarkRegistryConfirmationStatus::Confirmed,
+                failure: None,
+                error_detail: None,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TraceBenchmarkRegistryConfirmer for FakeBenchmarkRegistryConfirmer {
+        async fn confirm(
+            &self,
+            request: TraceBenchmarkRegistryConfirmationRequest,
+        ) -> anyhow::Result<TraceBenchmarkRegistryConfirmationResponse> {
+            if let Some(failure) = &self.failure {
+                anyhow::bail!("{failure}");
+            }
+            self.calls
+                .lock()
+                .expect("fake benchmark registry confirmer calls lock")
+                .push(request);
+            Ok(TraceBenchmarkRegistryConfirmationResponse {
+                status: self.status,
+                external_receipt_ref: Some("external-registry:receipt:confirmed-1".to_string()),
+                error_detail: self.error_detail.clone(),
+            })
+        }
+    }
+
     fn pending_benchmark_registry_outbox_item(
         benchmark_outbox_id: Uuid,
     ) -> TraceBenchmarkRegistryOutboxItem {
@@ -42783,6 +43364,24 @@ mod tests {
             last_error_hash: None,
             confirmed_at: None,
         }
+    }
+
+    fn submitted_benchmark_registry_outbox_item(
+        benchmark_outbox_id: Uuid,
+        operation: StorageTraceBenchmarkRegistryOutboxOperation,
+    ) -> TraceBenchmarkRegistryOutboxItem {
+        let mut item = pending_benchmark_registry_outbox_item(benchmark_outbox_id);
+        item.operation = operation;
+        item.status = StorageTraceBenchmarkRegistryOutboxStatus::Submitted;
+        item.submitted_at = Some(Utc::now());
+        item.external_receipt_ref = Some(format!(
+            "external-registry:receipt:{}",
+            match operation {
+                StorageTraceBenchmarkRegistryOutboxOperation::Publish => "publish",
+                StorageTraceBenchmarkRegistryOutboxOperation::Revoke => "revoke",
+            }
+        ));
+        item
     }
 
     #[tokio::test]
@@ -42942,6 +43541,121 @@ mod tests {
         .expect("dry-run does not require configured registry submitter");
         assert_eq!(dry_run.checked, 1);
         assert_eq!(dry_run.submitted, 0);
+        assert_eq!(dry_run.pending, 1);
+    }
+
+    #[tokio::test]
+    async fn benchmark_registry_outbox_confirm_worker_confirms_submitted_items() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let fake_confirmer = FakeBenchmarkRegistryConfirmer::default();
+        let confirmation_calls = fake_confirmer.calls.clone();
+        Arc::make_mut(&mut state).benchmark_registry_confirmer = Some(Arc::new(fake_confirmer));
+
+        let publish_outbox_id = Uuid::new_v4();
+        let revoke_outbox_id = Uuid::new_v4();
+        let publish_item = submitted_benchmark_registry_outbox_item(
+            publish_outbox_id,
+            StorageTraceBenchmarkRegistryOutboxOperation::Publish,
+        );
+        let revoke_item = submitted_benchmark_registry_outbox_item(
+            revoke_outbox_id,
+            StorageTraceBenchmarkRegistryOutboxOperation::Revoke,
+        );
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &publish_item)
+            .expect("publish benchmark registry outbox file writes");
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &revoke_item)
+            .expect("revoke benchmark registry outbox file writes");
+
+        let Json(response) = benchmark_registry_outbox_confirm_worker_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxConfirmWorkerRequest {
+                purpose: Some("confirm_benchmark_registry_items".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("benchmark worker confirms submitted registry outbox items");
+        assert_eq!(response.checked, 2);
+        assert_eq!(response.confirmed, 2);
+        assert_eq!(response.failed, 0);
+        assert_eq!(response.pending, 0);
+
+        let calls = confirmation_calls
+            .lock()
+            .expect("fake benchmark registry confirmer calls lock");
+        assert_eq!(calls.len(), 2);
+        let publish_call = calls
+            .iter()
+            .find(|call| call.operation == StorageTraceBenchmarkRegistryOutboxOperation::Publish)
+            .expect("publish confirmation call recorded");
+        assert_eq!(publish_call.benchmark_outbox_id, publish_outbox_id);
+        assert_eq!(
+            publish_call.external_receipt_ref,
+            "external-registry:receipt:publish"
+        );
+        let revoke_call = calls
+            .iter()
+            .find(|call| call.operation == StorageTraceBenchmarkRegistryOutboxOperation::Revoke)
+            .expect("revoke confirmation call recorded");
+        assert_eq!(revoke_call.benchmark_outbox_id, revoke_outbox_id);
+        assert_eq!(
+            revoke_call.external_receipt_ref,
+            "external-registry:receipt:revoke"
+        );
+        let call_json = serde_json::to_string(&calls[0]).expect("confirmation call serializes");
+        assert!(!call_json.contains("token-a"));
+        assert!(!call_json.contains("raw benchmark summary"));
+
+        let outbox = read_all_benchmark_registry_outbox_items(temp.path(), "tenant-a")
+            .expect("benchmark registry outbox reads");
+        assert_eq!(outbox.len(), 2);
+        assert!(outbox.iter().all(|item| {
+            item.status == StorageTraceBenchmarkRegistryOutboxStatus::Confirmed
+                && item.confirmed_at.is_some()
+                && item.last_error_hash.is_none()
+        }));
+    }
+
+    #[tokio::test]
+    async fn benchmark_registry_outbox_confirm_worker_requires_configured_confirmer_for_live_run() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let item = submitted_benchmark_registry_outbox_item(
+            Uuid::new_v4(),
+            StorageTraceBenchmarkRegistryOutboxOperation::Publish,
+        );
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &item)
+            .expect("benchmark registry outbox file writes");
+
+        let error = benchmark_registry_outbox_confirm_worker_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxConfirmWorkerRequest {
+                purpose: Some("registry_confirmer_config_gate".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect_err("live confirm worker requires configured registry confirmer");
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+
+        let Json(dry_run) = benchmark_registry_outbox_confirm_worker_handler(
+            State(state),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxConfirmWorkerRequest {
+                purpose: Some("registry_confirmer_config_gate_dry_run".to_string()),
+                dry_run: true,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("dry-run does not require configured registry confirmer");
+        assert_eq!(dry_run.checked, 1);
+        assert_eq!(dry_run.confirmed, 0);
         assert_eq!(dry_run.pending, 1);
     }
 
