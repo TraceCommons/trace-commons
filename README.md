@@ -170,7 +170,8 @@ admins can retire it through
 `POST /v1/admin/ranking/calibration-dataset-conflicts/quarantine`, which appends
 an `archived` status row using the latest projected manifest metadata and
 removes that key from active manifest-conflict blockers without rewriting
-history.
+history. Strict DB mirror deployments preserve any older immutable manifest
+metadata already stored in Postgres and mirror only the archival status update.
 Dataset-readiness reports group candidate and active models by
 registered holdout calibration dataset hash and show target-use readiness,
 current evidence hashes, effective thresholds, error metrics, and blocker reason

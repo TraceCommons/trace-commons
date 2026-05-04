@@ -30,6 +30,7 @@ use trace_commons_protocol::trace_contribution::{
 };
 use trace_commons_server::config::DatabaseConfig;
 use trace_commons_server::db::{Database, TraceCorpusRlsDiagnostics};
+use trace_commons_server::error::DatabaseError;
 use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
 use trace_commons_server::secrets::SecretsCrypto;
 use trace_commons_server::trace_artifact_store::{
@@ -81,6 +82,7 @@ use trace_commons_server::trace_corpus_storage::{
     TraceObjectRefWrite as StorageTraceObjectRefWrite,
     TraceRankingCalibrationDatasetRecord as StorageTraceRankingCalibrationDatasetRecord,
     TraceRankingCalibrationDatasetStatus as StorageTraceRankingCalibrationDatasetStatus,
+    TraceRankingCalibrationDatasetStatusUpdate as StorageTraceRankingCalibrationDatasetStatusUpdate,
     TraceRankingCalibrationDatasetWrite as StorageTraceRankingCalibrationDatasetWrite,
     TraceRankingCalibrationRunRecord as StorageTraceRankingCalibrationRunRecord,
     TraceRankingCalibrationRunWrite as StorageTraceRankingCalibrationRunWrite,
@@ -13657,7 +13659,8 @@ async fn append_ranking_calibration_dataset_status_override_with_db_mirror(
     record: &TraceRankingCalibrationDatasetRecord,
 ) -> anyhow::Result<()> {
     ensure_ranking_calibration_dataset_tenant(record, &tenant.tenant_id)?;
-    let mirror_result = mirror_ranking_calibration_dataset_to_db(state, record).await;
+    let mirror_result =
+        mirror_ranking_calibration_dataset_status_override_to_db(state, record).await;
     if state.require_db_mirror_writes {
         if let Err(error) = &mirror_result {
             tracing::warn!(%error, calibration_dataset_hash = %record.calibration_dataset_hash, "Trace Commons DB ranking calibration dataset status override mirror failed");
@@ -13860,6 +13863,56 @@ async fn mirror_ranking_calibration_dataset_to_db(
     .await
     .context("failed to mirror ranking calibration dataset to DB")?;
     Ok(())
+}
+
+async fn mirror_ranking_calibration_dataset_status_override_to_db(
+    state: &AppState,
+    record: &TraceRankingCalibrationDatasetRecord,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    let target_use = serde_storage_string(&record.target_use)?;
+    let write = StorageTraceRankingCalibrationDatasetWrite {
+        tenant_id: record.tenant_id.clone(),
+        calibration_dataset_hash: record.calibration_dataset_hash.clone(),
+        target_use: target_use.clone(),
+        policy_version: record.policy_version.clone(),
+        source_manifest_hash: record.source_manifest_hash.clone(),
+        source_count: record.source_count,
+        label_source_count: record.label_source_count,
+        label_actor_count: record.label_actor_count,
+        status: record.status,
+        actor_principal_ref: record.actor_principal_ref.clone(),
+    };
+    match db.upsert_trace_ranking_calibration_dataset(write).await {
+        Ok(_) => Ok(()),
+        Err(error) if ranking_calibration_dataset_db_manifest_immutable_error(&error) => db
+            .update_trace_ranking_calibration_dataset_status(
+                StorageTraceRankingCalibrationDatasetStatusUpdate {
+                    tenant_id: record.tenant_id.clone(),
+                    calibration_dataset_hash: record.calibration_dataset_hash.clone(),
+                    target_use,
+                    policy_version: record.policy_version.clone(),
+                    status: record.status,
+                    actor_principal_ref: record.actor_principal_ref.clone(),
+                },
+            )
+            .await
+            .map(|_| ())
+            .context("failed to mirror ranking calibration dataset status override to DB"),
+        Err(error) => {
+            Err(error).context("failed to mirror ranking calibration dataset status override to DB")
+        }
+    }
+}
+
+fn ranking_calibration_dataset_db_manifest_immutable_error(error: &DatabaseError) -> bool {
+    matches!(
+        error,
+        DatabaseError::Constraint(message)
+            if message.contains("ranking calibration dataset manifest is immutable")
+    )
 }
 
 async fn mirror_ranking_feature_to_db(
@@ -51262,6 +51315,91 @@ mod tests {
                 .iter()
                 .any(|gate| gate.starts_with("ranking_calibration_dataset_manifest_conflicts="))
         );
+    }
+
+    #[tokio::test]
+    async fn ranking_calibration_dataset_conflict_quarantine_archives_stale_db_mirror_manifest() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let fixture_key = "calibration-conflict-quarantine-db";
+        let conflict_key = append_legacy_calibration_dataset_manifest_conflict(
+            temp.path(),
+            "tenant-a",
+            fixture_key,
+        );
+        backend
+            .upsert_trace_ranking_calibration_dataset(StorageTraceRankingCalibrationDatasetWrite {
+                tenant_id: "tenant-a".to_string(),
+                calibration_dataset_hash: format!("sha256:{fixture_key}-holdout-v1"),
+                target_use: serde_storage_string(&TraceAllowedUse::RankingModelTraining)
+                    .expect("target use serializes"),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                source_manifest_hash: format!("sha256:{fixture_key}-manifest-v1"),
+                source_count: 128,
+                label_source_count: 3,
+                label_actor_count: 3,
+                status: StorageTraceRankingCalibrationDatasetStatus::Candidate,
+                actor_principal_ref: "principal_sha256:ranker-admin".to_string(),
+            })
+            .await
+            .expect("seed older DB mirror calibration dataset manifest");
+
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state =
+            test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
+                temp.path().to_path_buf(),
+                Some(db_mirror),
+                None,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                BTreeMap::new(),
+                false,
+                false,
+                true,
+                false,
+            );
+
+        let Json(response) = ranking_calibration_dataset_conflict_quarantine_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingCalibrationDatasetConflictQuarantineRequest {
+                calibration_dataset_hash: format!("sha256:{fixture_key}-holdout-v1"),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "legacy manifest rewrite imported before DB immutability".to_string(),
+            }),
+        )
+        .await
+        .expect("strict DB mirror archive preserves DB manifest metadata");
+
+        assert_eq!(response.conflict_key, conflict_key);
+        assert_eq!(
+            response.archived_record.source_manifest_hash,
+            format!("sha256:{fixture_key}-manifest-v2")
+        );
+        let db_records = backend
+            .list_trace_ranking_calibration_datasets("tenant-a")
+            .await
+            .expect("DB mirror calibration datasets read");
+        assert_eq!(db_records.len(), 1);
+        assert_eq!(
+            db_records[0].source_manifest_hash,
+            format!("sha256:{fixture_key}-manifest-v1")
+        );
+        assert_eq!(
+            db_records[0].status,
+            StorageTraceRankingCalibrationDatasetStatus::Archived
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
 
     #[tokio::test]
