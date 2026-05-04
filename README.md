@@ -134,6 +134,11 @@ arrives. Label-source authority is enforced at write time: utility workers write
 process-evaluation workers write `system`, and admins are the explicit override.
 Registered calibration datasets marked `deprecated` or `archived` are retired
 and cannot feed new calibration runs for that target use and policy.
+Production deployments can set
+`TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY=true` so
+calibration runs fail closed unless the requested model holdout hash has a
+matching registered non-retired calibration dataset row for the same target use
+and policy.
 When deployments require multiple joined label sources, calibration also
 requires that many distinct label-writing actor principals so one worker cannot
 satisfy source diversity by switching label-source enums. Model manifests must

@@ -263,6 +263,8 @@ const TRACE_COMMONS_PROCESS_EVALUATOR_TIMEOUT_MS: &str =
     "TRACE_COMMONS_PROCESS_EVALUATOR_TIMEOUT_MS";
 const TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS: &str =
     "TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS";
+const TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY: &str =
+    "TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY";
 const TRACE_COMMONS_RANKING_MIN_CONFIDENCE_THRESHOLD: &str =
     "TRACE_COMMONS_RANKING_MIN_CONFIDENCE_THRESHOLD";
 const TRACE_COMMONS_RANKING_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS: &str =
@@ -397,6 +399,7 @@ struct AppState {
     process_evaluator: Option<Arc<dyn TraceProcessEvaluator>>,
     process_evaluator_timeout_ms: Option<u64>,
     ranking_calibration_max_age: Option<Duration>,
+    ranking_require_calibration_dataset_registry: bool,
     ranking_min_confidence_threshold: f32,
     ranking_max_average_absolute_error_micros: i64,
     ranking_min_label_count: usize,
@@ -1554,6 +1557,8 @@ impl AppState {
             .map(|config| config.timeout_ms);
         let process_evaluator = process_evaluator_config.map(|config| config.evaluator);
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
+        let ranking_require_calibration_dataset_registry =
+            env_truthy(TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY);
         let ranking_min_confidence_threshold = parse_ranking_min_confidence_threshold_from_env()?;
         let ranking_max_average_absolute_error_micros =
             parse_ranking_max_average_absolute_error_micros_from_env()?;
@@ -1716,6 +1721,7 @@ impl AppState {
             process_evaluator,
             process_evaluator_timeout_ms,
             ranking_calibration_max_age,
+            ranking_require_calibration_dataset_registry,
             ranking_min_confidence_threshold,
             ranking_max_average_absolute_error_micros,
             ranking_min_label_count,
@@ -4440,6 +4446,7 @@ struct TraceCommonsConfigStatusResponse {
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Vec<String>,
     ranking_calibration_max_age_hours: Option<i64>,
+    ranking_require_calibration_dataset_registry: bool,
     ranking_min_confidence_threshold: f32,
     ranking_max_average_absolute_error_micros: i64,
     ranking_min_label_count: usize,
@@ -4589,6 +4596,8 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         ranking_calibration_max_age_hours: state
             .ranking_calibration_max_age
             .map(|max_age| max_age.num_hours()),
+        ranking_require_calibration_dataset_registry: state
+            .ranking_require_calibration_dataset_registry,
         ranking_min_confidence_threshold: state.ranking_min_confidence_threshold,
         ranking_max_average_absolute_error_micros: state.ranking_max_average_absolute_error_micros,
         ranking_min_label_count: state.ranking_min_label_count,
@@ -12940,6 +12949,7 @@ async fn create_ranking_calibration_run(
         &evaluation_dataset_hash,
         body.target_use,
         &policy_version,
+        state.ranking_require_calibration_dataset_registry,
     )?;
     let feature_schema_version = model.feature_schema_version.clone();
     let predictions = read_ranking_predictions_for_admin(state, tenant)
@@ -12981,12 +12991,19 @@ fn ensure_ranking_calibration_dataset_can_feed_run(
     evaluation_dataset_hash: &str,
     target_use: TraceAllowedUse,
     policy_version: &str,
+    require_registered: bool,
 ) -> ApiResult<()> {
     let Some(dataset) = datasets.iter().find(|dataset| {
         dataset.calibration_dataset_hash == evaluation_dataset_hash
             && dataset.target_use == target_use
             && dataset.policy_version == policy_version
     }) else {
+        if require_registered {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "ranking calibration dataset is not registered for this target use and policy",
+            ));
+        }
         return Ok(());
     };
     if matches!(
@@ -36739,6 +36756,7 @@ mod tests {
             process_evaluator: None,
             process_evaluator_timeout_ms: None,
             ranking_calibration_max_age: None,
+            ranking_require_calibration_dataset_registry: false,
             ranking_min_confidence_threshold: DEFAULT_TRACE_RANKING_MIN_CONFIDENCE_THRESHOLD,
             ranking_max_average_absolute_error_micros:
                 TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS,
@@ -38866,6 +38884,10 @@ mod tests {
         assert_eq!(
             value["ranking_min_label_source_count"],
             serde_json::json!(DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT)
+        );
+        assert_eq!(
+            value["ranking_require_calibration_dataset_registry"],
+            serde_json::json!(false)
         );
         assert_eq!(
             value["ranking_min_confidence_threshold"],
@@ -44050,6 +44072,7 @@ mod tests {
             process_evaluator: None,
             process_evaluator_timeout_ms: None,
             ranking_calibration_max_age: None,
+            ranking_require_calibration_dataset_registry: false,
             ranking_min_confidence_threshold: DEFAULT_TRACE_RANKING_MIN_CONFIDENCE_THRESHOLD,
             ranking_max_average_absolute_error_micros:
                 TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS,
@@ -54181,6 +54204,91 @@ mod tests {
                 .await
                 .expect("admin can list calibration runs");
         assert!(runs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ranking_calibration_run_can_require_registered_calibration_dataset() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).ranking_require_calibration_dataset_registry = true;
+
+        let Json(model) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-required-dataset-v1".to_string(),
+                feature_schema_version: "ranking-features-required-dataset-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:training-set-required-dataset".to_string(),
+                calibration_dataset_hash: "sha256:calibration-set-required-dataset".to_string(),
+                model_artifact_hash: "sha256:model-artifact-required-dataset".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can register ranking model version");
+
+        let missing = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: model.model_version.clone(),
+                target_use: TraceAllowedUse::ModelTraining,
+                policy_version: model.policy_version.clone(),
+                evaluation_dataset_hash: model.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(500_000),
+            }),
+        )
+        .await
+        .expect_err("required calibration dataset registry blocks unregistered holdouts");
+        assert_eq!(missing.0, StatusCode::CONFLICT);
+
+        let Json(runs) =
+            ranking_calibration_runs_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list calibration runs");
+        assert!(runs.is_empty());
+
+        let Json(dataset) = ranking_calibration_dataset_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingCalibrationDatasetRequest {
+                calibration_dataset_hash: model.calibration_dataset_hash.clone(),
+                target_use: TraceAllowedUse::ModelTraining,
+                policy_version: model.policy_version.clone(),
+                source_manifest_hash: "sha256:required-calibration-manifest".to_string(),
+                source_count: 10,
+                label_source_count: 2,
+                label_actor_count: 2,
+                status: StorageTraceRankingCalibrationDatasetStatus::Candidate,
+            }),
+        )
+        .await
+        .expect("admin can register candidate ranking calibration dataset");
+
+        let Json(run) = ranking_calibration_run_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: model.model_version,
+                target_use: dataset.target_use,
+                policy_version: dataset.policy_version,
+                evaluation_dataset_hash: dataset.calibration_dataset_hash,
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(500_000),
+            }),
+        )
+        .await
+        .expect("registered non-retired holdout can feed calibration");
+        assert!(!run.promotable);
+        assert_eq!(run.joined_label_prediction_count, 0);
+        assert!(
+            run.reason_codes
+                .contains(&"insufficient_labels".to_string())
+        );
     }
 
     #[tokio::test]
