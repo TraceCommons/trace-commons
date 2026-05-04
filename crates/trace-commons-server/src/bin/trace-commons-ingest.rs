@@ -2733,6 +2733,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(ranking_adjudication_report_handler),
         )
         .route(
+            "/v1/admin/ranking/labeler-reliability-report",
+            get(ranking_labeler_reliability_report_handler),
+        )
+        .route(
             "/v1/admin/ranking/calibration-report",
             get(ranking_calibration_report_handler),
         )
@@ -7282,6 +7286,52 @@ struct TraceRankingPreferencePairAdjudicationIssue {
 
 type TraceRankingPreferencePairKey = (Uuid, Uuid, TraceAllowedUse);
 type TraceRankingPreferencePairEntries<'a> = Vec<(bool, &'a TraceRankingPreferenceLabelRecord)>;
+
+#[derive(Debug, Serialize)]
+struct TraceRankingLabelerReliabilityReport {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    absolute_label_count: usize,
+    preference_label_count: usize,
+    source_count: usize,
+    actor_count: usize,
+    sources: Vec<TraceRankingLabelSourceReliabilityRecord>,
+    actors: Vec<TraceRankingLabelActorReliabilityRecord>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingLabelSourceReliabilityRecord {
+    label_source: StorageTraceRankingLabelSource,
+    absolute_label_count: usize,
+    preference_label_count: usize,
+    disputed_label_count: usize,
+    absolute_conflict_count: usize,
+    pairwise_conflict_count: usize,
+    issue_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingLabelActorReliabilityRecord {
+    actor_principal_hash: String,
+    label_source_counts: BTreeMap<String, usize>,
+    absolute_label_count: usize,
+    preference_label_count: usize,
+    disputed_label_count: usize,
+    absolute_conflict_count: usize,
+    pairwise_conflict_count: usize,
+    issue_count: usize,
+}
+
+#[derive(Debug, Default, Clone)]
+struct TraceRankingLabelerReliabilityStats {
+    label_source_counts: BTreeMap<String, usize>,
+    absolute_label_count: usize,
+    preference_label_count: usize,
+    disputed_label_count: usize,
+    absolute_conflict_count: usize,
+    pairwise_conflict_count: usize,
+    issue_count: usize,
+}
 
 #[derive(Debug, Serialize)]
 struct TraceRankingCalibrationReport {
@@ -13753,6 +13803,25 @@ async fn ranking_adjudication_report_handler(
     )))
 }
 
+async fn ranking_labeler_reliability_report_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<TraceRankingLabelerReliabilityReport>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let labels = read_ranking_labels_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let preference_labels = read_ranking_preference_labels_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(ranking_labeler_reliability_report(
+        &tenant.tenant_id,
+        &labels,
+        &preference_labels,
+    )))
+}
+
 async fn ranking_calibration_report_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -15737,6 +15806,194 @@ fn ranking_adjudication_issue_count_for_target(
             .iter()
             .filter(|issue| issue.target_use == target_use)
             .count()
+}
+
+fn ranking_labeler_reliability_report(
+    tenant_id: &str,
+    labels: &[TraceRankingLabelRecord],
+    preference_labels: &[TraceRankingPreferenceLabelRecord],
+) -> TraceRankingLabelerReliabilityReport {
+    let mut source_stats =
+        BTreeMap::<StorageTraceRankingLabelSource, TraceRankingLabelerReliabilityStats>::new();
+    let mut actor_stats = BTreeMap::<String, TraceRankingLabelerReliabilityStats>::new();
+
+    for label in labels {
+        record_labeler_reliability_absolute_label(
+            source_stats.entry(label.label_source).or_default(),
+            label,
+        );
+        record_labeler_reliability_absolute_label(
+            actor_stats
+                .entry(sha256_prefixed(&label.actor_principal_ref))
+                .or_default(),
+            label,
+        );
+    }
+    for label in preference_labels {
+        record_labeler_reliability_preference_label(
+            source_stats.entry(label.label_source).or_default(),
+            label,
+        );
+        record_labeler_reliability_preference_label(
+            actor_stats
+                .entry(sha256_prefixed(&label.actor_principal_ref))
+                .or_default(),
+            label,
+        );
+    }
+
+    let mut latest_label_by_source = BTreeMap::new();
+    for label in labels {
+        let key = (label.submission_id, label.target_use, label.label_source);
+        let should_replace =
+            latest_label_by_source
+                .get(&key)
+                .is_none_or(|current: &&TraceRankingLabelRecord| {
+                    (label.created_at, label.ranking_label_id)
+                        > (current.created_at, current.ranking_label_id)
+                });
+        if should_replace {
+            latest_label_by_source.insert(key, label);
+        }
+    }
+
+    let adjudication = ranking_adjudication_report(tenant_id, labels, preference_labels);
+    for issue in &adjudication.absolute_label_issues {
+        for label in latest_label_by_source.values().filter(|label| {
+            label.submission_id == issue.submission_id && label.target_use == issue.target_use
+        }) {
+            if issue
+                .reason_codes
+                .iter()
+                .any(|reason| reason == "absolute_label_outcome_conflict")
+            {
+                source_stats
+                    .entry(label.label_source)
+                    .or_default()
+                    .absolute_conflict_count += 1;
+                actor_stats
+                    .entry(sha256_prefixed(&label.actor_principal_ref))
+                    .or_default()
+                    .absolute_conflict_count += 1;
+            }
+            source_stats
+                .entry(label.label_source)
+                .or_default()
+                .issue_count += 1;
+            actor_stats
+                .entry(sha256_prefixed(&label.actor_principal_ref))
+                .or_default()
+                .issue_count += 1;
+        }
+    }
+    for issue in &adjudication.preference_pair_issues {
+        for label in preference_labels.iter().filter(|label| {
+            label.target_use == issue.target_use
+                && preference_label_matches_adjudication_pair(
+                    label,
+                    issue.left_submission_id,
+                    issue.right_submission_id,
+                )
+        }) {
+            source_stats
+                .entry(label.label_source)
+                .or_default()
+                .pairwise_conflict_count += 1;
+            source_stats
+                .entry(label.label_source)
+                .or_default()
+                .issue_count += 1;
+            actor_stats
+                .entry(sha256_prefixed(&label.actor_principal_ref))
+                .or_default()
+                .pairwise_conflict_count += 1;
+            actor_stats
+                .entry(sha256_prefixed(&label.actor_principal_ref))
+                .or_default()
+                .issue_count += 1;
+        }
+    }
+
+    let sources = source_stats
+        .into_iter()
+        .map(
+            |(label_source, stats)| TraceRankingLabelSourceReliabilityRecord {
+                label_source,
+                absolute_label_count: stats.absolute_label_count,
+                preference_label_count: stats.preference_label_count,
+                disputed_label_count: stats.disputed_label_count,
+                absolute_conflict_count: stats.absolute_conflict_count,
+                pairwise_conflict_count: stats.pairwise_conflict_count,
+                issue_count: stats.issue_count,
+            },
+        )
+        .collect::<Vec<_>>();
+    let actors = actor_stats
+        .into_iter()
+        .map(
+            |(actor_principal_hash, stats)| TraceRankingLabelActorReliabilityRecord {
+                actor_principal_hash,
+                label_source_counts: stats.label_source_counts,
+                absolute_label_count: stats.absolute_label_count,
+                preference_label_count: stats.preference_label_count,
+                disputed_label_count: stats.disputed_label_count,
+                absolute_conflict_count: stats.absolute_conflict_count,
+                pairwise_conflict_count: stats.pairwise_conflict_count,
+                issue_count: stats.issue_count,
+            },
+        )
+        .collect::<Vec<_>>();
+
+    TraceRankingLabelerReliabilityReport {
+        tenant_id: tenant_id.to_string(),
+        tenant_storage_ref: tenant_storage_ref(tenant_id),
+        absolute_label_count: labels.len(),
+        preference_label_count: preference_labels.len(),
+        source_count: sources.len(),
+        actor_count: actors.len(),
+        sources,
+        actors,
+    }
+}
+
+fn record_labeler_reliability_absolute_label(
+    stats: &mut TraceRankingLabelerReliabilityStats,
+    label: &TraceRankingLabelRecord,
+) {
+    stats.absolute_label_count += 1;
+    increment_labeler_reliability_source(stats, label.label_source);
+    if label.label_outcome == StorageTraceRankingLabelOutcome::Disputed {
+        stats.disputed_label_count += 1;
+    }
+}
+
+fn record_labeler_reliability_preference_label(
+    stats: &mut TraceRankingLabelerReliabilityStats,
+    label: &TraceRankingPreferenceLabelRecord,
+) {
+    stats.preference_label_count += 1;
+    increment_labeler_reliability_source(stats, label.label_source);
+}
+
+fn increment_labeler_reliability_source(
+    stats: &mut TraceRankingLabelerReliabilityStats,
+    label_source: StorageTraceRankingLabelSource,
+) {
+    increment_count(
+        &mut stats.label_source_counts,
+        &serde_enum_tag(&label_source),
+    );
+}
+
+fn preference_label_matches_adjudication_pair(
+    label: &TraceRankingPreferenceLabelRecord,
+    left_submission_id: Uuid,
+    right_submission_id: Uuid,
+) -> bool {
+    (label.preferred_submission_id == left_submission_id
+        && label.rejected_submission_id == right_submission_id)
+        || (label.preferred_submission_id == right_submission_id
+            && label.rejected_submission_id == left_submission_id)
 }
 
 fn ranking_calibration_report(
@@ -56905,6 +57162,145 @@ mod tests {
         );
         let report_text = serde_json::to_string(&report).expect("report serializes");
         assert!(!report_text.contains("private-adjudication"));
+    }
+
+    #[tokio::test]
+    async fn ranking_labeler_reliability_report_hashes_actors_and_counts_conflicts() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut first = sample_envelope().await;
+        make_metadata_only_low_risk(&mut first);
+        first.consent.scopes = vec![ConsentScope::ModelTraining];
+        first.trace_card.consent_scope = ConsentScope::ModelTraining;
+        first.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let first_submission_id = first.submission_id;
+        let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
+            .await
+            .expect("first source submission succeeds");
+
+        let mut second = sample_envelope().await;
+        make_metadata_only_low_risk(&mut second);
+        second.consent.scopes = vec![ConsentScope::ModelTraining];
+        second.trace_card.consent_scope = ConsentScope::ModelTraining;
+        second.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let second_submission_id = second.submission_id;
+        let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(second))
+            .await
+            .expect("second source submission succeeds");
+
+        let _ = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: first_submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 900_000,
+                evidence_hash: "sha256:reliability-frontier-label".to_string(),
+                external_ref: "private-reliability-frontier-label".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write frontier label");
+        let _ = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: first_submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Rejected,
+                utility_delta_micros: -250_000,
+                evidence_hash: "sha256:reliability-reviewer-label".to_string(),
+                external_ref: "private-reliability-reviewer-label".to_string(),
+            }),
+        )
+        .await
+        .expect("reviewer can write conflicting label");
+        let _ = ranking_preference_label_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id: first_submission_id,
+                rejected_submission_id: second_submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 700_000,
+                evidence_hash: "sha256:reliability-reviewer-pair".to_string(),
+                external_ref: "private-reliability-reviewer-pair".to_string(),
+            }),
+        )
+        .await
+        .expect("reviewer can write pairwise preference");
+        let _ = ranking_preference_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id: second_submission_id,
+                rejected_submission_id: first_submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 700_000,
+                evidence_hash: "sha256:reliability-frontier-pair".to_string(),
+                external_ref: "private-reliability-frontier-pair".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write reversed pairwise preference");
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/ranking/labeler-reliability-report")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("labeler reliability response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let report: serde_json::Value =
+            serde_json::from_slice(&body).expect("labeler reliability report parses");
+        assert_eq!(report["source_count"], serde_json::json!(2));
+        assert_eq!(report["actor_count"], serde_json::json!(2));
+
+        let sources = report["sources"].as_array().expect("sources array");
+        let frontier = sources
+            .iter()
+            .find(|source| source["label_source"] == serde_json::json!("frontier_lab"))
+            .expect("frontier source reliability exists");
+        let reviewer = sources
+            .iter()
+            .find(|source| source["label_source"] == serde_json::json!("reviewer"))
+            .expect("reviewer source reliability exists");
+        for source in [frontier, reviewer] {
+            assert_eq!(source["absolute_conflict_count"], serde_json::json!(1));
+            assert_eq!(source["pairwise_conflict_count"], serde_json::json!(1));
+            assert_eq!(source["issue_count"], serde_json::json!(2));
+        }
+        for actor in report["actors"].as_array().expect("actors array") {
+            let actor_hash = actor["actor_principal_hash"]
+                .as_str()
+                .expect("actor hash string");
+            assert!(actor_hash.starts_with("sha256:"));
+            assert_eq!(actor["issue_count"], serde_json::json!(2));
+        }
+        let report_text = serde_json::to_string(&report).expect("report serializes");
+        assert!(!report_text.contains("private-reliability"));
+        assert!(!report_text.contains("utility-worker-token"));
+        assert!(!report_text.contains("review-token"));
     }
 
     #[tokio::test]
