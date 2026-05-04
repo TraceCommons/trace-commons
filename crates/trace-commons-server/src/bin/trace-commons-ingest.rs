@@ -332,6 +332,8 @@ const MAX_TRACE_RANKING_MIN_PAIRWISE_LABEL_COUNT: usize = 1_000_000;
 const DEFAULT_TRACE_RANKING_MIN_PAIRWISE_ACCURACY_MICROS: i64 = 500_000;
 const MAX_TRACE_RANKING_PAIRWISE_ACCURACY_MICROS: i64 = 1_000_000;
 const RANKING_FEATURE_SERVER_PROVENANCE_TAG: &str = "feature_provenance:server_derived";
+const RANKING_FEATURE_VECTOR_METADATA_TAG: &str = "feature_input:vector_metadata";
+const RANKING_FEATURE_DERIVED_METADATA_TAG: &str = "feature_input:derived_metadata";
 const DEFAULT_RANKING_FEATURE_RUN_LIMIT: usize = 100;
 const MAX_RANKING_FEATURE_RUN_LIMIT: usize = 500;
 
@@ -7024,6 +7026,8 @@ struct TraceRankingFeatureRunRequest {
     feature_schema_version: String,
     reason: String,
     #[serde(default)]
+    require_vector_metadata: bool,
+    #[serde(default)]
     limit: Option<usize>,
 }
 
@@ -7040,6 +7044,8 @@ struct TraceRankingFeatureRunResponse {
     generated_count: usize,
     skipped_existing_count: usize,
     skipped_ineligible_count: usize,
+    skipped_missing_vector_count: usize,
+    vector_backed_count: usize,
     pending_after_count: usize,
     feature_refs: Vec<String>,
 }
@@ -12180,14 +12186,15 @@ async fn ranking_feature_handler(
     validate_optional_unit_score(body.privacy_risk_score, "privacy_risk_score")?;
     validate_optional_unit_score(body.quality_score, "quality_score")?;
     validate_ranking_codes(&body.coverage_tags, "coverage_tags")?;
-    if body
-        .coverage_tags
-        .iter()
-        .any(|tag| tag == RANKING_FEATURE_SERVER_PROVENANCE_TAG)
-    {
+    if body.coverage_tags.iter().any(|tag| {
+        tag == RANKING_FEATURE_SERVER_PROVENANCE_TAG
+            || tag == RANKING_FEATURE_VECTOR_METADATA_TAG
+            || tag == RANKING_FEATURE_DERIVED_METADATA_TAG
+            || tag.starts_with("feature_input:")
+    }) {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
-            "ranking feature server provenance is reserved for the feature worker",
+            "ranking feature server provenance and input tags are reserved for the feature worker",
         ));
     }
 
@@ -12242,6 +12249,10 @@ async fn ranking_feature_run_handler(
     let existing_features = read_ranking_features_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    let active_vector_entries =
+        read_active_vector_entries_by_submission_source(state.as_ref(), &tenant)
+            .await
+            .map_err(internal_error)?;
     let mut existing_server_feature_keys = existing_features
         .iter()
         .filter(|feature| ranking_feature_is_server_provenanced(feature))
@@ -12279,6 +12290,8 @@ async fn ranking_feature_run_handler(
         generated_count: 0,
         skipped_existing_count: 0,
         skipped_ineligible_count: 0,
+        skipped_missing_vector_count: 0,
+        vector_backed_count: 0,
         pending_after_count: 0,
         feature_refs: Vec::new(),
     };
@@ -12303,6 +12316,14 @@ async fn ranking_feature_run_handler(
             response.skipped_ineligible_count += 1;
             continue;
         }
+        let vector_entry = active_vector_entries.get(&(
+            derived.submission_id,
+            derived.canonical_summary_hash.clone(),
+        ));
+        if body.require_vector_metadata && vector_entry.is_none() {
+            response.skipped_missing_vector_count += 1;
+            continue;
+        }
         let feature_key = (
             derived.submission_id,
             body.target_use,
@@ -12317,6 +12338,7 @@ async fn ranking_feature_run_handler(
             &tenant,
             record,
             derived,
+            vector_entry,
             body.target_use,
             &feature_schema_version,
         );
@@ -12324,6 +12346,9 @@ async fn ranking_feature_run_handler(
             .feature_refs
             .push(ranking_feature_external_ref(feature.ranking_feature_id));
         response.generated_count += 1;
+        if vector_entry.is_some() {
+            response.vector_backed_count += 1;
+        }
         existing_server_feature_keys.insert(feature_key);
         if !body.dry_run {
             append_ranking_feature_with_db_mirror(state.as_ref(), &tenant, &feature)
@@ -12332,15 +12357,18 @@ async fn ranking_feature_run_handler(
         }
     }
 
-    let pending_before_current_run = count_pending_server_ranking_features(
-        &metadata,
-        &existing_features,
-        &records_by_submission,
-        &tenant,
-        tenant_policy.as_ref(),
-        body.target_use,
-        &feature_schema_version,
-    );
+    let pending_before_current_run =
+        count_pending_server_ranking_features(PendingServerRankingFeatureInputs {
+            metadata: &metadata,
+            features: &existing_features,
+            records_by_submission: &records_by_submission,
+            tenant: &tenant,
+            tenant_policy: tenant_policy.as_ref(),
+            target_use: body.target_use,
+            feature_schema_version: &feature_schema_version,
+            active_vector_entries: &active_vector_entries,
+            require_vector_metadata: body.require_vector_metadata,
+        });
     response.pending_after_count = if body.dry_run {
         pending_before_current_run
     } else {
@@ -12370,6 +12398,36 @@ fn ranking_feature_external_ref(ranking_feature_id: Uuid) -> String {
     format!("ranking_feature:{ranking_feature_id}")
 }
 
+async fn read_active_vector_entries_by_submission_source(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<BTreeMap<(Uuid, String), StorageTraceVectorEntryRecord>> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(BTreeMap::new());
+    };
+    let mut entries = db
+        .list_trace_vector_entries(&tenant.tenant_id)
+        .await
+        .context("failed to read active vector metadata for ranking features")?;
+    entries.sort_by_key(|entry| {
+        (
+            entry.indexed_at.unwrap_or(entry.updated_at),
+            entry.updated_at,
+            entry.vector_entry_id,
+        )
+    });
+    let mut by_submission_source = BTreeMap::new();
+    for entry in entries {
+        if entry.status == StorageTraceVectorEntryStatus::Active
+            && entry.source_projection == StorageTraceVectorEntrySourceProjection::CanonicalSummary
+            && !entry.source_hash.trim().is_empty()
+        {
+            by_submission_source.insert((entry.submission_id, entry.source_hash.clone()), entry);
+        }
+    }
+    Ok(by_submission_source)
+}
+
 fn ranking_feature_is_server_provenanced(feature: &TraceRankingFeatureRecord) -> bool {
     feature
         .coverage_tags
@@ -12394,14 +12452,18 @@ fn server_derived_ranking_feature_record(
     tenant: &TenantAuth,
     submission: &TraceCommonsSubmissionRecord,
     derived: &TraceCommonsDerivedRecord,
+    vector_entry: Option<&StorageTraceVectorEntryRecord>,
     target_use: TraceAllowedUse,
     feature_schema_version: &str,
 ) -> TraceRankingFeatureRecord {
-    let source_feature_hash = derived.canonical_summary_hash.clone();
+    let source_feature_hash = vector_entry
+        .map(|entry| entry.source_hash.clone())
+        .unwrap_or_else(|| derived.canonical_summary_hash.clone());
     let feature_vector_hash = server_derived_ranking_feature_vector_hash(
         tenant,
         submission,
         derived,
+        vector_entry,
         target_use,
         feature_schema_version,
     );
@@ -12411,7 +12473,7 @@ fn server_derived_ranking_feature_record(
         submission.submission_id,
         &format!("{feature_schema_version}:{target_use:?}:{source_feature_hash}"),
     );
-    let coverage_tags = server_derived_ranking_feature_coverage_tags(derived);
+    let coverage_tags = server_derived_ranking_feature_coverage_tags(derived, vector_entry);
     TraceRankingFeatureRecord {
         ranking_feature_id,
         tenant_id: tenant.tenant_id.clone(),
@@ -12423,8 +12485,16 @@ fn server_derived_ranking_feature_record(
         feature_vector_hash,
         feature_names_hash: server_derived_ranking_feature_names_hash(feature_schema_version),
         source_feature_hash,
-        duplicate_score: Some(derived.duplicate_score),
-        novelty_score: Some(derived.novelty_score),
+        duplicate_score: Some(
+            vector_entry
+                .and_then(|entry| entry.duplicate_score)
+                .unwrap_or(derived.duplicate_score),
+        ),
+        novelty_score: Some(
+            vector_entry
+                .and_then(|entry| entry.novelty_score)
+                .unwrap_or(derived.novelty_score),
+        ),
         privacy_risk_score: Some(privacy_risk_feature_score(submission.privacy_risk)),
         quality_score: Some(submission.submission_score.clamp(0.0, 1.0)),
         coverage_tags,
@@ -12441,24 +12511,62 @@ fn server_derived_ranking_feature_names_hash(feature_schema_version: &str) -> St
 
 fn server_derived_ranking_feature_coverage_tags(
     derived: &TraceCommonsDerivedRecord,
+    vector_entry: Option<&StorageTraceVectorEntryRecord>,
 ) -> Vec<String> {
     let mut coverage_tags = derived.coverage_tags.clone();
     coverage_tags.push(RANKING_FEATURE_SERVER_PROVENANCE_TAG.to_string());
+    coverage_tags.push(
+        if vector_entry.is_some() {
+            RANKING_FEATURE_VECTOR_METADATA_TAG
+        } else {
+            RANKING_FEATURE_DERIVED_METADATA_TAG
+        }
+        .to_string(),
+    );
     coverage_tags.sort();
     coverage_tags.dedup();
     coverage_tags
+}
+
+fn optional_score_feature_bits(score: Option<f32>) -> String {
+    score
+        .map(|score| score.to_bits().to_string())
+        .unwrap_or_else(|| "none".to_string())
 }
 
 fn server_derived_ranking_feature_vector_hash(
     tenant: &TenantAuth,
     submission: &TraceCommonsSubmissionRecord,
     derived: &TraceCommonsDerivedRecord,
+    vector_entry: Option<&StorageTraceVectorEntryRecord>,
     target_use: TraceAllowedUse,
     feature_schema_version: &str,
 ) -> String {
-    let coverage_tags = server_derived_ranking_feature_coverage_tags(derived).join(",");
+    let coverage_tags =
+        server_derived_ranking_feature_coverage_tags(derived, vector_entry).join(",");
+    let vector_metadata = vector_entry
+        .map(|entry| {
+            format!(
+                "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                entry.vector_entry_id,
+                entry.vector_store,
+                entry.embedding_model,
+                entry.embedding_dimension,
+                entry.embedding_version,
+                serde_enum_tag(&entry.source_projection),
+                entry.source_hash,
+                entry.nearest_trace_ids.join(","),
+                entry.cluster_id.as_deref().unwrap_or("none"),
+                [
+                    optional_score_feature_bits(entry.duplicate_score),
+                    optional_score_feature_bits(entry.novelty_score),
+                ]
+                .join(",")
+            )
+        })
+        .unwrap_or_else(|| "none".to_string());
     sha256_prefixed(&format!(
-        "ranking_feature_vector:server_derived:v1\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "ranking_feature_vector:server_derived:v1\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         tenant_storage_ref(&tenant.tenant_id),
         submission.submission_id,
         submission.trace_id,
@@ -12469,7 +12577,8 @@ fn server_derived_ranking_feature_vector_hash(
         derived.novelty_score.to_bits(),
         serde_enum_tag(&submission.privacy_risk),
         submission.submission_score.to_bits(),
-        coverage_tags
+        coverage_tags,
+        vector_metadata
     ))
 }
 
@@ -12481,16 +12590,21 @@ fn privacy_risk_feature_score(privacy_risk: ResidualPiiRisk) -> f32 {
     }
 }
 
-fn count_pending_server_ranking_features(
-    metadata: &TraceCommonsMetadataView,
-    features: &[TraceRankingFeatureRecord],
-    records_by_submission: &BTreeMap<Uuid, &TraceCommonsSubmissionRecord>,
-    tenant: &TenantAuth,
-    tenant_policy: Option<&TenantSubmissionPolicy>,
+struct PendingServerRankingFeatureInputs<'a> {
+    metadata: &'a TraceCommonsMetadataView,
+    features: &'a [TraceRankingFeatureRecord],
+    records_by_submission: &'a BTreeMap<Uuid, &'a TraceCommonsSubmissionRecord>,
+    tenant: &'a TenantAuth,
+    tenant_policy: Option<&'a TenantSubmissionPolicy>,
     target_use: TraceAllowedUse,
-    feature_schema_version: &str,
-) -> usize {
-    let existing_server_feature_keys = features
+    feature_schema_version: &'a str,
+    active_vector_entries: &'a BTreeMap<(Uuid, String), StorageTraceVectorEntryRecord>,
+    require_vector_metadata: bool,
+}
+
+fn count_pending_server_ranking_features(inputs: PendingServerRankingFeatureInputs<'_>) -> usize {
+    let existing_server_feature_keys = inputs
+        .features
         .iter()
         .filter(|feature| ranking_feature_is_server_provenanced(feature))
         .map(|feature| {
@@ -12502,27 +12616,35 @@ fn count_pending_server_ranking_features(
             )
         })
         .collect::<BTreeSet<_>>();
-    metadata
+    inputs
+        .metadata
         .derived
         .iter()
         .filter(|derived| derived.status == TraceCorpusStatus::Accepted)
         .filter(|derived| !derived.canonical_summary_hash.trim().is_empty())
+        .filter(|derived| {
+            !inputs.require_vector_metadata
+                || inputs.active_vector_entries.contains_key(&(
+                    derived.submission_id,
+                    derived.canonical_summary_hash.clone(),
+                ))
+        })
         .filter_map(|derived| {
-            let record = records_by_submission.get(&derived.submission_id)?;
+            let record = inputs.records_by_submission.get(&derived.submission_id)?;
             (record.status == TraceCorpusStatus::Accepted
                 && record_matches_utility_credit_policy_abac(
                     record,
-                    tenant,
-                    tenant_policy,
-                    &[target_use],
+                    inputs.tenant,
+                    inputs.tenant_policy,
+                    &[inputs.target_use],
                 ))
             .then_some(derived)
         })
         .filter(|derived| {
             !existing_server_feature_keys.contains(&(
                 derived.submission_id,
-                target_use,
-                feature_schema_version.to_string(),
+                inputs.target_use,
+                inputs.feature_schema_version.to_string(),
                 derived.canonical_summary_hash.clone(),
             ))
         })
@@ -49791,6 +49913,7 @@ mod tests {
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: "ranking-features-server-v1".to_string(),
                 reason: "derive server-owned ranking features".to_string(),
+                require_vector_metadata: false,
                 limit: Some(10),
             }),
         )
@@ -49820,6 +49943,167 @@ mod tests {
                 .coverage_tags
                 .contains(&RANKING_FEATURE_SERVER_PROVENANCE_TAG.to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn ranking_feature_worker_requires_and_uses_active_vector_metadata() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("ranking submission mirrors into DB");
+
+        let derived_records = backend
+            .list_trace_derived_records("tenant-a")
+            .await
+            .expect("DB derived records read");
+        let derived = derived_records
+            .iter()
+            .find(|record| record.submission_id == submission_id)
+            .expect("mirrored derived record exists");
+        let source_hash = derived
+            .canonical_summary_hash
+            .clone()
+            .expect("derived summary hash exists");
+        let vector_entry_id = deterministic_vector_entry_uuid(
+            "tenant-a",
+            submission_id,
+            derived.derived_id,
+            &source_hash,
+        );
+        backend
+            .upsert_trace_vector_entry(StorageTraceVectorEntryWrite {
+                tenant_id: "tenant-a".to_string(),
+                submission_id,
+                derived_id: derived.derived_id,
+                vector_entry_id,
+                vector_store: "trace_commons_metadata_precheck".to_string(),
+                embedding_model: TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_MODEL.to_string(),
+                embedding_dimension: i32::try_from(
+                    TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION,
+                )
+                .expect("embedding dimension fits"),
+                embedding_version: TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_VERSION.to_string(),
+                source_projection: StorageTraceVectorEntrySourceProjection::CanonicalSummary,
+                source_hash: source_hash.clone(),
+                status: StorageTraceVectorEntryStatus::Active,
+                nearest_trace_ids: vec!["trace:neighbor-a".to_string()],
+                cluster_id: Some("summary:vector-backed-cluster".to_string()),
+                duplicate_score: Some(0.77),
+                novelty_score: Some(0.23),
+                indexed_at: Some(Utc::now()),
+                invalidated_at: None,
+                deleted_at: None,
+            })
+            .await
+            .expect("active vector entry writes");
+
+        let Json(run) = ranking_feature_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRunRequest {
+                dry_run: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                feature_schema_version: "ranking-features-vector-v1".to_string(),
+                reason: "derive vector-backed ranking features".to_string(),
+                require_vector_metadata: true,
+                limit: Some(10),
+            }),
+        )
+        .await
+        .expect("utility worker can require active vector metadata");
+        assert_eq!(run.checked_count, 1);
+        assert_eq!(run.generated_count, 1);
+        assert_eq!(run.vector_backed_count, 1);
+        assert_eq!(run.skipped_missing_vector_count, 0);
+
+        let features =
+            read_all_ranking_features(temp.path(), "tenant-a").expect("ranking features read");
+        assert_eq!(features.len(), 1);
+        let feature = &features[0];
+        assert_eq!(feature.source_feature_hash, source_hash);
+        assert_eq!(feature.duplicate_score, Some(0.77));
+        assert_eq!(feature.novelty_score, Some(0.23));
+        assert!(
+            feature
+                .coverage_tags
+                .contains(&RANKING_FEATURE_SERVER_PROVENANCE_TAG.to_string())
+        );
+        assert!(
+            feature
+                .coverage_tags
+                .contains(&RANKING_FEATURE_VECTOR_METADATA_TAG.to_string())
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn ranking_feature_worker_skips_sources_without_vector_metadata_when_required() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("ranking submission succeeds");
+
+        let Json(run) = ranking_feature_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRunRequest {
+                dry_run: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                feature_schema_version: "ranking-features-vector-required-v1".to_string(),
+                reason: "require vector metadata before ranking credit".to_string(),
+                require_vector_metadata: true,
+                limit: Some(10),
+            }),
+        )
+        .await
+        .expect("utility worker can require vector metadata");
+        assert_eq!(run.checked_count, 1);
+        assert_eq!(run.generated_count, 0);
+        assert_eq!(run.vector_backed_count, 0);
+        assert_eq!(run.skipped_missing_vector_count, 1);
+        assert_eq!(run.pending_after_count, 0);
+
+        let features =
+            read_all_ranking_features(temp.path(), "tenant-a").expect("ranking features read");
+        assert!(features.is_empty());
     }
 
     #[tokio::test]

@@ -222,11 +222,11 @@ Exit criteria:
 
 ### Phase 4: Derived Artifact Workers
 
-Status: vector metadata and benchmark candidate plumbing are partial; production workers remain future work.
+Status: vector metadata, vector-backed ranking feature derivation, and benchmark candidate plumbing are partial; production workers remain future work.
 
 Scope:
 
-- Implement private vector duplicate/novelty workers that embed only approved redacted projections and write `trace_vector_entries` plus derived records.
+- Implement private vector duplicate/novelty workers that embed only approved redacted projections and write `trace_vector_entries` plus derived records. The ranking feature worker can now require active vector metadata before deriving server-provenanced ranking features, but the full embedding backend remains future work.
 - Promote benchmark conversion into controlled worker jobs that record consent scope, review state, redaction version, replayability requirements, source-list hashes, and artifact refs.
 - Add ranker/model-utility jobs as offline analysis that may append delayed credit only with a downstream artifact/job reference.
 - Extend item-level export manifest rows beyond replay datasets to benchmark and ranker artifacts once those exports become durable job outputs.
