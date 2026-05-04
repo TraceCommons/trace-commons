@@ -27765,16 +27765,29 @@ fn read_all_ranking_calibration_datasets(
     let records: Vec<TraceRankingCalibrationDatasetRecord> =
         read_jsonl_records(&path, "ranking calibration dataset")?;
     let mut latest_by_key = BTreeMap::new();
+    let mut manifest_by_key = BTreeMap::new();
     for record in records {
         ensure_ranking_calibration_dataset_tenant(&record, tenant_id)?;
-        latest_by_key.insert(
-            (
-                record.calibration_dataset_hash.clone(),
-                record.target_use,
-                record.policy_version.clone(),
-            ),
-            record,
+        let key = (
+            record.calibration_dataset_hash.clone(),
+            record.target_use,
+            record.policy_version.clone(),
         );
+        let manifest = (
+            record.source_manifest_hash.clone(),
+            record.source_count,
+            record.label_source_count,
+            record.label_actor_count,
+        );
+        if let Some(existing_manifest) = manifest_by_key.get(&key) {
+            anyhow::ensure!(
+                existing_manifest == &manifest,
+                RANKING_CALIBRATION_DATASET_IMMUTABLE_MANIFEST_MESSAGE
+            );
+        } else {
+            manifest_by_key.insert(key.clone(), manifest);
+        }
+        latest_by_key.insert(key, record);
     }
     let mut records = latest_by_key.into_values().collect::<Vec<_>>();
     records.sort_by_key(|record| record.created_at);
@@ -50781,6 +50794,40 @@ mod tests {
             records[0].status,
             StorageTraceRankingCalibrationDatasetStatus::Active
         );
+    }
+
+    #[tokio::test]
+    async fn ranking_calibration_dataset_reader_rejects_legacy_manifest_conflicts() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let tenant_id = "tenant-a";
+        let path = ranking_calibration_datasets_path(temp.path(), tenant_id);
+        let initial = TraceRankingCalibrationDatasetRecord {
+            tenant_id: tenant_id.to_string(),
+            tenant_storage_ref: tenant_storage_ref(tenant_id),
+            calibration_dataset_hash: "sha256:ranking-calibration-legacy-v1".to_string(),
+            target_use: TraceAllowedUse::RankingModelTraining,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            source_manifest_hash: "sha256:ranking-calibration-legacy-manifest-v1".to_string(),
+            source_count: 128,
+            label_source_count: 3,
+            label_actor_count: 3,
+            status: StorageTraceRankingCalibrationDatasetStatus::Candidate,
+            actor_principal_ref: "principal_sha256:ranker-admin".to_string(),
+            created_at: Utc::now(),
+        };
+        let mut rewrite = initial.clone();
+        rewrite.source_manifest_hash = "sha256:ranking-calibration-legacy-manifest-v2".to_string();
+        rewrite.status = StorageTraceRankingCalibrationDatasetStatus::Active;
+        rewrite.created_at = Utc::now();
+
+        append_jsonl_record(&path, &initial, "ranking calibration dataset")
+            .expect("legacy initial row written");
+        append_jsonl_record(&path, &rewrite, "ranking calibration dataset")
+            .expect("legacy rewritten row written");
+
+        let error = read_all_ranking_calibration_datasets(temp.path(), tenant_id)
+            .expect_err("reader rejects legacy calibration dataset manifest conflict");
+        assert!(error.to_string().contains("immutable"));
     }
 
     async fn seed_pairwise_ranking_prediction_source(
