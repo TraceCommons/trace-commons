@@ -11145,24 +11145,6 @@ async fn ranking_calibration_dataset_handler(
     validate_positive_ranking_count(body.source_count, "source_count")?;
     validate_positive_ranking_count(body.label_source_count, "label_source_count")?;
     validate_positive_ranking_count(body.label_actor_count, "label_actor_count")?;
-    let existing_calibration_datasets =
-        read_ranking_calibration_datasets_for_admin(state.as_ref(), &tenant)
-            .await
-            .map_err(internal_error)?;
-    if existing_calibration_datasets.iter().any(|existing| {
-        existing.calibration_dataset_hash.as_str() == calibration_dataset_hash.as_str()
-            && existing.target_use == body.target_use
-            && existing.policy_version.as_str() == policy_version.as_str()
-            && (existing.source_manifest_hash.as_str() != source_manifest_hash.as_str()
-                || existing.source_count != body.source_count
-                || existing.label_source_count != body.label_source_count
-                || existing.label_actor_count != body.label_actor_count)
-    }) {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            "ranking calibration dataset manifest is immutable for this target use and policy",
-        ));
-    }
     let record = TraceRankingCalibrationDatasetRecord {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
@@ -11177,6 +11159,16 @@ async fn ranking_calibration_dataset_handler(
         actor_principal_ref: tenant.principal_ref.clone(),
         created_at: Utc::now(),
     };
+    let existing_calibration_datasets =
+        read_ranking_calibration_datasets_for_admin(state.as_ref(), &tenant)
+            .await
+            .map_err(internal_error)?;
+    if ranking_calibration_dataset_manifest_rewrite(&existing_calibration_datasets, &record) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            RANKING_CALIBRATION_DATASET_IMMUTABLE_MANIFEST_MESSAGE,
+        ));
+    }
     append_ranking_calibration_dataset_with_db_mirror(state.as_ref(), &tenant, &record)
         .await
         .map_err(internal_error)?;
@@ -13407,6 +13399,7 @@ async fn append_ranking_calibration_dataset_with_db_mirror(
     tenant: &TenantAuth,
     record: &TraceRankingCalibrationDatasetRecord,
 ) -> anyhow::Result<()> {
+    ensure_ranking_calibration_dataset_append_allowed(&state.root, &tenant.tenant_id, record)?;
     let mirror_result = mirror_ranking_calibration_dataset_to_db(state, record).await;
     if state.require_db_mirror_writes {
         if let Err(error) = &mirror_result {
@@ -27725,8 +27718,40 @@ fn append_ranking_calibration_dataset(
     tenant_id: &str,
     record: &TraceRankingCalibrationDatasetRecord,
 ) -> anyhow::Result<()> {
+    ensure_ranking_calibration_dataset_append_allowed(root, tenant_id, record)?;
     let path = ranking_calibration_datasets_path(root, tenant_id);
     append_jsonl_record(&path, record, "ranking calibration dataset")
+}
+
+const RANKING_CALIBRATION_DATASET_IMMUTABLE_MANIFEST_MESSAGE: &str =
+    "ranking calibration dataset manifest is immutable for this target use and policy";
+
+fn ensure_ranking_calibration_dataset_append_allowed(
+    root: &Path,
+    tenant_id: &str,
+    record: &TraceRankingCalibrationDatasetRecord,
+) -> anyhow::Result<()> {
+    let existing_records = read_all_ranking_calibration_datasets(root, tenant_id)?;
+    anyhow::ensure!(
+        !ranking_calibration_dataset_manifest_rewrite(&existing_records, record),
+        RANKING_CALIBRATION_DATASET_IMMUTABLE_MANIFEST_MESSAGE
+    );
+    Ok(())
+}
+
+fn ranking_calibration_dataset_manifest_rewrite(
+    existing_records: &[TraceRankingCalibrationDatasetRecord],
+    record: &TraceRankingCalibrationDatasetRecord,
+) -> bool {
+    existing_records.iter().any(|existing| {
+        existing.calibration_dataset_hash == record.calibration_dataset_hash
+            && existing.target_use == record.target_use
+            && existing.policy_version == record.policy_version
+            && (existing.source_manifest_hash != record.source_manifest_hash
+                || existing.source_count != record.source_count
+                || existing.label_source_count != record.label_source_count
+                || existing.label_actor_count != record.label_actor_count)
+    })
 }
 
 fn read_all_ranking_calibration_datasets(
@@ -50705,6 +50730,53 @@ mod tests {
                 .expect("admin can list latest calibration dataset registry row");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].source_manifest_hash, record.source_manifest_hash);
+        assert_eq!(
+            records[0].status,
+            StorageTraceRankingCalibrationDatasetStatus::Active
+        );
+    }
+
+    #[tokio::test]
+    async fn ranking_calibration_dataset_append_rejects_manifest_rewrites() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let tenant_id = "tenant-a";
+        let initial = TraceRankingCalibrationDatasetRecord {
+            tenant_id: tenant_id.to_string(),
+            tenant_storage_ref: tenant_storage_ref(tenant_id),
+            calibration_dataset_hash: "sha256:ranking-calibration-storage-v1".to_string(),
+            target_use: TraceAllowedUse::RankingModelTraining,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            source_manifest_hash: "sha256:ranking-calibration-storage-manifest-v1".to_string(),
+            source_count: 128,
+            label_source_count: 3,
+            label_actor_count: 3,
+            status: StorageTraceRankingCalibrationDatasetStatus::Candidate,
+            actor_principal_ref: "principal_sha256:ranker-admin".to_string(),
+            created_at: Utc::now(),
+        };
+
+        append_ranking_calibration_dataset(temp.path(), tenant_id, &initial)
+            .expect("initial calibration dataset registry append succeeds");
+
+        let mut status_update = initial.clone();
+        status_update.status = StorageTraceRankingCalibrationDatasetStatus::Active;
+        status_update.created_at = Utc::now();
+        append_ranking_calibration_dataset(temp.path(), tenant_id, &status_update)
+            .expect("status-only calibration dataset append succeeds");
+
+        let mut rewrite = status_update.clone();
+        rewrite.source_manifest_hash = "sha256:ranking-calibration-storage-manifest-v2".to_string();
+        let error = append_ranking_calibration_dataset(temp.path(), tenant_id, &rewrite)
+            .expect_err("storage append rejects calibration dataset manifest rewrite");
+        assert!(error.to_string().contains("immutable"));
+
+        let records = read_all_ranking_calibration_datasets(temp.path(), tenant_id)
+            .expect("calibration dataset registry remains readable");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].source_manifest_hash,
+            initial.source_manifest_hash
+        );
         assert_eq!(
             records[0].status,
             StorageTraceRankingCalibrationDatasetStatus::Active

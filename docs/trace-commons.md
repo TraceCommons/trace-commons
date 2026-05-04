@@ -596,7 +596,8 @@ notes, raw lab refs, or source ids.
 For an existing `(calibration_dataset_hash, target_use, policy_version)` holdout
 key, status-only lifecycle updates are append-only but must keep the source
 manifest hash, source count, label-source count, and label-actor count unchanged.
-Manifest or count changes require a new dataset hash or policy version.
+Manifest or count changes require a new dataset hash or policy version, and both
+file-backed writes and PostgreSQL mirror writes reject those rewrites.
 Calibration runs may use matching registry rows in `candidate` or `active`
 status, but reject matching `deprecated` or `archived` rows so retired holdout
 sets cannot keep model evidence alive after stewardship review.
