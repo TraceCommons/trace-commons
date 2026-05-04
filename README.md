@@ -75,6 +75,13 @@ set `require_external_evaluator=true` to fail closed when that adapter is not
 configured; optional bearer auth and timeout are controlled by
 `TRACE_COMMONS_BENCHMARK_EVALUATOR_BEARER_TOKEN` and
 `TRACE_COMMONS_BENCHMARK_EVALUATOR_TIMEOUT_MS`.
+Configure `TRACE_COMMONS_PROCESS_EVALUATOR_URL` to let process-evaluation
+workers run bounded evaluator batches over accepted trace derived summaries and
+hashes, then write normal process-evaluation metadata plus optional hash-only
+system ranking labels. Worker requests can set `require_external_evaluator=true`
+to fail closed when the adapter is absent; optional bearer auth and timeout are
+controlled by `TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN` and
+`TRACE_COMMONS_PROCESS_EVALUATOR_TIMEOUT_MS`.
 Configure `TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL` to let benchmark
 workers submit pending or failed rows to an operator-owned registry adapter;
 optional bearer auth and timeout are controlled by

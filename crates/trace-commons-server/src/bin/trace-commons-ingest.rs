@@ -253,6 +253,11 @@ const TRACE_COMMONS_BENCHMARK_EVALUATOR_BEARER_TOKEN: &str =
     "TRACE_COMMONS_BENCHMARK_EVALUATOR_BEARER_TOKEN";
 const TRACE_COMMONS_BENCHMARK_EVALUATOR_TIMEOUT_MS: &str =
     "TRACE_COMMONS_BENCHMARK_EVALUATOR_TIMEOUT_MS";
+const TRACE_COMMONS_PROCESS_EVALUATOR_URL: &str = "TRACE_COMMONS_PROCESS_EVALUATOR_URL";
+const TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN: &str =
+    "TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN";
+const TRACE_COMMONS_PROCESS_EVALUATOR_TIMEOUT_MS: &str =
+    "TRACE_COMMONS_PROCESS_EVALUATOR_TIMEOUT_MS";
 const TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS: &str =
     "TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS";
 const TRACE_COMMONS_RANKING_MIN_CONFIDENCE_THRESHOLD: &str =
@@ -272,6 +277,7 @@ const DEFAULT_NEAR_CREDIT_CONFIRMATION_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_BENCHMARK_REGISTRY_SUBMITTER_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_BENCHMARK_EVALUATOR_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_PROCESS_EVALUATOR_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_EDDSA_KEYSET_REFRESH_INTERVAL_SECONDS: u64 = 300;
 const MAX_EDDSA_KEYSET_URL_BYTES: usize = 256 * 1024;
 const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT: u32 = 100;
@@ -295,6 +301,8 @@ const TRACE_BENCHMARK_EVALUATION_WORKER_RUN_DEFAULT_LIMIT: usize = 25;
 const TRACE_BENCHMARK_EVALUATION_WORKER_RUN_MAX_LIMIT: usize = 100;
 const TRACE_BENCHMARK_REGISTRY_PUBLICATION_WORKER_RUN_DEFAULT_LIMIT: usize = 25;
 const TRACE_BENCHMARK_REGISTRY_PUBLICATION_WORKER_RUN_MAX_LIMIT: usize = 100;
+const TRACE_PROCESS_EVALUATION_WORKER_RUN_DEFAULT_LIMIT: usize = 25;
+const TRACE_PROCESS_EVALUATION_WORKER_RUN_MAX_LIMIT: usize = 100;
 const TRACE_RANKING_WORKER_RUN_STALE_AFTER_HOURS: i64 = 1;
 const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
 const TRACE_REVIEW_DUE_AFTER_HOURS: i64 = 24;
@@ -383,6 +391,8 @@ struct AppState {
     benchmark_registry_confirmer_timeout_ms: Option<u64>,
     benchmark_evaluator: Option<Arc<dyn TraceBenchmarkEvaluator>>,
     benchmark_evaluator_timeout_ms: Option<u64>,
+    process_evaluator: Option<Arc<dyn TraceProcessEvaluator>>,
+    process_evaluator_timeout_ms: Option<u64>,
     ranking_calibration_max_age: Option<Duration>,
     ranking_min_confidence_threshold: f32,
     ranking_max_average_absolute_error_micros: i64,
@@ -1535,6 +1545,11 @@ impl AppState {
             .as_ref()
             .map(|config| config.timeout_ms);
         let benchmark_evaluator = benchmark_evaluator_config.map(|config| config.evaluator);
+        let process_evaluator_config = trace_process_evaluator_from_env()?;
+        let process_evaluator_timeout_ms = process_evaluator_config
+            .as_ref()
+            .map(|config| config.timeout_ms);
+        let process_evaluator = process_evaluator_config.map(|config| config.evaluator);
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
         let ranking_min_confidence_threshold = parse_ranking_min_confidence_threshold_from_env()?;
         let ranking_max_average_absolute_error_micros =
@@ -1695,6 +1710,8 @@ impl AppState {
             benchmark_registry_confirmer_timeout_ms,
             benchmark_evaluator,
             benchmark_evaluator_timeout_ms,
+            process_evaluator,
+            process_evaluator_timeout_ms,
             ranking_calibration_max_age,
             ranking_min_confidence_threshold,
             ranking_max_average_absolute_error_micros,
@@ -1971,6 +1988,11 @@ struct ConfiguredTraceBenchmarkEvaluator {
     timeout_ms: u64,
 }
 
+struct ConfiguredTraceProcessEvaluator {
+    evaluator: Arc<dyn TraceProcessEvaluator>,
+    timeout_ms: u64,
+}
+
 fn trace_near_credit_submitter_from_env()
 -> anyhow::Result<Option<ConfiguredTraceNearCreditSubmitter>> {
     let Some(url) = optional_trimmed_env(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL)? else {
@@ -2117,6 +2139,33 @@ fn trace_benchmark_evaluator_from_env() -> anyhow::Result<Option<ConfiguredTrace
     }))
 }
 
+fn trace_process_evaluator_from_env() -> anyhow::Result<Option<ConfiguredTraceProcessEvaluator>> {
+    let Some(url) = optional_trimmed_env(TRACE_COMMONS_PROCESS_EVALUATOR_URL)? else {
+        return Ok(None);
+    };
+    let parsed = reqwest::Url::parse(&url)
+        .with_context(|| format!("invalid {TRACE_COMMONS_PROCESS_EVALUATOR_URL}"))?;
+    validate_trace_process_evaluator_url(&parsed)?;
+    let timeout = parse_trace_process_evaluator_timeout_from_env()?;
+    let timeout_ms = timeout.as_millis() as u64;
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout.min(StdDuration::from_secs(3)))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("trace-commons-process-evaluator/0.1")
+        .build()
+        .context("failed to build process evaluator HTTP client")?;
+    Ok(Some(ConfiguredTraceProcessEvaluator {
+        evaluator: Arc::new(HttpTraceProcessEvaluator {
+            client,
+            url,
+            bearer_token: optional_trimmed_env(TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN)?
+                .map(SecretString::from),
+        }),
+        timeout_ms,
+    }))
+}
+
 fn validate_trace_near_credit_submitter_url(url: &reqwest::Url) -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(url.scheme(), "https" | "http"),
@@ -2242,6 +2291,32 @@ fn validate_trace_benchmark_evaluator_url(url: &reqwest::Url) -> anyhow::Result<
     Ok(())
 }
 
+fn validate_trace_process_evaluator_url(url: &reqwest::Url) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        matches!(url.scheme(), "https" | "http"),
+        "{TRACE_COMMONS_PROCESS_EVALUATOR_URL} must use http or https"
+    );
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "{TRACE_COMMONS_PROCESS_EVALUATOR_URL} must not include embedded credentials"
+    );
+    anyhow::ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "{TRACE_COMMONS_PROCESS_EVALUATOR_URL} must not include query strings or fragments"
+    );
+    let host = url
+        .host_str()
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| anyhow::anyhow!("{TRACE_COMMONS_PROCESS_EVALUATOR_URL} requires a host"))?;
+    if url.scheme() == "http" {
+        anyhow::ensure!(
+            is_loopback_or_localhost_host(&host),
+            "{TRACE_COMMONS_PROCESS_EVALUATOR_URL} may use http only for localhost loopback evaluators"
+        );
+    }
+    Ok(())
+}
+
 fn is_loopback_or_localhost_host(host: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     if host == "localhost" || host.ends_with(".localhost") {
@@ -2329,6 +2404,20 @@ fn parse_trace_benchmark_evaluator_timeout_from_env() -> anyhow::Result<StdDurat
     anyhow::ensure!(
         (1..=120_000).contains(&timeout_ms),
         "{TRACE_COMMONS_BENCHMARK_EVALUATOR_TIMEOUT_MS} must be between 1 and 120000"
+    );
+    Ok(StdDuration::from_millis(timeout_ms))
+}
+
+fn parse_trace_process_evaluator_timeout_from_env() -> anyhow::Result<StdDuration> {
+    let timeout_ms = match optional_trimmed_env(TRACE_COMMONS_PROCESS_EVALUATOR_TIMEOUT_MS)? {
+        Some(configured) => configured.parse::<u64>().with_context(|| {
+            format!("{TRACE_COMMONS_PROCESS_EVALUATOR_TIMEOUT_MS} must be milliseconds")
+        })?,
+        None => DEFAULT_PROCESS_EVALUATOR_TIMEOUT_MS,
+    };
+    anyhow::ensure!(
+        (1..=120_000).contains(&timeout_ms),
+        "{TRACE_COMMONS_PROCESS_EVALUATOR_TIMEOUT_MS} must be between 1 and 120000"
     );
     Ok(StdDuration::from_millis(timeout_ms))
 }
@@ -2699,6 +2788,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/workers/process-evaluation",
             post(process_evaluation_worker_handler),
+        )
+        .route(
+            "/v1/workers/process-evaluations/run",
+            post(process_evaluation_worker_run_handler),
         )
         .route("/v1/audit/events", get(audit_events_handler))
         .with_state(state)
@@ -4361,6 +4454,10 @@ struct TraceCommonsConfigStatusResponse {
     benchmark_registry_outbox_confirm_max_limit: u32,
     benchmark_evaluator_configured: bool,
     benchmark_evaluator_timeout_ms: Option<u64>,
+    process_evaluator_configured: bool,
+    process_evaluator_timeout_ms: Option<u64>,
+    process_evaluation_worker_run_default_limit: usize,
+    process_evaluation_worker_run_max_limit: usize,
     credit_cycle_worker_step_count: usize,
     credit_cycle_scheduler_default_limit: usize,
     credit_cycle_scheduler_max_limit: usize,
@@ -4510,6 +4607,11 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_MAX_LIMIT,
         benchmark_evaluator_configured: state.benchmark_evaluator.is_some(),
         benchmark_evaluator_timeout_ms: state.benchmark_evaluator_timeout_ms,
+        process_evaluator_configured: state.process_evaluator.is_some(),
+        process_evaluator_timeout_ms: state.process_evaluator_timeout_ms,
+        process_evaluation_worker_run_default_limit:
+            TRACE_PROCESS_EVALUATION_WORKER_RUN_DEFAULT_LIMIT,
+        process_evaluation_worker_run_max_limit: TRACE_PROCESS_EVALUATION_WORKER_RUN_MAX_LIMIT,
         credit_cycle_worker_step_count: TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT,
         credit_cycle_scheduler_default_limit: TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_LIMIT,
         credit_cycle_scheduler_max_limit: TRACE_CREDIT_CYCLE_SCHEDULER_MAX_LIMIT,
@@ -7205,6 +7307,46 @@ struct TraceProcessEvaluationJobResponse {
     utility_credit_skipped_existing_count: usize,
     ranking_label_appended_count: usize,
     ranking_label_skipped_existing_count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProcessEvaluationWorkerRunRequest {
+    limit: Option<usize>,
+    #[serde(default)]
+    dry_run: Option<bool>,
+    #[serde(default)]
+    evaluator_ref: Option<String>,
+    #[serde(default)]
+    require_external_evaluator: Option<bool>,
+    #[serde(default)]
+    target_use: Option<TraceAllowedUse>,
+    #[serde(default)]
+    utility_category: Option<StorageTraceRankingUtilityCategory>,
+    #[serde(default)]
+    external_ref_prefix: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProcessEvaluationWorkerRunResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    dry_run: bool,
+    limit: usize,
+    evaluator_ref: String,
+    target_use: Option<TraceAllowedUse>,
+    utility_category: Option<StorageTraceRankingUtilityCategory>,
+    reason_hash: String,
+    checked_count: usize,
+    evaluated_count: usize,
+    ranking_label_appended_count: usize,
+    ranking_label_skipped_existing_count: usize,
+    skipped_existing_count: usize,
+    skipped_ineligible_count: usize,
+    pending_after_count: usize,
+    evaluated_submission_ids: Vec<Uuid>,
+    skipped_reason_counts: BTreeMap<String, usize>,
 }
 
 fn default_process_evaluation_ranking_label_source() -> StorageTraceRankingLabelSource {
@@ -15030,6 +15172,16 @@ async fn process_evaluation_worker_handler(
 ) -> ApiResult<Json<TraceProcessEvaluationJobResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_process_evaluation_operator(&tenant)?;
+    run_process_evaluation_job(state.as_ref(), &tenant, body)
+        .await
+        .map(Json)
+}
+
+async fn run_process_evaluation_job(
+    state: &AppState,
+    tenant: &TenantAuth,
+    body: TraceProcessEvaluationJobRequest,
+) -> ApiResult<TraceProcessEvaluationJobResponse> {
     let reason = body.reason.trim().to_string();
     if reason.is_empty() {
         return Err(api_error(
@@ -15097,7 +15249,7 @@ async fn process_evaluation_worker_handler(
         .utility_credit_points_delta
         .zip(utility_external_ref.clone());
 
-    let mut record = read_utility_submission_record(state.as_ref(), &tenant, body.submission_id)
+    let mut record = read_utility_submission_record(state, tenant, body.submission_id)
         .await
         .map_err(internal_error)?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
@@ -15107,11 +15259,10 @@ async fn process_evaluation_worker_handler(
             "process evaluation jobs can only label accepted trace submissions",
         ));
     }
-    let tenant_policy =
-        tenant_process_evaluation_policy_for_request(state.as_ref(), &tenant).await?;
+    let tenant_policy = tenant_process_evaluation_policy_for_request(state, tenant).await?;
     if !record_matches_export_policy_abac(
         &record,
-        &tenant,
+        tenant,
         tenant_policy.as_ref(),
         TraceAllowedUse::Evaluation,
     ) {
@@ -15135,7 +15286,7 @@ async fn process_evaluation_worker_handler(
         }
         if !record_matches_export_policy_abac(
             &record,
-            &tenant,
+            tenant,
             tenant_policy.as_ref(),
             ranking_label.target_use,
         ) {
@@ -15148,8 +15299,8 @@ async fn process_evaluation_worker_handler(
             validate_process_evaluation_ranking_label_external_ref(&ranking_label.external_ref)?;
         Some(
             prepare_process_evaluation_ranking_label(
-                state.as_ref(),
-                &tenant,
+                state,
+                tenant,
                 &record,
                 &body.process_evaluation,
                 ranking_label,
@@ -15164,7 +15315,7 @@ async fn process_evaluation_worker_handler(
     let TraceEnvelopeBodyRead {
         envelope: mut envelope_before,
         object_ref_id: input_object_ref_id,
-    } = read_envelope_for_process_evaluation(state.as_ref(), &tenant, &record, Some(&reason))
+    } = read_envelope_for_process_evaluation(state, tenant, &record, Some(&reason))
         .await
         .map_err(internal_error)?;
     let input_hash = envelope_plaintext_hash(&envelope_before).map_err(internal_error)?;
@@ -15172,7 +15323,7 @@ async fn process_evaluation_worker_handler(
     apply_credit_estimate_to_envelope(&mut envelope_before);
     let process_eval_value = envelope_before.value_card.scorecard.process_eval_value;
     let stored = store_envelope(
-        &state,
+        state,
         &tenant.tenant_id,
         record.status,
         "process-evaluated-envelope",
@@ -15194,8 +15345,8 @@ async fn process_evaluation_worker_handler(
     }
 
     let output_object_ref_id = mirror_process_evaluation_to_db(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         &record,
         &envelope_before,
         input_object_ref_id,
@@ -15205,10 +15356,10 @@ async fn process_evaluation_worker_handler(
     .map_err(internal_error)?;
 
     append_audit_event_with_db_mirror(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         TraceCommonsAuditEvent::process_evaluation(
-            &tenant,
+            tenant,
             record.submission_id,
             envelope_before.value_card.scorecard.process_eval_value,
             Some(&reason),
@@ -15225,8 +15376,8 @@ async fn process_evaluation_worker_handler(
     let utility_credit_counts =
         if let Some((credit_points_delta, external_ref)) = utility_credit_request {
             append_automatic_utility_credit_events_once_with_counts(
-                state.as_ref(),
-                &tenant,
+                state,
+                tenant,
                 AutomaticUtilityCreditConfig {
                     idempotency_label: "process-evaluation-training-credit",
                     idempotency_ref: Some(external_ref.clone()),
@@ -15249,19 +15400,13 @@ async fn process_evaluation_worker_handler(
     let ranking_label_counts = if let (Some(ranking_label), Some(plan)) =
         (ranking_label_request.as_ref(), ranking_label_plan.as_ref())
     {
-        append_process_evaluation_ranking_label_once(
-            state.as_ref(),
-            &tenant,
-            &record,
-            ranking_label,
-            plan,
-        )
-        .await?
+        append_process_evaluation_ranking_label_once(state, tenant, &record, ranking_label, plan)
+            .await?
     } else {
         ProcessEvaluationRankingLabelAppendCounts::default()
     };
 
-    Ok(Json(TraceProcessEvaluationJobResponse {
+    Ok(TraceProcessEvaluationJobResponse {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         submission_id: record.submission_id,
@@ -15274,7 +15419,510 @@ async fn process_evaluation_worker_handler(
         utility_credit_skipped_existing_count: utility_credit_counts.skipped_existing,
         ranking_label_appended_count: ranking_label_counts.appended,
         ranking_label_skipped_existing_count: ranking_label_counts.skipped_existing,
-    }))
+    })
+}
+
+async fn process_evaluation_worker_run_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ProcessEvaluationWorkerRunRequest>,
+) -> ApiResult<Json<ProcessEvaluationWorkerRunResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_process_evaluation_operator(&tenant)?;
+    run_process_evaluation_worker(state.as_ref(), &tenant, body)
+        .await
+        .map(Json)
+}
+
+async fn run_process_evaluation_worker(
+    state: &AppState,
+    tenant: &TenantAuth,
+    body: ProcessEvaluationWorkerRunRequest,
+) -> ApiResult<ProcessEvaluationWorkerRunResponse> {
+    let limit = validate_process_evaluation_worker_run_limit(body.limit)?;
+    let dry_run = body.dry_run.unwrap_or(false);
+    let evaluator_ref = normalize_process_evaluation_worker_evaluator_ref(body.evaluator_ref)?;
+    let reason = normalize_process_evaluation_worker_reason(body.reason)?;
+    let require_external_evaluator = body.require_external_evaluator.unwrap_or(false);
+    if require_external_evaluator && state.process_evaluator.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "process evaluation worker requires TRACE_COMMONS_PROCESS_EVALUATOR_URL",
+        ));
+    }
+    let target_use = body.target_use;
+    let utility_category = target_use.map(|_| {
+        body.utility_category
+            .unwrap_or(StorageTraceRankingUtilityCategory::RankingTraining)
+    });
+    let external_ref_prefix = if target_use.is_some() {
+        Some(normalize_process_evaluation_external_ref_prefix(
+            body.external_ref_prefix,
+        )?)
+    } else {
+        None
+    };
+    let tenant_policy = tenant_process_evaluation_policy_for_request(state, tenant).await?;
+    let view = read_reviewer_metadata_view(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let derived_by_submission = view
+        .derived
+        .iter()
+        .map(|derived| (derived.submission_id, derived))
+        .collect::<BTreeMap<_, _>>();
+    let existing_labels = if target_use.is_some() {
+        read_ranking_labels_for_admin(state, tenant)
+            .await
+            .map_err(internal_error)?
+    } else {
+        Vec::new()
+    };
+    let external_evaluator = state.process_evaluator.clone();
+    let initial_pending_count = view
+        .records
+        .iter()
+        .filter(|record| {
+            process_evaluation_worker_source_is_pending(
+                record,
+                derived_by_submission.get(&record.submission_id).copied(),
+                &ProcessEvaluationWorkerPendingContext {
+                    tenant,
+                    tenant_policy: tenant_policy.as_ref(),
+                    target_use,
+                    utility_category,
+                    external_ref_prefix: external_ref_prefix.as_deref(),
+                    existing_labels: &existing_labels,
+                },
+            )
+        })
+        .count();
+    let mut response = ProcessEvaluationWorkerRunResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        dry_run,
+        limit,
+        evaluator_ref: evaluator_ref.clone(),
+        target_use,
+        utility_category,
+        reason_hash: sha256_prefixed(&reason),
+        checked_count: 0,
+        evaluated_count: 0,
+        ranking_label_appended_count: 0,
+        ranking_label_skipped_existing_count: 0,
+        skipped_existing_count: 0,
+        skipped_ineligible_count: 0,
+        pending_after_count: initial_pending_count,
+        evaluated_submission_ids: Vec::new(),
+        skipped_reason_counts: BTreeMap::new(),
+    };
+
+    for record in view.records.iter().take(limit) {
+        response.checked_count += 1;
+        let Some(derived) = derived_by_submission.get(&record.submission_id).copied() else {
+            response.skipped_ineligible_count += 1;
+            increment_count(
+                &mut response.skipped_reason_counts,
+                "missing_derived_summary",
+            );
+            continue;
+        };
+        if record.status != TraceCorpusStatus::Accepted {
+            response.skipped_ineligible_count += 1;
+            increment_count(&mut response.skipped_reason_counts, "source_not_accepted");
+            continue;
+        }
+        if !record_matches_export_policy_abac(
+            record,
+            tenant,
+            tenant_policy.as_ref(),
+            TraceAllowedUse::Evaluation,
+        ) {
+            response.skipped_ineligible_count += 1;
+            increment_count(
+                &mut response.skipped_reason_counts,
+                "evaluation_use_not_allowed",
+            );
+            continue;
+        }
+        if let Some(target_use) = target_use {
+            if !record_matches_export_policy_abac(
+                record,
+                tenant,
+                tenant_policy.as_ref(),
+                target_use,
+            ) {
+                response.skipped_ineligible_count += 1;
+                increment_count(
+                    &mut response.skipped_reason_counts,
+                    "ranking_target_use_not_allowed",
+                );
+                continue;
+            }
+            if process_evaluation_worker_existing_ranking_label(
+                record,
+                target_use,
+                utility_category.ok_or_else(|| {
+                    internal_error(anyhow::anyhow!(
+                        "process evaluation worker target use missing utility category"
+                    ))
+                })?,
+                external_ref_prefix.as_deref().ok_or_else(|| {
+                    internal_error(anyhow::anyhow!(
+                        "process evaluation worker target use missing external ref prefix"
+                    ))
+                })?,
+                &existing_labels,
+            ) {
+                response.skipped_existing_count += 1;
+                increment_count(&mut response.skipped_reason_counts, "ranking_label_exists");
+                continue;
+            }
+        }
+        if dry_run && external_evaluator.is_some() {
+            response.skipped_ineligible_count += 1;
+            increment_count(
+                &mut response.skipped_reason_counts,
+                "external_evaluator_dry_run",
+            );
+            continue;
+        }
+
+        let candidate = process_evaluator_candidate_from_records(0, record, derived);
+        let decision = if let Some(evaluator) = external_evaluator.as_ref() {
+            let evaluator_request = TraceProcessEvaluatorRequest {
+                tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+                evaluator_ref: evaluator_ref.clone(),
+                target_use,
+                purpose_hash: sha256_prefixed(&reason),
+                candidate_count: 1,
+                candidate,
+            };
+            match evaluator.evaluate(evaluator_request).await {
+                Ok(evaluator_response) => {
+                    match process_evaluation_worker_decision_from_external_response(
+                        evaluator_response,
+                        &evaluator_ref,
+                        target_use,
+                    ) {
+                        Ok(decision) => decision,
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                submission_id = %record.submission_id,
+                                "Trace Commons process evaluator response was rejected"
+                            );
+                            response.skipped_ineligible_count += 1;
+                            increment_count(
+                                &mut response.skipped_reason_counts,
+                                "evaluator_adapter_error",
+                            );
+                            continue;
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        submission_id = %record.submission_id,
+                        "Trace Commons process evaluator call failed"
+                    );
+                    response.skipped_ineligible_count += 1;
+                    increment_count(
+                        &mut response.skipped_reason_counts,
+                        "evaluator_adapter_error",
+                    );
+                    continue;
+                }
+            }
+        } else {
+            evaluate_process_candidate_structurally(&evaluator_ref, target_use, derived, record)
+        };
+
+        if !dry_run {
+            let ranking_label = if let Some(target_use) = target_use {
+                let ranking_decision = decision.ranking_label.ok_or_else(|| {
+                    internal_error(anyhow::anyhow!(
+                        "process evaluation worker target use decision missing ranking label"
+                    ))
+                })?;
+                let utility_category = utility_category.ok_or_else(|| {
+                    internal_error(anyhow::anyhow!(
+                        "process evaluation worker target use missing utility category"
+                    ))
+                })?;
+                let external_ref_prefix = external_ref_prefix.as_deref().ok_or_else(|| {
+                    internal_error(anyhow::anyhow!(
+                        "process evaluation worker target use missing external ref prefix"
+                    ))
+                })?;
+                Some(TraceProcessEvaluationRankingLabelRequest {
+                    target_use,
+                    label_source: StorageTraceRankingLabelSource::System,
+                    utility_category,
+                    label_outcome: ranking_decision.label_outcome,
+                    utility_delta_micros: ranking_decision.utility_delta_micros,
+                    external_ref: process_evaluation_worker_external_ref(
+                        external_ref_prefix,
+                        record.submission_id,
+                    ),
+                })
+            } else {
+                None
+            };
+            let job_response = run_process_evaluation_job(
+                state,
+                tenant,
+                TraceProcessEvaluationJobRequest {
+                    submission_id: record.submission_id,
+                    process_evaluation: decision.process_evaluation,
+                    reason: reason.clone(),
+                    utility_credit_points_delta: None,
+                    utility_external_ref: None,
+                    ranking_label,
+                },
+            )
+            .await?;
+            response.ranking_label_appended_count += job_response.ranking_label_appended_count;
+            response.ranking_label_skipped_existing_count +=
+                job_response.ranking_label_skipped_existing_count;
+        }
+        response.evaluated_count += 1;
+        response.evaluated_submission_ids.push(record.submission_id);
+    }
+    if !dry_run {
+        response.pending_after_count =
+            initial_pending_count.saturating_sub(response.evaluated_count);
+    }
+    Ok(response)
+}
+
+fn validate_process_evaluation_worker_run_limit(limit: Option<usize>) -> ApiResult<usize> {
+    let limit = limit.unwrap_or(TRACE_PROCESS_EVALUATION_WORKER_RUN_DEFAULT_LIMIT);
+    if !(1..=TRACE_PROCESS_EVALUATION_WORKER_RUN_MAX_LIMIT).contains(&limit) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "process evaluation worker run limit must be between 1 and 100",
+        ));
+    }
+    Ok(limit)
+}
+
+fn normalize_process_evaluation_worker_evaluator_ref(value: Option<String>) -> ApiResult<String> {
+    let Some(value) = value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "process evaluation worker run requires evaluator_ref",
+        ));
+    };
+    if value.len() > 512 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "process evaluation worker run evaluator_ref is too long",
+        ));
+    }
+    Ok(value)
+}
+
+fn normalize_process_evaluation_worker_reason(value: Option<String>) -> ApiResult<String> {
+    let Some(value) = value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "process evaluation worker run requires reason",
+        ));
+    };
+    if value.len() > 1024 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "process evaluation worker run reason is too long",
+        ));
+    }
+    Ok(value)
+}
+
+fn normalize_process_evaluation_external_ref_prefix(value: Option<String>) -> ApiResult<String> {
+    let Some(value) = value
+        .map(|value| value.trim().trim_end_matches(':').to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "process evaluation worker run requires external_ref_prefix for ranking labels",
+        ));
+    };
+    if value.len() > 512 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "process evaluation worker run external_ref_prefix is too long",
+        ));
+    }
+    Ok(value)
+}
+
+fn process_evaluation_worker_external_ref(prefix: &str, submission_id: Uuid) -> String {
+    format!("{prefix}:{submission_id}")
+}
+
+fn process_evaluation_worker_existing_ranking_label(
+    record: &TraceCommonsSubmissionRecord,
+    target_use: TraceAllowedUse,
+    utility_category: StorageTraceRankingUtilityCategory,
+    external_ref_prefix: &str,
+    existing_labels: &[TraceRankingLabelRecord],
+) -> bool {
+    let external_ref_hash = sha256_prefixed(&process_evaluation_worker_external_ref(
+        external_ref_prefix,
+        record.submission_id,
+    ));
+    existing_labels.iter().any(|label| {
+        label.submission_id == record.submission_id
+            && label.target_use == target_use
+            && label.label_source == StorageTraceRankingLabelSource::System
+            && label.utility_category == utility_category
+            && label.external_ref_hash == external_ref_hash
+    })
+}
+
+struct ProcessEvaluationWorkerPendingContext<'a> {
+    tenant: &'a TenantAuth,
+    tenant_policy: Option<&'a TenantSubmissionPolicy>,
+    target_use: Option<TraceAllowedUse>,
+    utility_category: Option<StorageTraceRankingUtilityCategory>,
+    external_ref_prefix: Option<&'a str>,
+    existing_labels: &'a [TraceRankingLabelRecord],
+}
+
+fn process_evaluation_worker_source_is_pending(
+    record: &TraceCommonsSubmissionRecord,
+    derived: Option<&TraceCommonsDerivedRecord>,
+    context: &ProcessEvaluationWorkerPendingContext<'_>,
+) -> bool {
+    if record.status != TraceCorpusStatus::Accepted || derived.is_none() {
+        return false;
+    }
+    if !record_matches_export_policy_abac(
+        record,
+        context.tenant,
+        context.tenant_policy,
+        TraceAllowedUse::Evaluation,
+    ) {
+        return false;
+    }
+    let Some(target_use) = context.target_use else {
+        return true;
+    };
+    if !record_matches_export_policy_abac(record, context.tenant, context.tenant_policy, target_use)
+    {
+        return false;
+    }
+    let (Some(utility_category), Some(external_ref_prefix)) =
+        (context.utility_category, context.external_ref_prefix)
+    else {
+        return false;
+    };
+    !process_evaluation_worker_existing_ranking_label(
+        record,
+        target_use,
+        utility_category,
+        external_ref_prefix,
+        context.existing_labels,
+    )
+}
+
+fn process_evaluator_candidate_from_records(
+    candidate_index: usize,
+    record: &TraceCommonsSubmissionRecord,
+    derived: &TraceCommonsDerivedRecord,
+) -> TraceProcessEvaluatorCandidate {
+    TraceProcessEvaluatorCandidate {
+        candidate_index,
+        submission_id_hash: sha256_prefixed(&record.submission_id.to_string()),
+        trace_id_hash: sha256_prefixed(&record.trace_id.to_string()),
+        canonical_summary_hash: derived.canonical_summary_hash.clone(),
+        canonical_summary: derived.canonical_summary.clone(),
+        summary_model: derived.summary_model.clone(),
+        task_success: derived.task_success.clone(),
+        event_count: derived.event_count,
+        tool_sequence: derived.tool_sequence.clone(),
+        tool_categories: derived.tool_categories.clone(),
+        coverage_tags: derived.coverage_tags.clone(),
+        novelty_score: derived.novelty_score,
+        duplicate_score: derived.duplicate_score,
+        submission_score: record.submission_score,
+        consent_scopes: record.consent_scopes.clone(),
+    }
+}
+
+struct ProcessEvaluationWorkerDecision {
+    process_evaluation: ProcessEvaluationLabels,
+    ranking_label: Option<TraceProcessEvaluatorRankingLabelDecision>,
+}
+
+fn process_evaluation_worker_decision_from_external_response(
+    response: TraceProcessEvaluatorResponse,
+    evaluator_ref: &str,
+    target_use: Option<TraceAllowedUse>,
+) -> anyhow::Result<ProcessEvaluationWorkerDecision> {
+    let mut process_evaluation = response.process_evaluation;
+    if process_evaluation.evaluator_version.trim().is_empty() {
+        process_evaluation.evaluator_version = evaluator_ref.to_string();
+    }
+    if let Some(score) = process_evaluation.overall_score {
+        anyhow::ensure!(
+            score.is_finite() && (0.0..=1.0).contains(&score),
+            "process evaluator overall_score must be between 0 and 1"
+        );
+    }
+    if target_use.is_some() {
+        anyhow::ensure!(
+            response.ranking_label.is_some(),
+            "process evaluator response requires ranking_label for ranking target runs"
+        );
+    }
+    Ok(ProcessEvaluationWorkerDecision {
+        process_evaluation,
+        ranking_label: response.ranking_label,
+    })
+}
+
+fn evaluate_process_candidate_structurally(
+    evaluator_ref: &str,
+    target_use: Option<TraceAllowedUse>,
+    derived: &TraceCommonsDerivedRecord,
+    record: &TraceCommonsSubmissionRecord,
+) -> ProcessEvaluationWorkerDecision {
+    let score = if record.submission_score.is_finite() {
+        record.submission_score.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    ProcessEvaluationWorkerDecision {
+        process_evaluation: ProcessEvaluationLabels {
+            evaluator_name: Some("structural-process-evaluator".to_string()),
+            evaluator_version: evaluator_ref.to_string(),
+            verification: Some(if derived.event_count > 0 {
+                ProcessEvalRating::Pass
+            } else {
+                ProcessEvalRating::Fail
+            }),
+            overall_score: Some(score),
+            ..ProcessEvaluationLabels::default()
+        },
+        ranking_label: target_use.map(|_| TraceProcessEvaluatorRankingLabelDecision {
+            label_outcome: if score >= 0.5 {
+                StorageTraceRankingLabelOutcome::Useful
+            } else {
+                StorageTraceRankingLabelOutcome::Neutral
+            },
+            utility_delta_micros: (score * 1_000_000.0).round() as i64,
+        }),
+    }
 }
 
 #[derive(Default)]
@@ -16972,6 +17620,92 @@ impl TraceBenchmarkEvaluator for HttpTraceBenchmarkEvaluator {
             .context("failed to decode benchmark evaluator response")?;
         benchmark_evaluation_worker_decision_from_external_response(&response)?;
         Ok(response)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceProcessEvaluatorCandidate {
+    candidate_index: usize,
+    submission_id_hash: String,
+    trace_id_hash: String,
+    canonical_summary_hash: String,
+    canonical_summary: String,
+    summary_model: String,
+    task_success: String,
+    event_count: usize,
+    tool_sequence: Vec<String>,
+    tool_categories: Vec<String>,
+    coverage_tags: Vec<String>,
+    novelty_score: f32,
+    duplicate_score: f32,
+    submission_score: f32,
+    consent_scopes: Vec<ConsentScope>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceProcessEvaluatorRequest {
+    tenant_storage_ref: String,
+    evaluator_ref: String,
+    target_use: Option<TraceAllowedUse>,
+    purpose_hash: String,
+    candidate_count: usize,
+    candidate: TraceProcessEvaluatorCandidate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceProcessEvaluatorRankingLabelDecision {
+    label_outcome: StorageTraceRankingLabelOutcome,
+    utility_delta_micros: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceProcessEvaluatorResponse {
+    process_evaluation: ProcessEvaluationLabels,
+    #[serde(default)]
+    ranking_label: Option<TraceProcessEvaluatorRankingLabelDecision>,
+}
+
+#[async_trait::async_trait]
+trait TraceProcessEvaluator: Send + Sync {
+    async fn evaluate(
+        &self,
+        request: TraceProcessEvaluatorRequest,
+    ) -> anyhow::Result<TraceProcessEvaluatorResponse>;
+}
+
+#[derive(Clone)]
+struct HttpTraceProcessEvaluator {
+    client: reqwest::Client,
+    url: String,
+    bearer_token: Option<SecretString>,
+}
+
+#[async_trait::async_trait]
+impl TraceProcessEvaluator for HttpTraceProcessEvaluator {
+    async fn evaluate(
+        &self,
+        request: TraceProcessEvaluatorRequest,
+    ) -> anyhow::Result<TraceProcessEvaluatorResponse> {
+        let mut builder = self
+            .client
+            .post(&self.url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&request);
+        if let Some(bearer_token) = &self.bearer_token {
+            builder = builder.bearer_auth(bearer_token.expose_secret());
+        }
+        let response = builder
+            .send()
+            .await
+            .context("failed to evaluate process candidate")?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!("process evaluator returned HTTP {}", status.as_u16());
+        }
+        response
+            .json()
+            .await
+            .context("failed to decode process evaluator response")
     }
 }
 
@@ -35015,6 +35749,8 @@ mod tests {
             benchmark_registry_confirmer_timeout_ms: None,
             benchmark_evaluator: None,
             benchmark_evaluator_timeout_ms: None,
+            process_evaluator: None,
+            process_evaluator_timeout_ms: None,
             ranking_calibration_max_age: None,
             ranking_min_confidence_threshold: DEFAULT_TRACE_RANKING_MIN_CONFIDENCE_THRESHOLD,
             ranking_max_average_absolute_error_micros:
@@ -37561,6 +38297,9 @@ mod tests {
         Arc::make_mut(&mut state).benchmark_evaluator =
             Some(Arc::new(FakeBenchmarkEvaluator::default()));
         Arc::make_mut(&mut state).benchmark_evaluator_timeout_ms = Some(4_567);
+        Arc::make_mut(&mut state).process_evaluator =
+            Some(Arc::new(FakeProcessEvaluator::default()));
+        Arc::make_mut(&mut state).process_evaluator_timeout_ms = Some(6_789);
 
         let response = app(state)
             .oneshot(
@@ -37586,13 +38325,33 @@ mod tests {
             value["benchmark_evaluator_timeout_ms"],
             serde_json::json!(4_567)
         );
+        assert_eq!(
+            value["process_evaluator_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["process_evaluator_timeout_ms"],
+            serde_json::json!(6_789)
+        );
+        assert_eq!(
+            value["process_evaluation_worker_run_default_limit"],
+            serde_json::json!(TRACE_PROCESS_EVALUATION_WORKER_RUN_DEFAULT_LIMIT)
+        );
+        assert_eq!(
+            value["process_evaluation_worker_run_max_limit"],
+            serde_json::json!(TRACE_PROCESS_EVALUATION_WORKER_RUN_MAX_LIMIT)
+        );
 
         let object = value.as_object().expect("status response is object");
         assert!(!object.contains_key("benchmark_evaluator_url"));
         assert!(!object.contains_key("benchmark_evaluator_bearer_token"));
+        assert!(!object.contains_key("process_evaluator_url"));
+        assert!(!object.contains_key("process_evaluator_bearer_token"));
         let body_text = std::str::from_utf8(&body).expect("body is utf8");
         assert!(!body_text.contains(TRACE_COMMONS_BENCHMARK_EVALUATOR_URL));
         assert!(!body_text.contains(TRACE_COMMONS_BENCHMARK_EVALUATOR_BEARER_TOKEN));
+        assert!(!body_text.contains(TRACE_COMMONS_PROCESS_EVALUATOR_URL));
+        assert!(!body_text.contains(TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN));
     }
 
     #[tokio::test]
@@ -38981,6 +39740,148 @@ mod tests {
             event.submission_id != submission_id
                 || (event.kind != "trace_content_read" && event.kind != "process_evaluation")
         }));
+    }
+
+    #[tokio::test]
+    async fn process_evaluation_worker_run_uses_external_evaluator_for_hash_only_ranking_labels() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let fake_evaluator = FakeProcessEvaluator::default();
+        Arc::make_mut(&mut state).process_evaluator = Some(Arc::new(fake_evaluator.clone()));
+        Arc::make_mut(&mut state).process_evaluator_timeout_ms = Some(6_789);
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![
+            ConsentScope::DebuggingEvaluation,
+            ConsentScope::RankingTraining,
+        ];
+        envelope.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        envelope.trace_card.allowed_uses = vec![
+            TraceAllowedUse::Evaluation,
+            TraceAllowedUse::RankingModelTraining,
+        ];
+        let submission_id = envelope.submission_id;
+        let raw_summary = canonical_summary_for_embedding(&envelope);
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("accepted submission succeeds");
+
+        let Json(response) = process_evaluation_worker_run_handler(
+            State(state.clone()),
+            auth_headers("process-eval-worker-token-a"),
+            Json(ProcessEvaluationWorkerRunRequest {
+                limit: Some(10),
+                dry_run: Some(false),
+                evaluator_ref: Some("trajectory-judge:v3".to_string()),
+                require_external_evaluator: Some(true),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                utility_category: Some(StorageTraceRankingUtilityCategory::RankingTraining),
+                external_ref_prefix: Some("process-eval-run:nightly-9".to_string()),
+                reason: Some("nightly ranking evaluator run".to_string()),
+            }),
+        )
+        .await
+        .expect("process evaluation worker run calls configured evaluator");
+        assert_eq!(response.checked_count, 1);
+        assert_eq!(response.evaluated_count, 1);
+        assert_eq!(response.ranking_label_appended_count, 1);
+        assert_eq!(response.skipped_existing_count, 0);
+        assert_eq!(response.pending_after_count, 0);
+        assert_eq!(response.evaluated_submission_ids, vec![submission_id]);
+
+        {
+            let calls = fake_evaluator.calls.lock().expect("calls lock");
+            assert_eq!(calls.len(), 1);
+            let call = calls.first().expect("external evaluator call");
+            assert_eq!(call.evaluator_ref, "trajectory-judge:v3");
+            assert_eq!(call.target_use, Some(TraceAllowedUse::RankingModelTraining));
+            assert_eq!(call.candidate_count, 1);
+            assert_eq!(call.candidate.candidate_index, 0);
+            assert_eq!(call.candidate.canonical_summary, raw_summary);
+            assert!(call.candidate.submission_id_hash.starts_with("sha256:"));
+            assert!(call.candidate.trace_id_hash.starts_with("sha256:"));
+            let call_json = serde_json::to_string(call).expect("call serializes");
+            assert!(!call_json.contains(&submission_id.to_string()));
+            assert!(!call_json.contains("principal:"));
+        }
+
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let stored = read_envelope_by_record(state.as_ref(), &record).expect("envelope reads");
+        let process_eval = stored
+            .process_evaluation
+            .as_ref()
+            .expect("process evaluation stored");
+        assert_eq!(process_eval.evaluator_version, "trajectory-judge:v3");
+        assert_eq!(process_eval.overall_score, Some(0.88));
+
+        let labels = read_all_ranking_labels(temp.path(), "tenant-a").expect("labels read");
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].submission_id, submission_id);
+        assert_eq!(
+            labels[0].label_source,
+            StorageTraceRankingLabelSource::System
+        );
+        assert_eq!(labels[0].target_use, TraceAllowedUse::RankingModelTraining);
+        assert_eq!(labels[0].utility_delta_micros, 880_000);
+        assert!(
+            !serde_json::to_string(&labels)
+                .expect("labels serialize")
+                .contains("process-eval-run:nightly-9")
+        );
+
+        let Json(retry) = process_evaluation_worker_run_handler(
+            State(state.clone()),
+            auth_headers("process-eval-worker-token-a"),
+            Json(ProcessEvaluationWorkerRunRequest {
+                limit: Some(10),
+                dry_run: Some(false),
+                evaluator_ref: Some("trajectory-judge:v3".to_string()),
+                require_external_evaluator: Some(true),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                utility_category: Some(StorageTraceRankingUtilityCategory::RankingTraining),
+                external_ref_prefix: Some("process-eval-run:nightly-9".to_string()),
+                reason: Some("nightly ranking evaluator run".to_string()),
+            }),
+        )
+        .await
+        .expect("process evaluation worker run is idempotent");
+        assert_eq!(retry.checked_count, 1);
+        assert_eq!(retry.evaluated_count, 0);
+        assert_eq!(retry.skipped_existing_count, 1);
+        assert_eq!(retry.ranking_label_appended_count, 0);
+        assert_eq!(fake_evaluator.calls.lock().expect("calls lock").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn process_evaluation_worker_run_requires_external_evaluator_when_requested() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = process_evaluation_worker_run_handler(
+            State(state),
+            auth_headers("process-eval-worker-token-a"),
+            Json(ProcessEvaluationWorkerRunRequest {
+                limit: Some(1),
+                dry_run: Some(false),
+                evaluator_ref: Some("trajectory-judge:v3".to_string()),
+                require_external_evaluator: Some(true),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                utility_category: Some(StorageTraceRankingUtilityCategory::RankingTraining),
+                external_ref_prefix: Some("process-eval-run:missing-adapter".to_string()),
+                reason: Some("require configured process evaluator".to_string()),
+            }),
+        )
+        .await
+        .expect_err("required external process evaluator fails closed");
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
@@ -42159,6 +43060,8 @@ mod tests {
             benchmark_registry_confirmer_timeout_ms: None,
             benchmark_evaluator: None,
             benchmark_evaluator_timeout_ms: None,
+            process_evaluator: None,
+            process_evaluator_timeout_ms: None,
             ranking_calibration_max_age: None,
             ranking_min_confidence_threshold: DEFAULT_TRACE_RANKING_MIN_CONFIDENCE_THRESHOLD,
             ranking_max_average_absolute_error_micros:
@@ -45013,6 +45916,53 @@ mod tests {
             self.calls
                 .lock()
                 .expect("fake benchmark evaluator calls lock")
+                .push(request);
+            Ok(self.response.clone())
+        }
+    }
+
+    #[derive(Clone)]
+    struct FakeProcessEvaluator {
+        calls: Arc<std::sync::Mutex<Vec<TraceProcessEvaluatorRequest>>>,
+        response: TraceProcessEvaluatorResponse,
+        failure: Option<String>,
+    }
+
+    impl Default for FakeProcessEvaluator {
+        fn default() -> Self {
+            Self {
+                calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+                response: TraceProcessEvaluatorResponse {
+                    process_evaluation: ProcessEvaluationLabels {
+                        evaluator_name: Some("trajectory-judge".to_string()),
+                        evaluator_version: String::new(),
+                        labels: vec![trace_commons_protocol::trace_contribution::ProcessEvaluatorLabel::ProperVerification],
+                        verification: Some(ProcessEvalRating::Pass),
+                        overall_score: Some(0.88),
+                        ..ProcessEvaluationLabels::default()
+                    },
+                    ranking_label: Some(TraceProcessEvaluatorRankingLabelDecision {
+                        label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                        utility_delta_micros: 880_000,
+                    }),
+                },
+                failure: None,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TraceProcessEvaluator for FakeProcessEvaluator {
+        async fn evaluate(
+            &self,
+            request: TraceProcessEvaluatorRequest,
+        ) -> anyhow::Result<TraceProcessEvaluatorResponse> {
+            if let Some(failure) = &self.failure {
+                anyhow::bail!("{failure}");
+            }
+            self.calls
+                .lock()
+                .expect("fake process evaluator calls lock")
                 .push(request);
             Ok(self.response.clone())
         }
