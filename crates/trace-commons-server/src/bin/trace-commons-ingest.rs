@@ -282,7 +282,7 @@ const TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_DEFAULT_LIMIT: u32 = 100;
 const TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_MAX_LIMIT: u32 = 500;
 const TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_DEFAULT_LIMIT: u32 = 100;
 const TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_MAX_LIMIT: u32 = 500;
-const TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT: usize = 5;
+const TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT: usize = 6;
 const TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_LIMIT: usize = 1;
 const TRACE_CREDIT_CYCLE_SCHEDULER_MAX_LIMIT: usize = 25;
 const TRACE_CREDIT_SETTLEMENT_WORKER_RUN_DEFAULT_LIMIT: usize = 100;
@@ -5936,6 +5936,8 @@ struct TraceCreditCycleWorkerRunRequest {
     dry_run: bool,
     #[serde(default)]
     submit_near_outbox: bool,
+    #[serde(default)]
+    confirm_near_outbox: bool,
     target_use: TraceAllowedUse,
     model_version: String,
     policy_version: String,
@@ -5952,6 +5954,8 @@ struct TraceCreditCycleWorkerRunRequest {
     credit_settlement_limit: Option<usize>,
     #[serde(default)]
     near_outbox_limit: Option<u32>,
+    #[serde(default)]
+    near_outbox_confirm_limit: Option<u32>,
     #[serde(default)]
     min_label_count: Option<usize>,
     #[serde(default)]
@@ -5970,6 +5974,8 @@ struct TraceCreditCycleSchedulerRunRequest {
     preflight_only: bool,
     #[serde(default)]
     submit_near_outbox: bool,
+    #[serde(default)]
+    confirm_near_outbox: bool,
     target_use: TraceAllowedUse,
     #[serde(default)]
     model_version: Option<String>,
@@ -5991,6 +5997,8 @@ struct TraceCreditCycleSchedulerRunRequest {
     #[serde(default)]
     near_outbox_limit: Option<u32>,
     #[serde(default)]
+    near_outbox_confirm_limit: Option<u32>,
+    #[serde(default)]
     min_label_count: Option<usize>,
     #[serde(default)]
     confidence_threshold: Option<f32>,
@@ -6007,6 +6015,7 @@ struct TraceCreditCycleSchedulerRunResponse {
     dry_run: bool,
     preflight_only: bool,
     submit_near_outbox: bool,
+    confirm_near_outbox: bool,
     target_use: TraceAllowedUse,
     model_version: Option<String>,
     policy_version: Option<String>,
@@ -6047,6 +6056,7 @@ struct TraceCreditCycleWorkerRunResponse {
     tenant_storage_ref: String,
     dry_run: bool,
     submit_near_outbox: bool,
+    confirm_near_outbox: bool,
     target_use: TraceAllowedUse,
     model_version: String,
     policy_version: String,
@@ -6057,6 +6067,7 @@ struct TraceCreditCycleWorkerRunResponse {
     prediction_credit: TraceRankingPredictionCreditRunResponse,
     settlement: TraceCreditSettlementRunResponse,
     near_outbox_submit: TraceNearCreditOutboxSubmitWorkerResponse,
+    near_outbox_confirm: TraceNearCreditOutboxConfirmWorkerResponse,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7709,6 +7720,7 @@ async fn credit_cycle_scheduler_run_handler(
         dry_run: body.dry_run,
         preflight_only: body.preflight_only,
         submit_near_outbox: body.submit_near_outbox,
+        confirm_near_outbox: body.confirm_near_outbox,
         target_use: body.target_use,
         model_version: model_version.clone(),
         policy_version: policy_version.clone(),
@@ -7795,6 +7807,7 @@ async fn credit_cycle_scheduler_run_handler(
             Json(TraceCreditCycleWorkerRunRequest {
                 dry_run: body.dry_run,
                 submit_near_outbox: body.submit_near_outbox,
+                confirm_near_outbox: body.confirm_near_outbox,
                 target_use: body.target_use,
                 model_version: candidate.model_version.clone(),
                 policy_version: candidate.policy_version.clone(),
@@ -7805,6 +7818,7 @@ async fn credit_cycle_scheduler_run_handler(
                 prediction_credit_limit: body.prediction_credit_limit,
                 credit_settlement_limit: body.credit_settlement_limit,
                 near_outbox_limit: body.near_outbox_limit,
+                near_outbox_confirm_limit: body.near_outbox_confirm_limit,
                 min_label_count: body.min_label_count,
                 confidence_threshold: body.confidence_threshold,
                 max_average_absolute_error_micros: body.max_average_absolute_error_micros,
@@ -8169,7 +8183,7 @@ async fn credit_cycle_worker_run_handler(
         5,
         near_credit_outbox_submit_worker_handler(
             State(state.clone()),
-            headers,
+            headers.clone(),
             Json(TraceNearCreditOutboxSubmitWorkerRequest {
                 purpose: Some("trace_commons_credit_cycle_near_outbox".to_string()),
                 dry_run: body.dry_run || !body.submit_near_outbox,
@@ -8179,12 +8193,28 @@ async fn credit_cycle_worker_run_handler(
             }),
         )
     );
+    let near_outbox_confirm = run_credit_cycle_step!(
+        6,
+        near_credit_outbox_confirm_worker_handler(
+            State(state.clone()),
+            headers,
+            Json(TraceNearCreditOutboxConfirmWorkerRequest {
+                purpose: Some("trace_commons_credit_cycle_near_outbox_confirm".to_string()),
+                dry_run: body.dry_run || !body.confirm_near_outbox,
+                limit: body
+                    .near_outbox_confirm_limit
+                    .or(body.near_outbox_limit)
+                    .unwrap_or(TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_DEFAULT_LIMIT),
+            }),
+        )
+    );
 
     let response = TraceCreditCycleWorkerRunResponse {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         dry_run: body.dry_run,
         submit_near_outbox: body.submit_near_outbox,
+        confirm_near_outbox: body.confirm_near_outbox,
         target_use: body.target_use,
         model_version,
         policy_version,
@@ -8195,6 +8225,7 @@ async fn credit_cycle_worker_run_handler(
         prediction_credit,
         settlement,
         near_outbox_submit,
+        near_outbox_confirm,
     };
     update_credit_cycle_worker_run_from_response(&mut cycle_worker_run, &response);
     cycle_worker_run.status = TraceRankingWorkerRunStatus::Completed;
@@ -8225,17 +8256,23 @@ fn credit_cycle_worker_run_total_limit(body: &TraceCreditCycleWorkerRunRequest) 
             body.near_outbox_limit
                 .unwrap_or(TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT) as usize,
         )
+        .saturating_add(
+            body.near_outbox_confirm_limit
+                .or(body.near_outbox_limit)
+                .unwrap_or(TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_DEFAULT_LIMIT) as usize,
+        )
 }
 
 fn update_credit_cycle_worker_run_from_response(
     worker_run: &mut TraceRankingWorkerRunRecord,
     response: &TraceCreditCycleWorkerRunResponse,
 ) {
-    worker_run.checked_count = 5;
-    worker_run.succeeded_count = 5;
+    worker_run.checked_count = TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT;
+    worker_run.succeeded_count = TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT;
     worker_run.skipped_existing_count = response.calibration.skipped_existing_count
         + response.prediction_credit.skipped_existing_count
-        + response.near_outbox_submit.skipped;
+        + response.near_outbox_submit.skipped
+        + response.near_outbox_confirm.skipped;
     worker_run.skipped_model_risk_count = response.prediction_credit.skipped_model_risk_count;
     worker_run.skipped_ineligible_count = response.calibration.skipped_ineligible_count
         + response.model_promotion.skipped_ineligible_count
@@ -8244,7 +8281,8 @@ fn update_credit_cycle_worker_run_from_response(
         + response.model_promotion.pending_after_count
         + response.prediction_credit.pending_after_count
         + response.settlement.pending_after_count
-        + response.near_outbox_submit.pending;
+        + response.near_outbox_submit.pending
+        + response.near_outbox_confirm.pending;
     worker_run.result_refs = if response.dry_run {
         Vec::new()
     } else {
@@ -8293,6 +8331,12 @@ fn credit_cycle_worker_run_reason_counts(
         counts.insert(
             "near_outbox_failed".to_string(),
             response.near_outbox_submit.failed,
+        );
+    }
+    if response.near_outbox_confirm.failed > 0 {
+        counts.insert(
+            "near_outbox_confirm_failed".to_string(),
+            response.near_outbox_confirm.failed,
         );
     }
     counts
@@ -47667,6 +47711,7 @@ mod tests {
             Json(TraceCreditCycleWorkerRunRequest {
                 dry_run: false,
                 submit_near_outbox: false,
+                confirm_near_outbox: false,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 model_version: candidate.model_version.clone(),
                 policy_version: candidate.policy_version.clone(),
@@ -47677,6 +47722,7 @@ mod tests {
                 prediction_credit_limit: Some(10),
                 credit_settlement_limit: Some(10),
                 near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(100_000),
@@ -47696,6 +47742,8 @@ mod tests {
         assert!(cycle.near_outbox_submit.dry_run);
         assert_eq!(cycle.near_outbox_submit.checked, 1);
         assert_eq!(cycle.near_outbox_submit.pending, 1);
+        assert!(cycle.near_outbox_confirm.dry_run);
+        assert_eq!(cycle.near_outbox_confirm.checked, 0);
 
         let credit_events = read_all_credit_events(temp.path(), "tenant-a")
             .expect("credit events read after cycle");
@@ -47737,8 +47785,14 @@ mod tests {
             credit_cycle_runs[0].target_use,
             Some(TraceAllowedUse::RankingModelTraining)
         );
-        assert_eq!(credit_cycle_runs[0].checked_count, 5);
-        assert_eq!(credit_cycle_runs[0].succeeded_count, 5);
+        assert_eq!(
+            credit_cycle_runs[0].checked_count,
+            TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT
+        );
+        assert_eq!(
+            credit_cycle_runs[0].succeeded_count,
+            TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT
+        );
         assert!(
             credit_cycle_runs[0]
                 .result_refs
@@ -47748,9 +47802,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn credit_cycle_worker_can_submit_and_confirm_near_outbox() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).near_credit_submitter =
+            Some(Arc::new(FakeNearCreditSubmitter::default()));
+        Arc::make_mut(&mut state).near_credit_confirmer =
+            Some(Arc::new(FakeNearCreditConfirmer::default()));
+        let (candidate, _) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-credit-cycle-near-v1")
+                .await;
+
+        let Json(cycle) = credit_cycle_worker_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleWorkerRunRequest {
+                dry_run: false,
+                submit_near_outbox: true,
+                confirm_near_outbox: true,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: candidate.model_version.clone(),
+                policy_version: candidate.policy_version.clone(),
+                reason: "scheduled credit cycle with NEAR confirmation".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect("utility worker can submit and confirm NEAR outbox rows");
+
+        assert!(!cycle.near_outbox_submit.dry_run);
+        assert_eq!(cycle.near_outbox_submit.submitted, 1);
+        assert!(!cycle.near_outbox_confirm.dry_run);
+        assert_eq!(cycle.near_outbox_confirm.confirmed, 1);
+        assert_eq!(cycle.near_outbox_confirm.pending, 0);
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(
+            outbox[0].status,
+            StorageTraceCreditSettlementNearStatus::Confirmed
+        );
+        assert!(outbox[0].confirmed_at.is_some());
+
+        let worker_runs =
+            read_all_ranking_worker_runs(temp.path(), "tenant-a").expect("worker runs read");
+        let credit_cycle_runs = worker_runs
+            .iter()
+            .filter(|run| run.run_kind == TraceRankingWorkerRunKind::CreditCycle)
+            .collect::<Vec<_>>();
+        assert_eq!(credit_cycle_runs.len(), 1);
+        assert_eq!(
+            credit_cycle_runs[0].checked_count,
+            TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT
+        );
+        assert_eq!(
+            credit_cycle_runs[0].succeeded_count,
+            TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT
+        );
+        assert_eq!(credit_cycle_runs[0].pending_after_count, 0);
+    }
+
+    #[tokio::test]
     async fn credit_cycle_scheduler_runs_next_eligible_model() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let state = test_state(temp.path().to_path_buf());
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).near_credit_submitter =
+            Some(Arc::new(FakeNearCreditSubmitter::default()));
+        Arc::make_mut(&mut state).near_credit_confirmer =
+            Some(Arc::new(FakeNearCreditConfirmer::default()));
         let (candidate, prediction) =
             seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-credit-cycle-sched-v1")
                 .await;
@@ -47761,7 +47890,8 @@ mod tests {
             Json(TraceCreditCycleSchedulerRunRequest {
                 dry_run: false,
                 preflight_only: false,
-                submit_near_outbox: false,
+                submit_near_outbox: true,
+                confirm_near_outbox: true,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 model_version: None,
                 policy_version: Some(candidate.policy_version.clone()),
@@ -47773,6 +47903,7 @@ mod tests {
                 prediction_credit_limit: Some(10),
                 credit_settlement_limit: Some(10),
                 near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(100_000),
@@ -47790,6 +47921,8 @@ mod tests {
         assert_eq!(scheduler.cycles[0].model_version, candidate.model_version);
         assert_eq!(scheduler.cycles[0].prediction_credit.credited_count, 1);
         assert_eq!(scheduler.cycles[0].settlement.settled_source_event_count, 1);
+        assert_eq!(scheduler.cycles[0].near_outbox_submit.submitted, 1);
+        assert_eq!(scheduler.cycles[0].near_outbox_confirm.confirmed, 1);
 
         let credit_events = read_all_credit_events(temp.path(), "tenant-a")
             .expect("credit events read after scheduled cycle");
@@ -47937,6 +48070,7 @@ mod tests {
                 dry_run: false,
                 preflight_only: false,
                 submit_near_outbox: false,
+                confirm_near_outbox: false,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 model_version: None,
                 policy_version: Some("trace-credit-policy-v1".to_string()),
@@ -47948,6 +48082,7 @@ mod tests {
                 prediction_credit_limit: Some(10),
                 credit_settlement_limit: Some(10),
                 near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(100_000),
@@ -47992,6 +48127,7 @@ mod tests {
                 dry_run: false,
                 preflight_only: false,
                 submit_near_outbox: false,
+                confirm_near_outbox: false,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 model_version: None,
                 policy_version: Some("trace-credit-policy-v1".to_string()),
@@ -48003,6 +48139,7 @@ mod tests {
                 prediction_credit_limit: Some(10),
                 credit_settlement_limit: Some(10),
                 near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(100_000),
@@ -48040,6 +48177,7 @@ mod tests {
                 dry_run: false,
                 preflight_only: false,
                 submit_near_outbox: false,
+                confirm_near_outbox: false,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 model_version: None,
                 policy_version: Some("trace-credit-policy-v1".to_string()),
@@ -48051,6 +48189,7 @@ mod tests {
                 prediction_credit_limit: Some(10),
                 credit_settlement_limit: Some(10),
                 near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(100_000),
@@ -48100,6 +48239,7 @@ mod tests {
                 dry_run: false,
                 preflight_only: false,
                 submit_near_outbox: false,
+                confirm_near_outbox: false,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 model_version: None,
                 policy_version: Some(candidate.policy_version),
@@ -48111,6 +48251,7 @@ mod tests {
                 prediction_credit_limit: Some(10),
                 credit_settlement_limit: Some(10),
                 near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(100_000),
@@ -48202,6 +48343,7 @@ mod tests {
                 dry_run: false,
                 preflight_only: false,
                 submit_near_outbox: false,
+                confirm_near_outbox: false,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 model_version: None,
                 policy_version: Some(candidate.policy_version),
@@ -48213,6 +48355,7 @@ mod tests {
                 prediction_credit_limit: Some(10),
                 credit_settlement_limit: Some(10),
                 near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(100_000),
@@ -48261,6 +48404,7 @@ mod tests {
                 dry_run: false,
                 preflight_only: false,
                 submit_near_outbox: false,
+                confirm_near_outbox: false,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 model_version: None,
                 policy_version: Some(candidate.policy_version),
@@ -48272,6 +48416,7 @@ mod tests {
                 prediction_credit_limit: Some(10),
                 credit_settlement_limit: Some(10),
                 near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(100_000),
@@ -48313,6 +48458,7 @@ mod tests {
             Json(TraceCreditCycleWorkerRunRequest {
                 dry_run: false,
                 submit_near_outbox: true,
+                confirm_near_outbox: false,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 model_version: "trace-ranker-credit-cycle-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
@@ -48323,6 +48469,7 @@ mod tests {
                 prediction_credit_limit: Some(10),
                 credit_settlement_limit: Some(10),
                 near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(100_000),
@@ -48396,6 +48543,7 @@ mod tests {
             Json(TraceCreditCycleWorkerRunRequest {
                 dry_run: false,
                 submit_near_outbox: true,
+                confirm_near_outbox: false,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 model_version: "trace-ranker-credit-cycle-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
@@ -48406,6 +48554,7 @@ mod tests {
                 prediction_credit_limit: Some(10),
                 credit_settlement_limit: Some(10),
                 near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(100_000),
@@ -48453,6 +48602,7 @@ mod tests {
             Json(TraceCreditCycleWorkerRunRequest {
                 dry_run: false,
                 submit_near_outbox: true,
+                confirm_near_outbox: false,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 model_version: "trace-ranker-missing-model-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
@@ -48463,6 +48613,7 @@ mod tests {
                 prediction_credit_limit: Some(10),
                 credit_settlement_limit: Some(10),
                 near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(100_000),
