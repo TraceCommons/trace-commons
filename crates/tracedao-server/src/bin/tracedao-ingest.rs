@@ -12932,6 +12932,15 @@ async fn create_ranking_calibration_run(
             "ranking calibration dataset does not match the registered model",
         ));
     }
+    let calibration_datasets = read_ranking_calibration_datasets_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    ensure_ranking_calibration_dataset_can_feed_run(
+        &calibration_datasets,
+        &evaluation_dataset_hash,
+        body.target_use,
+        &policy_version,
+    )?;
     let feature_schema_version = model.feature_schema_version.clone();
     let predictions = read_ranking_predictions_for_admin(state, tenant)
         .await
@@ -12965,6 +12974,32 @@ async fn create_ranking_calibration_run(
             .map_err(internal_error)?;
     }
     Ok(record)
+}
+
+fn ensure_ranking_calibration_dataset_can_feed_run(
+    datasets: &[TraceRankingCalibrationDatasetRecord],
+    evaluation_dataset_hash: &str,
+    target_use: TraceAllowedUse,
+    policy_version: &str,
+) -> ApiResult<()> {
+    let Some(dataset) = datasets.iter().find(|dataset| {
+        dataset.calibration_dataset_hash == evaluation_dataset_hash
+            && dataset.target_use == target_use
+            && dataset.policy_version == policy_version
+    }) else {
+        return Ok(());
+    };
+    if matches!(
+        dataset.status,
+        StorageTraceRankingCalibrationDatasetStatus::Deprecated
+            | StorageTraceRankingCalibrationDatasetStatus::Archived
+    ) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "ranking calibration dataset is retired for this target use and policy",
+        ));
+    }
+    Ok(())
 }
 
 async fn ranking_calibration_run_worker_handler(
@@ -54078,6 +54113,68 @@ mod tests {
         .await
         .expect_err("calibration must use the registered calibration dataset hash");
         assert_eq!(mismatch.0, StatusCode::CONFLICT);
+
+        let Json(runs) =
+            ranking_calibration_runs_handler(State(state), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list calibration runs");
+        assert!(runs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ranking_calibration_run_rejects_retired_registered_calibration_dataset() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let Json(dataset) = ranking_calibration_dataset_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingCalibrationDatasetRequest {
+                calibration_dataset_hash: "sha256:retired-calibration-set".to_string(),
+                target_use: TraceAllowedUse::ModelTraining,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                source_manifest_hash: "sha256:retired-calibration-manifest".to_string(),
+                source_count: 10,
+                label_source_count: 2,
+                label_actor_count: 2,
+                status: StorageTraceRankingCalibrationDatasetStatus::Archived,
+            }),
+        )
+        .await
+        .expect("admin can register retired ranking calibration dataset");
+
+        let Json(model) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-retired-dataset-v1".to_string(),
+                feature_schema_version: "ranking-features-retired-dataset-v1".to_string(),
+                policy_version: dataset.policy_version.clone(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:training-set-retired-dataset".to_string(),
+                calibration_dataset_hash: dataset.calibration_dataset_hash.clone(),
+                model_artifact_hash: "sha256:model-artifact-retired-dataset".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can register model that names retired calibration dataset");
+
+        let retired = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: model.model_version,
+                target_use: dataset.target_use,
+                policy_version: model.policy_version,
+                evaluation_dataset_hash: dataset.calibration_dataset_hash,
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(500_000),
+            }),
+        )
+        .await
+        .expect_err("retired holdout dataset cannot feed calibration");
+        assert_eq!(retired.0, StatusCode::CONFLICT);
 
         let Json(runs) =
             ranking_calibration_runs_handler(State(state), auth_headers("admin-token-a"))

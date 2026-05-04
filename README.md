@@ -132,6 +132,8 @@ suppresses that source's calibration evidence until a newer non-disputed label
 arrives. Label-source authority is enforced at write time: utility workers write
 `frontier_lab`, reviewers write `reviewer`, benchmark workers write `benchmark`,
 process-evaluation workers write `system`, and admins are the explicit override.
+Registered calibration datasets marked `deprecated` or `archived` are retired
+and cannot feed new calibration runs for that target use and policy.
 When deployments require multiple joined label sources, calibration also
 requires that many distinct label-writing actor principals so one worker cannot
 satisfy source diversity by switching label-source enums. Model manifests must
