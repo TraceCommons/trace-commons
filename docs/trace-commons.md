@@ -613,9 +613,11 @@ row with result refs to the generated calibration ids.
 latest candidate ranking models with a bounded `limit`, required target use,
 non-empty reason, optional model/policy filters, and dry-run support. It reuses
 the same overlapping live-run guard, calibration/freshness/diversity gates as
-the admin promotion endpoint, promotes only eligible candidates, skips
-ineligible candidates with safe reason counts, and reports remaining candidate
-count without granting utility workers generic admin promotion access.
+the admin promotion endpoint, rechecks current joined prediction/label evidence
+against the latest promotable calibration run, promotes only eligible
+candidates, skips ineligible candidates with safe reason counts, and reports
+remaining candidate count without granting utility workers generic admin
+promotion access.
 
 `GET /v1/admin/ranking/worker-runs` exposes the hash-only worker-run ledger for
 bounded ranking calibration, prediction-credit, model-promotion, and full
