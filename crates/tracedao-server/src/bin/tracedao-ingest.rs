@@ -10964,14 +10964,10 @@ async fn ranking_model_version_handler(
         }
     }
     if body.status == StorageTraceRankingModelStatus::Active {
-        ensure_active_ranking_model_has_promotable_calibration(
-            state.as_ref(),
-            &tenant,
-            &model_version,
-            &policy_version,
-            &calibration_dataset_hash,
-        )
-        .await?;
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "active ranking model registration is target-use scoped; register a candidate and use /v1/admin/ranking/model-promotions",
+        ));
     }
 
     let record = TraceRankingModelVersionRecord {
@@ -46997,22 +46993,23 @@ mod tests {
         .await
         .expect("utility worker can persist promotable ranking calibration");
         assert!(calibration.promotable);
-        let Json(active_model) = ranking_model_version_handler(
+        let Json(active_model) = ranking_model_promotion_handler(
             State(state.clone()),
             auth_headers("admin-token-a"),
-            Json(TraceRankingModelVersionRequest {
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
                 model_version: model.model_version.clone(),
-                feature_schema_version: model.feature_schema_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: model.policy_version.clone(),
-                status: StorageTraceRankingModelStatus::Active,
-                training_dataset_hash: model.training_dataset_hash.clone(),
-                calibration_dataset_hash: model.calibration_dataset_hash.clone(),
-                model_artifact_hash: model.model_artifact_hash.clone(),
+                reason: "promote calibrated ranking settlement model".to_string(),
             }),
         )
         .await
-        .expect("admin can activate calibrated ranking settlement model");
-        assert_eq!(active_model.status, StorageTraceRankingModelStatus::Active);
+        .expect("admin can promote calibrated ranking settlement model");
+        assert_eq!(
+            active_model.model_status,
+            StorageTraceRankingModelStatus::Active
+        );
 
         let Json(bound_event) = append_credit_event_handler(
             State(state.clone()),
@@ -48828,7 +48825,7 @@ mod tests {
         .await
         .expect_err("stale calibration blocks model promotion");
         assert_eq!(stale_promotion_error.0, StatusCode::CONFLICT);
-        let stale_direct_activation_error = ranking_model_version_handler(
+        let direct_activation_error = ranking_model_version_handler(
             State(state.clone()),
             auth_headers("admin-token-a"),
             Json(TraceRankingModelVersionRequest {
@@ -48842,8 +48839,17 @@ mod tests {
             }),
         )
         .await
-        .expect_err("stale calibration blocks direct active model registration");
-        assert_eq!(stale_direct_activation_error.0, StatusCode::CONFLICT);
+        .expect_err("direct active model registration requires target-scoped promotion");
+        assert_eq!(direct_activation_error.0, StatusCode::CONFLICT);
+        assert!(
+            direct_activation_error
+                .1
+                .0
+                .error
+                .contains("target-use scoped"),
+            "{}",
+            direct_activation_error.1.0.error
+        );
 
         Arc::make_mut(&mut state).ranking_calibration_max_age = None;
         let Json(_) = ranking_model_promotion_handler(
@@ -53195,7 +53201,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_ranking_model_requires_latest_promotable_calibration() {
+    async fn direct_active_ranking_model_registration_requires_target_scoped_promotion() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
         let mut envelope = sample_envelope().await;
@@ -53227,8 +53233,13 @@ mod tests {
             }),
         )
         .await
-        .expect_err("active ranking model must have calibration evidence");
+        .expect_err("direct active ranking model registration must use target-scoped promotion");
         assert_eq!(uncalibrated_active.0, StatusCode::CONFLICT);
+        assert!(
+            uncalibrated_active.1.0.error.contains("target-use scoped"),
+            "{}",
+            uncalibrated_active.1.0.error
+        );
 
         let Json(candidate) = ranking_model_version_handler(
             State(state.clone()),
@@ -53317,22 +53328,42 @@ mod tests {
         .expect("utility worker can persist calibration run");
         assert!(calibration.promotable);
 
-        let Json(active) = ranking_model_version_handler(
-            State(state),
+        let direct_active = ranking_model_version_handler(
+            State(state.clone()),
             auth_headers("admin-token-a"),
             Json(TraceRankingModelVersionRequest {
-                model_version: candidate.model_version,
-                feature_schema_version: candidate.feature_schema_version,
-                policy_version: candidate.policy_version,
+                model_version: candidate.model_version.clone(),
+                feature_schema_version: candidate.feature_schema_version.clone(),
+                policy_version: candidate.policy_version.clone(),
                 status: StorageTraceRankingModelStatus::Active,
-                training_dataset_hash: candidate.training_dataset_hash,
-                calibration_dataset_hash: candidate.calibration_dataset_hash,
-                model_artifact_hash: candidate.model_artifact_hash,
+                training_dataset_hash: candidate.training_dataset_hash.clone(),
+                calibration_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                model_artifact_hash: candidate.model_artifact_hash.clone(),
             }),
         )
         .await
-        .expect("promotable calibration evidence allows activation");
-        assert_eq!(active.status, StorageTraceRankingModelStatus::Active);
+        .expect_err("calibrated candidates must still use target-scoped promotion");
+        assert_eq!(direct_active.0, StatusCode::CONFLICT);
+        assert!(
+            direct_active.1.0.error.contains("target-use scoped"),
+            "{}",
+            direct_active.1.0.error
+        );
+
+        let Json(active) = ranking_model_promotion_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version,
+                target_use: TraceAllowedUse::ModelTraining,
+                policy_version: candidate.policy_version,
+                reason: "promote calibrated model through target-scoped endpoint".to_string(),
+            }),
+        )
+        .await
+        .expect("promotable calibration evidence allows target-scoped promotion");
+        assert_eq!(active.model_status, StorageTraceRankingModelStatus::Active);
     }
 
     #[tokio::test]
@@ -54221,7 +54252,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_ranking_model_rejects_latest_nonpromotable_calibration() {
+    async fn ranking_model_promotion_rejects_latest_nonpromotable_calibration() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
         let mut envelope = sample_envelope().await;
@@ -54342,21 +54373,19 @@ mod tests {
         .expect("latest calibration run is persisted even when nonpromotable");
         assert!(!nonpromotable_run.promotable);
 
-        let active_error = ranking_model_version_handler(
+        let active_error = ranking_model_promotion_handler(
             State(state),
             auth_headers("admin-token-a"),
-            Json(TraceRankingModelVersionRequest {
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
                 model_version: candidate.model_version,
-                feature_schema_version: candidate.feature_schema_version,
+                target_use: TraceAllowedUse::ModelTraining,
                 policy_version: candidate.policy_version,
-                status: StorageTraceRankingModelStatus::Active,
-                training_dataset_hash: candidate.training_dataset_hash,
-                calibration_dataset_hash: candidate.calibration_dataset_hash,
-                model_artifact_hash: candidate.model_artifact_hash,
+                reason: "latest nonpromotable calibration should block promotion".to_string(),
             }),
         )
         .await
-        .expect_err("latest nonpromotable calibration blocks activation");
+        .expect_err("latest nonpromotable calibration blocks promotion");
         assert_eq!(active_error.0, StatusCode::CONFLICT);
     }
 
