@@ -619,6 +619,10 @@ candidates, skips ineligible candidates with safe reason counts, and reports
 remaining candidate count without granting utility workers generic admin
 promotion access.
 
+Direct `active` writes to `POST /v1/admin/ranking/model-versions` are rejected:
+activation is target-use scoped, so admins should register `candidate` model
+manifests and activate them through `/v1/admin/ranking/model-promotions`.
+
 `GET /v1/admin/ranking/worker-runs` exposes the hash-only worker-run ledger for
 bounded ranking calibration, prediction-credit, model-promotion, and full
 credit-cycle automation. Rows include the run id, running/completed/failed
