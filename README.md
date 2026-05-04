@@ -129,10 +129,13 @@ submission and target use as corrections, so only the latest
 `(submission_id, target_use, label_source)` non-disputed label contributes to
 sample counts, joined evidence, and error metrics. A latest `disputed` label
 suppresses that source's calibration evidence until a newer non-disputed label
-arrives. When deployments require multiple joined label sources, calibration
-also requires that many distinct label-writing actor principals so one worker
-cannot satisfy source diversity by switching label-source enums. Model manifests
-must use disjoint training and calibration dataset hashes, so the registered
+arrives. Label-source authority is enforced at write time: utility workers write
+`frontier_lab`, reviewers write `reviewer`, benchmark workers write `benchmark`,
+process-evaluation workers write `system`, and admins are the explicit override.
+When deployments require multiple joined label sources, calibration also
+requires that many distinct label-writing actor principals so one worker cannot
+satisfy source diversity by switching label-source enums. Model manifests must
+use disjoint training and calibration dataset hashes, so the registered
 calibration dataset acts as holdout evidence instead of a reused training split.
 Admins can
 inspect calibration reports, persisted calibration runs, dataset-readiness
