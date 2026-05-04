@@ -2707,6 +2707,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(ranking_model_risk_report_handler),
         )
         .route(
+            "/v1/admin/ranking/dataset-readiness-report",
+            get(ranking_dataset_readiness_report_handler),
+        )
+        .route(
             "/v1/admin/ranking/credit-readiness-report",
             get(ranking_credit_readiness_report_handler),
         )
@@ -7167,6 +7171,70 @@ struct TraceRankingModelRiskRecord {
     pairwise_accuracy_micros: Option<i64>,
     pairwise_average_preferred_margin_micros: Option<i64>,
     risk_codes: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingDatasetReadinessReport {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    calibration_dataset_count: usize,
+    model_version_count: usize,
+    candidate_model_count: usize,
+    active_model_count: usize,
+    no_target_evidence_model_count: usize,
+    ready_model_target_count: usize,
+    blocked_model_target_count: usize,
+    reason_code_counts: BTreeMap<String, usize>,
+    datasets: Vec<TraceRankingDatasetReadinessRecord>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingDatasetReadinessRecord {
+    calibration_dataset_hash: String,
+    model_version_count: usize,
+    candidate_model_count: usize,
+    active_model_count: usize,
+    deprecated_model_count: usize,
+    archived_model_count: usize,
+    no_target_evidence_model_count: usize,
+    ready_model_target_count: usize,
+    blocked_model_target_count: usize,
+    reason_code_counts: BTreeMap<String, usize>,
+    model_versions: Vec<String>,
+    training_dataset_hashes: Vec<String>,
+    model_targets: Vec<TraceRankingDatasetTargetReadinessRecord>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingDatasetTargetReadinessRecord {
+    model_version: String,
+    model_status: StorageTraceRankingModelStatus,
+    target_use: TraceAllowedUse,
+    policy_version: String,
+    feature_schema_version: String,
+    latest_calibration_run_id: Option<Uuid>,
+    latest_calibration_report_hash: Option<String>,
+    latest_joined_evidence_hash: Option<String>,
+    latest_calibration_created_at: Option<DateTime<Utc>>,
+    latest_calibration_promotable: Option<bool>,
+    latest_calibration_reason_codes: Vec<String>,
+    current_calibration_report_hash: String,
+    current_joined_evidence_hash: String,
+    current_promotable: bool,
+    current_reason_codes: Vec<String>,
+    joined_evidence_changed: bool,
+    current_prediction_count: usize,
+    current_label_count: usize,
+    current_joined_label_prediction_count: usize,
+    current_joined_label_source_count: usize,
+    current_average_absolute_error_micros: Option<i64>,
+    current_max_label_source_average_absolute_error_micros: Option<i64>,
+    current_min_label_count: usize,
+    current_min_label_source_count: usize,
+    current_confidence_threshold: f32,
+    current_max_average_absolute_error_micros: i64,
+    ready: bool,
+    reason_codes: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -12643,6 +12711,34 @@ async fn ranking_model_risk_report_handler(
     )))
 }
 
+async fn ranking_dataset_readiness_report_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<TraceRankingDatasetReadinessReport>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let predictions = read_ranking_predictions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let labels = read_ranking_labels_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let calibration_runs = read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(ranking_dataset_readiness_report(
+        state.as_ref(),
+        &tenant,
+        &model_versions,
+        &predictions,
+        &labels,
+        &calibration_runs,
+    )))
+}
+
 async fn ranking_credit_readiness_report_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -14577,6 +14673,249 @@ fn ranking_model_risk_record(
         pairwise_accuracy_micros: pairwise.pairwise_accuracy_micros,
         pairwise_average_preferred_margin_micros: pairwise.average_preferred_margin_micros,
         risk_codes,
+    }
+}
+
+fn ranking_dataset_readiness_report(
+    state: &AppState,
+    tenant: &TenantAuth,
+    model_versions: &[TraceRankingModelVersionRecord],
+    predictions: &[TraceRankingPredictionRecord],
+    labels: &[TraceRankingLabelRecord],
+    calibration_runs: &[TraceRankingCalibrationRunRecord],
+) -> TraceRankingDatasetReadinessReport {
+    let latest_models = latest_ranking_model_versions(model_versions);
+    let mut models_by_dataset = BTreeMap::new();
+    for model in latest_models {
+        models_by_dataset
+            .entry(model.calibration_dataset_hash.clone())
+            .or_insert_with(Vec::new)
+            .push(model);
+    }
+
+    let mut datasets = Vec::new();
+    let mut model_version_count = 0usize;
+    let mut candidate_model_count = 0usize;
+    let mut active_model_count = 0usize;
+    let mut no_target_evidence_model_count = 0usize;
+    let mut ready_model_target_count = 0usize;
+    let mut blocked_model_target_count = 0usize;
+    let mut reason_code_counts = BTreeMap::new();
+
+    for (calibration_dataset_hash, mut models) in models_by_dataset {
+        models.sort_by(|left, right| left.model_version.cmp(&right.model_version));
+        let mut dataset_candidate_count = 0usize;
+        let mut dataset_active_count = 0usize;
+        let mut dataset_deprecated_count = 0usize;
+        let mut dataset_archived_count = 0usize;
+        let mut dataset_no_target_count = 0usize;
+        let mut dataset_ready_count = 0usize;
+        let mut dataset_blocked_count = 0usize;
+        let mut dataset_reason_counts = BTreeMap::new();
+        let mut dataset_model_versions = Vec::new();
+        let mut training_dataset_hashes = BTreeSet::new();
+        let mut model_targets = Vec::new();
+
+        for model in &models {
+            model_version_count += 1;
+            dataset_model_versions.push(model.model_version.clone());
+            training_dataset_hashes.insert(model.training_dataset_hash.clone());
+            match model.status {
+                StorageTraceRankingModelStatus::Candidate => {
+                    candidate_model_count += 1;
+                    dataset_candidate_count += 1;
+                }
+                StorageTraceRankingModelStatus::Active => {
+                    active_model_count += 1;
+                    dataset_active_count += 1;
+                }
+                StorageTraceRankingModelStatus::Deprecated => {
+                    dataset_deprecated_count += 1;
+                }
+                StorageTraceRankingModelStatus::Archived => {
+                    dataset_archived_count += 1;
+                }
+            }
+
+            let target_uses = ranking_model_target_uses(model, predictions, calibration_runs);
+            if target_uses.is_empty() {
+                dataset_no_target_count += 1;
+                no_target_evidence_model_count += 1;
+                increment_count(&mut dataset_reason_counts, "missing_target_use_evidence");
+                increment_count(&mut reason_code_counts, "missing_target_use_evidence");
+                continue;
+            }
+            for target_use in target_uses {
+                let target = ranking_dataset_target_readiness_record(
+                    state,
+                    tenant,
+                    model,
+                    target_use,
+                    predictions,
+                    labels,
+                    calibration_runs,
+                );
+                if target.ready {
+                    dataset_ready_count += 1;
+                    ready_model_target_count += 1;
+                } else {
+                    dataset_blocked_count += 1;
+                    blocked_model_target_count += 1;
+                }
+                for reason in &target.reason_codes {
+                    increment_count(&mut dataset_reason_counts, reason);
+                    increment_count(&mut reason_code_counts, reason);
+                }
+                model_targets.push(target);
+            }
+        }
+
+        model_targets.sort_by(|left, right| {
+            (
+                &left.model_version,
+                serde_enum_tag(&left.target_use),
+                &left.policy_version,
+            )
+                .cmp(&(
+                    &right.model_version,
+                    serde_enum_tag(&right.target_use),
+                    &right.policy_version,
+                ))
+        });
+
+        datasets.push(TraceRankingDatasetReadinessRecord {
+            calibration_dataset_hash,
+            model_version_count: models.len(),
+            candidate_model_count: dataset_candidate_count,
+            active_model_count: dataset_active_count,
+            deprecated_model_count: dataset_deprecated_count,
+            archived_model_count: dataset_archived_count,
+            no_target_evidence_model_count: dataset_no_target_count,
+            ready_model_target_count: dataset_ready_count,
+            blocked_model_target_count: dataset_blocked_count,
+            reason_code_counts: dataset_reason_counts,
+            model_versions: dataset_model_versions,
+            training_dataset_hashes: training_dataset_hashes.into_iter().collect(),
+            model_targets,
+        });
+    }
+
+    TraceRankingDatasetReadinessReport {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        calibration_dataset_count: datasets.len(),
+        model_version_count,
+        candidate_model_count,
+        active_model_count,
+        no_target_evidence_model_count,
+        ready_model_target_count,
+        blocked_model_target_count,
+        reason_code_counts,
+        datasets,
+    }
+}
+
+fn ranking_dataset_target_readiness_record(
+    state: &AppState,
+    tenant: &TenantAuth,
+    model: &TraceRankingModelVersionRecord,
+    target_use: TraceAllowedUse,
+    predictions: &[TraceRankingPredictionRecord],
+    labels: &[TraceRankingLabelRecord],
+    calibration_runs: &[TraceRankingCalibrationRunRecord],
+) -> TraceRankingDatasetTargetReadinessRecord {
+    let latest_calibration =
+        latest_calibration_run_for_model_target(model, target_use, calibration_runs);
+    let thresholds = effective_ranking_calibration_thresholds(state, latest_calibration);
+    let mut current = ranking_calibration_run_record(
+        tenant,
+        RankingCalibrationRunInputs {
+            calibration_run_id: Uuid::new_v4(),
+            model_version: model.model_version.clone(),
+            target_use,
+            policy_version: model.policy_version.clone(),
+            feature_schema_version: model.feature_schema_version.clone(),
+            evaluation_dataset_hash: model.calibration_dataset_hash.clone(),
+            min_label_count: thresholds.min_label_count,
+            min_label_source_count: thresholds.min_label_source_count,
+            confidence_threshold: thresholds.confidence_threshold,
+            max_average_absolute_error_micros: thresholds.max_average_absolute_error_micros,
+            actor_principal_ref: tenant.principal_ref.clone(),
+            created_at: Utc::now(),
+        },
+        predictions,
+        labels,
+    );
+    current.report_hash = ranking_calibration_run_report_hash(&current);
+
+    let joined_evidence_changed = latest_calibration
+        .is_some_and(|run| run.joined_evidence_hash != current.joined_evidence_hash);
+    let mut reason_codes = Vec::new();
+    match model.status {
+        StorageTraceRankingModelStatus::Candidate | StorageTraceRankingModelStatus::Active => {}
+        StorageTraceRankingModelStatus::Deprecated | StorageTraceRankingModelStatus::Archived => {
+            reason_codes.push("model_status_not_deployable".to_string());
+        }
+    }
+    match latest_calibration {
+        Some(run) => {
+            if !run.promotable {
+                reason_codes.push("calibration_not_promotable".to_string());
+            }
+            if ranking_calibration_is_stale(state, run) {
+                reason_codes.push("calibration_stale".to_string());
+            }
+            if run.joined_label_source_count < state.ranking_min_label_source_count {
+                reason_codes.push("calibration_label_source_underdiverse".to_string());
+            }
+            if joined_evidence_changed {
+                reason_codes.push("joined_evidence_changed_since_calibration".to_string());
+            }
+        }
+        None => reason_codes.push("missing_calibration".to_string()),
+    }
+    if !current.promotable {
+        reason_codes.push("current_evidence_not_promotable".to_string());
+    }
+    if ranking_model_training_calibration_datasets_overlap(model) {
+        reason_codes.push("training_calibration_dataset_overlap".to_string());
+    }
+    reason_codes.sort();
+    reason_codes.dedup();
+    let ready = reason_codes.is_empty();
+
+    TraceRankingDatasetTargetReadinessRecord {
+        model_version: model.model_version.clone(),
+        model_status: model.status,
+        target_use,
+        policy_version: model.policy_version.clone(),
+        feature_schema_version: model.feature_schema_version.clone(),
+        latest_calibration_run_id: latest_calibration.map(|run| run.calibration_run_id),
+        latest_calibration_report_hash: latest_calibration.map(|run| run.report_hash.clone()),
+        latest_joined_evidence_hash: latest_calibration.map(|run| run.joined_evidence_hash.clone()),
+        latest_calibration_created_at: latest_calibration.map(|run| run.created_at),
+        latest_calibration_promotable: latest_calibration.map(|run| run.promotable),
+        latest_calibration_reason_codes: latest_calibration
+            .map(|run| run.reason_codes.clone())
+            .unwrap_or_default(),
+        current_calibration_report_hash: current.report_hash,
+        current_joined_evidence_hash: current.joined_evidence_hash,
+        current_promotable: current.promotable,
+        current_reason_codes: current.reason_codes,
+        joined_evidence_changed,
+        current_prediction_count: current.prediction_count,
+        current_label_count: current.label_count,
+        current_joined_label_prediction_count: current.joined_label_prediction_count,
+        current_joined_label_source_count: current.joined_label_source_count,
+        current_average_absolute_error_micros: current.average_absolute_error_micros,
+        current_max_label_source_average_absolute_error_micros: current
+            .max_label_source_average_absolute_error_micros,
+        current_min_label_count: current.min_label_count,
+        current_min_label_source_count: current.min_label_source_count,
+        current_confidence_threshold: current.confidence_threshold,
+        current_max_average_absolute_error_micros: current.max_average_absolute_error_micros,
+        ready,
+        reason_codes,
     }
 }
 
@@ -49448,6 +49787,89 @@ mod tests {
         let latest =
             latest_ranking_model_version(&model_versions, &candidate.model_version).unwrap();
         assert_eq!(latest.status, StorageTraceRankingModelStatus::Candidate);
+    }
+
+    #[tokio::test]
+    async fn ranking_dataset_readiness_report_groups_holdout_evidence_by_calibration_dataset() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let (candidate, _) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-dataset-readiness-v1")
+                .await;
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration");
+
+        let Json(report) = ranking_dataset_readiness_report_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+        )
+        .await
+        .expect("admin can inspect ranking dataset readiness");
+
+        assert_eq!(report.calibration_dataset_count, 1);
+        assert_eq!(report.model_version_count, 1);
+        assert_eq!(report.candidate_model_count, 1);
+        assert_eq!(report.active_model_count, 0);
+        assert_eq!(report.ready_model_target_count, 1);
+        assert_eq!(report.blocked_model_target_count, 0);
+        assert!(report.reason_code_counts.is_empty());
+
+        let dataset = report.datasets.first().expect("dataset readiness row");
+        assert_eq!(
+            dataset.calibration_dataset_hash,
+            candidate.calibration_dataset_hash
+        );
+        assert_eq!(dataset.model_version_count, 1);
+        assert_eq!(dataset.candidate_model_count, 1);
+        assert_eq!(dataset.active_model_count, 0);
+        assert_eq!(dataset.no_target_evidence_model_count, 0);
+        assert_eq!(dataset.ready_model_target_count, 1);
+        assert_eq!(dataset.blocked_model_target_count, 0);
+        assert!(dataset.reason_code_counts.is_empty());
+
+        let target = dataset
+            .model_targets
+            .first()
+            .expect("dataset target readiness row");
+        assert_eq!(target.model_version, candidate.model_version);
+        assert_eq!(
+            target.model_status,
+            StorageTraceRankingModelStatus::Candidate
+        );
+        assert_eq!(target.target_use, TraceAllowedUse::RankingModelTraining);
+        assert!(target.ready);
+        assert!(target.reason_codes.is_empty());
+        assert_eq!(
+            target.latest_calibration_run_id,
+            Some(calibration.calibration_run_id)
+        );
+        assert_eq!(
+            target.latest_calibration_report_hash,
+            Some(calibration.report_hash)
+        );
+        assert_eq!(
+            target.current_joined_evidence_hash,
+            calibration.joined_evidence_hash
+        );
+        assert_eq!(target.current_joined_label_prediction_count, 1);
+        assert_eq!(target.current_joined_label_source_count, 1);
+        assert_eq!(target.current_min_label_count, 1);
+        assert_eq!(target.current_min_label_source_count, 1);
+        assert_eq!(target.current_confidence_threshold, 0.5);
+        assert_eq!(target.current_max_average_absolute_error_micros, 100_000);
     }
 
     async fn seed_pairwise_ranking_prediction_source(

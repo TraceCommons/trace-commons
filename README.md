@@ -129,10 +129,14 @@ that many distinct label-writing actor principals so one worker cannot satisfy
 source diversity by switching label-source enums. Model manifests must use
 disjoint training and calibration dataset hashes, so the registered calibration
 dataset acts as holdout evidence instead of a reused training split. Admins can
-inspect calibration reports, persisted
-calibration runs, active-model risk reports, ranking-credit readiness reports,
-and operational summary blocker counts before deciding whether model-derived
-credit can settle. Model promotion rechecks the current joined prediction/label
+inspect calibration reports, persisted calibration runs, dataset-readiness
+reports, active-model risk reports, ranking-credit readiness reports, and
+operational summary blocker counts before deciding whether model-derived credit
+can settle. Dataset-readiness reports group candidate and active models by
+registered holdout calibration dataset hash and show target-use readiness,
+current evidence hashes, effective thresholds, error metrics, and blocker reason
+counts without raw trace or lab evidence. Model promotion rechecks the current
+joined prediction/label
 evidence hash and current server-owned calibration floors against the latest
 promotable calibration run before writing an active model status, so a candidate
 cannot activate after labels, predictions, or production thresholds drift under
