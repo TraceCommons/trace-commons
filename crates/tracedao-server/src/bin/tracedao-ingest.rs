@@ -5847,6 +5847,26 @@ fn ranking_worker_run_recovery_audit_metadata_from_reason(
     })
 }
 
+fn ranking_calibration_dataset_quarantine_audit_metadata_from_reason(
+    reason: Option<&str>,
+) -> Option<StorageTraceAuditSafeMetadata> {
+    Some(
+        StorageTraceAuditSafeMetadata::RankingCalibrationDatasetQuarantine {
+            calibration_dataset_hash: trace_audit_reason_value(reason, "calibration_dataset_hash")?
+                .to_string(),
+            target_use: trace_audit_reason_value(reason, "target_use")?.to_string(),
+            policy_version: trace_audit_reason_value(reason, "policy_version")?.to_string(),
+            archived_source_manifest_hash: trace_audit_reason_value(
+                reason,
+                "archived_source_manifest_hash",
+            )?
+            .to_string(),
+            conflict_key_hash: trace_audit_reason_value(reason, "conflict_key_hash")?.to_string(),
+            reason_hash: trace_audit_reason_value(reason, "reason_hash")?.to_string(),
+        },
+    )
+}
+
 fn trace_review_lease_reason(
     action: StorageTraceReviewLeaseAuditAction,
     lease_expires_at: Option<DateTime<Utc>>,
@@ -30750,6 +30770,12 @@ fn audit_backfill_storage_projection(
             ranking_worker_run_recovery_audit_metadata_from_reason(event.reason.as_deref())
                 .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
         }
+        "ranking_calibration_dataset_quarantine" => {
+            ranking_calibration_dataset_quarantine_audit_metadata_from_reason(
+                event.reason.as_deref(),
+            )
+            .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
+        }
         _ => StorageTraceAuditSafeMetadata::Empty,
     };
     (action, metadata)
@@ -35633,6 +35659,7 @@ impl TraceCommonsAuditEvent {
         reason_hash: &str,
     ) -> Self {
         let conflict_key_hash = sha256_prefixed(conflict_key);
+        let target_use = serde_enum_tag(&record.target_use);
         Self {
             event_id: Uuid::new_v4(),
             tenant_id: auth.tenant_id.clone(),
@@ -35643,8 +35670,8 @@ impl TraceCommonsAuditEvent {
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
             reason: Some(format!(
-                "conflict_key_hash={conflict_key_hash};reason_hash={reason_hash};archived_source_manifest_hash={}",
-                record.source_manifest_hash
+                "calibration_dataset_hash={};target_use={target_use};policy_version={};conflict_key_hash={conflict_key_hash};reason_hash={reason_hash};archived_source_manifest_hash={}",
+                record.calibration_dataset_hash, record.policy_version, record.source_manifest_hash
             )),
             export_count: None,
             export_id: None,
@@ -46163,6 +46190,63 @@ mod tests {
                 allowed_consent_scope_count: 2,
                 allowed_use_count: 1,
                 grant_projection_hash: projection_hash.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn audit_backfill_preserves_calibration_dataset_quarantine_metadata() {
+        let auth = TenantAuth {
+            tenant_id: "tenant-a".to_string(),
+            role: TokenRole::Admin,
+            principal_ref: principal_storage_ref("admin-token-a"),
+            expires_at: None,
+            auth_method: TraceAuthMethod::StaticToken,
+            signed_claim_issuer: None,
+            signed_claim_audiences: BTreeSet::new(),
+            signed_claim_subject: None,
+            allowed_consent_scopes: BTreeSet::new(),
+            allowed_uses: BTreeSet::new(),
+        };
+        let record = TraceRankingCalibrationDatasetRecord {
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            calibration_dataset_hash: "sha256:quarantine-holdout".to_string(),
+            target_use: TraceAllowedUse::RankingModelTraining,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            source_manifest_hash: "sha256:quarantine-manifest".to_string(),
+            source_count: 128,
+            label_source_count: 3,
+            label_actor_count: 3,
+            status: StorageTraceRankingCalibrationDatasetStatus::Archived,
+            actor_principal_ref: principal_storage_ref("admin-token-a"),
+            created_at: Utc::now(),
+        };
+        let conflict_key = ranking_calibration_dataset_file_key(&record)
+            .expect("calibration dataset key serializes");
+        let reason_hash = "sha256:quarantine-reason";
+        let event = TraceCommonsAuditEvent::ranking_calibration_dataset_quarantine(
+            &auth,
+            &record,
+            &conflict_key,
+            reason_hash,
+        );
+
+        let (action, metadata) = audit_backfill_storage_projection(&event);
+
+        assert_eq!(
+            action,
+            StorageTraceAuditAction::RankingCalibrationDatasetQuarantine
+        );
+        assert_eq!(
+            metadata,
+            StorageTraceAuditSafeMetadata::RankingCalibrationDatasetQuarantine {
+                calibration_dataset_hash: record.calibration_dataset_hash,
+                target_use: "ranking_model_training".to_string(),
+                policy_version: record.policy_version,
+                archived_source_manifest_hash: record.source_manifest_hash,
+                conflict_key_hash: sha256_prefixed(&conflict_key),
+                reason_hash: reason_hash.to_string(),
             }
         );
     }
