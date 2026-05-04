@@ -13,13 +13,14 @@ use trace_commons_server::trace_corpus_storage::{
     TraceCreditSettlementBatchWrite, TraceCreditSettlementNearStatus, TraceCreditSettlementState,
     TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportManifestItemWrite,
     TraceExportManifestMirrorWrite, TraceExportManifestWrite, TraceNearCreditOutboxItemWrite,
-    TraceObjectArtifactKind, TraceObjectRefWrite, TraceRankingCalibrationRunWrite,
-    TraceRankingFeatureWrite, TraceRankingLabelOutcome, TraceRankingLabelSource,
-    TraceRankingLabelWrite, TraceRankingModelStatus, TraceRankingModelVersionWrite,
-    TraceRankingPredictionWrite, TraceRankingPreferenceLabelWrite, TraceRankingUtilityCategory,
-    TraceRankingWorkerRunKind, TraceRankingWorkerRunStatus, TraceRankingWorkerRunWrite,
-    TraceSubmissionWrite, TraceUtilityAttestationWrite, TraceVectorEntrySourceProjection,
-    TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWorkerKind,
+    TraceObjectArtifactKind, TraceObjectRefWrite, TraceRankingCalibrationDatasetStatus,
+    TraceRankingCalibrationDatasetWrite, TraceRankingCalibrationRunWrite, TraceRankingFeatureWrite,
+    TraceRankingLabelOutcome, TraceRankingLabelSource, TraceRankingLabelWrite,
+    TraceRankingModelStatus, TraceRankingModelVersionWrite, TraceRankingPredictionWrite,
+    TraceRankingPreferenceLabelWrite, TraceRankingUtilityCategory, TraceRankingWorkerRunKind,
+    TraceRankingWorkerRunStatus, TraceRankingWorkerRunWrite, TraceSubmissionWrite,
+    TraceUtilityAttestationWrite, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
+    TraceVectorEntryWrite, TraceWorkerKind,
 };
 use uuid::Uuid;
 
@@ -539,6 +540,30 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
         .expect("upsert ranking model version");
     assert_eq!(model.model_version, "trace-ranker-v2");
 
+    let calibration_dataset = backend
+        .upsert_trace_ranking_calibration_dataset(TraceRankingCalibrationDatasetWrite {
+            tenant_id: tenant_alpha.clone(),
+            calibration_dataset_hash: model.calibration_dataset_hash.clone(),
+            target_use: "model_training".to_string(),
+            policy_version: model.policy_version.clone(),
+            source_manifest_hash: "sha256:calibration-source-manifest".to_string(),
+            source_count: 32,
+            label_source_count: 2,
+            label_actor_count: 2,
+            status: TraceRankingCalibrationDatasetStatus::Candidate,
+            actor_principal_ref: "principal:ranker-admin".to_string(),
+        })
+        .await
+        .expect("upsert ranking calibration dataset");
+    assert_eq!(
+        calibration_dataset.calibration_dataset_hash,
+        "sha256:calibration-dataset"
+    );
+    assert_eq!(
+        calibration_dataset.status,
+        TraceRankingCalibrationDatasetStatus::Candidate
+    );
+
     let feature_id = Uuid::new_v4();
     let feature = backend
         .upsert_trace_ranking_feature(TraceRankingFeatureWrite {
@@ -798,6 +823,10 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
         .list_trace_ranking_model_versions(&tenant_alpha)
         .await
         .expect("list alpha ranking models");
+    let alpha_calibration_datasets = backend
+        .list_trace_ranking_calibration_datasets(&tenant_alpha)
+        .await
+        .expect("list alpha ranking calibration datasets");
     let alpha_features = backend
         .list_trace_ranking_features(&tenant_alpha)
         .await
@@ -823,6 +852,7 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
         .await
         .expect("list alpha ranking worker runs");
     assert_eq!(alpha_models.len(), 1);
+    assert_eq!(alpha_calibration_datasets.len(), 1);
     assert_eq!(alpha_features.len(), 1);
     assert_eq!(alpha_predictions.len(), 1);
     assert_eq!(alpha_labels.len(), 1);
@@ -830,6 +860,14 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
     assert_eq!(alpha_calibration_runs.len(), 1);
     assert_eq!(alpha_worker_runs.len(), 1);
 
+    assert!(
+        backend
+            .list_trace_ranking_calibration_datasets(&tenant_beta)
+            .await
+            .expect("list beta ranking calibration datasets")
+            .is_empty(),
+        "ranking calibration datasets must stay tenant scoped"
+    );
     assert!(
         backend
             .list_trace_ranking_labels(&tenant_beta)

@@ -79,6 +79,9 @@ use trace_commons_server::trace_corpus_storage::{
     TraceObjectArtifactKind as StorageTraceObjectArtifactKind,
     TraceObjectRefRecord as StorageTraceObjectRefRecord,
     TraceObjectRefWrite as StorageTraceObjectRefWrite,
+    TraceRankingCalibrationDatasetRecord as StorageTraceRankingCalibrationDatasetRecord,
+    TraceRankingCalibrationDatasetStatus as StorageTraceRankingCalibrationDatasetStatus,
+    TraceRankingCalibrationDatasetWrite as StorageTraceRankingCalibrationDatasetWrite,
     TraceRankingCalibrationRunRecord as StorageTraceRankingCalibrationRunRecord,
     TraceRankingCalibrationRunWrite as StorageTraceRankingCalibrationRunWrite,
     TraceRankingFeatureRecord as StorageTraceRankingFeatureRecord,
@@ -2679,6 +2682,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/ranking/model-versions",
             get(ranking_model_versions_handler).post(ranking_model_version_handler),
+        )
+        .route(
+            "/v1/admin/ranking/calibration-datasets",
+            get(ranking_calibration_datasets_handler).post(ranking_calibration_dataset_handler),
         )
         .route(
             "/v1/admin/ranking/model-promotions",
@@ -6745,6 +6752,18 @@ struct TraceRankingModelVersionRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct TraceRankingCalibrationDatasetRequest {
+    calibration_dataset_hash: String,
+    target_use: TraceAllowedUse,
+    policy_version: String,
+    source_manifest_hash: String,
+    source_count: u32,
+    label_source_count: u32,
+    label_actor_count: u32,
+    status: StorageTraceRankingCalibrationDatasetStatus,
+}
+
+#[derive(Debug, Deserialize)]
 struct TraceRankingModelPromotionRequest {
     #[serde(default)]
     dry_run: bool,
@@ -6865,6 +6884,22 @@ struct TraceRankingModelVersionRecord {
     training_dataset_hash: String,
     calibration_dataset_hash: String,
     model_artifact_hash: String,
+    actor_principal_ref: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceRankingCalibrationDatasetRecord {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    calibration_dataset_hash: String,
+    target_use: TraceAllowedUse,
+    policy_version: String,
+    source_manifest_hash: String,
+    source_count: u32,
+    label_source_count: u32,
+    label_actor_count: u32,
+    status: StorageTraceRankingCalibrationDatasetStatus,
     actor_principal_ref: String,
     created_at: DateTime<Utc>,
 }
@@ -11086,6 +11121,53 @@ async fn ranking_model_versions_handler(
     Ok(Json(records))
 }
 
+async fn ranking_calibration_dataset_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceRankingCalibrationDatasetRequest>,
+) -> ApiResult<Json<TraceRankingCalibrationDatasetRecord>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let calibration_dataset_hash =
+        validate_sha256_hash(&body.calibration_dataset_hash, "calibration_dataset_hash")?;
+    let policy_version = validate_ranking_identifier(&body.policy_version, "policy_version")?;
+    let source_manifest_hash =
+        validate_sha256_hash(&body.source_manifest_hash, "source_manifest_hash")?;
+    validate_positive_ranking_count(body.source_count, "source_count")?;
+    validate_positive_ranking_count(body.label_source_count, "label_source_count")?;
+    validate_positive_ranking_count(body.label_actor_count, "label_actor_count")?;
+    let record = TraceRankingCalibrationDatasetRecord {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        calibration_dataset_hash,
+        target_use: body.target_use,
+        policy_version,
+        source_manifest_hash,
+        source_count: body.source_count,
+        label_source_count: body.label_source_count,
+        label_actor_count: body.label_actor_count,
+        status: body.status,
+        actor_principal_ref: tenant.principal_ref.clone(),
+        created_at: Utc::now(),
+    };
+    append_ranking_calibration_dataset_with_db_mirror(state.as_ref(), &tenant, &record)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(record))
+}
+
+async fn ranking_calibration_datasets_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<TraceRankingCalibrationDatasetRecord>>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let records = read_ranking_calibration_datasets_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(records))
+}
+
 async fn ranking_model_promotion_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -13188,6 +13270,27 @@ async fn append_ranking_model_version_with_db_mirror(
     enforce_db_mirror_write_result(state, "ranking model version", mirror_result)
 }
 
+async fn append_ranking_calibration_dataset_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    record: &TraceRankingCalibrationDatasetRecord,
+) -> anyhow::Result<()> {
+    let mirror_result = mirror_ranking_calibration_dataset_to_db(state, record).await;
+    if state.require_db_mirror_writes {
+        if let Err(error) = &mirror_result {
+            tracing::warn!(%error, calibration_dataset_hash = %record.calibration_dataset_hash, "Trace Commons DB dual-write ranking calibration dataset mirror failed");
+        }
+        enforce_db_mirror_write_result(state, "ranking calibration dataset", mirror_result)?;
+        append_ranking_calibration_dataset(&state.root, &tenant.tenant_id, record)?;
+        return Ok(());
+    }
+    append_ranking_calibration_dataset(&state.root, &tenant.tenant_id, record)?;
+    if let Err(error) = &mirror_result {
+        tracing::warn!(%error, calibration_dataset_hash = %record.calibration_dataset_hash, "Trace Commons DB dual-write ranking calibration dataset mirror failed");
+    }
+    enforce_db_mirror_write_result(state, "ranking calibration dataset", mirror_result)
+}
+
 async fn append_ranking_feature_with_db_mirror(
     state: &AppState,
     tenant: &TenantAuth,
@@ -13334,6 +13437,30 @@ async fn mirror_ranking_model_version_to_db(
     })
     .await
     .context("failed to mirror ranking model version to DB")?;
+    Ok(())
+}
+
+async fn mirror_ranking_calibration_dataset_to_db(
+    state: &AppState,
+    record: &TraceRankingCalibrationDatasetRecord,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    db.upsert_trace_ranking_calibration_dataset(StorageTraceRankingCalibrationDatasetWrite {
+        tenant_id: record.tenant_id.clone(),
+        calibration_dataset_hash: record.calibration_dataset_hash.clone(),
+        target_use: serde_storage_string(&record.target_use)?,
+        policy_version: record.policy_version.clone(),
+        source_manifest_hash: record.source_manifest_hash.clone(),
+        source_count: record.source_count,
+        label_source_count: record.label_source_count,
+        label_actor_count: record.label_actor_count,
+        status: record.status,
+        actor_principal_ref: record.actor_principal_ref.clone(),
+    })
+    .await
+    .context("failed to mirror ranking calibration dataset to DB")?;
     Ok(())
 }
 
@@ -13594,6 +13721,26 @@ async fn read_ranking_model_versions_for_admin(
     read_all_ranking_model_versions(&state.root, &tenant.tenant_id)
 }
 
+async fn read_ranking_calibration_datasets_for_admin(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceRankingCalibrationDatasetRecord>> {
+    if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("TRACE_COMMONS_DB_REVIEWER_READS is enabled without a DB mirror")?;
+        return db
+            .list_trace_ranking_calibration_datasets(&tenant.tenant_id)
+            .await
+            .context("failed to read ranking calibration datasets from DB mirror")?
+            .into_iter()
+            .map(ranking_calibration_dataset_from_storage)
+            .collect();
+    }
+    read_all_ranking_calibration_datasets(&state.root, &tenant.tenant_id)
+}
+
 async fn read_ranking_features_for_admin(
     state: &AppState,
     tenant: &TenantAuth,
@@ -13730,6 +13877,45 @@ fn ranking_model_version_from_storage(
         actor_principal_ref: record.actor_principal_ref,
         created_at: record.created_at,
     }
+}
+
+fn ranking_calibration_dataset_from_storage(
+    record: StorageTraceRankingCalibrationDatasetRecord,
+) -> anyhow::Result<TraceRankingCalibrationDatasetRecord> {
+    Ok(TraceRankingCalibrationDatasetRecord {
+        tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
+        tenant_id: record.tenant_id,
+        calibration_dataset_hash: record.calibration_dataset_hash,
+        target_use: storage_string_as(&record.target_use, "ranking target_use")?,
+        policy_version: record.policy_version,
+        source_manifest_hash: record.source_manifest_hash,
+        source_count: record.source_count,
+        label_source_count: record.label_source_count,
+        label_actor_count: record.label_actor_count,
+        status: record.status,
+        actor_principal_ref: record.actor_principal_ref,
+        created_at: record.created_at,
+    })
+}
+
+fn ranking_calibration_dataset_file_key(
+    record: &TraceRankingCalibrationDatasetRecord,
+) -> anyhow::Result<String> {
+    Ok(format!(
+        "{}:{}:{}",
+        record.calibration_dataset_hash,
+        serde_storage_string(&record.target_use)?,
+        record.policy_version
+    ))
+}
+
+fn ranking_calibration_dataset_storage_key(
+    record: &StorageTraceRankingCalibrationDatasetRecord,
+) -> String {
+    format!(
+        "{}:{}:{}",
+        record.calibration_dataset_hash, record.target_use, record.policy_version
+    )
 }
 
 fn ranking_feature_from_storage(
@@ -13995,6 +14181,16 @@ fn validate_sha256_hash(value: &str, label: &str) -> ApiResult<String> {
             format!("ranking {label} must be a sha256-prefixed hash"),
         ))
     }
+}
+
+fn validate_positive_ranking_count(value: u32, label: &str) -> ApiResult<()> {
+    if value > 0 {
+        return Ok(());
+    }
+    Err(api_error(
+        StatusCode::BAD_REQUEST,
+        format!("ranking {label} must be greater than zero"),
+    ))
 }
 
 fn validate_unit_score(value: f32, label: &str) -> ApiResult<()> {
@@ -27320,6 +27516,65 @@ fn ensure_ranking_model_version_tenant(
     Ok(())
 }
 
+fn ranking_calibration_datasets_path(root: &Path, tenant_id: &str) -> PathBuf {
+    let tenant_key = tenant_storage_key(tenant_id);
+    root.join("tenants")
+        .join(tenant_key)
+        .join("ranking")
+        .join("calibration_datasets.jsonl")
+}
+
+fn append_ranking_calibration_dataset(
+    root: &Path,
+    tenant_id: &str,
+    record: &TraceRankingCalibrationDatasetRecord,
+) -> anyhow::Result<()> {
+    let path = ranking_calibration_datasets_path(root, tenant_id);
+    append_jsonl_record(&path, record, "ranking calibration dataset")
+}
+
+fn read_all_ranking_calibration_datasets(
+    root: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<Vec<TraceRankingCalibrationDatasetRecord>> {
+    let path = ranking_calibration_datasets_path(root, tenant_id);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let records: Vec<TraceRankingCalibrationDatasetRecord> =
+        read_jsonl_records(&path, "ranking calibration dataset")?;
+    let mut latest_by_key = BTreeMap::new();
+    for record in records {
+        ensure_ranking_calibration_dataset_tenant(&record, tenant_id)?;
+        latest_by_key.insert(
+            (
+                record.calibration_dataset_hash.clone(),
+                record.target_use,
+                record.policy_version.clone(),
+            ),
+            record,
+        );
+    }
+    let mut records = latest_by_key.into_values().collect::<Vec<_>>();
+    records.sort_by_key(|record| record.created_at);
+    Ok(records)
+}
+
+fn ensure_ranking_calibration_dataset_tenant(
+    record: &TraceRankingCalibrationDatasetRecord,
+    tenant_id: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        record.tenant_id == tenant_id,
+        "ranking calibration dataset tenant mismatch"
+    );
+    anyhow::ensure!(
+        record.tenant_storage_ref == tenant_storage_ref(tenant_id),
+        "ranking calibration dataset tenant storage ref mismatch"
+    );
+    Ok(())
+}
+
 fn ranking_features_path(root: &Path, tenant_id: &str) -> PathBuf {
     let tenant_key = tenant_storage_key(tenant_id);
     root.join("tenants")
@@ -29201,6 +29456,8 @@ async fn backfill_db_mirror_from_files(
         read_all_ranking_model_versions(&state.root, &tenant.tenant_id)?;
     let file_latest_ranking_model_versions =
         latest_ranking_model_versions(&file_ranking_model_versions);
+    let file_ranking_calibration_datasets =
+        read_all_ranking_calibration_datasets(&state.root, &tenant.tenant_id)?;
     let file_ranking_features = read_all_ranking_features(&state.root, &tenant.tenant_id)?;
     let file_ranking_predictions = read_all_ranking_predictions(&state.root, &tenant.tenant_id)?;
     let file_ranking_labels = read_all_ranking_labels(&state.root, &tenant.tenant_id)?;
@@ -29218,6 +29475,7 @@ async fn backfill_db_mirror_from_files(
             + file_near_credit_outbox_items.len()
             + file_benchmark_registry_outbox_items.len()
             + file_latest_ranking_model_versions.len()
+            + file_ranking_calibration_datasets.len()
             + file_ranking_features.len()
             + file_ranking_predictions.len()
             + file_ranking_labels.len()
@@ -29463,6 +29721,32 @@ async fn backfill_db_mirror_from_files(
                 record.model_version.clone(),
                 error.to_string(),
             ),
+        }
+    }
+
+    let existing_ranking_calibration_dataset_keys = db
+        .list_trace_ranking_calibration_datasets(&tenant.tenant_id)
+        .await
+        .context("failed to list ranking calibration datasets for DB backfill")?
+        .into_iter()
+        .map(|record| (ranking_calibration_dataset_storage_key(&record), record))
+        .collect::<BTreeMap<_, _>>();
+    for record in &file_ranking_calibration_datasets {
+        let key = ranking_calibration_dataset_file_key(record)?;
+        if existing_ranking_calibration_dataset_keys
+            .get(&key)
+            .is_some_and(|db_record| {
+                db_record.status == record.status
+                    && db_record.source_manifest_hash == record.source_manifest_hash
+            })
+        {
+            continue;
+        }
+        match mirror_ranking_calibration_dataset_to_db(state, record).await {
+            Ok(()) => report.backfilled += 1,
+            Err(error) => {
+                report.record_failure("ranking_calibration_dataset", key, error.to_string())
+            }
         }
     }
 
@@ -30022,6 +30306,10 @@ async fn reconcile_db_mirror(
         .list_trace_ranking_model_versions(&tenant.tenant_id)
         .await
         .context("failed to list ranking model versions for DB reconciliation")?;
+    let db_ranking_calibration_datasets = db
+        .list_trace_ranking_calibration_datasets(&tenant.tenant_id)
+        .await
+        .context("failed to list ranking calibration datasets for DB reconciliation")?;
     let db_ranking_features = db
         .list_trace_ranking_features(&tenant.tenant_id)
         .await
@@ -30225,6 +30513,8 @@ async fn reconcile_db_mirror(
         read_all_benchmark_registry_outbox_items(&state.root, &tenant.tenant_id)?;
     let file_ranking_model_versions =
         read_all_ranking_model_versions(&state.root, &tenant.tenant_id)?;
+    let file_ranking_calibration_datasets =
+        read_all_ranking_calibration_datasets(&state.root, &tenant.tenant_id)?;
     let file_ranking_features = read_all_ranking_features(&state.root, &tenant.tenant_id)?;
     let file_ranking_predictions = read_all_ranking_predictions(&state.root, &tenant.tenant_id)?;
     let file_ranking_labels = read_all_ranking_labels(&state.root, &tenant.tenant_id)?;
@@ -30428,6 +30718,36 @@ async fn reconcile_db_mirror(
                 .map(|_| file_record.model_version.clone())
         })
         .collect::<Vec<_>>();
+    let file_ranking_calibration_dataset_keys = file_ranking_calibration_datasets
+        .iter()
+        .map(ranking_calibration_dataset_file_key)
+        .collect::<anyhow::Result<BTreeSet<_>>>()?;
+    let db_ranking_calibration_dataset_keys = db_ranking_calibration_datasets
+        .iter()
+        .map(ranking_calibration_dataset_storage_key)
+        .collect::<BTreeSet<_>>();
+    let db_ranking_calibration_datasets_by_key = db_ranking_calibration_datasets
+        .iter()
+        .map(|record| (ranking_calibration_dataset_storage_key(record), record))
+        .collect::<BTreeMap<_, _>>();
+    let missing_ranking_calibration_dataset_keys_in_db = file_ranking_calibration_dataset_keys
+        .difference(&db_ranking_calibration_dataset_keys)
+        .cloned()
+        .collect::<Vec<_>>();
+    let missing_ranking_calibration_dataset_keys_in_files = db_ranking_calibration_dataset_keys
+        .difference(&file_ranking_calibration_dataset_keys)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut ranking_calibration_dataset_status_mismatch_keys = Vec::new();
+    for file_record in &file_ranking_calibration_datasets {
+        let key = ranking_calibration_dataset_file_key(file_record)?;
+        if db_ranking_calibration_datasets_by_key
+            .get(&key)
+            .is_some_and(|db_record| db_record.status != file_record.status)
+        {
+            ranking_calibration_dataset_status_mismatch_keys.push(key);
+        }
+    }
     let file_ranking_feature_ids = file_ranking_features
         .iter()
         .map(|record| record.ranking_feature_id)
@@ -30917,6 +31237,11 @@ async fn reconcile_db_mirror(
         missing_ranking_model_versions_in_db,
         missing_ranking_model_versions_in_files,
         ranking_model_status_mismatch_versions,
+        file_ranking_calibration_dataset_count: file_ranking_calibration_datasets.len(),
+        db_ranking_calibration_dataset_count: db_ranking_calibration_datasets.len(),
+        missing_ranking_calibration_dataset_keys_in_db,
+        missing_ranking_calibration_dataset_keys_in_files,
+        ranking_calibration_dataset_status_mismatch_keys,
         file_ranking_feature_count: file_ranking_features.len(),
         db_ranking_feature_count: db_ranking_features.len(),
         missing_ranking_feature_ids_in_db,
@@ -33357,6 +33682,11 @@ struct TraceDbReconciliationReport {
     missing_ranking_model_versions_in_db: Vec<String>,
     missing_ranking_model_versions_in_files: Vec<String>,
     ranking_model_status_mismatch_versions: Vec<String>,
+    file_ranking_calibration_dataset_count: usize,
+    db_ranking_calibration_dataset_count: usize,
+    missing_ranking_calibration_dataset_keys_in_db: Vec<String>,
+    missing_ranking_calibration_dataset_keys_in_files: Vec<String>,
+    ranking_calibration_dataset_status_mismatch_keys: Vec<String>,
     file_ranking_feature_count: usize,
     db_ranking_feature_count: usize,
     missing_ranking_feature_ids_in_db: Vec<Uuid>,
@@ -33551,6 +33881,21 @@ impl TraceDbReconciliationReport {
             &mut gaps,
             "ranking_model_status_mismatch_versions",
             self.ranking_model_status_mismatch_versions.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_ranking_calibration_dataset_keys_in_db",
+            self.missing_ranking_calibration_dataset_keys_in_db.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "missing_ranking_calibration_dataset_keys_in_files",
+            self.missing_ranking_calibration_dataset_keys_in_files.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "ranking_calibration_dataset_status_mismatch_keys",
+            self.ranking_calibration_dataset_status_mismatch_keys.len(),
         );
         push_gap_count(
             &mut gaps,
@@ -49870,6 +50215,68 @@ mod tests {
         assert_eq!(target.current_min_label_source_count, 1);
         assert_eq!(target.current_confidence_threshold, 0.5);
         assert_eq!(target.current_max_average_absolute_error_micros, 100_000);
+    }
+
+    #[tokio::test]
+    async fn ranking_calibration_dataset_registry_records_hash_only_holdout_metadata() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let Json(record) = ranking_calibration_dataset_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingCalibrationDatasetRequest {
+                calibration_dataset_hash: "sha256:ranking-calibration-registry-v1".to_string(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                source_manifest_hash: "sha256:ranking-calibration-source-manifest-v1".to_string(),
+                source_count: 128,
+                label_source_count: 3,
+                label_actor_count: 3,
+                status: StorageTraceRankingCalibrationDatasetStatus::Candidate,
+            }),
+        )
+        .await
+        .expect("admin can register calibration dataset metadata");
+        assert_eq!(
+            record.calibration_dataset_hash,
+            "sha256:ranking-calibration-registry-v1"
+        );
+        assert_eq!(record.target_use, TraceAllowedUse::RankingModelTraining);
+        assert_eq!(record.policy_version, "trace-credit-policy-v1");
+        assert_eq!(
+            record.source_manifest_hash,
+            "sha256:ranking-calibration-source-manifest-v1"
+        );
+        assert_eq!(record.source_count, 128);
+        assert_eq!(record.label_source_count, 3);
+        assert_eq!(record.label_actor_count, 3);
+        assert_eq!(
+            record.status,
+            StorageTraceRankingCalibrationDatasetStatus::Candidate
+        );
+        assert!(record.actor_principal_ref.starts_with("principal_sha256:"));
+
+        let Json(records) = ranking_calibration_datasets_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+        )
+        .await
+        .expect("admin can list calibration dataset registry");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].calibration_dataset_hash,
+            record.calibration_dataset_hash
+        );
+
+        let raw_records = read_all_ranking_calibration_datasets(temp.path(), "tenant-a")
+            .expect("file-backed calibration dataset registry reads");
+        assert_eq!(raw_records.len(), 1);
+        assert_eq!(
+            raw_records[0].source_manifest_hash,
+            record.source_manifest_hash
+        );
+        assert_eq!(raw_records[0].source_count, 128);
     }
 
     async fn seed_pairwise_ranking_prediction_source(

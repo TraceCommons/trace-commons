@@ -215,6 +215,15 @@ pub enum TraceRankingLabelOutcome {
     Disputed,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceRankingCalibrationDatasetStatus {
+    Candidate,
+    Active,
+    Deprecated,
+    Archived,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TraceRankingModelVersionWrite {
     pub tenant_id: String,
@@ -238,6 +247,35 @@ pub struct TraceRankingModelVersionRecord {
     pub training_dataset_hash: String,
     pub calibration_dataset_hash: String,
     pub model_artifact_hash: String,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingCalibrationDatasetWrite {
+    pub tenant_id: String,
+    pub calibration_dataset_hash: String,
+    pub target_use: String,
+    pub policy_version: String,
+    pub source_manifest_hash: String,
+    pub source_count: u32,
+    pub label_source_count: u32,
+    pub label_actor_count: u32,
+    pub status: TraceRankingCalibrationDatasetStatus,
+    pub actor_principal_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingCalibrationDatasetRecord {
+    pub tenant_id: String,
+    pub calibration_dataset_hash: String,
+    pub target_use: String,
+    pub policy_version: String,
+    pub source_manifest_hash: String,
+    pub source_count: u32,
+    pub label_source_count: u32,
+    pub label_actor_count: u32,
+    pub status: TraceRankingCalibrationDatasetStatus,
     pub actor_principal_ref: String,
     pub created_at: DateTime<Utc>,
 }
@@ -1711,6 +1749,16 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceRankingModelVersionRecord>, DatabaseError>;
+
+    async fn upsert_trace_ranking_calibration_dataset(
+        &self,
+        dataset: TraceRankingCalibrationDatasetWrite,
+    ) -> Result<TraceRankingCalibrationDatasetRecord, DatabaseError>;
+
+    async fn list_trace_ranking_calibration_datasets(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingCalibrationDatasetRecord>, DatabaseError>;
 
     async fn upsert_trace_ranking_feature(
         &self,

@@ -26,16 +26,18 @@ use crate::trace_corpus_storage::{
     TraceExportManifestItemWrite, TraceExportManifestMirrorWrite, TraceExportManifestRecord,
     TraceExportManifestWrite, TraceNearCreditOutboxItemRecord, TraceNearCreditOutboxItemWrite,
     TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
-    TraceRankingCalibrationRunRecord, TraceRankingCalibrationRunWrite, TraceRankingFeatureRecord,
-    TraceRankingFeatureWrite, TraceRankingLabelOutcome, TraceRankingLabelRecord,
-    TraceRankingLabelSource, TraceRankingLabelWrite, TraceRankingModelStatus,
-    TraceRankingModelVersionRecord, TraceRankingModelVersionWrite, TraceRankingPredictionRecord,
-    TraceRankingPredictionWrite, TraceRankingPreferenceLabelRecord,
-    TraceRankingPreferenceLabelWrite, TraceRankingUtilityCategory, TraceRankingWorkerRunKind,
-    TraceRankingWorkerRunRecord, TraceRankingWorkerRunStatus, TraceRankingWorkerRunWrite,
-    TraceRetentionJobItemAction, TraceRetentionJobItemRecord, TraceRetentionJobItemStatus,
-    TraceRetentionJobItemWrite, TraceRetentionJobRecord, TraceRetentionJobStatus,
-    TraceRetentionJobWrite, TraceRevocationPropagationAction, TraceRevocationPropagationItemRecord,
+    TraceRankingCalibrationDatasetRecord, TraceRankingCalibrationDatasetStatus,
+    TraceRankingCalibrationDatasetWrite, TraceRankingCalibrationRunRecord,
+    TraceRankingCalibrationRunWrite, TraceRankingFeatureRecord, TraceRankingFeatureWrite,
+    TraceRankingLabelOutcome, TraceRankingLabelRecord, TraceRankingLabelSource,
+    TraceRankingLabelWrite, TraceRankingModelStatus, TraceRankingModelVersionRecord,
+    TraceRankingModelVersionWrite, TraceRankingPredictionRecord, TraceRankingPredictionWrite,
+    TraceRankingPreferenceLabelRecord, TraceRankingPreferenceLabelWrite,
+    TraceRankingUtilityCategory, TraceRankingWorkerRunKind, TraceRankingWorkerRunRecord,
+    TraceRankingWorkerRunStatus, TraceRankingWorkerRunWrite, TraceRetentionJobItemAction,
+    TraceRetentionJobItemRecord, TraceRetentionJobItemStatus, TraceRetentionJobItemWrite,
+    TraceRetentionJobRecord, TraceRetentionJobStatus, TraceRetentionJobWrite,
+    TraceRevocationPropagationAction, TraceRevocationPropagationItemRecord,
     TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget,
     TraceRevocationPropagationTargetKind, TraceSubmissionRecord, TraceSubmissionWrite,
@@ -123,6 +125,10 @@ const TRACE_RANKING_MODEL_VERSION_COLUMNS: &str = "\
     tenant_id, model_version, feature_schema_version, policy_version, status, \
     training_dataset_hash, calibration_dataset_hash, model_artifact_hash, \
     actor_principal_ref, created_at";
+
+const TRACE_RANKING_CALIBRATION_DATASET_COLUMNS: &str = "\
+    tenant_id, calibration_dataset_hash, target_use, policy_version, source_manifest_hash, \
+    source_count, label_source_count, label_actor_count, status, actor_principal_ref, created_at";
 
 const TRACE_RANKING_FEATURE_COLUMNS: &str = "\
     tenant_id, ranking_feature_id, submission_id, trace_id, target_use, \
@@ -639,6 +645,28 @@ fn row_to_ranking_model_version(
         training_dataset_hash: row.get("training_dataset_hash"),
         calibration_dataset_hash: row.get("calibration_dataset_hash"),
         model_artifact_hash: row.get("model_artifact_hash"),
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn row_to_ranking_calibration_dataset(
+    row: &Row,
+) -> Result<TraceRankingCalibrationDatasetRecord, DatabaseError> {
+    let status: String = row.get("status");
+    Ok(TraceRankingCalibrationDatasetRecord {
+        tenant_id: row.get("tenant_id"),
+        calibration_dataset_hash: row.get("calibration_dataset_hash"),
+        target_use: row.get("target_use"),
+        policy_version: row.get("policy_version"),
+        source_manifest_hash: row.get("source_manifest_hash"),
+        source_count: row_i32_to_u32(row, "source_count")?,
+        label_source_count: row_i32_to_u32(row, "label_source_count")?,
+        label_actor_count: row_i32_to_u32(row, "label_actor_count")?,
+        status: enum_from_storage::<TraceRankingCalibrationDatasetStatus>(
+            &status,
+            "TraceRankingCalibrationDatasetStatus",
+        )?,
         actor_principal_ref: row.get("actor_principal_ref"),
         created_at: row.get("created_at"),
     })
@@ -2141,6 +2169,91 @@ impl TraceCorpusStore for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
         let records = rows.iter().map(row_to_ranking_model_version).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_ranking_calibration_dataset(
+        &self,
+        dataset: TraceRankingCalibrationDatasetWrite,
+    ) -> Result<TraceRankingCalibrationDatasetRecord, DatabaseError> {
+        self.ensure_trace_tenant(&dataset.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &dataset.tenant_id).await?;
+        let source_count = u32_to_pg_i32(
+            dataset.source_count,
+            "ranking_calibration_datasets.source_count",
+        )?;
+        let label_source_count = u32_to_pg_i32(
+            dataset.label_source_count,
+            "ranking_calibration_datasets.label_source_count",
+        )?;
+        let label_actor_count = u32_to_pg_i32(
+            dataset.label_actor_count,
+            "ranking_calibration_datasets.label_actor_count",
+        )?;
+        let status = enum_to_storage(dataset.status)?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_ranking_calibration_datasets (
+                        tenant_id, calibration_dataset_hash, target_use, policy_version,
+                        source_manifest_hash, source_count, label_source_count,
+                        label_actor_count, status, actor_principal_ref
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                     ON CONFLICT (tenant_id, calibration_dataset_hash, target_use, policy_version)
+                     DO UPDATE SET
+                        source_manifest_hash = excluded.source_manifest_hash,
+                        source_count = excluded.source_count,
+                        label_source_count = excluded.label_source_count,
+                        label_actor_count = excluded.label_actor_count,
+                        status = excluded.status,
+                        actor_principal_ref = excluded.actor_principal_ref,
+                        created_at = NOW()
+                     RETURNING {TRACE_RANKING_CALIBRATION_DATASET_COLUMNS}"
+                ),
+                &[
+                    &dataset.tenant_id,
+                    &dataset.calibration_dataset_hash,
+                    &dataset.target_use,
+                    &dataset.policy_version,
+                    &dataset.source_manifest_hash,
+                    &source_count,
+                    &label_source_count,
+                    &label_actor_count,
+                    &status,
+                    &dataset.actor_principal_ref,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_ranking_calibration_dataset(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_ranking_calibration_datasets(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingCalibrationDatasetRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_RANKING_CALIBRATION_DATASET_COLUMNS}
+                     FROM trace_ranking_calibration_datasets
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, calibration_dataset_hash ASC, target_use ASC, policy_version ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows
+            .iter()
+            .map(row_to_ranking_calibration_dataset)
+            .collect();
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         records
     }
