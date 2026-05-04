@@ -14795,10 +14795,11 @@ fn ranking_calibration_run_record(
                 && prediction.feature_schema_version == inputs.feature_schema_version
         })
         .collect::<Vec<_>>();
-    let matching_labels = labels
-        .iter()
-        .filter(|label| label.target_use == inputs.target_use)
-        .collect::<Vec<_>>();
+    let matching_labels = ranking_calibration_effective_labels(
+        labels
+            .iter()
+            .filter(|label| label.target_use == inputs.target_use),
+    );
     let mut latest_prediction_by_submission = BTreeMap::new();
     for prediction in &matching_predictions {
         latest_prediction_by_submission.insert(prediction.submission_id, *prediction);
@@ -14908,6 +14909,36 @@ fn ranking_calibration_run_record(
         actor_principal_ref: inputs.actor_principal_ref,
         created_at: inputs.created_at,
     }
+}
+
+fn ranking_calibration_effective_labels<'a>(
+    labels: impl Iterator<Item = &'a TraceRankingLabelRecord>,
+) -> Vec<&'a TraceRankingLabelRecord> {
+    let mut latest_by_submission_source = BTreeMap::new();
+    for label in labels {
+        let key = (label.submission_id, label.label_source);
+        let should_replace = latest_by_submission_source.get(&key).is_none_or(
+            |current: &&TraceRankingLabelRecord| {
+                (label.created_at, label.ranking_label_id)
+                    > (current.created_at, current.ranking_label_id)
+            },
+        );
+        if should_replace {
+            latest_by_submission_source.insert(key, label);
+        }
+    }
+    let mut labels = latest_by_submission_source
+        .into_values()
+        .collect::<Vec<_>>();
+    labels.sort_by_key(|label| {
+        (
+            label.submission_id,
+            label.label_source,
+            label.created_at,
+            label.ranking_label_id,
+        )
+    });
+    labels
 }
 
 fn ranking_calibration_run_report_hash(record: &TraceRankingCalibrationRunRecord) -> String {
@@ -52273,6 +52304,134 @@ mod tests {
         assert!(!run.promotable);
         assert_eq!(run.joined_label_prediction_count, 1);
         assert_eq!(run.min_label_count, 2);
+        assert_eq!(run.reason_codes, vec!["insufficient_labels".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn ranking_calibration_run_deduplicates_repeated_labels_per_submission_source() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(model) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-dedup-labels-v1".to_string(),
+                feature_schema_version: "ranking-features-dedup-labels-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:training-set-dedup-labels".to_string(),
+                calibration_dataset_hash: "sha256:calibration-set-dedup-labels".to_string(),
+                model_artifact_hash: "sha256:model-artifact-dedup-labels".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can register ranking model version");
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                feature_schema_version: model.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:feature-vector-dedup-labels".to_string(),
+                feature_names_hash: "sha256:feature-names-dedup-labels".to_string(),
+                source_feature_hash: "sha256:redacted-summary-features-dedup-labels".to_string(),
+                duplicate_score: Some(0.05),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.88),
+                coverage_tags: vec!["tool:terminal".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking feature record");
+        let Json(_) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                model_version: model.model_version.clone(),
+                feature_schema_version: model.feature_schema_version.clone(),
+                prediction_policy_version: model.policy_version.clone(),
+                feature_vector_hash: feature.feature_vector_hash,
+                predicted_utility_micros: 1_000_000,
+                uncertainty_micros: 100_000,
+                confidence: 0.9,
+                risk_penalty_micros: 0,
+                novelty_bonus_micros: 0,
+                explanation_codes: vec!["dedup_probe".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking prediction");
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Neutral,
+                utility_delta_micros: 500_000,
+                evidence_hash: "sha256:frontier-lab-evidence-dedup-labels-a".to_string(),
+                external_ref: "private-frontier-lab-dedup-labels-a".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write first ranking label");
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_000_000,
+                evidence_hash: "sha256:frontier-lab-evidence-dedup-labels-b".to_string(),
+                external_ref: "private-frontier-lab-dedup-labels-b".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write second same-source ranking label");
+
+        let Json(run) = ranking_calibration_run_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: model.model_version,
+                target_use: TraceAllowedUse::ModelTraining,
+                policy_version: model.policy_version,
+                evaluation_dataset_hash: model.calibration_dataset_hash,
+                min_label_count: Some(2),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(500_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist calibration run");
+        assert_eq!(run.label_count, 1);
+        assert_eq!(run.joined_label_prediction_count, 1);
+        assert_eq!(run.average_label_utility_delta_micros, Some(1_000_000));
+        assert!(!run.promotable);
         assert_eq!(run.reason_codes, vec!["insufficient_labels".to_string()]);
     }
 

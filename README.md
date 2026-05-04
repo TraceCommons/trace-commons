@@ -121,9 +121,12 @@ that record aggregate error, confidence, threshold policy, per-source quality
 gates, joined-evidence hashes, reason codes, and a hash-only report digest.
 Prediction writes must name a registered active or candidate model, match its
 policy and feature schema, and reference an existing feature vector hash for the
-same source. Model manifests must use disjoint training and calibration dataset
-hashes, so the registered calibration dataset acts as holdout evidence instead
-of a reused training split. Admins can inspect calibration reports, persisted
+same source. Calibration treats repeated labels from the same source on the same
+submission as corrections, so only the latest `(submission_id, label_source)`
+label contributes to sample counts, joined evidence, and error metrics. Model
+manifests must use disjoint training and calibration dataset hashes, so the
+registered calibration dataset acts as holdout evidence instead of a reused
+training split. Admins can inspect calibration reports, persisted
 calibration runs, active-model risk reports, ranking-credit readiness reports,
 and operational summary blocker counts before deciding whether model-derived
 credit can settle.

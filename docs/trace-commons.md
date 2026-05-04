@@ -584,6 +584,12 @@ active-model risk gates under `training_calibration_dataset_overlap`, so the
 registered calibration dataset acts as holdout evidence rather than a reused
 training split.
 
+Calibration sample counts use effective labels, not raw label rows. If the same
+label source writes multiple labels for the same submission and target use, the
+latest `(submission_id, label_source)` row replaces older rows for joined
+evidence, aggregate error, label-source diversity, and promotion thresholds.
+Different label sources on the same submission still count as distinct evidence.
+
 Process-evaluation-derived ranking labels are intended as auxiliary evaluator
 evidence, not direct credit authority. They participate in the same calibration,
 model-risk, readiness, and settlement gates as other ranking labels.
