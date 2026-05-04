@@ -598,6 +598,8 @@ key, status-only lifecycle updates are append-only but must keep the source
 manifest hash, source count, label-source count, and label-actor count unchanged.
 Manifest or count changes require a new dataset hash or policy version, and both
 file-backed writes and PostgreSQL mirror writes reject those rewrites.
+File-backed readers also fail closed if legacy JSONL history contains conflicting
+manifest rows for one holdout key.
 Calibration runs may use matching registry rows in `candidate` or `active`
 status, but reject matching `deprecated` or `archived` rows so retired holdout
 sets cannot keep model evidence alive after stewardship review.
