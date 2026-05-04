@@ -530,8 +530,9 @@ In the current ingest service, `export_worker` is limited to replay/ranker expor
 retention/cache cleanup maintenance, `revocation_worker` is limited to the
 revocation-propagation worker route, and `vector_worker` is limited to vector-index
 maintenance. `process_eval_worker` is limited to writing bounded process-evaluation
-metadata for accepted submissions and, when supplied with an external reference, appending
-idempotent `training_utility` delayed credit for the evaluated accepted submission. These
+metadata for accepted submissions, when supplied with an external reference appending
+idempotent `training_utility` delayed credit for the evaluated accepted submission, and
+attaching idempotent hash-only system ranking labels for ranking-allowed traces. These
 worker roles are intentionally not treated as reviewers for generic trace listing, audit
 reads, policy administration, review decisions, or unrestricted credit mutation.
 
@@ -616,7 +617,10 @@ overall score. DB derived ids are versioned by evaluator version rather than ove
 rerunning a new rubric version preserves the previous process-evaluation row. Process-evaluation
 requests may also include a bounded utility credit delta plus external reference; the
 service appends `training_utility` delayed credit idempotently and reports appended/skipped
-counts without making the worker a generic credit mutator. Process-evaluation audit rows use
+counts without making the worker a generic credit mutator. Requests may also include a
+ranking-label projection; the service validates the target use before reading the trace body
+and stores only process-evaluation evidence hashes plus external-ref hashes in ranking label
+rows. Process-evaluation audit rows use
 typed safe metadata with evaluator-version and external-reference hashes, label counts,
 rating counts, score band, and optional credit delta, never raw evaluator payloads or raw
 external refs. Derived coverage tags use the wire-format enum values, for example
