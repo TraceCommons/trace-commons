@@ -146,6 +146,34 @@ fn ranking_worker_run_recovery_audit_metadata_is_hash_only() {
 }
 
 #[test]
+fn calibration_dataset_quarantine_audit_metadata_is_hash_only() {
+    let metadata = TraceAuditSafeMetadata::RankingCalibrationDatasetQuarantine {
+        calibration_dataset_hash: "sha256:holdout".to_string(),
+        target_use: "ranking_model_training".to_string(),
+        policy_version: "trace-credit-policy-v1".to_string(),
+        archived_source_manifest_hash: "sha256:manifest".to_string(),
+        conflict_key_hash: "sha256:conflict-key".to_string(),
+        reason_hash: "sha256:operator-reason".to_string(),
+    };
+    let json = serde_json::to_value(metadata).unwrap();
+
+    assert_eq!(
+        serde_json::to_value(TraceAuditAction::RankingCalibrationDatasetQuarantine).unwrap(),
+        "ranking_calibration_dataset_quarantine"
+    );
+    assert_eq!(json["kind"], "ranking_calibration_dataset_quarantine");
+    assert_eq!(json["calibration_dataset_hash"], "sha256:holdout");
+    assert_eq!(json["target_use"], "ranking_model_training");
+    assert_eq!(json["policy_version"], "trace-credit-policy-v1");
+    assert_eq!(json["archived_source_manifest_hash"], "sha256:manifest");
+    assert_eq!(json["conflict_key_hash"], "sha256:conflict-key");
+    assert_eq!(json["reason_hash"], "sha256:operator-reason");
+    assert!(json.get("reason").is_none());
+    assert!(json.get("operator_note").is_none());
+    assert!(json.get("raw_manifest").is_none());
+}
+
+#[test]
 fn process_evaluation_audit_metadata_is_hash_and_count_only() {
     let metadata = TraceAuditSafeMetadata::ProcessEvaluation {
         evaluator_version_hash: "sha256:evaluator-version".to_string(),
