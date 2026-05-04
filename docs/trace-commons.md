@@ -404,7 +404,12 @@ history. `GET /v1/admin/ranking/calibration-dataset-conflicts` provides the
 operator drill-down: exact conflict keys, latest projected hash-only registry
 metadata, whether the latest row still blocks credit issuance, and a remediation
 hint to register a new calibration dataset hash or policy version instead of
-rewriting the conflicted key.
+rewriting the conflicted key. `POST
+/v1/admin/ranking/calibration-dataset-conflicts/quarantine` appends an
+`archived` status row using the latest projected manifest metadata for a
+conflicted key; that retires the key from active manifest-conflict blockers
+without rewriting the old rows, while any model still depending on the retired
+holdout remains blocked by `calibration_dataset_retired`.
 
 Ranking worker-run ledger rows are part of the ranking DB mirror, the
 DB-backed reviewer ranking read surface, and the maintenance reconciliation

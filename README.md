@@ -165,7 +165,12 @@ and operational summaries promote the same signal into
 Admins can inspect exact hash-only conflict keys through
 `GET /v1/admin/ranking/calibration-dataset-conflicts`, which reports the latest
 projected registry metadata and a remediation hint without exposing trace bodies
-or raw lab references.
+or raw lab references. If a key was imported with conflicting manifest history,
+admins can retire it through
+`POST /v1/admin/ranking/calibration-dataset-conflicts/quarantine`, which appends
+an `archived` status row using the latest projected manifest metadata and
+removes that key from active manifest-conflict blockers without rewriting
+history.
 Dataset-readiness reports group candidate and active models by
 registered holdout calibration dataset hash and show target-use readiness,
 current evidence hashes, effective thresholds, error metrics, and blocker reason
