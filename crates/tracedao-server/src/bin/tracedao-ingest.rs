@@ -14811,6 +14811,7 @@ fn ranking_calibration_run_record(
     let mut signed_error_sum = 0i128;
     let mut abs_error_sum = 0i128;
     let mut joined_label_sources = BTreeSet::new();
+    let mut joined_label_actors = BTreeSet::new();
     let mut label_source_abs_error_sums = BTreeMap::new();
     let mut joined_evidence_lines = Vec::new();
     for label in &matching_labels {
@@ -14819,6 +14820,7 @@ fn ranking_calibration_run_record(
         };
         joined_count += 1;
         joined_label_sources.insert(label.label_source);
+        joined_label_actors.insert(label.actor_principal_ref.as_str());
         let predicted = prediction.predicted_utility_micros;
         let abs_error = (label.utility_delta_micros - predicted).abs();
         let (source_error_sum, source_count) = label_source_abs_error_sums
@@ -14844,6 +14846,7 @@ fn ranking_calibration_run_record(
         ));
     }
     let joined_label_source_count = joined_label_sources.len();
+    let joined_label_actor_count = joined_label_actors.len();
     let joined_evidence_hash =
         ranking_calibration_joined_evidence_hash(&inputs, &joined_evidence_lines);
     let (max_label_source_average_absolute_error_micros, max_error_label_source) =
@@ -14855,6 +14858,11 @@ fn ranking_calibration_run_record(
     }
     if joined_label_source_count < inputs.min_label_source_count {
         reason_codes.push("insufficient_label_source_diversity".to_string());
+    }
+    if joined_label_source_count >= inputs.min_label_source_count
+        && joined_label_actor_count < inputs.min_label_source_count
+    {
+        reason_codes.push("insufficient_label_actor_diversity".to_string());
     }
     if average_absolute_error_micros
         .is_none_or(|error| error > inputs.max_average_absolute_error_micros)
@@ -52725,6 +52733,133 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ranking_calibration_run_requires_distinct_label_actors_for_source_diversity() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).ranking_min_label_source_count = 2;
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(model) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-label-actors-v1".to_string(),
+                feature_schema_version: "ranking-features-label-actors-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:training-set-label-actors".to_string(),
+                calibration_dataset_hash: "sha256:calibration-set-label-actors".to_string(),
+                model_artifact_hash: "sha256:model-artifact-label-actors".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can register ranking model version");
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                feature_schema_version: model.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:feature-vector-label-actors".to_string(),
+                feature_names_hash: "sha256:feature-names-label-actors".to_string(),
+                source_feature_hash: "sha256:redacted-summary-features-label-actors".to_string(),
+                duplicate_score: Some(0.04),
+                novelty_score: Some(0.92),
+                privacy_risk_score: Some(0.01),
+                quality_score: Some(0.9),
+                coverage_tags: vec!["tool:terminal".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking feature record");
+        let Json(_) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                model_version: model.model_version.clone(),
+                feature_schema_version: model.feature_schema_version.clone(),
+                prediction_policy_version: model.policy_version.clone(),
+                feature_vector_hash: feature.feature_vector_hash,
+                predicted_utility_micros: 1_500_000,
+                uncertainty_micros: 100_000,
+                confidence: 0.9,
+                risk_penalty_micros: 0,
+                novelty_bonus_micros: 0,
+                explanation_codes: vec!["actor_diversity_probe".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking prediction");
+
+        for (label_source, external_ref) in [
+            (
+                StorageTraceRankingLabelSource::FrontierLab,
+                "private-frontier-lab-label-actors",
+            ),
+            (
+                StorageTraceRankingLabelSource::Reviewer,
+                "private-reviewer-label-actors",
+            ),
+        ] {
+            let Json(_) = ranking_label_handler(
+                State(state.clone()),
+                auth_headers("utility-worker-token-a"),
+                Json(TraceRankingLabelRequest {
+                    submission_id,
+                    target_use: TraceAllowedUse::ModelTraining,
+                    label_source,
+                    utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                    label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                    utility_delta_micros: 1_500_000,
+                    evidence_hash: format!("sha256:{external_ref}-evidence"),
+                    external_ref: external_ref.to_string(),
+                }),
+            )
+            .await
+            .expect("utility worker can write ranking label");
+        }
+
+        let Json(run) = ranking_calibration_run_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: model.model_version,
+                target_use: TraceAllowedUse::ModelTraining,
+                policy_version: model.policy_version,
+                evaluation_dataset_hash: model.calibration_dataset_hash,
+                min_label_count: Some(2),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(500_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist calibration run");
+        assert_eq!(run.joined_label_prediction_count, 2);
+        assert_eq!(run.joined_label_source_count, 2);
+        assert!(!run.promotable);
+        assert_eq!(
+            run.reason_codes,
+            vec!["insufficient_label_actor_diversity".to_string()]
+        );
+    }
+
+    #[tokio::test]
     async fn ranking_calibration_run_rejects_bad_label_source_cohort_error() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
@@ -52771,6 +52906,10 @@ mod tests {
         {
             let submission_id = submission_ids[index];
             let suffix = index + 1;
+            let label_actor_token = match label_source {
+                StorageTraceRankingLabelSource::Reviewer => "review-token-a",
+                _ => "utility-worker-token-a",
+            };
             let Json(feature) = ranking_feature_handler(
                 State(state.clone()),
                 auth_headers("utility-worker-token-a"),
@@ -52812,7 +52951,7 @@ mod tests {
             .expect("utility worker can write ranking prediction");
             let Json(_) = ranking_label_handler(
                 State(state.clone()),
-                auth_headers("utility-worker-token-a"),
+                auth_headers(label_actor_token),
                 Json(TraceRankingLabelRequest {
                     submission_id,
                     target_use: TraceAllowedUse::ModelTraining,
