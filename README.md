@@ -133,9 +133,10 @@ inspect calibration reports, persisted
 calibration runs, active-model risk reports, ranking-credit readiness reports,
 and operational summary blocker counts before deciding whether model-derived
 credit can settle. Model promotion rechecks the current joined prediction/label
-evidence hash against the latest promotable calibration run before writing an
-active model status, so a candidate cannot activate after labels or predictions
-drift under its calibration.
+evidence hash and current server-owned calibration floors against the latest
+promotable calibration run before writing an active model status, so a candidate
+cannot activate after labels, predictions, or production thresholds drift under
+its calibration.
 Settlement excludes `ranking_utility` credit events unless the request names an
 active model version with a fresh promotable calibration run for the same policy,
 target use, and registered calibration dataset, and every credit event is bound

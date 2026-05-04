@@ -623,6 +623,11 @@ Direct `active` writes to `POST /v1/admin/ranking/model-versions` are rejected:
 activation is target-use scoped, so admins should register `candidate` model
 manifests and activate them through `/v1/admin/ranking/model-promotions`.
 
+Promotion and active-model risk recomputation re-apply the current server-owned
+calibration floors to stored calibration evidence. Raising production thresholds
+therefore blocks old calibration runs from activating models, minting prediction
+credit, or settling ranking utility until fresh evidence clears the new policy.
+
 `GET /v1/admin/ranking/worker-runs` exposes the hash-only worker-run ledger for
 bounded ranking calibration, prediction-credit, model-promotion, and full
 credit-cycle automation. Rows include the run id, running/completed/failed
