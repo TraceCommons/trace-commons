@@ -210,9 +210,11 @@ at risk. Admins can inspect candidate and active model/target backtests through
 `/v1/admin/ranking/model-backtest-report`, which combines current calibration
 metrics, pairwise preference ordering checks, latest calibration hashes, and the
 same machine-readable reason codes before a model is allowed to influence
-credit. Process-evaluation workers can also attach an idempotent hash-only
-ranking label for ranking-allowed traces, letting trusted rubric evaluators feed
-calibration without storing raw evaluator notes in ranking metadata. Settlement
+credit; model promotion now rejects candidates whose current backtest has any
+blocking reason code. Process-evaluation workers can also attach an idempotent
+hash-only ranking label for ranking-allowed traces, letting trusted rubric
+evaluators feed calibration without storing raw evaluator notes in ranking
+metadata. Settlement
 responses report aggregate ranking-credit exclusion reason counts for dry-runs
 and live runs. A scoped promotion
 run lets utility workers promote calibrated candidate models through the same
