@@ -162,6 +162,10 @@ can settle. Dataset-readiness and ranking-credit readiness reports also surface
 legacy calibration-registry manifest conflicts as safe aggregate blocker counts,
 and operational summaries promote the same signal into
 `ranking_calibration_dataset_manifest_conflicts` promotion-gate blockers.
+Admins can inspect exact hash-only conflict keys through
+`GET /v1/admin/ranking/calibration-dataset-conflicts`, which reports the latest
+projected registry metadata and a remediation hint without exposing trace bodies
+or raw lab references.
 Dataset-readiness reports group candidate and active models by
 registered holdout calibration dataset hash and show target-use readiness,
 current evidence hashes, effective thresholds, error metrics, and blocker reason

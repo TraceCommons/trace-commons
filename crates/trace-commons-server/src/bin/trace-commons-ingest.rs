@@ -2694,6 +2694,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(ranking_calibration_datasets_handler).post(ranking_calibration_dataset_handler),
         )
         .route(
+            "/v1/admin/ranking/calibration-dataset-conflicts",
+            get(ranking_calibration_dataset_conflict_report_handler),
+        )
+        .route(
             "/v1/admin/ranking/model-promotions",
             post(ranking_model_promotion_handler),
         )
@@ -6911,6 +6915,31 @@ struct TraceRankingCalibrationDatasetRecord {
     status: StorageTraceRankingCalibrationDatasetStatus,
     actor_principal_ref: String,
     created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingCalibrationDatasetConflictReport {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    conflict_count: usize,
+    conflict_keys: Vec<String>,
+    conflicts: Vec<TraceRankingCalibrationDatasetConflictRecord>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingCalibrationDatasetConflictRecord {
+    conflict_key: String,
+    calibration_dataset_hash: String,
+    target_use: TraceAllowedUse,
+    policy_version: String,
+    latest_source_manifest_hash: String,
+    latest_source_count: u32,
+    latest_label_source_count: u32,
+    latest_label_actor_count: u32,
+    latest_status: StorageTraceRankingCalibrationDatasetStatus,
+    latest_created_at: DateTime<Utc>,
+    blocks_credit_issuance: bool,
+    recommended_action: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -11189,6 +11218,72 @@ async fn ranking_calibration_datasets_handler(
     Ok(Json(records))
 }
 
+async fn ranking_calibration_dataset_conflict_report_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<TraceRankingCalibrationDatasetConflictReport>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let read = read_ranking_calibration_datasets_for_admin_reconciliation(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(ranking_calibration_dataset_conflict_report(
+        &tenant, read,
+    )))
+}
+
+fn ranking_calibration_dataset_conflict_report(
+    tenant: &TenantAuth,
+    read: RankingCalibrationDatasetReconciliationRead,
+) -> TraceRankingCalibrationDatasetConflictReport {
+    let records_by_key = read
+        .records
+        .iter()
+        .filter_map(|record| {
+            ranking_calibration_dataset_file_key(record)
+                .ok()
+                .map(|key| (key, record))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut conflicts = read
+        .manifest_conflict_keys
+        .iter()
+        .filter_map(|conflict_key| {
+            let latest = records_by_key.get(conflict_key)?;
+            Some(TraceRankingCalibrationDatasetConflictRecord {
+                conflict_key: conflict_key.clone(),
+                calibration_dataset_hash: latest.calibration_dataset_hash.clone(),
+                target_use: latest.target_use,
+                policy_version: latest.policy_version.clone(),
+                latest_source_manifest_hash: latest.source_manifest_hash.clone(),
+                latest_source_count: latest.source_count,
+                latest_label_source_count: latest.label_source_count,
+                latest_label_actor_count: latest.label_actor_count,
+                latest_status: latest.status,
+                latest_created_at: latest.created_at,
+                blocks_credit_issuance: !ranking_calibration_dataset_status_is_retired(
+                    latest.status,
+                ),
+                recommended_action:
+                    "register a new calibration_dataset_hash or policy_version after choosing the canonical source manifest; do not rewrite this conflicted key"
+                        .to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    conflicts.sort_by(|left, right| left.conflict_key.cmp(&right.conflict_key));
+    let conflict_keys = conflicts
+        .iter()
+        .map(|conflict| conflict.conflict_key.clone())
+        .collect::<Vec<_>>();
+    TraceRankingCalibrationDatasetConflictReport {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        conflict_count: conflicts.len(),
+        conflict_keys,
+        conflicts,
+    }
+}
+
 async fn ranking_model_promotion_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -13083,14 +13178,20 @@ fn ranking_calibration_dataset_gate_reason(
     }) else {
         return require_registered.then_some("calibration_dataset_not_registered");
     };
-    if matches!(
-        dataset.status,
-        StorageTraceRankingCalibrationDatasetStatus::Deprecated
-            | StorageTraceRankingCalibrationDatasetStatus::Archived
-    ) {
+    if ranking_calibration_dataset_status_is_retired(dataset.status) {
         return Some("calibration_dataset_retired");
     }
     None
+}
+
+fn ranking_calibration_dataset_status_is_retired(
+    status: StorageTraceRankingCalibrationDatasetStatus,
+) -> bool {
+    matches!(
+        status,
+        StorageTraceRankingCalibrationDatasetStatus::Deprecated
+            | StorageTraceRankingCalibrationDatasetStatus::Archived
+    )
 }
 
 fn ranking_calibration_dataset_gate_error_message(reason: &str) -> &'static str {
@@ -50858,6 +50959,50 @@ mod tests {
                 .reason_code_counts
                 .get(RANKING_CALIBRATION_DATASET_MANIFEST_CONFLICT_REASON),
             Some(&1)
+        );
+    }
+
+    #[tokio::test]
+    async fn ranking_calibration_dataset_conflict_report_exposes_remediation_keys() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let conflict_key = append_legacy_calibration_dataset_manifest_conflict(
+            temp.path(),
+            "tenant-a",
+            "calibration-conflict-report",
+        );
+
+        let Json(report) = ranking_calibration_dataset_conflict_report_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+        )
+        .await
+        .expect("admin can inspect calibration dataset manifest conflicts");
+
+        assert_eq!(report.conflict_count, 1);
+        assert_eq!(report.conflict_keys, vec![conflict_key.clone()]);
+        assert_eq!(report.conflicts.len(), 1);
+        let conflict = &report.conflicts[0];
+        assert_eq!(conflict.conflict_key, conflict_key);
+        assert_eq!(
+            conflict.calibration_dataset_hash,
+            "sha256:calibration-conflict-report-holdout-v1"
+        );
+        assert_eq!(conflict.target_use, TraceAllowedUse::RankingModelTraining);
+        assert_eq!(conflict.policy_version, "trace-credit-policy-v1");
+        assert_eq!(
+            conflict.latest_source_manifest_hash,
+            "sha256:calibration-conflict-report-manifest-v2"
+        );
+        assert_eq!(
+            conflict.latest_status,
+            StorageTraceRankingCalibrationDatasetStatus::Active
+        );
+        assert!(conflict.blocks_credit_issuance);
+        assert!(
+            conflict
+                .recommended_action
+                .contains("new calibration_dataset_hash or policy_version")
         );
     }
 
