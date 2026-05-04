@@ -575,6 +575,8 @@ The service exposes:
 - `GET /v1/admin/ranking/predictions`
 - `GET /v1/admin/ranking/labels`
 - `GET /v1/admin/ranking/preference-labels`
+- `GET /v1/admin/ranking/adjudication-report`
+- `GET /v1/admin/ranking/labeler-reliability-report`
 - `GET /v1/admin/ranking/calibration-report`
 - `GET /v1/admin/ranking/pairwise-evaluation-report`
 - `GET /v1/admin/ranking/model-backtest-report`
@@ -653,6 +655,14 @@ actor principals; otherwise the run records
 Process-evaluation-derived ranking labels are intended as auxiliary evaluator
 evidence, not direct credit authority. They participate in the same calibration,
 model-risk, readiness, and settlement gates as other ranking labels.
+
+`GET /v1/admin/ranking/adjudication-report` groups the latest absolute labels
+and pairwise preferences into unresolved issue buckets for disputed labels,
+cross-source absolute-label outcome conflicts, and reversed pairwise
+preferences. `GET /v1/admin/ranking/labeler-reliability-report` projects the
+same issue participation into source-level and hashed-actor rows, including
+absolute-label, preference-label, dispute, conflict, and total issue counts
+without exposing raw actor principals or external refs.
 
 Set `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL` to point at the relayer's confirmation endpoint; utility workers can then call `POST /v1/workers/near-credit-outbox/confirm` to poll submitted NEAR rows, mark confirmed transactions, or record hashed terminal failures without sending raw NEAR call args. `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_BEARER_TOKEN` adds confirmation bearer auth, and `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_TIMEOUT_MS` bounds confirmation calls.
 
