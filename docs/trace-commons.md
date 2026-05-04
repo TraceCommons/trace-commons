@@ -574,6 +574,7 @@ The service exposes:
 - `GET /v1/admin/ranking/preference-labels`
 - `GET /v1/admin/ranking/calibration-report`
 - `GET /v1/admin/ranking/pairwise-evaluation-report`
+- `GET /v1/admin/ranking/model-backtest-report`
 - `GET /v1/admin/ranking/model-risk-report`
 - `GET /v1/admin/ranking/dataset-readiness-report`
 - `GET /v1/admin/ranking/credit-readiness-report`
@@ -713,6 +714,8 @@ the raw reason is hashed, a `ranking_worker_run_recovery` audit event is
 appended with only the run id, run kind, recovered status, and reason hash,
 fresh active runs are rejected, and the recovered row no longer contributes to
 the stale-run promotion blocker.
+
+`GET /v1/admin/ranking/model-backtest-report` recomputes the same current calibration and pairwise checks for latest candidate and active model/target-use pairs. Each row reports current joined-evidence hashes, latest calibration run/report hashes, joined label counts, aggregate and per-source error metrics, low-confidence counts, pairwise evidence and accuracy, pass/fail status, and machine-readable reason codes so operators can evaluate a candidate before promotion or credit issuance without exposing trace bodies or raw lab references.
 
 `GET /v1/admin/ranking/model-risk-report` recomputes the current joined-evidence hash for each active model/target-use pair and reports post-calibration prediction/label counts, current joined-label source diversity, current calibration thresholds, current aggregate/per-label-source error metrics, pairwise preference evidence counts, pairwise policy thresholds, pairwise ordering accuracy, low-confidence fresh predictions, stale or non-promotable calibration status, training/calibration dataset overlap, evidence-hash drift, aggregate risk-code counts, and per-model machine-readable risk codes without exposing trace bodies or raw lab references.
 

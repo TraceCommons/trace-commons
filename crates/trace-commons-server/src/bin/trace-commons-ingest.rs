@@ -2737,6 +2737,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(ranking_pairwise_evaluation_report_handler),
         )
         .route(
+            "/v1/admin/ranking/model-backtest-report",
+            get(ranking_model_backtest_report_handler),
+        )
+        .route(
             "/v1/admin/ranking/model-risk-report",
             get(ranking_model_risk_report_handler),
         )
@@ -7337,6 +7341,62 @@ struct TraceRankingModelRiskRecord {
     pairwise_accuracy_micros: Option<i64>,
     pairwise_average_preferred_margin_micros: Option<i64>,
     risk_codes: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingModelBacktestReport {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    model_version_count: usize,
+    evaluated_model_target_count: usize,
+    passing_model_target_count: usize,
+    failing_model_target_count: usize,
+    reason_code_counts: BTreeMap<String, usize>,
+    models: Vec<TraceRankingModelBacktestRecord>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingModelBacktestRecord {
+    model_version: String,
+    model_status: StorageTraceRankingModelStatus,
+    target_use: TraceAllowedUse,
+    policy_version: String,
+    feature_schema_version: String,
+    latest_calibration_run_id: Option<Uuid>,
+    latest_calibration_report_hash: Option<String>,
+    latest_joined_evidence_hash: Option<String>,
+    latest_calibration_created_at: Option<DateTime<Utc>>,
+    latest_calibration_promotable: Option<bool>,
+    latest_calibration_reason_codes: Vec<String>,
+    current_joined_evidence_hash: String,
+    current_promotable: bool,
+    current_reason_codes: Vec<String>,
+    joined_evidence_changed: bool,
+    prediction_count: usize,
+    label_count: usize,
+    joined_label_prediction_count: usize,
+    joined_label_source_count: usize,
+    current_average_absolute_error_micros: Option<i64>,
+    current_max_label_source_average_absolute_error_micros: Option<i64>,
+    current_max_error_label_source: Option<StorageTraceRankingLabelSource>,
+    current_min_label_count: usize,
+    current_min_label_source_count: usize,
+    current_confidence_threshold: f32,
+    current_max_average_absolute_error_micros: i64,
+    predictions_since_calibration_count: usize,
+    labels_since_calibration_count: usize,
+    low_confidence_predictions_since_calibration_count: usize,
+    pairwise_min_label_count: usize,
+    pairwise_min_accuracy_micros: i64,
+    pairwise_preference_label_count: usize,
+    pairwise_joined_pair_prediction_count: usize,
+    pairwise_correct_pair_count: usize,
+    pairwise_reversed_pair_count: usize,
+    pairwise_tied_pair_count: usize,
+    pairwise_accuracy_micros: Option<i64>,
+    pairwise_average_preferred_margin_micros: Option<i64>,
+    passed: bool,
+    reason_codes: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -13638,6 +13698,44 @@ async fn ranking_model_risk_report_handler(
     )))
 }
 
+async fn ranking_model_backtest_report_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<TraceRankingModelBacktestReport>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let predictions = read_ranking_predictions_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let labels = read_ranking_labels_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let preference_labels = read_ranking_preference_labels_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let calibration_datasets = read_ranking_calibration_datasets_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    let calibration_runs = read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(ranking_model_backtest_report(
+        state.as_ref(),
+        &tenant,
+        &model_versions,
+        RankingModelRiskEvidence {
+            predictions: &predictions,
+            labels: &labels,
+            preference_labels: &preference_labels,
+            calibration_datasets: &calibration_datasets,
+            calibration_runs: &calibration_runs,
+        },
+    )))
+}
+
 async fn ranking_dataset_readiness_report_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -15756,6 +15854,110 @@ fn ranking_model_risk_report(
         monitored_model_count: models.len(),
         at_risk_model_count,
         risk_code_counts,
+        models,
+    }
+}
+
+fn ranking_model_backtest_report(
+    state: &AppState,
+    tenant: &TenantAuth,
+    model_versions: &[TraceRankingModelVersionRecord],
+    evidence: RankingModelRiskEvidence<'_>,
+) -> TraceRankingModelBacktestReport {
+    let deployable_models = latest_ranking_model_versions(model_versions)
+        .into_iter()
+        .filter(|model| {
+            matches!(
+                model.status,
+                StorageTraceRankingModelStatus::Candidate | StorageTraceRankingModelStatus::Active
+            )
+        })
+        .collect::<Vec<_>>();
+    let model_version_count = deployable_models.len();
+    let mut models = Vec::new();
+    for model in deployable_models {
+        for target_use in
+            ranking_model_target_uses(model, evidence.predictions, evidence.calibration_runs)
+        {
+            let risk = ranking_model_risk_record(state, tenant, model, target_use, evidence);
+            let passed = risk.risk_codes.is_empty();
+            models.push(TraceRankingModelBacktestRecord {
+                model_version: risk.model_version,
+                model_status: model.status,
+                target_use: risk.target_use,
+                policy_version: risk.policy_version,
+                feature_schema_version: risk.feature_schema_version,
+                latest_calibration_run_id: risk.latest_calibration_run_id,
+                latest_calibration_report_hash: risk.latest_calibration_report_hash,
+                latest_joined_evidence_hash: risk.latest_joined_evidence_hash,
+                latest_calibration_created_at: risk.latest_calibration_created_at,
+                latest_calibration_promotable: risk.latest_calibration_promotable,
+                latest_calibration_reason_codes: risk.latest_calibration_reason_codes,
+                current_joined_evidence_hash: risk.current_joined_evidence_hash,
+                current_promotable: risk.current_promotable,
+                current_reason_codes: risk.current_reason_codes,
+                joined_evidence_changed: risk.joined_evidence_changed,
+                prediction_count: risk.prediction_count,
+                label_count: risk.label_count,
+                joined_label_prediction_count: risk.joined_label_prediction_count,
+                joined_label_source_count: risk.joined_label_source_count,
+                current_average_absolute_error_micros: risk.current_average_absolute_error_micros,
+                current_max_label_source_average_absolute_error_micros: risk
+                    .current_max_label_source_average_absolute_error_micros,
+                current_max_error_label_source: risk.current_max_error_label_source,
+                current_min_label_count: risk.current_min_label_count,
+                current_min_label_source_count: risk.current_min_label_source_count,
+                current_confidence_threshold: risk.current_confidence_threshold,
+                current_max_average_absolute_error_micros: risk
+                    .current_max_average_absolute_error_micros,
+                predictions_since_calibration_count: risk.predictions_since_calibration_count,
+                labels_since_calibration_count: risk.labels_since_calibration_count,
+                low_confidence_predictions_since_calibration_count: risk
+                    .low_confidence_predictions_since_calibration_count,
+                pairwise_min_label_count: risk.pairwise_min_label_count,
+                pairwise_min_accuracy_micros: risk.pairwise_min_accuracy_micros,
+                pairwise_preference_label_count: risk.pairwise_preference_label_count,
+                pairwise_joined_pair_prediction_count: risk.pairwise_joined_pair_prediction_count,
+                pairwise_correct_pair_count: risk.pairwise_correct_pair_count,
+                pairwise_reversed_pair_count: risk.pairwise_reversed_pair_count,
+                pairwise_tied_pair_count: risk.pairwise_tied_pair_count,
+                pairwise_accuracy_micros: risk.pairwise_accuracy_micros,
+                pairwise_average_preferred_margin_micros: risk
+                    .pairwise_average_preferred_margin_micros,
+                passed,
+                reason_codes: risk.risk_codes,
+            });
+        }
+    }
+    models.sort_by(|left, right| {
+        (
+            &left.model_version,
+            serde_enum_tag(&left.target_use),
+            &left.policy_version,
+        )
+            .cmp(&(
+                &right.model_version,
+                serde_enum_tag(&right.target_use),
+                &right.policy_version,
+            ))
+    });
+    let passing_model_target_count = models.iter().filter(|model| model.passed).count();
+    let failing_model_target_count = models.len().saturating_sub(passing_model_target_count);
+    let mut reason_code_counts = BTreeMap::new();
+    for model in &models {
+        for reason in &model.reason_codes {
+            increment_count(&mut reason_code_counts, reason);
+        }
+    }
+
+    TraceRankingModelBacktestReport {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        model_version_count,
+        evaluated_model_target_count: models.len(),
+        passing_model_target_count,
+        failing_model_target_count,
+        reason_code_counts,
         models,
     }
 }
@@ -55535,6 +55737,110 @@ mod tests {
         let report_json = serde_json::to_string(&report).expect("report serializes");
         assert!(!report_json.contains("frontier-private-pairwise-correct"));
         assert!(!report_json.contains("reviewer-private-pairwise-reversed"));
+        assert!(!report_json.contains("trace body"));
+    }
+
+    #[tokio::test]
+    async fn ranking_model_backtest_report_surfaces_pairwise_holdout_failures_for_candidates() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).ranking_min_pairwise_label_count = 1;
+        Arc::make_mut(&mut state).ranking_min_pairwise_accuracy_micros = 600_000;
+        let (candidate, calibrated_prediction) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-backtest-v1").await;
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration");
+        assert!(calibration.promotable);
+
+        let higher_scored = seed_pairwise_ranking_prediction_source(
+            state.clone(),
+            &candidate,
+            "backtest-pairwise-reversal",
+            2_000_000,
+        )
+        .await;
+        let _ = ranking_preference_label_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id: calibrated_prediction.submission_id,
+                rejected_submission_id: higher_scored.submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 800_000,
+                evidence_hash: "sha256:backtest-pairwise-reversal-evidence".to_string(),
+                external_ref: "reviewer-private-backtest-pairwise-reversal".to_string(),
+            }),
+        )
+        .await
+        .expect("reviewer can write pairwise backtest label");
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/ranking/model-backtest-report")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("backtest response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let report: serde_json::Value = serde_json::from_slice(&body).expect("report parses");
+
+        assert_eq!(report["model_version_count"], serde_json::json!(1));
+        assert_eq!(report["evaluated_model_target_count"], serde_json::json!(1));
+        assert_eq!(report["passing_model_target_count"], serde_json::json!(0));
+        assert_eq!(report["failing_model_target_count"], serde_json::json!(1));
+        assert_eq!(
+            report["reason_code_counts"]["pairwise_accuracy_below_threshold"],
+            serde_json::json!(1)
+        );
+        let model = &report["models"][0];
+        assert_eq!(
+            model["model_version"],
+            serde_json::json!(candidate.model_version)
+        );
+        assert_eq!(model["model_status"], serde_json::json!("candidate"));
+        assert_eq!(model["passed"], serde_json::json!(false));
+        assert_eq!(
+            model["latest_calibration_run_id"],
+            serde_json::json!(calibration.calibration_run_id)
+        );
+        assert_eq!(
+            model["pairwise_joined_pair_prediction_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(model["pairwise_accuracy_micros"], serde_json::json!(0));
+        assert!(
+            model["reason_codes"]
+                .as_array()
+                .expect("reason codes array")
+                .contains(&serde_json::json!("pairwise_accuracy_below_threshold"))
+        );
+        let report_json = serde_json::to_string(&report).expect("report serializes");
+        assert!(!report_json.contains("reviewer-private-backtest-pairwise-reversal"));
         assert!(!report_json.contains("trace body"));
     }
 
