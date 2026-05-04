@@ -115,10 +115,13 @@ timeout, outbox confirmation bounds, and the credit-cycle step count. It does
 not expose the relayer/confirmer URL, bearer token, hosts, or contributor
 identity.
 
-Ranking evidence is stored separately from settlement. Workers can register
-feature hashes, model predictions, lab/reviewer/evaluator labels, and calibration runs
-that record aggregate error, confidence, threshold policy, per-source quality
-gates, joined-evidence hashes, reason codes, and a hash-only report digest.
+Ranking evidence is stored separately from settlement. Admins can register
+hash-only holdout calibration dataset manifests with source counts, label-source
+counts, label-actor counts, and lifecycle status, while workers can register
+feature hashes, model predictions, lab/reviewer/evaluator labels, and calibration
+runs that record aggregate error, confidence, threshold policy, per-source
+quality gates, joined-evidence hashes, reason codes, and a hash-only report
+digest.
 Prediction writes must name a registered active or candidate model, match its
 policy and feature schema, and reference an existing feature vector hash for the
 same source. Calibration treats repeated labels from the same source on the same
@@ -170,11 +173,12 @@ non-dry-run ranking schedulers reject overlapping active non-stale runs before
 appending a new running row; stale running rows surface as operational-summary
 blockers until an admin append-finalizes them through the stale recovery API,
 which also writes a hash-only audit event for the recovery action.
-With the DB mirror configured, ranking evidence, calibration runs, and ranking
-worker runs are dual-written to PostgreSQL. Maintenance backfill mirrors
-file-backed ranking model versions, feature/prediction/label evidence,
-calibration runs, and worker-run rows into the DB. Maintenance reconciliation
-compares ranking model versions, feature/prediction/label evidence,
+With the DB mirror configured, ranking dataset registry rows, evidence,
+calibration runs, and ranking worker runs are dual-written to PostgreSQL.
+Maintenance backfill mirrors file-backed ranking model versions, calibration
+dataset registry rows, feature/prediction/label evidence, calibration runs, and
+worker-run rows into the DB. Maintenance reconciliation compares ranking model
+versions, calibration dataset registry rows, feature/prediction/label evidence,
 calibration report hashes, and worker-run lifecycle rows across file and DB
 storage, feeding any missing or drifted rows into `blocking_gaps` before DB
 reviewer reads or credit-bearing ranking paths are promoted.

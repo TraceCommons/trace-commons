@@ -37,6 +37,7 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_near_credit_outbox",
     "trace_benchmark_registry_outbox",
     "trace_ranking_model_versions",
+    "trace_ranking_calibration_datasets",
     "trace_ranking_features",
     "trace_ranking_predictions",
     "trace_ranking_labels",
@@ -355,6 +356,46 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _tracedao_migrations (version, name) VALUES ($1, $2)",
                     &[&14_i32, &"trace_ranking_preference_labels"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _tracedao_migrations WHERE version = $1",
+                &[&15_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V15__trace_benchmark_registry_outbox.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _tracedao_migrations (version, name) VALUES ($1, $2)",
+                    &[&15_i32, &"trace_benchmark_registry_outbox"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _tracedao_migrations WHERE version = $1",
+                &[&16_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V16__trace_ranking_calibration_datasets.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _tracedao_migrations (version, name) VALUES ($1, $2)",
+                    &[&16_i32, &"trace_ranking_calibration_datasets"],
                 )
                 .await?;
         }
