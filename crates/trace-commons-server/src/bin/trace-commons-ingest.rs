@@ -10940,6 +10940,11 @@ async fn ranking_model_version_handler(
         validate_sha256_hash(&body.training_dataset_hash, "training_dataset_hash")?;
     let calibration_dataset_hash =
         validate_sha256_hash(&body.calibration_dataset_hash, "calibration_dataset_hash")?;
+    ensure_ranking_model_dataset_hashes_are_disjoint(
+        &training_dataset_hash,
+        &calibration_dataset_hash,
+        RankingModelDatasetIsolationContext::Registration,
+    )?;
     let model_artifact_hash =
         validate_sha256_hash(&body.model_artifact_hash, "model_artifact_hash")?;
     let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
@@ -11401,6 +11406,7 @@ async fn promote_ranking_model_version(
             ));
         }
     }
+    ensure_ranking_model_dataset_isolation(model, RankingModelDatasetIsolationContext::Promotion)?;
 
     let calibration_run = latest_promotable_ranking_calibration_run(
         state,
@@ -12207,6 +12213,10 @@ async fn append_ranking_prediction_credit_for_record(
             "ranking prediction credit requires an active model version",
         ));
     }
+    ensure_ranking_model_dataset_isolation(
+        model,
+        RankingModelDatasetIsolationContext::PredictionCredit,
+    )?;
     if model.feature_schema_version != prediction.feature_schema_version {
         return Err(api_error(
             StatusCode::CONFLICT,
@@ -14135,6 +14145,68 @@ fn latest_ranking_model_versions(
     latest_by_version.into_values().collect()
 }
 
+#[derive(Debug, Clone, Copy)]
+enum RankingModelDatasetIsolationContext {
+    Registration,
+    Promotion,
+    PredictionCredit,
+    Settlement,
+}
+
+impl RankingModelDatasetIsolationContext {
+    fn status(self) -> StatusCode {
+        match self {
+            Self::Registration => StatusCode::BAD_REQUEST,
+            Self::Promotion | Self::PredictionCredit | Self::Settlement => StatusCode::CONFLICT,
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::Registration => {
+                "ranking model training_dataset_hash and calibration_dataset_hash must be disjoint"
+            }
+            Self::Promotion => {
+                "ranking model promotion requires disjoint training and calibration datasets"
+            }
+            Self::PredictionCredit => {
+                "ranking prediction credit requires disjoint training and calibration datasets"
+            }
+            Self::Settlement => {
+                "ranking utility settlement requires disjoint training and calibration datasets"
+            }
+        }
+    }
+}
+
+fn ranking_model_training_calibration_datasets_overlap(
+    model: &TraceRankingModelVersionRecord,
+) -> bool {
+    model.training_dataset_hash == model.calibration_dataset_hash
+}
+
+fn ensure_ranking_model_dataset_hashes_are_disjoint(
+    training_dataset_hash: &str,
+    calibration_dataset_hash: &str,
+    context: RankingModelDatasetIsolationContext,
+) -> ApiResult<()> {
+    if training_dataset_hash == calibration_dataset_hash {
+        return Err(api_error(context.status(), context.message()));
+    }
+    Ok(())
+}
+
+fn ensure_ranking_model_dataset_isolation(
+    model: &TraceRankingModelVersionRecord,
+    context: RankingModelDatasetIsolationContext,
+) -> ApiResult<()> {
+    ensure_ranking_model_dataset_hashes_are_disjoint(
+        &model.training_dataset_hash,
+        &model.calibration_dataset_hash,
+        context,
+    )
+}
+
 fn ranking_prediction_matches_model_target(
     prediction: &TraceRankingPredictionRecord,
     model: &TraceRankingModelVersionRecord,
@@ -14372,6 +14444,9 @@ fn ranking_model_risk_record(
             .is_some_and(|accuracy| accuracy < state.ranking_min_pairwise_accuracy_micros)
     {
         risk_codes.push("pairwise_accuracy_below_threshold".to_string());
+    }
+    if ranking_model_training_calibration_datasets_overlap(model) {
+        risk_codes.push("training_calibration_dataset_overlap".to_string());
     }
     risk_codes.sort();
     risk_codes.dedup();
@@ -15059,6 +15134,7 @@ async fn ranking_settlement_calibration_gate(
             "ranking utility settlement requires an active ranking model",
         ));
     }
+    ensure_ranking_model_dataset_isolation(model, RankingModelDatasetIsolationContext::Settlement)?;
     if model.policy_version != policy_version {
         return Err(api_error(
             StatusCode::CONFLICT,
@@ -51873,6 +51949,87 @@ mod tests {
             versions[0].calibration_dataset_hash,
             model.calibration_dataset_hash
         );
+    }
+
+    #[tokio::test]
+    async fn ranking_model_version_rejects_training_calibration_dataset_overlap() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-overlap-v1".to_string(),
+                feature_schema_version: "ranking-features-overlap-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:same-ranking-dataset".to_string(),
+                calibration_dataset_hash: "sha256:same-ranking-dataset".to_string(),
+                model_artifact_hash: "sha256:model-artifact-overlap".to_string(),
+            }),
+        )
+        .await
+        .expect_err("training and calibration datasets must be disjoint");
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+
+        let Json(versions) =
+            ranking_model_versions_handler(State(state), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list model versions");
+        assert!(versions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ranking_model_promotion_rejects_legacy_training_calibration_dataset_overlap() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let (candidate, _) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-legacy-overlap-v1")
+                .await;
+        let mut legacy_overlap = candidate.clone();
+        legacy_overlap.training_dataset_hash = legacy_overlap.calibration_dataset_hash.clone();
+        legacy_overlap.created_at = Utc::now() + Duration::seconds(1);
+        append_ranking_model_version(temp.path(), "tenant-a", &legacy_overlap)
+            .expect("legacy overlapping manifest can exist on disk");
+
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: legacy_overlap.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: legacy_overlap.policy_version.clone(),
+                evaluation_dataset_hash: legacy_overlap.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(500_000),
+            }),
+        )
+        .await
+        .expect("legacy overlapping model can still have old calibration evidence");
+        assert!(calibration.promotable);
+
+        let error = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: legacy_overlap.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: legacy_overlap.policy_version.clone(),
+                reason: "legacy overlap must not promote".to_string(),
+            }),
+        )
+        .await
+        .expect_err("legacy training/calibration overlap blocks promotion");
+        assert_eq!(error.0, StatusCode::CONFLICT);
+
+        let model_versions =
+            read_all_ranking_model_versions(temp.path(), "tenant-a").expect("model versions read");
+        let latest =
+            latest_ranking_model_version(&model_versions, &legacy_overlap.model_version).unwrap();
+        assert_eq!(latest.status, StorageTraceRankingModelStatus::Candidate);
     }
 
     #[tokio::test]

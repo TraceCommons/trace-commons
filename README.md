@@ -121,9 +121,12 @@ that record aggregate error, confidence, threshold policy, per-source quality
 gates, joined-evidence hashes, reason codes, and a hash-only report digest.
 Prediction writes must name a registered active or candidate model, match its
 policy and feature schema, and reference an existing feature vector hash for the
-same source. Admins can inspect calibration reports, persisted calibration runs,
-active-model risk reports, ranking-credit readiness reports, and operational
-summary blocker counts before deciding whether model-derived credit can settle.
+same source. Model manifests must use disjoint training and calibration dataset
+hashes, so the registered calibration dataset acts as holdout evidence instead
+of a reused training split. Admins can inspect calibration reports, persisted
+calibration runs, active-model risk reports, ranking-credit readiness reports,
+and operational summary blocker counts before deciding whether model-derived
+credit can settle.
 Settlement excludes `ranking_utility` credit events unless the request names an
 active model version with a fresh promotable calibration run for the same policy,
 target use, and registered calibration dataset, and every credit event is bound
