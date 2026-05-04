@@ -6776,6 +6776,23 @@ struct TraceRankingModelPromotionResponse {
     model_status: StorageTraceRankingModelStatus,
     calibration_run_id: Uuid,
     calibration_report_hash: String,
+    calibration_dataset_hash: String,
+    calibration_joined_evidence_hash: String,
+    calibration_joined_label_prediction_count: usize,
+    calibration_joined_label_source_count: usize,
+    current_calibration_report_hash: String,
+    current_joined_evidence_hash: String,
+    current_joined_label_prediction_count: usize,
+    current_joined_label_source_count: usize,
+    current_average_absolute_error_micros: Option<i64>,
+    current_max_label_source_average_absolute_error_micros: Option<i64>,
+    current_low_confidence_prediction_count: usize,
+    current_promotable: bool,
+    current_reason_codes: Vec<String>,
+    effective_min_label_count: usize,
+    effective_min_label_source_count: usize,
+    effective_confidence_threshold: f32,
+    effective_max_average_absolute_error_micros: i64,
     reason_hash: String,
 }
 
@@ -11414,7 +11431,7 @@ async fn promote_ranking_model_version(
         RankingCalibrationGateContext::ModelPromotion,
     )
     .await?;
-    ensure_ranking_promotion_current_evidence_matches_calibration(
+    let current_calibration = ensure_ranking_promotion_current_evidence_matches_calibration(
         state,
         tenant,
         model,
@@ -11465,7 +11482,27 @@ async fn promote_ranking_model_version(
             StorageTraceRankingModelStatus::Active
         },
         calibration_run_id: calibration_run.calibration_run_id,
-        calibration_report_hash: calibration_run.report_hash,
+        calibration_report_hash: calibration_run.report_hash.clone(),
+        calibration_dataset_hash: model.calibration_dataset_hash.clone(),
+        calibration_joined_evidence_hash: calibration_run.joined_evidence_hash.clone(),
+        calibration_joined_label_prediction_count: calibration_run.joined_label_prediction_count,
+        calibration_joined_label_source_count: calibration_run.joined_label_source_count,
+        current_calibration_report_hash: current_calibration.report_hash,
+        current_joined_evidence_hash: current_calibration.joined_evidence_hash,
+        current_joined_label_prediction_count: current_calibration.joined_label_prediction_count,
+        current_joined_label_source_count: current_calibration.joined_label_source_count,
+        current_average_absolute_error_micros: current_calibration.average_absolute_error_micros,
+        current_max_label_source_average_absolute_error_micros: current_calibration
+            .max_label_source_average_absolute_error_micros,
+        current_low_confidence_prediction_count: current_calibration
+            .low_confidence_prediction_count,
+        current_promotable: current_calibration.promotable,
+        current_reason_codes: current_calibration.reason_codes,
+        effective_min_label_count: current_calibration.min_label_count,
+        effective_min_label_source_count: current_calibration.min_label_source_count,
+        effective_confidence_threshold: current_calibration.confidence_threshold,
+        effective_max_average_absolute_error_micros: current_calibration
+            .max_average_absolute_error_micros,
         reason_hash: sha256_prefixed(&reason),
     })
 }
@@ -11554,7 +11591,7 @@ async fn ensure_ranking_promotion_current_evidence_matches_calibration(
     model: &TraceRankingModelVersionRecord,
     target_use: TraceAllowedUse,
     run: &TraceRankingCalibrationRunRecord,
-) -> ApiResult<()> {
+) -> ApiResult<TraceRankingCalibrationRunRecord> {
     let predictions = read_ranking_predictions_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
@@ -11562,7 +11599,7 @@ async fn ensure_ranking_promotion_current_evidence_matches_calibration(
         .await
         .map_err(internal_error)?;
     let thresholds = effective_ranking_calibration_thresholds(state, Some(run));
-    let current = ranking_calibration_run_record(
+    let mut current = ranking_calibration_run_record(
         tenant,
         RankingCalibrationRunInputs {
             calibration_run_id: Uuid::new_v4(),
@@ -11581,6 +11618,7 @@ async fn ensure_ranking_promotion_current_evidence_matches_calibration(
         &predictions,
         &labels,
     );
+    current.report_hash = ranking_calibration_run_report_hash(&current);
     if current.joined_evidence_hash != run.joined_evidence_hash {
         return Err(api_error(
             StatusCode::CONFLICT,
@@ -11593,7 +11631,7 @@ async fn ensure_ranking_promotion_current_evidence_matches_calibration(
             "ranking model promotion requires current evidence to remain promotable",
         ));
     }
-    Ok(())
+    Ok(current)
 }
 
 async fn ranking_feature_handler(
@@ -49313,6 +49351,97 @@ mod tests {
             error.1.0.error,
             "ranking model promotion requires current evidence to remain promotable"
         );
+
+        let model_versions =
+            read_all_ranking_model_versions(temp.path(), "tenant-a").expect("model versions read");
+        let latest =
+            latest_ranking_model_version(&model_versions, &candidate.model_version).unwrap();
+        assert_eq!(latest.status, StorageTraceRankingModelStatus::Candidate);
+    }
+
+    #[tokio::test]
+    async fn ranking_model_promotion_dry_run_reports_current_evidence_readiness() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let (candidate, _) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-readiness-v1").await;
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration");
+        assert!(calibration.promotable);
+
+        let Json(promotion) = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: true,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "inspect candidate evidence before activation".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can dry-run a promotable candidate model");
+
+        assert!(!promotion.promoted);
+        assert_eq!(
+            promotion.model_status,
+            StorageTraceRankingModelStatus::Candidate
+        );
+        assert_eq!(
+            promotion.calibration_dataset_hash,
+            candidate.calibration_dataset_hash
+        );
+        assert_eq!(
+            promotion.calibration_joined_evidence_hash,
+            calibration.joined_evidence_hash
+        );
+        assert_eq!(
+            promotion.calibration_joined_label_prediction_count,
+            calibration.joined_label_prediction_count
+        );
+        assert_eq!(
+            promotion.calibration_joined_label_source_count,
+            calibration.joined_label_source_count
+        );
+        assert_eq!(
+            promotion.current_joined_evidence_hash,
+            calibration.joined_evidence_hash
+        );
+        assert_eq!(
+            promotion.current_calibration_report_hash,
+            calibration.report_hash
+        );
+        assert_eq!(promotion.current_joined_label_prediction_count, 1);
+        assert_eq!(promotion.current_joined_label_source_count, 1);
+        assert_eq!(promotion.effective_min_label_count, 1);
+        assert_eq!(promotion.effective_min_label_source_count, 1);
+        assert_eq!(promotion.effective_confidence_threshold, 0.5);
+        assert_eq!(
+            promotion.effective_max_average_absolute_error_micros,
+            100_000
+        );
+        assert_eq!(promotion.current_average_absolute_error_micros, Some(0));
+        assert_eq!(
+            promotion.current_max_label_source_average_absolute_error_micros,
+            Some(0)
+        );
+        assert_eq!(promotion.current_low_confidence_prediction_count, 0);
+        assert!(promotion.current_promotable);
+        assert!(promotion.current_reason_codes.is_empty());
 
         let model_versions =
             read_all_ranking_model_versions(temp.path(), "tenant-a").expect("model versions read");

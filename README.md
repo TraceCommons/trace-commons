@@ -136,7 +136,11 @@ credit can settle. Model promotion rechecks the current joined prediction/label
 evidence hash and current server-owned calibration floors against the latest
 promotable calibration run before writing an active model status, so a candidate
 cannot activate after labels, predictions, or production thresholds drift under
-its calibration.
+its calibration. The promotion dry-run response exposes the registered holdout
+calibration dataset hash, stored calibration joined-evidence/report hashes and
+counts, and the freshly recomputed current-evidence hash, report hash, counts,
+thresholds, error metrics, low-confidence count, promotability flag, and reason
+codes, giving operators a hash-only preflight record before activation.
 Settlement excludes `ranking_utility` credit events unless the request names an
 active model version with a fresh promotable calibration run for the same policy,
 target use, and registered calibration dataset, and every credit event is bound
