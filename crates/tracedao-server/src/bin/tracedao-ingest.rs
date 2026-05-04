@@ -242,6 +242,11 @@ const TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN: &str =
     "TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN";
 const TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS: &str =
     "TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS";
+const TRACE_COMMONS_BENCHMARK_EVALUATOR_URL: &str = "TRACE_COMMONS_BENCHMARK_EVALUATOR_URL";
+const TRACE_COMMONS_BENCHMARK_EVALUATOR_BEARER_TOKEN: &str =
+    "TRACE_COMMONS_BENCHMARK_EVALUATOR_BEARER_TOKEN";
+const TRACE_COMMONS_BENCHMARK_EVALUATOR_TIMEOUT_MS: &str =
+    "TRACE_COMMONS_BENCHMARK_EVALUATOR_TIMEOUT_MS";
 const TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS: &str =
     "TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS";
 const TRACE_COMMONS_RANKING_MIN_CONFIDENCE_THRESHOLD: &str =
@@ -259,6 +264,7 @@ const DEFAULT_EDDSA_KEYSET_URL_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_BENCHMARK_REGISTRY_SUBMITTER_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_BENCHMARK_EVALUATOR_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_EDDSA_KEYSET_REFRESH_INTERVAL_SECONDS: u64 = 300;
 const MAX_EDDSA_KEYSET_URL_BYTES: usize = 256 * 1024;
 const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT: u32 = 100;
@@ -364,6 +370,8 @@ struct AppState {
     benchmark_registry_submitter_timeout_ms: Option<u64>,
     benchmark_registry_confirmer: Option<Arc<dyn TraceBenchmarkRegistryConfirmer>>,
     benchmark_registry_confirmer_timeout_ms: Option<u64>,
+    benchmark_evaluator: Option<Arc<dyn TraceBenchmarkEvaluator>>,
+    benchmark_evaluator_timeout_ms: Option<u64>,
     ranking_calibration_max_age: Option<Duration>,
     ranking_min_confidence_threshold: f32,
     ranking_max_average_absolute_error_micros: i64,
@@ -1506,6 +1514,11 @@ impl AppState {
             .map(|config| config.timeout_ms);
         let benchmark_registry_confirmer =
             benchmark_registry_confirmer_config.map(|config| config.confirmer);
+        let benchmark_evaluator_config = trace_benchmark_evaluator_from_env()?;
+        let benchmark_evaluator_timeout_ms = benchmark_evaluator_config
+            .as_ref()
+            .map(|config| config.timeout_ms);
+        let benchmark_evaluator = benchmark_evaluator_config.map(|config| config.evaluator);
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
         let ranking_min_confidence_threshold = parse_ranking_min_confidence_threshold_from_env()?;
         let ranking_max_average_absolute_error_micros =
@@ -1662,6 +1675,8 @@ impl AppState {
             benchmark_registry_submitter_timeout_ms,
             benchmark_registry_confirmer,
             benchmark_registry_confirmer_timeout_ms,
+            benchmark_evaluator,
+            benchmark_evaluator_timeout_ms,
             ranking_calibration_max_age,
             ranking_min_confidence_threshold,
             ranking_max_average_absolute_error_micros,
@@ -1928,6 +1943,11 @@ struct ConfiguredTraceBenchmarkRegistryConfirmer {
     timeout_ms: u64,
 }
 
+struct ConfiguredTraceBenchmarkEvaluator {
+    evaluator: Arc<dyn TraceBenchmarkEvaluator>,
+    timeout_ms: u64,
+}
+
 fn trace_near_credit_submitter_from_env()
 -> anyhow::Result<Option<ConfiguredTraceNearCreditSubmitter>> {
     let Some(url) = optional_trimmed_env(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL)? else {
@@ -2016,6 +2036,34 @@ fn trace_benchmark_registry_confirmer_from_env()
     }))
 }
 
+fn trace_benchmark_evaluator_from_env() -> anyhow::Result<Option<ConfiguredTraceBenchmarkEvaluator>>
+{
+    let Some(url) = optional_trimmed_env(TRACE_COMMONS_BENCHMARK_EVALUATOR_URL)? else {
+        return Ok(None);
+    };
+    let parsed = reqwest::Url::parse(&url)
+        .with_context(|| format!("invalid {TRACE_COMMONS_BENCHMARK_EVALUATOR_URL}"))?;
+    validate_trace_benchmark_evaluator_url(&parsed)?;
+    let timeout = parse_trace_benchmark_evaluator_timeout_from_env()?;
+    let timeout_ms = timeout.as_millis() as u64;
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout.min(StdDuration::from_secs(3)))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("tracedao-benchmark-evaluator/0.1")
+        .build()
+        .context("failed to build benchmark evaluator HTTP client")?;
+    Ok(Some(ConfiguredTraceBenchmarkEvaluator {
+        evaluator: Arc::new(HttpTraceBenchmarkEvaluator {
+            client,
+            url,
+            bearer_token: optional_trimmed_env(TRACE_COMMONS_BENCHMARK_EVALUATOR_BEARER_TOKEN)?
+                .map(SecretString::from),
+        }),
+        timeout_ms,
+    }))
+}
+
 fn validate_trace_near_credit_submitter_url(url: &reqwest::Url) -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(url.scheme(), "https" | "http"),
@@ -2091,6 +2139,31 @@ fn validate_trace_benchmark_registry_confirmation_url(url: &reqwest::Url) -> any
     Ok(())
 }
 
+fn validate_trace_benchmark_evaluator_url(url: &reqwest::Url) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        matches!(url.scheme(), "https" | "http"),
+        "{TRACE_COMMONS_BENCHMARK_EVALUATOR_URL} must use http or https"
+    );
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "{TRACE_COMMONS_BENCHMARK_EVALUATOR_URL} must not include embedded credentials"
+    );
+    anyhow::ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "{TRACE_COMMONS_BENCHMARK_EVALUATOR_URL} must not include query strings or fragments"
+    );
+    let host = url.host_str().map(str::to_ascii_lowercase).ok_or_else(|| {
+        anyhow::anyhow!("{TRACE_COMMONS_BENCHMARK_EVALUATOR_URL} requires a host")
+    })?;
+    if url.scheme() == "http" {
+        anyhow::ensure!(
+            is_loopback_or_localhost_host(&host),
+            "{TRACE_COMMONS_BENCHMARK_EVALUATOR_URL} may use http only for localhost loopback evaluators"
+        );
+    }
+    Ok(())
+}
+
 fn is_loopback_or_localhost_host(host: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     if host == "localhost" || host.ends_with(".localhost") {
@@ -2149,6 +2222,20 @@ fn parse_trace_benchmark_registry_confirmation_timeout_from_env() -> anyhow::Res
     anyhow::ensure!(
         (1..=30_000).contains(&timeout_ms),
         "{TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS} must be between 1 and 30000"
+    );
+    Ok(StdDuration::from_millis(timeout_ms))
+}
+
+fn parse_trace_benchmark_evaluator_timeout_from_env() -> anyhow::Result<StdDuration> {
+    let timeout_ms = match optional_trimmed_env(TRACE_COMMONS_BENCHMARK_EVALUATOR_TIMEOUT_MS)? {
+        Some(configured) => configured.parse::<u64>().with_context(|| {
+            format!("{TRACE_COMMONS_BENCHMARK_EVALUATOR_TIMEOUT_MS} must be milliseconds")
+        })?,
+        None => DEFAULT_BENCHMARK_EVALUATOR_TIMEOUT_MS,
+    };
+    anyhow::ensure!(
+        (1..=120_000).contains(&timeout_ms),
+        "{TRACE_COMMONS_BENCHMARK_EVALUATOR_TIMEOUT_MS} must be between 1 and 120000"
     );
     Ok(StdDuration::from_millis(timeout_ms))
 }
@@ -4171,6 +4258,8 @@ struct TraceCommonsConfigStatusResponse {
     benchmark_registry_confirmer_timeout_ms: Option<u64>,
     benchmark_registry_outbox_confirm_default_limit: u32,
     benchmark_registry_outbox_confirm_max_limit: u32,
+    benchmark_evaluator_configured: bool,
+    benchmark_evaluator_timeout_ms: Option<u64>,
     credit_cycle_worker_step_count: usize,
     credit_cycle_scheduler_default_limit: usize,
     credit_cycle_scheduler_max_limit: usize,
@@ -4314,6 +4403,8 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_DEFAULT_LIMIT,
         benchmark_registry_outbox_confirm_max_limit:
             TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_MAX_LIMIT,
+        benchmark_evaluator_configured: state.benchmark_evaluator.is_some(),
+        benchmark_evaluator_timeout_ms: state.benchmark_evaluator_timeout_ms,
         credit_cycle_worker_step_count: TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT,
         credit_cycle_scheduler_default_limit: TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_LIMIT,
         credit_cycle_scheduler_max_limit: TRACE_CREDIT_CYCLE_SCHEDULER_MAX_LIMIT,
@@ -16074,6 +16165,91 @@ struct TraceBenchmarkEvaluationPatch {
     fail_count: Option<u32>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceBenchmarkEvaluatorCandidate {
+    candidate_index: usize,
+    canonical_summary_hash: String,
+    canonical_summary: String,
+    summary_model: String,
+    task_success: String,
+    event_count: usize,
+    tool_sequence: Vec<String>,
+    tool_categories: Vec<String>,
+    coverage_tags: Vec<String>,
+    novelty_score: f32,
+    duplicate_score: f32,
+    submission_score: f32,
+    consent_scopes: Vec<ConsentScope>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceBenchmarkEvaluatorRequest {
+    tenant_storage_ref: String,
+    conversion_id: Uuid,
+    artifact_schema_version: String,
+    artifact_payload_hash: String,
+    source_submission_ids_hash: String,
+    purpose_hash: String,
+    evaluator_ref: String,
+    min_score: f32,
+    candidate_count: usize,
+    candidates: Vec<TraceBenchmarkEvaluatorCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceBenchmarkEvaluatorResponse {
+    status: TraceBenchmarkEvaluationStatus,
+    score: f32,
+    pass_count: u32,
+    fail_count: u32,
+}
+
+#[async_trait::async_trait]
+trait TraceBenchmarkEvaluator: Send + Sync {
+    async fn evaluate(
+        &self,
+        request: TraceBenchmarkEvaluatorRequest,
+    ) -> anyhow::Result<TraceBenchmarkEvaluatorResponse>;
+}
+
+#[derive(Clone)]
+struct HttpTraceBenchmarkEvaluator {
+    client: reqwest::Client,
+    url: String,
+    bearer_token: Option<SecretString>,
+}
+
+#[async_trait::async_trait]
+impl TraceBenchmarkEvaluator for HttpTraceBenchmarkEvaluator {
+    async fn evaluate(
+        &self,
+        request: TraceBenchmarkEvaluatorRequest,
+    ) -> anyhow::Result<TraceBenchmarkEvaluatorResponse> {
+        let mut builder = self
+            .client
+            .post(&self.url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&request);
+        if let Some(bearer_token) = &self.bearer_token {
+            builder = builder.bearer_auth(bearer_token.expose_secret());
+        }
+        let response = builder
+            .send()
+            .await
+            .context("failed to evaluate benchmark artifact")?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!("benchmark evaluator returned HTTP {}", status.as_u16());
+        }
+        let response: TraceBenchmarkEvaluatorResponse = response
+            .json()
+            .await
+            .context("failed to decode benchmark evaluator response")?;
+        benchmark_evaluation_worker_decision_from_external_response(&response)?;
+        Ok(response)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct BenchmarkEvaluationWorkerRunRequest {
     limit: Option<usize>,
@@ -16081,6 +16257,8 @@ struct BenchmarkEvaluationWorkerRunRequest {
     dry_run: Option<bool>,
     #[serde(default)]
     evaluator_ref: Option<String>,
+    #[serde(default)]
+    require_external_evaluator: Option<bool>,
     #[serde(default)]
     min_score: Option<f32>,
     #[serde(default)]
@@ -16187,6 +16365,14 @@ async fn run_benchmark_evaluation_worker(
     let limit = validate_benchmark_evaluation_worker_limit(body.limit)?;
     let dry_run = body.dry_run.unwrap_or(false);
     let evaluator_ref = normalize_required_benchmark_evaluator_ref(body.evaluator_ref)?;
+    let require_external_evaluator = body.require_external_evaluator.unwrap_or(false);
+    if require_external_evaluator && state.benchmark_evaluator.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "benchmark evaluation worker requires TRACE_COMMONS_BENCHMARK_EVALUATOR_URL",
+        ));
+    }
+    let external_evaluator = state.benchmark_evaluator.clone();
     let reason = normalize_benchmark_evaluation_worker_reason(body.reason)?;
     let min_score = body.min_score.unwrap_or(1.0);
     validate_unit_score(min_score, "benchmark evaluation min_score")?;
@@ -16212,6 +16398,10 @@ async fn run_benchmark_evaluation_worker(
         failed_conversion_ids: Vec::new(),
         skipped_reason_counts: BTreeMap::new(),
     };
+    let initial_pending_count = artifacts
+        .iter()
+        .filter(|artifact| benchmark_artifact_is_pending_evaluation(artifact))
+        .count();
 
     for artifact in artifacts.iter().take(limit) {
         response.checked_count += 1;
@@ -16231,10 +16421,61 @@ async fn run_benchmark_evaluation_worker(
             );
             continue;
         }
-        let Some(decision) = evaluate_benchmark_artifact_for_worker(artifact, min_score) else {
+        if artifact.candidates.is_empty() {
             response.skipped_ineligible_count += 1;
             increment_count(&mut response.skipped_reason_counts, "empty_benchmark");
             continue;
+        }
+        if dry_run && external_evaluator.is_some() {
+            response.skipped_ineligible_count += 1;
+            increment_count(
+                &mut response.skipped_reason_counts,
+                "external_evaluator_dry_run",
+            );
+            continue;
+        }
+        let decision = if let Some(evaluator) = external_evaluator.as_ref() {
+            let evaluator_request =
+                benchmark_evaluator_request_from_artifact(artifact, &evaluator_ref, min_score)
+                    .map_err(internal_error)?;
+            match evaluator.evaluate(evaluator_request).await {
+                Ok(evaluator_response) => {
+                    match benchmark_evaluation_worker_decision_from_external_response(
+                        &evaluator_response,
+                    ) {
+                        Ok(decision) => decision,
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                conversion_id = %artifact.conversion_id,
+                                "Trace Commons benchmark evaluator response was rejected"
+                            );
+                            response.skipped_ineligible_count += 1;
+                            increment_count(
+                                &mut response.skipped_reason_counts,
+                                "evaluator_adapter_error",
+                            );
+                            continue;
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        conversion_id = %artifact.conversion_id,
+                        "Trace Commons benchmark evaluator call failed"
+                    );
+                    response.skipped_ineligible_count += 1;
+                    increment_count(
+                        &mut response.skipped_reason_counts,
+                        "evaluator_adapter_error",
+                    );
+                    continue;
+                }
+            }
+        } else {
+            evaluate_benchmark_artifact_for_worker(artifact, min_score)
+                .expect("non-empty benchmark artifact evaluates structurally")
         };
         if !dry_run {
             let _ = update_benchmark_lifecycle(
@@ -16274,11 +16515,8 @@ async fn run_benchmark_evaluation_worker(
             | TraceBenchmarkEvaluationStatus::Inconclusive => {}
         }
     }
-    response.pending_after_count = artifacts
-        .iter()
-        .skip(limit)
-        .filter(|artifact| benchmark_artifact_is_pending_evaluation(artifact))
-        .count();
+    response.pending_after_count =
+        initial_pending_count.saturating_sub(if dry_run { 0 } else { response.evaluated_count });
     Ok(response)
 }
 
@@ -30569,6 +30807,72 @@ fn evaluate_benchmark_artifact_for_worker(
     })
 }
 
+fn benchmark_evaluator_request_from_artifact(
+    artifact: &TraceBenchmarkConversionArtifact,
+    evaluator_ref: &str,
+    min_score: f32,
+) -> anyhow::Result<TraceBenchmarkEvaluatorRequest> {
+    let artifact_payload_hash = benchmark_artifact_payload_hash(artifact)?;
+    let candidates = artifact
+        .candidates
+        .iter()
+        .enumerate()
+        .map(
+            |(candidate_index, candidate)| TraceBenchmarkEvaluatorCandidate {
+                candidate_index,
+                canonical_summary_hash: candidate.canonical_summary_hash.clone(),
+                canonical_summary: candidate.canonical_summary.clone(),
+                summary_model: candidate.summary_model.clone(),
+                task_success: candidate.task_success.clone(),
+                event_count: candidate.event_count,
+                tool_sequence: candidate.tool_sequence.clone(),
+                tool_categories: candidate.tool_categories.clone(),
+                coverage_tags: candidate.coverage_tags.clone(),
+                novelty_score: candidate.novelty_score,
+                duplicate_score: candidate.duplicate_score,
+                submission_score: candidate.submission_score,
+                consent_scopes: candidate.consent_scopes.clone(),
+            },
+        )
+        .collect::<Vec<_>>();
+    Ok(TraceBenchmarkEvaluatorRequest {
+        tenant_storage_ref: artifact.tenant_storage_ref.clone(),
+        conversion_id: artifact.conversion_id,
+        artifact_schema_version: artifact.artifact_schema_version.clone(),
+        artifact_payload_hash,
+        source_submission_ids_hash: artifact.source_submission_ids_hash.clone(),
+        purpose_hash: sha256_prefixed(&artifact.purpose),
+        evaluator_ref: evaluator_ref.to_string(),
+        min_score,
+        candidate_count: candidates.len(),
+        candidates,
+    })
+}
+
+fn benchmark_evaluation_worker_decision_from_external_response(
+    response: &TraceBenchmarkEvaluatorResponse,
+) -> anyhow::Result<BenchmarkEvaluationWorkerDecision> {
+    anyhow::ensure!(
+        response.score.is_finite() && (0.0..=1.0).contains(&response.score),
+        "benchmark evaluator score must be between 0 and 1"
+    );
+    anyhow::ensure!(
+        matches!(
+            response.status,
+            TraceBenchmarkEvaluationStatus::Passed
+                | TraceBenchmarkEvaluationStatus::Failed
+                | TraceBenchmarkEvaluationStatus::Inconclusive
+        ),
+        "benchmark evaluator status must be passed, failed, or inconclusive"
+    );
+    Ok(BenchmarkEvaluationWorkerDecision {
+        status: response.status,
+        score: response.score,
+        pass_count: response.pass_count,
+        fail_count: response.fail_count,
+    })
+}
+
 fn benchmark_candidate_passes_structural_evaluation(candidate: &TraceBenchmarkCandidate) -> bool {
     candidate.canonical_summary_hash.starts_with("sha256:")
         && !candidate.canonical_summary.trim().is_empty()
@@ -33982,6 +34286,8 @@ mod tests {
             benchmark_registry_submitter_timeout_ms: None,
             benchmark_registry_confirmer: None,
             benchmark_registry_confirmer_timeout_ms: None,
+            benchmark_evaluator: None,
+            benchmark_evaluator_timeout_ms: None,
             ranking_calibration_max_age: None,
             ranking_min_confidence_threshold: DEFAULT_TRACE_RANKING_MIN_CONFIDENCE_THRESHOLD,
             ranking_max_average_absolute_error_micros:
@@ -36184,6 +36490,14 @@ mod tests {
             serde_json::json!(TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_MAX_LIMIT)
         );
         assert_eq!(
+            value["benchmark_evaluator_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["benchmark_evaluator_timeout_ms"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
             value["credit_cycle_worker_step_count"],
             serde_json::json!(TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT)
         );
@@ -36246,6 +36560,8 @@ mod tests {
             "benchmark_registry_submitter_bearer_token",
             "benchmark_registry_confirmation_url",
             "benchmark_registry_confirmation_bearer_token",
+            "benchmark_evaluator_url",
+            "benchmark_evaluator_bearer_token",
         ] {
             assert!(
                 !object.contains_key(forbidden_key),
@@ -36435,6 +36751,50 @@ mod tests {
         let body_text = std::str::from_utf8(&body).expect("body is utf8");
         assert!(!body_text.contains(TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_URL));
         assert!(!body_text.contains(TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN));
+    }
+
+    #[tokio::test]
+    async fn admin_config_status_reports_benchmark_evaluator_readiness_without_endpoint_secrets() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).benchmark_evaluator =
+            Some(Arc::new(FakeBenchmarkEvaluator::default()));
+        Arc::make_mut(&mut state).benchmark_evaluator_timeout_ms = Some(4_567);
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/config-status")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("admin response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("status json parses");
+        assert_eq!(
+            value["benchmark_evaluator_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["benchmark_evaluator_timeout_ms"],
+            serde_json::json!(4_567)
+        );
+
+        let object = value.as_object().expect("status response is object");
+        assert!(!object.contains_key("benchmark_evaluator_url"));
+        assert!(!object.contains_key("benchmark_evaluator_bearer_token"));
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains(TRACE_COMMONS_BENCHMARK_EVALUATOR_URL));
+        assert!(!body_text.contains(TRACE_COMMONS_BENCHMARK_EVALUATOR_BEARER_TOKEN));
     }
 
     #[tokio::test]
@@ -38902,6 +39262,7 @@ mod tests {
                 limit: Some(10),
                 dry_run: Some(false),
                 evaluator_ref: Some("deterministic-benchmark-evaluator:v1".to_string()),
+                require_external_evaluator: None,
                 min_score: None,
                 reason: Some("scheduled benchmark evaluator run".to_string()),
             }),
@@ -38964,6 +39325,222 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn benchmark_evaluation_worker_run_uses_configured_external_evaluator() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let fake_evaluator = FakeBenchmarkEvaluator::default();
+        let evaluator_calls = fake_evaluator.calls.clone();
+        Arc::make_mut(&mut state).benchmark_evaluator = Some(Arc::new(fake_evaluator));
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::BenchmarkOnly];
+        envelope.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::BenchmarkGeneration];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("benchmark source submission succeeds");
+
+        let Json(benchmark) = benchmark_worker_convert_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("external_worker_evaluation_candidate".to_string()),
+                consent_scope: Some("benchmark_only".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: Some("benchmark:external-evaluation-worker".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark worker conversion succeeds");
+
+        let Json(run) = benchmark_evaluation_worker_run_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkEvaluationWorkerRunRequest {
+                limit: Some(10),
+                dry_run: Some(false),
+                evaluator_ref: Some("external-benchmark-evaluator:v2".to_string()),
+                require_external_evaluator: Some(true),
+                min_score: Some(0.75),
+                reason: Some("scheduled external benchmark evaluator run".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark evaluation worker run succeeds with external evaluator");
+
+        assert!(!run.dry_run);
+        assert_eq!(run.checked_count, 1);
+        assert_eq!(run.evaluated_count, 1);
+        assert_eq!(run.passed_count, 1);
+        assert_eq!(run.failed_count, 0);
+        assert_eq!(run.pending_after_count, 0);
+        assert_eq!(run.evaluated_conversion_ids, vec![benchmark.conversion_id]);
+
+        let calls = evaluator_calls
+            .lock()
+            .expect("fake benchmark evaluator calls lock");
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+        assert_eq!(call.tenant_storage_ref, tenant_storage_ref("tenant-a"));
+        assert_eq!(call.conversion_id, benchmark.conversion_id);
+        assert_eq!(call.evaluator_ref, "external-benchmark-evaluator:v2");
+        assert_eq!(call.min_score, 0.75);
+        assert_eq!(call.candidate_count, 1);
+        assert_eq!(call.candidates.len(), 1);
+        assert_eq!(
+            call.source_submission_ids_hash,
+            benchmark.source_submission_ids_hash
+        );
+        assert!(call.artifact_payload_hash.starts_with("sha256:"));
+        assert!(
+            call.candidates[0]
+                .canonical_summary_hash
+                .starts_with("sha256:")
+        );
+        assert!(!call.candidates[0].canonical_summary.trim().is_empty());
+        let call_json = serde_json::to_string(call).expect("external evaluator call serializes");
+        assert!(!call_json.contains("token-a"));
+        assert!(!call_json.contains("benchmark-worker-token-a"));
+        assert!(!call_json.contains(&submission_id.to_string()));
+
+        let persisted: TraceBenchmarkConversionArtifact = serde_json::from_str(
+            &std::fs::read_to_string(benchmark_artifact_path(
+                temp.path(),
+                "tenant-a",
+                benchmark.conversion_id,
+            ))
+            .expect("benchmark artifact reads"),
+        )
+        .expect("benchmark artifact parses");
+        assert_eq!(
+            persisted.evaluation.status,
+            TraceBenchmarkEvaluationStatus::Passed
+        );
+        assert_eq!(
+            persisted.evaluation.evaluator_ref.as_deref(),
+            Some("external-benchmark-evaluator:v2")
+        );
+        assert_eq!(persisted.evaluation.score, Some(0.875));
+        assert_eq!(persisted.evaluation.pass_count, Some(7));
+        assert_eq!(persisted.evaluation.fail_count, Some(1));
+    }
+
+    #[tokio::test]
+    async fn benchmark_evaluation_worker_run_requires_external_evaluator_when_requested() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = benchmark_evaluation_worker_run_handler(
+            State(state),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkEvaluationWorkerRunRequest {
+                limit: Some(10),
+                dry_run: Some(false),
+                evaluator_ref: Some("external-benchmark-evaluator:v2".to_string()),
+                require_external_evaluator: Some(true),
+                min_score: Some(0.75),
+                reason: Some("scheduled external benchmark evaluator run".to_string()),
+            }),
+        )
+        .await
+        .expect_err("external evaluator requirement fails closed without configured adapter");
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn benchmark_evaluation_worker_dry_run_does_not_call_external_evaluator() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let fake_evaluator = FakeBenchmarkEvaluator::default();
+        let evaluator_calls = fake_evaluator.calls.clone();
+        Arc::make_mut(&mut state).benchmark_evaluator = Some(Arc::new(fake_evaluator));
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::BenchmarkOnly];
+        envelope.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::BenchmarkGeneration];
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("benchmark source submission succeeds");
+
+        let Json(benchmark) = benchmark_worker_convert_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("external_worker_evaluation_dry_run".to_string()),
+                consent_scope: Some("benchmark_only".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: Some("benchmark:external-evaluation-dry-run".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark worker conversion succeeds");
+
+        let Json(run) = benchmark_evaluation_worker_run_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkEvaluationWorkerRunRequest {
+                limit: Some(10),
+                dry_run: Some(true),
+                evaluator_ref: Some("external-benchmark-evaluator:v2".to_string()),
+                require_external_evaluator: Some(true),
+                min_score: Some(0.75),
+                reason: Some("external evaluator dry-run preflight".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark evaluation dry-run succeeds without calling external evaluator");
+
+        assert!(run.dry_run);
+        assert_eq!(run.checked_count, 1);
+        assert_eq!(run.evaluated_count, 0);
+        assert_eq!(run.pending_after_count, 1);
+        assert_eq!(
+            run.skipped_reason_counts
+                .get("external_evaluator_dry_run")
+                .copied(),
+            Some(1)
+        );
+        assert!(
+            evaluator_calls
+                .lock()
+                .expect("fake benchmark evaluator calls lock")
+                .is_empty()
+        );
+
+        let persisted: TraceBenchmarkConversionArtifact = serde_json::from_str(
+            &std::fs::read_to_string(benchmark_artifact_path(
+                temp.path(),
+                "tenant-a",
+                benchmark.conversion_id,
+            ))
+            .expect("benchmark artifact reads"),
+        )
+        .expect("benchmark artifact parses");
+        assert_eq!(
+            persisted.evaluation.status,
+            TraceBenchmarkEvaluationStatus::NotRun
+        );
+    }
+
+    #[tokio::test]
     async fn benchmark_registry_publication_worker_publishes_passed_evaluations_only() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -39003,6 +39580,7 @@ mod tests {
                 limit: Some(10),
                 dry_run: Some(false),
                 evaluator_ref: Some("deterministic-benchmark-evaluator:v1".to_string()),
+                require_external_evaluator: None,
                 min_score: None,
                 reason: Some("scheduled benchmark evaluator run".to_string()),
             }),
@@ -39113,6 +39691,7 @@ mod tests {
                 limit: Some(10),
                 dry_run: Some(false),
                 evaluator_ref: Some("deterministic-benchmark-evaluator:v1".to_string()),
+                require_external_evaluator: None,
                 min_score: None,
                 reason: Some("scheduled benchmark evaluator run".to_string()),
             }),
@@ -39274,6 +39853,7 @@ mod tests {
                 limit: Some(10),
                 dry_run: Some(false),
                 evaluator_ref: Some("deterministic-benchmark-evaluator:v1".to_string()),
+                require_external_evaluator: None,
                 min_score: None,
                 reason: Some("scheduled benchmark evaluator run".to_string()),
             }),
@@ -40523,6 +41103,8 @@ mod tests {
             benchmark_registry_submitter_timeout_ms: None,
             benchmark_registry_confirmer: None,
             benchmark_registry_confirmer_timeout_ms: None,
+            benchmark_evaluator: None,
+            benchmark_evaluator_timeout_ms: None,
             ranking_calibration_max_age: None,
             ranking_min_confidence_threshold: DEFAULT_TRACE_RANKING_MIN_CONFIDENCE_THRESHOLD,
             ranking_max_average_absolute_error_micros:
@@ -43300,6 +43882,45 @@ mod tests {
             Ok(TraceBenchmarkRegistrySubmitterResponse {
                 external_receipt_ref: "external-registry:receipt:worker-1".to_string(),
             })
+        }
+    }
+
+    #[derive(Clone)]
+    struct FakeBenchmarkEvaluator {
+        calls: Arc<std::sync::Mutex<Vec<TraceBenchmarkEvaluatorRequest>>>,
+        response: TraceBenchmarkEvaluatorResponse,
+        failure: Option<String>,
+    }
+
+    impl Default for FakeBenchmarkEvaluator {
+        fn default() -> Self {
+            Self {
+                calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+                response: TraceBenchmarkEvaluatorResponse {
+                    status: TraceBenchmarkEvaluationStatus::Passed,
+                    score: 0.875,
+                    pass_count: 7,
+                    fail_count: 1,
+                },
+                failure: None,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TraceBenchmarkEvaluator for FakeBenchmarkEvaluator {
+        async fn evaluate(
+            &self,
+            request: TraceBenchmarkEvaluatorRequest,
+        ) -> anyhow::Result<TraceBenchmarkEvaluatorResponse> {
+            if let Some(failure) = &self.failure {
+                anyhow::bail!("{failure}");
+            }
+            self.calls
+                .lock()
+                .expect("fake benchmark evaluator calls lock")
+                .push(request);
+            Ok(self.response.clone())
         }
     }
 

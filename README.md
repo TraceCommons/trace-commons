@@ -67,6 +67,14 @@ confirmed, and failed registry outbox work, and a published artifact remains in
 the external-registry-adapter gap until a confirmed outbox receipt is recorded;
 a revoked artifact with a registry ref remains in the external-registry
 invalidation gap until a confirmed revoke receipt is recorded.
+Configure `TRACE_COMMONS_BENCHMARK_EVALUATOR_URL` to let benchmark evaluation
+workers call an operator-owned evaluator adapter over bounded derived benchmark
+candidate summaries, artifact hashes, source-list hashes, and evaluator refs
+instead of only using the in-process structural evaluator. Worker requests can
+set `require_external_evaluator=true` to fail closed when that adapter is not
+configured; optional bearer auth and timeout are controlled by
+`TRACE_COMMONS_BENCHMARK_EVALUATOR_BEARER_TOKEN` and
+`TRACE_COMMONS_BENCHMARK_EVALUATOR_TIMEOUT_MS`.
 Configure `TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL` to let benchmark
 workers submit pending or failed rows to an operator-owned registry adapter;
 optional bearer auth and timeout are controlled by
