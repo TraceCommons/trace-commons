@@ -11579,6 +11579,16 @@ async fn promote_ranking_model_version(
         }
     }
     ensure_ranking_model_dataset_isolation(model, RankingModelDatasetIsolationContext::Promotion)?;
+    let calibration_datasets = read_ranking_calibration_datasets_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    ensure_ranking_calibration_dataset_can_feed_run(
+        &calibration_datasets,
+        &model.calibration_dataset_hash,
+        body.target_use,
+        &policy_version,
+        state.ranking_require_calibration_dataset_registry,
+    )?;
 
     let calibration_run = latest_promotable_ranking_calibration_run(
         state,
@@ -12029,6 +12039,10 @@ async fn ranking_prediction_credit_run_handler(
         let preference_labels = read_ranking_preference_labels_for_admin(state.as_ref(), &tenant)
             .await
             .map_err(internal_error)?;
+        let calibration_datasets =
+            read_ranking_calibration_datasets_for_admin(state.as_ref(), &tenant)
+                .await
+                .map_err(internal_error)?;
         let calibration_runs = read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
             .await
             .map_err(internal_error)?;
@@ -12036,10 +12050,13 @@ async fn ranking_prediction_credit_run_handler(
             state.as_ref(),
             &tenant,
             &model_versions,
-            &predictions,
-            &labels,
-            &preference_labels,
-            &calibration_runs,
+            RankingModelRiskEvidence {
+                predictions: &predictions,
+                labels: &labels,
+                preference_labels: &preference_labels,
+                calibration_datasets: &calibration_datasets,
+                calibration_runs: &calibration_runs,
+            },
         ))
     };
     let mut response = TraceRankingPredictionCreditRunResponse {
@@ -12396,6 +12413,9 @@ async fn ranking_prediction_model_risk_codes(
     let preference_labels = read_ranking_preference_labels_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
+    let calibration_datasets = read_ranking_calibration_datasets_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
     let calibration_runs = read_ranking_calibration_runs_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
@@ -12404,10 +12424,13 @@ async fn ranking_prediction_model_risk_codes(
         state,
         tenant,
         &model_versions,
-        &predictions,
-        &labels,
-        &preference_labels,
-        &calibration_runs,
+        RankingModelRiskEvidence {
+            predictions: &predictions,
+            labels: &labels,
+            preference_labels: &preference_labels,
+            calibration_datasets: &calibration_datasets,
+            calibration_runs: &calibration_runs,
+        },
     )
     .models
     .into_iter()
@@ -12788,6 +12811,9 @@ async fn ranking_model_risk_report_handler(
     let preference_labels = read_ranking_preference_labels_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    let calibration_datasets = read_ranking_calibration_datasets_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     let calibration_runs = read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
@@ -12795,10 +12821,13 @@ async fn ranking_model_risk_report_handler(
         state.as_ref(),
         &tenant,
         &model_versions,
-        &predictions,
-        &labels,
-        &preference_labels,
-        &calibration_runs,
+        RankingModelRiskEvidence {
+            predictions: &predictions,
+            labels: &labels,
+            preference_labels: &preference_labels,
+            calibration_datasets: &calibration_datasets,
+            calibration_runs: &calibration_runs,
+        },
     )))
 }
 
@@ -12817,6 +12846,9 @@ async fn ranking_dataset_readiness_report_handler(
     let labels = read_ranking_labels_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    let calibration_datasets = read_ranking_calibration_datasets_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     let calibration_runs = read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
@@ -12826,6 +12858,7 @@ async fn ranking_dataset_readiness_report_handler(
         &model_versions,
         &predictions,
         &labels,
+        &calibration_datasets,
         &calibration_runs,
     )))
 }
@@ -12857,6 +12890,9 @@ async fn ranking_credit_readiness_report_handler(
     let preference_labels = read_ranking_preference_labels_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    let calibration_datasets = read_ranking_calibration_datasets_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     let calibration_runs = read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
@@ -12871,6 +12907,7 @@ async fn ranking_credit_readiness_report_handler(
             model_versions: &model_versions,
             labels: &labels,
             preference_labels: &preference_labels,
+            calibration_datasets: &calibration_datasets,
             calibration_runs: &calibration_runs,
         },
     )))
@@ -12993,30 +13030,55 @@ fn ensure_ranking_calibration_dataset_can_feed_run(
     policy_version: &str,
     require_registered: bool,
 ) -> ApiResult<()> {
+    if let Some(reason) = ranking_calibration_dataset_gate_reason(
+        datasets,
+        evaluation_dataset_hash,
+        target_use,
+        policy_version,
+        require_registered,
+    ) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            ranking_calibration_dataset_gate_error_message(reason),
+        ));
+    }
+    Ok(())
+}
+
+fn ranking_calibration_dataset_gate_reason(
+    datasets: &[TraceRankingCalibrationDatasetRecord],
+    calibration_dataset_hash: &str,
+    target_use: TraceAllowedUse,
+    policy_version: &str,
+    require_registered: bool,
+) -> Option<&'static str> {
     let Some(dataset) = datasets.iter().find(|dataset| {
-        dataset.calibration_dataset_hash == evaluation_dataset_hash
+        dataset.calibration_dataset_hash == calibration_dataset_hash
             && dataset.target_use == target_use
             && dataset.policy_version == policy_version
     }) else {
-        if require_registered {
-            return Err(api_error(
-                StatusCode::CONFLICT,
-                "ranking calibration dataset is not registered for this target use and policy",
-            ));
-        }
-        return Ok(());
+        return require_registered.then_some("calibration_dataset_not_registered");
     };
     if matches!(
         dataset.status,
         StorageTraceRankingCalibrationDatasetStatus::Deprecated
             | StorageTraceRankingCalibrationDatasetStatus::Archived
     ) {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            "ranking calibration dataset is retired for this target use and policy",
-        ));
+        return Some("calibration_dataset_retired");
     }
-    Ok(())
+    None
+}
+
+fn ranking_calibration_dataset_gate_error_message(reason: &str) -> &'static str {
+    match reason {
+        "calibration_dataset_not_registered" => {
+            "ranking calibration dataset is not registered for this target use and policy"
+        }
+        "calibration_dataset_retired" => {
+            "ranking calibration dataset is retired for this target use and policy"
+        }
+        _ => "ranking calibration dataset cannot support this target use and policy",
+    }
 }
 
 async fn ranking_calibration_run_worker_handler(
@@ -14706,10 +14768,7 @@ fn ranking_model_risk_report(
     state: &AppState,
     tenant: &TenantAuth,
     model_versions: &[TraceRankingModelVersionRecord],
-    predictions: &[TraceRankingPredictionRecord],
-    labels: &[TraceRankingLabelRecord],
-    preference_labels: &[TraceRankingPreferenceLabelRecord],
-    calibration_runs: &[TraceRankingCalibrationRunRecord],
+    evidence: RankingModelRiskEvidence<'_>,
 ) -> TraceRankingModelRiskReport {
     let active_models = latest_ranking_model_versions(model_versions)
         .into_iter()
@@ -14717,14 +14776,10 @@ fn ranking_model_risk_report(
         .collect::<Vec<_>>();
     let active_model_count = active_models.len();
     let mut models = Vec::new();
-    let evidence = RankingModelRiskEvidence {
-        predictions,
-        labels,
-        preference_labels,
-        calibration_runs,
-    };
     for model in active_models {
-        for target_use in ranking_model_target_uses(model, predictions, calibration_runs) {
+        for target_use in
+            ranking_model_target_uses(model, evidence.predictions, evidence.calibration_runs)
+        {
             models.push(ranking_model_risk_record(
                 state, tenant, model, target_use, evidence,
             ));
@@ -14768,6 +14823,15 @@ struct RankingModelRiskEvidence<'a> {
     predictions: &'a [TraceRankingPredictionRecord],
     labels: &'a [TraceRankingLabelRecord],
     preference_labels: &'a [TraceRankingPreferenceLabelRecord],
+    calibration_datasets: &'a [TraceRankingCalibrationDatasetRecord],
+    calibration_runs: &'a [TraceRankingCalibrationRunRecord],
+}
+
+#[derive(Clone, Copy)]
+struct RankingDatasetReadinessEvidence<'a> {
+    predictions: &'a [TraceRankingPredictionRecord],
+    labels: &'a [TraceRankingLabelRecord],
+    calibration_datasets: &'a [TraceRankingCalibrationDatasetRecord],
     calibration_runs: &'a [TraceRankingCalibrationRunRecord],
 }
 
@@ -14877,6 +14941,15 @@ fn ranking_model_risk_record(
     if ranking_model_training_calibration_datasets_overlap(model) {
         risk_codes.push("training_calibration_dataset_overlap".to_string());
     }
+    if let Some(reason) = ranking_calibration_dataset_gate_reason(
+        evidence.calibration_datasets,
+        &model.calibration_dataset_hash,
+        target_use,
+        &model.policy_version,
+        state.ranking_require_calibration_dataset_registry,
+    ) {
+        risk_codes.push(reason.to_string());
+    }
     risk_codes.sort();
     risk_codes.dedup();
 
@@ -14931,6 +15004,7 @@ fn ranking_dataset_readiness_report(
     model_versions: &[TraceRankingModelVersionRecord],
     predictions: &[TraceRankingPredictionRecord],
     labels: &[TraceRankingLabelRecord],
+    calibration_datasets: &[TraceRankingCalibrationDatasetRecord],
     calibration_runs: &[TraceRankingCalibrationRunRecord],
 ) -> TraceRankingDatasetReadinessReport {
     let latest_models = latest_ranking_model_versions(model_versions);
@@ -14950,6 +15024,12 @@ fn ranking_dataset_readiness_report(
     let mut ready_model_target_count = 0usize;
     let mut blocked_model_target_count = 0usize;
     let mut reason_code_counts = BTreeMap::new();
+    let evidence = RankingDatasetReadinessEvidence {
+        predictions,
+        labels,
+        calibration_datasets,
+        calibration_runs,
+    };
 
     for (calibration_dataset_hash, mut models) in models_by_dataset {
         models.sort_by(|left, right| left.model_version.cmp(&right.model_version));
@@ -14996,13 +15076,7 @@ fn ranking_dataset_readiness_report(
             }
             for target_use in target_uses {
                 let target = ranking_dataset_target_readiness_record(
-                    state,
-                    tenant,
-                    model,
-                    target_use,
-                    predictions,
-                    labels,
-                    calibration_runs,
+                    state, tenant, model, target_use, evidence,
                 );
                 if target.ready {
                     dataset_ready_count += 1;
@@ -15069,12 +15143,10 @@ fn ranking_dataset_target_readiness_record(
     tenant: &TenantAuth,
     model: &TraceRankingModelVersionRecord,
     target_use: TraceAllowedUse,
-    predictions: &[TraceRankingPredictionRecord],
-    labels: &[TraceRankingLabelRecord],
-    calibration_runs: &[TraceRankingCalibrationRunRecord],
+    evidence: RankingDatasetReadinessEvidence<'_>,
 ) -> TraceRankingDatasetTargetReadinessRecord {
     let latest_calibration =
-        latest_calibration_run_for_model_target(model, target_use, calibration_runs);
+        latest_calibration_run_for_model_target(model, target_use, evidence.calibration_runs);
     let thresholds = effective_ranking_calibration_thresholds(state, latest_calibration);
     let mut current = ranking_calibration_run_record(
         tenant,
@@ -15092,8 +15164,8 @@ fn ranking_dataset_target_readiness_record(
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
         },
-        predictions,
-        labels,
+        evidence.predictions,
+        evidence.labels,
     );
     current.report_hash = ranking_calibration_run_report_hash(&current);
 
@@ -15128,6 +15200,15 @@ fn ranking_dataset_target_readiness_record(
     }
     if ranking_model_training_calibration_datasets_overlap(model) {
         reason_codes.push("training_calibration_dataset_overlap".to_string());
+    }
+    if let Some(reason) = ranking_calibration_dataset_gate_reason(
+        evidence.calibration_datasets,
+        &model.calibration_dataset_hash,
+        target_use,
+        &model.policy_version,
+        state.ranking_require_calibration_dataset_registry,
+    ) {
+        reason_codes.push(reason.to_string());
     }
     reason_codes.sort();
     reason_codes.dedup();
@@ -15217,6 +15298,7 @@ struct RankingCreditReadinessInputs<'a> {
     model_versions: &'a [TraceRankingModelVersionRecord],
     labels: &'a [TraceRankingLabelRecord],
     preference_labels: &'a [TraceRankingPreferenceLabelRecord],
+    calibration_datasets: &'a [TraceRankingCalibrationDatasetRecord],
     calibration_runs: &'a [TraceRankingCalibrationRunRecord],
 }
 
@@ -15234,10 +15316,13 @@ fn ranking_credit_readiness_report(
             inputs.state,
             inputs.tenant,
             inputs.model_versions,
-            inputs.predictions,
-            inputs.labels,
-            inputs.preference_labels,
-            inputs.calibration_runs,
+            RankingModelRiskEvidence {
+                predictions: inputs.predictions,
+                labels: inputs.labels,
+                preference_labels: inputs.preference_labels,
+                calibration_datasets: inputs.calibration_datasets,
+                calibration_runs: inputs.calibration_runs,
+            },
         ));
     let mut events = inputs
         .credit_events
@@ -15907,6 +15992,9 @@ async fn ranking_settlement_calibration_gate(
     let preference_labels = read_ranking_preference_labels_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
+    let calibration_datasets = read_ranking_calibration_datasets_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
     let calibration_runs = read_ranking_calibration_runs_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
@@ -15914,10 +16002,13 @@ async fn ranking_settlement_calibration_gate(
         state,
         tenant,
         &model_versions,
-        &predictions,
-        &labels,
-        &preference_labels,
-        &calibration_runs,
+        RankingModelRiskEvidence {
+            predictions: &predictions,
+            labels: &labels,
+            preference_labels: &preference_labels,
+            calibration_datasets: &calibration_datasets,
+            calibration_runs: &calibration_runs,
+        },
     ))
     .remove(&ranking_model_risk_lookup_key(
         &run.model_version,
@@ -18205,6 +18296,7 @@ async fn read_operational_ranking_summary(
     let predictions = read_ranking_predictions_for_admin(state, tenant).await?;
     let labels = read_ranking_labels_for_admin(state, tenant).await?;
     let preference_labels = read_ranking_preference_labels_for_admin(state, tenant).await?;
+    let calibration_datasets = read_ranking_calibration_datasets_for_admin(state, tenant).await?;
     let calibration_runs = read_ranking_calibration_runs_for_admin(state, tenant).await?;
     let worker_runs = read_ranking_worker_runs_for_admin(state, tenant).await?;
     Ok(TraceOperationalRankingSummary::from_inputs(
@@ -18218,6 +18310,7 @@ async fn read_operational_ranking_summary(
             predictions: &predictions,
             labels: &labels,
             preference_labels: &preference_labels,
+            calibration_datasets: &calibration_datasets,
             calibration_runs: &calibration_runs,
             worker_runs: &worker_runs,
             generated_at,
@@ -35878,6 +35971,7 @@ struct TraceOperationalRankingInputs<'a> {
     predictions: &'a [TraceRankingPredictionRecord],
     labels: &'a [TraceRankingLabelRecord],
     preference_labels: &'a [TraceRankingPreferenceLabelRecord],
+    calibration_datasets: &'a [TraceRankingCalibrationDatasetRecord],
     calibration_runs: &'a [TraceRankingCalibrationRunRecord],
     worker_runs: &'a [TraceRankingWorkerRunRecord],
     generated_at: DateTime<Utc>,
@@ -35904,10 +35998,13 @@ impl TraceOperationalRankingSummary {
             inputs.state,
             inputs.tenant,
             inputs.model_versions,
-            inputs.predictions,
-            inputs.labels,
-            inputs.preference_labels,
-            inputs.calibration_runs,
+            RankingModelRiskEvidence {
+                predictions: inputs.predictions,
+                labels: inputs.labels,
+                preference_labels: inputs.preference_labels,
+                calibration_datasets: inputs.calibration_datasets,
+                calibration_runs: inputs.calibration_runs,
+            },
         );
         let readiness = ranking_credit_readiness_report(RankingCreditReadinessInputs {
             state: inputs.state,
@@ -35919,6 +36016,7 @@ impl TraceOperationalRankingSummary {
             model_versions: inputs.model_versions,
             labels: inputs.labels,
             preference_labels: inputs.preference_labels,
+            calibration_datasets: inputs.calibration_datasets,
             calibration_runs: inputs.calibration_runs,
         });
         let mut risk_code_counts = BTreeMap::new();
@@ -50226,6 +50324,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ranking_model_promotion_requires_registered_calibration_dataset_when_gate_enabled() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let (candidate, _) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-required-holdout-v1")
+                .await;
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist calibration before registry gate");
+        assert!(calibration.promotable);
+
+        Arc::make_mut(&mut state).ranking_require_calibration_dataset_registry = true;
+        let missing_registry = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "required holdout registry should block promotion".to_string(),
+            }),
+        )
+        .await
+        .expect_err("promotion requires a registered calibration holdout when gate is enabled");
+        assert_eq!(missing_registry.0, StatusCode::CONFLICT);
+
+        let Json(_) = ranking_calibration_dataset_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingCalibrationDatasetRequest {
+                calibration_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                source_manifest_hash: "sha256:required-holdout-manifest".to_string(),
+                source_count: 10,
+                label_source_count: 1,
+                label_actor_count: 1,
+                status: StorageTraceRankingCalibrationDatasetStatus::Candidate,
+            }),
+        )
+        .await
+        .expect("admin can register the required calibration holdout");
+
+        let Json(promotion) = ranking_model_promotion_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version,
+                reason: "registered holdout can support promotion".to_string(),
+            }),
+        )
+        .await
+        .expect("registered holdout can support promotion");
+        assert!(promotion.promoted);
+    }
+
+    #[tokio::test]
     async fn ranking_dataset_readiness_report_groups_holdout_evidence_by_calibration_dataset() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -50306,6 +50477,83 @@ mod tests {
         assert_eq!(target.current_min_label_source_count, 1);
         assert_eq!(target.current_confidence_threshold, 0.5);
         assert_eq!(target.current_max_average_absolute_error_micros, 100_000);
+    }
+
+    #[tokio::test]
+    async fn ranking_dataset_readiness_report_flags_required_calibration_dataset_registry() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let (candidate, _) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-readiness-holdout-v1")
+                .await;
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist calibration before registry gate");
+        assert!(calibration.promotable);
+
+        Arc::make_mut(&mut state).ranking_require_calibration_dataset_registry = true;
+        let Json(missing_report) = ranking_dataset_readiness_report_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+        )
+        .await
+        .expect("admin can inspect dataset readiness");
+        assert_eq!(
+            missing_report
+                .reason_code_counts
+                .get("calibration_dataset_not_registered"),
+            Some(&1)
+        );
+        let missing_target = missing_report.datasets[0]
+            .model_targets
+            .first()
+            .expect("target readiness row exists");
+        assert!(!missing_target.ready);
+        assert!(
+            missing_target
+                .reason_codes
+                .contains(&"calibration_dataset_not_registered".to_string())
+        );
+
+        let Json(_) = ranking_calibration_dataset_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingCalibrationDatasetRequest {
+                calibration_dataset_hash: candidate.calibration_dataset_hash,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version,
+                source_manifest_hash: "sha256:readiness-holdout-manifest".to_string(),
+                source_count: 10,
+                label_source_count: 1,
+                label_actor_count: 1,
+                status: StorageTraceRankingCalibrationDatasetStatus::Candidate,
+            }),
+        )
+        .await
+        .expect("admin can register the calibration holdout");
+
+        let Json(cleared_report) =
+            ranking_dataset_readiness_report_handler(State(state), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect cleared dataset readiness");
+        assert!(
+            !cleared_report
+                .reason_code_counts
+                .contains_key("calibration_dataset_not_registered")
+        );
+        assert!(cleared_report.datasets[0].model_targets[0].ready);
     }
 
     #[tokio::test]
@@ -54846,6 +55094,93 @@ mod tests {
         .await
         .expect("promotable calibration evidence allows target-scoped promotion");
         assert_eq!(active.model_status, StorageTraceRankingModelStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn active_ranking_model_risk_report_flags_required_calibration_dataset_registry() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let (candidate, _) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-risk-holdout-v1").await;
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist calibration before registry gate");
+        assert!(calibration.promotable);
+        let Json(active) = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "activate before holdout registry gate".to_string(),
+            }),
+        )
+        .await
+        .expect("model can activate before registry gate");
+        assert!(active.promoted);
+
+        Arc::make_mut(&mut state).ranking_require_calibration_dataset_registry = true;
+        let Json(missing_report) =
+            ranking_model_risk_report_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect active model risk");
+        assert_eq!(
+            missing_report
+                .risk_code_counts
+                .get("calibration_dataset_not_registered"),
+            Some(&1)
+        );
+        let missing_model = missing_report
+            .models
+            .iter()
+            .find(|model| model.model_version == active.model_version)
+            .expect("active model risk row exists");
+        assert!(
+            missing_model
+                .risk_codes
+                .contains(&"calibration_dataset_not_registered".to_string())
+        );
+
+        let Json(_) = ranking_calibration_dataset_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingCalibrationDatasetRequest {
+                calibration_dataset_hash: candidate.calibration_dataset_hash,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version,
+                source_manifest_hash: "sha256:risk-holdout-manifest".to_string(),
+                source_count: 10,
+                label_source_count: 1,
+                label_actor_count: 1,
+                status: StorageTraceRankingCalibrationDatasetStatus::Candidate,
+            }),
+        )
+        .await
+        .expect("admin can register the calibration holdout");
+
+        let Json(cleared_report) =
+            ranking_model_risk_report_handler(State(state), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect cleared active model risk");
+        assert!(
+            !cleared_report
+                .risk_code_counts
+                .contains_key("calibration_dataset_not_registered")
+        );
     }
 
     #[tokio::test]
