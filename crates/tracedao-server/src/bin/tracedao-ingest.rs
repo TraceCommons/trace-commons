@@ -27726,6 +27726,12 @@ fn append_ranking_calibration_dataset(
 const RANKING_CALIBRATION_DATASET_IMMUTABLE_MANIFEST_MESSAGE: &str =
     "ranking calibration dataset manifest is immutable for this target use and policy";
 
+#[derive(Debug)]
+struct RankingCalibrationDatasetReconciliationRead {
+    records: Vec<TraceRankingCalibrationDatasetRecord>,
+    manifest_conflict_keys: Vec<String>,
+}
+
 fn ensure_ranking_calibration_dataset_append_allowed(
     root: &Path,
     tenant_id: &str,
@@ -27758,14 +27764,30 @@ fn read_all_ranking_calibration_datasets(
     root: &Path,
     tenant_id: &str,
 ) -> anyhow::Result<Vec<TraceRankingCalibrationDatasetRecord>> {
+    let read = read_ranking_calibration_datasets_for_reconciliation(root, tenant_id)?;
+    anyhow::ensure!(
+        read.manifest_conflict_keys.is_empty(),
+        RANKING_CALIBRATION_DATASET_IMMUTABLE_MANIFEST_MESSAGE
+    );
+    Ok(read.records)
+}
+
+fn read_ranking_calibration_datasets_for_reconciliation(
+    root: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<RankingCalibrationDatasetReconciliationRead> {
     let path = ranking_calibration_datasets_path(root, tenant_id);
     if !path.exists() {
-        return Ok(Vec::new());
+        return Ok(RankingCalibrationDatasetReconciliationRead {
+            records: Vec::new(),
+            manifest_conflict_keys: Vec::new(),
+        });
     }
     let records: Vec<TraceRankingCalibrationDatasetRecord> =
         read_jsonl_records(&path, "ranking calibration dataset")?;
     let mut latest_by_key = BTreeMap::new();
     let mut manifest_by_key = BTreeMap::new();
+    let mut manifest_conflict_keys = BTreeSet::new();
     for record in records {
         ensure_ranking_calibration_dataset_tenant(&record, tenant_id)?;
         let key = (
@@ -27773,6 +27795,7 @@ fn read_all_ranking_calibration_datasets(
             record.target_use,
             record.policy_version.clone(),
         );
+        let key_string = ranking_calibration_dataset_file_key(&record)?;
         let manifest = (
             record.source_manifest_hash.clone(),
             record.source_count,
@@ -27780,10 +27803,9 @@ fn read_all_ranking_calibration_datasets(
             record.label_actor_count,
         );
         if let Some(existing_manifest) = manifest_by_key.get(&key) {
-            anyhow::ensure!(
-                existing_manifest == &manifest,
-                RANKING_CALIBRATION_DATASET_IMMUTABLE_MANIFEST_MESSAGE
-            );
+            if existing_manifest != &manifest {
+                manifest_conflict_keys.insert(key_string);
+            }
         } else {
             manifest_by_key.insert(key.clone(), manifest);
         }
@@ -27791,7 +27813,10 @@ fn read_all_ranking_calibration_datasets(
     }
     let mut records = latest_by_key.into_values().collect::<Vec<_>>();
     records.sort_by_key(|record| record.created_at);
-    Ok(records)
+    Ok(RankingCalibrationDatasetReconciliationRead {
+        records,
+        manifest_conflict_keys: manifest_conflict_keys.into_iter().collect(),
+    })
 }
 
 fn ensure_ranking_calibration_dataset_tenant(
@@ -30747,8 +30772,11 @@ async fn reconcile_db_mirror(
         read_all_benchmark_registry_outbox_items(&state.root, &tenant.tenant_id)?;
     let file_ranking_model_versions =
         read_all_ranking_model_versions(&state.root, &tenant.tenant_id)?;
-    let file_ranking_calibration_datasets =
-        read_all_ranking_calibration_datasets(&state.root, &tenant.tenant_id)?;
+    let file_ranking_calibration_dataset_read =
+        read_ranking_calibration_datasets_for_reconciliation(&state.root, &tenant.tenant_id)?;
+    let file_ranking_calibration_dataset_manifest_conflict_keys =
+        file_ranking_calibration_dataset_read.manifest_conflict_keys;
+    let file_ranking_calibration_datasets = file_ranking_calibration_dataset_read.records;
     let file_ranking_features = read_all_ranking_features(&state.root, &tenant.tenant_id)?;
     let file_ranking_predictions = read_all_ranking_predictions(&state.root, &tenant.tenant_id)?;
     let file_ranking_labels = read_all_ranking_labels(&state.root, &tenant.tenant_id)?;
@@ -31476,6 +31504,8 @@ async fn reconcile_db_mirror(
         missing_ranking_calibration_dataset_keys_in_db,
         missing_ranking_calibration_dataset_keys_in_files,
         ranking_calibration_dataset_status_mismatch_keys,
+        ranking_calibration_dataset_manifest_conflict_keys:
+            file_ranking_calibration_dataset_manifest_conflict_keys,
         file_ranking_feature_count: file_ranking_features.len(),
         db_ranking_feature_count: db_ranking_features.len(),
         missing_ranking_feature_ids_in_db,
@@ -33921,6 +33951,7 @@ struct TraceDbReconciliationReport {
     missing_ranking_calibration_dataset_keys_in_db: Vec<String>,
     missing_ranking_calibration_dataset_keys_in_files: Vec<String>,
     ranking_calibration_dataset_status_mismatch_keys: Vec<String>,
+    ranking_calibration_dataset_manifest_conflict_keys: Vec<String>,
     file_ranking_feature_count: usize,
     db_ranking_feature_count: usize,
     missing_ranking_feature_ids_in_db: Vec<Uuid>,
@@ -34130,6 +34161,12 @@ impl TraceDbReconciliationReport {
             &mut gaps,
             "ranking_calibration_dataset_status_mismatch_keys",
             self.ranking_calibration_dataset_status_mismatch_keys.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "ranking_calibration_dataset_manifest_conflict_keys",
+            self.ranking_calibration_dataset_manifest_conflict_keys
+                .len(),
         );
         push_gap_count(
             &mut gaps,
@@ -44384,6 +44421,37 @@ mod tests {
             },
         )
         .expect("file ranking model writes");
+        let calibration_dataset_path = ranking_calibration_datasets_path(temp.path(), "tenant-a");
+        let calibration_dataset = TraceRankingCalibrationDatasetRecord {
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            calibration_dataset_hash: "sha256:ranking-calibration-reconcile".to_string(),
+            target_use: TraceAllowedUse::RankingModelTraining,
+            policy_version: "trace-credit-policy-reconcile-v1".to_string(),
+            source_manifest_hash: "sha256:ranking-calibration-manifest-reconcile-v1".to_string(),
+            source_count: 32,
+            label_source_count: 2,
+            label_actor_count: 2,
+            status: StorageTraceRankingCalibrationDatasetStatus::Candidate,
+            actor_principal_ref: principal_storage_ref("admin-token-a"),
+            created_at: now,
+        };
+        let mut calibration_dataset_rewrite = calibration_dataset.clone();
+        calibration_dataset_rewrite.source_manifest_hash =
+            "sha256:ranking-calibration-manifest-reconcile-v2".to_string();
+        calibration_dataset_rewrite.status = StorageTraceRankingCalibrationDatasetStatus::Active;
+        append_jsonl_record(
+            &calibration_dataset_path,
+            &calibration_dataset,
+            "ranking calibration dataset",
+        )
+        .expect("legacy calibration dataset writes");
+        append_jsonl_record(
+            &calibration_dataset_path,
+            &calibration_dataset_rewrite,
+            "ranking calibration dataset",
+        )
+        .expect("legacy calibration dataset rewrite writes");
         append_ranking_feature(
             temp.path(),
             "tenant-a",
@@ -44574,6 +44642,22 @@ mod tests {
             serde_json::json!(["trace-ranker-reconcile-v1"])
         );
         assert_eq!(
+            reconciliation_json["file_ranking_calibration_dataset_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            reconciliation_json["missing_ranking_calibration_dataset_keys_in_db"],
+            serde_json::json!([
+                "sha256:ranking-calibration-reconcile:ranking_model_training:trace-credit-policy-reconcile-v1"
+            ])
+        );
+        assert_eq!(
+            reconciliation_json["ranking_calibration_dataset_manifest_conflict_keys"],
+            serde_json::json!([
+                "sha256:ranking-calibration-reconcile:ranking_model_training:trace-credit-policy-reconcile-v1"
+            ])
+        );
+        assert_eq!(
             reconciliation_json["missing_ranking_feature_ids_in_db"],
             serde_json::json!([feature_id])
         );
@@ -44599,6 +44683,8 @@ mod tests {
         );
         for expected_gap in [
             "missing_ranking_model_versions_in_db=1",
+            "missing_ranking_calibration_dataset_keys_in_db=1",
+            "ranking_calibration_dataset_manifest_conflict_keys=1",
             "missing_ranking_feature_ids_in_db=1",
             "missing_ranking_prediction_ids_in_db=1",
             "missing_ranking_label_ids_in_db=1",
@@ -50828,6 +50914,53 @@ mod tests {
         let error = read_all_ranking_calibration_datasets(temp.path(), tenant_id)
             .expect_err("reader rejects legacy calibration dataset manifest conflict");
         assert!(error.to_string().contains("immutable"));
+    }
+
+    #[tokio::test]
+    async fn ranking_calibration_dataset_reconciliation_reader_reports_legacy_manifest_conflicts() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let tenant_id = "tenant-a";
+        let path = ranking_calibration_datasets_path(temp.path(), tenant_id);
+        let initial = TraceRankingCalibrationDatasetRecord {
+            tenant_id: tenant_id.to_string(),
+            tenant_storage_ref: tenant_storage_ref(tenant_id),
+            calibration_dataset_hash: "sha256:ranking-calibration-reconcile-legacy-v1".to_string(),
+            target_use: TraceAllowedUse::RankingModelTraining,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            source_manifest_hash: "sha256:ranking-calibration-reconcile-legacy-manifest-v1"
+                .to_string(),
+            source_count: 128,
+            label_source_count: 3,
+            label_actor_count: 3,
+            status: StorageTraceRankingCalibrationDatasetStatus::Candidate,
+            actor_principal_ref: "principal_sha256:ranker-admin".to_string(),
+            created_at: Utc::now(),
+        };
+        let mut rewrite = initial.clone();
+        rewrite.source_manifest_hash =
+            "sha256:ranking-calibration-reconcile-legacy-manifest-v2".to_string();
+        rewrite.status = StorageTraceRankingCalibrationDatasetStatus::Active;
+        rewrite.created_at = Utc::now();
+
+        append_jsonl_record(&path, &initial, "ranking calibration dataset")
+            .expect("legacy initial row written");
+        append_jsonl_record(&path, &rewrite, "ranking calibration dataset")
+            .expect("legacy rewritten row written");
+
+        let read = read_ranking_calibration_datasets_for_reconciliation(temp.path(), tenant_id)
+            .expect("reconciliation reader reports instead of rejecting manifest conflicts");
+        assert_eq!(read.records.len(), 1);
+        assert_eq!(
+            read.records[0].source_manifest_hash,
+            rewrite.source_manifest_hash
+        );
+        assert_eq!(
+            read.manifest_conflict_keys,
+            vec![
+                "sha256:ranking-calibration-reconcile-legacy-v1:ranking_model_training:trace-credit-policy-v1"
+                    .to_string()
+            ]
+        );
     }
 
     async fn seed_pairwise_ranking_prediction_source(

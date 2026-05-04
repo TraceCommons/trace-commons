@@ -203,8 +203,9 @@ dataset registry rows, feature/prediction/label evidence, calibration runs, and
 worker-run rows into the DB. Maintenance reconciliation compares ranking model
 versions, calibration dataset registry rows, feature/prediction/label evidence,
 calibration report hashes, and worker-run lifecycle rows across file and DB
-storage, feeding any missing or drifted rows into `blocking_gaps` before DB
-reviewer reads or credit-bearing ranking paths are promoted.
+storage, and it reports legacy calibration-registry manifest conflicts as
+`ranking_calibration_dataset_manifest_conflict_keys` blockers before DB reviewer
+reads or credit-bearing ranking paths are promoted.
 `TRACE_COMMONS_DB_REVIEWER_READS=true` serves admin ranking lists, calibration
 reports, model-risk reports, credit-readiness reports, calibration-run history,
 and worker-run history from the tenant-scoped DB mirror.
