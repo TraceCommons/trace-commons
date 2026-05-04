@@ -589,6 +589,10 @@ label source writes multiple labels for the same submission and target use, the
 latest `(submission_id, label_source)` row replaces older rows for joined
 evidence, aggregate error, label-source diversity, and promotion thresholds.
 Different label sources on the same submission still count as distinct evidence.
+However, when `TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT` requires multiple
+joined sources, those sources must also be written by at least that many distinct
+actor principals; otherwise the run records
+`insufficient_label_actor_diversity` and remains non-promotable.
 
 Process-evaluation-derived ranking labels are intended as auxiliary evaluator
 evidence, not direct credit authority. They participate in the same calibration,
