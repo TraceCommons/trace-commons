@@ -122,6 +122,10 @@ feature hashes, model predictions, lab/reviewer/evaluator labels, and calibratio
 runs that record aggregate error, confidence, threshold policy, per-source
 quality gates, joined-evidence hashes, reason codes, and a hash-only report
 digest.
+For an existing `(calibration_dataset_hash, target_use, policy_version)` holdout
+key, lifecycle status updates must keep the source manifest hash and count
+metadata unchanged; changing those manifest fields requires a new dataset hash
+or policy version.
 Prediction writes must name a registered active or candidate model, match its
 policy and feature schema, and reference an existing feature vector hash for the
 same source. Calibration treats repeated labels from the same source on the same
