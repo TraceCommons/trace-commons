@@ -7165,7 +7165,18 @@ struct TraceRankingCalibrationRunRecord {
     created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
+struct TraceProcessEvaluationRankingLabelRequest {
+    target_use: TraceAllowedUse,
+    #[serde(default = "default_process_evaluation_ranking_label_source")]
+    label_source: StorageTraceRankingLabelSource,
+    utility_category: StorageTraceRankingUtilityCategory,
+    label_outcome: StorageTraceRankingLabelOutcome,
+    utility_delta_micros: i64,
+    external_ref: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct TraceProcessEvaluationJobRequest {
     submission_id: Uuid,
     process_evaluation: ProcessEvaluationLabels,
@@ -7174,6 +7185,8 @@ struct TraceProcessEvaluationJobRequest {
     utility_credit_points_delta: Option<f32>,
     #[serde(default)]
     utility_external_ref: Option<String>,
+    #[serde(default)]
+    ranking_label: Option<TraceProcessEvaluationRankingLabelRequest>,
 }
 
 #[derive(Debug, Serialize)]
@@ -7190,6 +7203,12 @@ struct TraceProcessEvaluationJobResponse {
     output_object_ref_id: Option<Uuid>,
     utility_credit_appended_count: usize,
     utility_credit_skipped_existing_count: usize,
+    ranking_label_appended_count: usize,
+    ranking_label_skipped_existing_count: usize,
+}
+
+fn default_process_evaluation_ranking_label_source() -> StorageTraceRankingLabelSource {
+    StorageTraceRankingLabelSource::System
 }
 
 async fn append_credit_event_handler(
@@ -15106,6 +15125,41 @@ async fn process_evaluation_worker_handler(
             "trace process evaluation source is not allowed by tenant policy",
         ));
     }
+    let ranking_label_request = body.ranking_label.clone();
+    let ranking_label_plan = if let Some(ranking_label) = ranking_label_request.as_ref() {
+        if ranking_label.label_source != StorageTraceRankingLabelSource::System {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "process evaluation ranking labels must use system label_source",
+            ));
+        }
+        if !record_matches_export_policy_abac(
+            &record,
+            &tenant,
+            tenant_policy.as_ref(),
+            ranking_label.target_use,
+        ) {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "trace process evaluation ranking label source is not allowed for this target use",
+            ));
+        }
+        let external_ref =
+            validate_process_evaluation_ranking_label_external_ref(&ranking_label.external_ref)?;
+        Some(
+            prepare_process_evaluation_ranking_label(
+                state.as_ref(),
+                &tenant,
+                &record,
+                &body.process_evaluation,
+                ranking_label,
+                &external_ref,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
 
     let TraceEnvelopeBodyRead {
         envelope: mut envelope_before,
@@ -15192,6 +15246,20 @@ async fn process_evaluation_worker_handler(
         } else {
             AutomaticUtilityCreditAppendCounts::default()
         };
+    let ranking_label_counts = if let (Some(ranking_label), Some(plan)) =
+        (ranking_label_request.as_ref(), ranking_label_plan.as_ref())
+    {
+        append_process_evaluation_ranking_label_once(
+            state.as_ref(),
+            &tenant,
+            &record,
+            ranking_label,
+            plan,
+        )
+        .await?
+    } else {
+        ProcessEvaluationRankingLabelAppendCounts::default()
+    };
 
     Ok(Json(TraceProcessEvaluationJobResponse {
         tenant_id: tenant.tenant_id.clone(),
@@ -15204,7 +15272,160 @@ async fn process_evaluation_worker_handler(
         output_object_ref_id,
         utility_credit_appended_count: utility_credit_counts.appended,
         utility_credit_skipped_existing_count: utility_credit_counts.skipped_existing,
+        ranking_label_appended_count: ranking_label_counts.appended,
+        ranking_label_skipped_existing_count: ranking_label_counts.skipped_existing,
     }))
+}
+
+#[derive(Default)]
+struct ProcessEvaluationRankingLabelAppendCounts {
+    appended: usize,
+    skipped_existing: usize,
+}
+
+struct ProcessEvaluationRankingLabelPlan {
+    evidence_hash: String,
+    external_ref_hash: String,
+    skipped_existing: bool,
+}
+
+fn validate_process_evaluation_ranking_label_external_ref(value: &str) -> ApiResult<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "process evaluation ranking label requires a non-empty external_ref",
+        ));
+    }
+    if value.len() > 1024 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "process evaluation ranking label external_ref is too long",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+async fn prepare_process_evaluation_ranking_label(
+    state: &AppState,
+    tenant: &TenantAuth,
+    record: &TraceCommonsSubmissionRecord,
+    process_evaluation: &ProcessEvaluationLabels,
+    request: &TraceProcessEvaluationRankingLabelRequest,
+    external_ref: &str,
+) -> ApiResult<ProcessEvaluationRankingLabelPlan> {
+    let evidence_hash = process_evaluation_ranking_label_evidence_hash(process_evaluation, request);
+    let external_ref_hash = sha256_prefixed(external_ref);
+    let existing_labels = read_ranking_labels_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    if let Some(existing) = existing_labels.iter().find(|label| {
+        label.submission_id == record.submission_id
+            && label.target_use == request.target_use
+            && label.label_source == request.label_source
+            && label.utility_category == request.utility_category
+            && label.external_ref_hash == external_ref_hash
+    }) {
+        if existing.label_outcome == request.label_outcome
+            && existing.utility_delta_micros == request.utility_delta_micros
+            && existing.evidence_hash == evidence_hash
+        {
+            return Ok(ProcessEvaluationRankingLabelPlan {
+                evidence_hash,
+                external_ref_hash,
+                skipped_existing: true,
+            });
+        }
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "process evaluation ranking label external_ref already exists with different evidence",
+        ));
+    }
+    Ok(ProcessEvaluationRankingLabelPlan {
+        evidence_hash,
+        external_ref_hash,
+        skipped_existing: false,
+    })
+}
+
+async fn append_process_evaluation_ranking_label_once(
+    state: &AppState,
+    tenant: &TenantAuth,
+    record: &TraceCommonsSubmissionRecord,
+    request: &TraceProcessEvaluationRankingLabelRequest,
+    plan: &ProcessEvaluationRankingLabelPlan,
+) -> ApiResult<ProcessEvaluationRankingLabelAppendCounts> {
+    if plan.skipped_existing {
+        return Ok(ProcessEvaluationRankingLabelAppendCounts {
+            appended: 0,
+            skipped_existing: 1,
+        });
+    }
+
+    append_ranking_label_with_db_mirror(
+        state,
+        tenant,
+        &TraceRankingLabelRecord {
+            ranking_label_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            submission_id: record.submission_id,
+            trace_id: record.trace_id,
+            target_use: request.target_use,
+            label_source: request.label_source,
+            utility_category: request.utility_category,
+            label_outcome: request.label_outcome,
+            utility_delta_micros: request.utility_delta_micros,
+            evidence_hash: plan.evidence_hash.clone(),
+            external_ref_hash: plan.external_ref_hash.clone(),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            created_at: Utc::now(),
+        },
+    )
+    .await
+    .map_err(internal_error)?;
+
+    Ok(ProcessEvaluationRankingLabelAppendCounts {
+        appended: 1,
+        skipped_existing: 0,
+    })
+}
+
+fn process_evaluation_ranking_label_evidence_hash(
+    process_evaluation: &ProcessEvaluationLabels,
+    request: &TraceProcessEvaluationRankingLabelRequest,
+) -> String {
+    let mut labels = process_evaluation
+        .labels
+        .iter()
+        .map(serde_enum_tag)
+        .collect::<Vec<_>>();
+    labels.sort();
+    let payload = format!(
+        "process_evaluation_ranking_label:v1\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}",
+        process_evaluation
+            .evaluator_name
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default(),
+        process_evaluation.evaluator_version.trim(),
+        labels.join(","),
+        serde_enum_tag(&request.target_use),
+        serde_enum_tag(&request.label_source),
+        serde_enum_tag(&request.utility_category),
+        serde_enum_tag(&request.label_outcome),
+        request.utility_delta_micros,
+        process_evaluation
+            .overall_score
+            .map(|score| format!("{score:.6}"))
+            .unwrap_or_default(),
+        process_evaluation.tool_selection,
+        process_evaluation.tool_argument_quality,
+        process_evaluation.tool_ordering,
+        process_evaluation.verification,
+        process_evaluation.side_effect_safety,
+    );
+    sha256_prefixed(&payload)
 }
 
 fn process_evaluation_audit_metadata(
@@ -38336,6 +38557,7 @@ mod tests {
                 reason: "missing evaluator version".to_string(),
                 utility_credit_points_delta: None,
                 utility_external_ref: None,
+                ranking_label: None,
             }),
         )
         .await
@@ -38354,6 +38576,7 @@ mod tests {
                 reason: "utility credit missing ref".to_string(),
                 utility_credit_points_delta: Some(0.4),
                 utility_external_ref: Some(" ".to_string()),
+                ranking_label: None,
             }),
         )
         .await
@@ -38380,6 +38603,7 @@ mod tests {
                 reason: "offline trajectory evaluator".to_string(),
                 utility_credit_points_delta: Some(0.85),
                 utility_external_ref: Some("process-eval:nightly-42".to_string()),
+                ranking_label: None,
             }),
         )
         .await
@@ -38410,6 +38634,7 @@ mod tests {
                 reason: "offline trajectory evaluator".to_string(),
                 utility_credit_points_delta: Some(0.85),
                 utility_external_ref: Some("process-eval:nightly-42".to_string()),
+                ranking_label: None,
             }),
         )
         .await
@@ -38511,6 +38736,254 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_evaluation_worker_can_emit_idempotent_ranking_label() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![
+            ConsentScope::DebuggingEvaluation,
+            ConsentScope::RankingTraining,
+        ];
+        envelope.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        envelope.trace_card.allowed_uses = vec![
+            TraceAllowedUse::Evaluation,
+            TraceAllowedUse::RankingModelTraining,
+        ];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("accepted submission succeeds");
+
+        let request = TraceProcessEvaluationJobRequest {
+            submission_id,
+            process_evaluation: ProcessEvaluationLabels {
+                evaluator_name: Some("trajectory-judge".to_string()),
+                evaluator_version: "judge-v2".to_string(),
+                labels: vec![tracedao_protocol::trace_contribution::ProcessEvaluatorLabel::ProperVerification],
+                verification: Some(ProcessEvalRating::Pass),
+                overall_score: Some(0.93),
+                ..ProcessEvaluationLabels::default()
+            },
+            reason: "ranker evaluator label".to_string(),
+            utility_credit_points_delta: None,
+            utility_external_ref: None,
+            ranking_label: Some(TraceProcessEvaluationRankingLabelRequest {
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::System,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 930_000,
+                external_ref: "process-eval:ranking-label-nightly-7".to_string(),
+            }),
+        };
+
+        let Json(response) = process_evaluation_worker_handler(
+            State(state.clone()),
+            auth_headers("process-eval-worker-token-a"),
+            Json(request.clone()),
+        )
+        .await
+        .expect("process evaluation can emit a ranking label");
+        assert_eq!(response.ranking_label_appended_count, 1);
+        assert_eq!(response.ranking_label_skipped_existing_count, 0);
+
+        let Json(retry_response) = process_evaluation_worker_handler(
+            State(state.clone()),
+            auth_headers("process-eval-worker-token-a"),
+            Json(request.clone()),
+        )
+        .await
+        .expect("process evaluation ranking labels are idempotent by external ref");
+        assert_eq!(retry_response.ranking_label_appended_count, 0);
+        assert_eq!(retry_response.ranking_label_skipped_existing_count, 1);
+
+        let mut conflicting_request = request;
+        conflicting_request.process_evaluation.overall_score = Some(0.12);
+        conflicting_request
+            .ranking_label
+            .as_mut()
+            .expect("ranking label request")
+            .label_outcome = StorageTraceRankingLabelOutcome::Disputed;
+        let conflict = process_evaluation_worker_handler(
+            State(state.clone()),
+            auth_headers("process-eval-worker-token-a"),
+            Json(conflicting_request),
+        )
+        .await
+        .expect_err("same external ref cannot rewrite ranking label evidence");
+        assert_eq!(conflict.0, StatusCode::CONFLICT);
+
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let stored = read_envelope_by_record(state.as_ref(), &record).expect("envelope reads");
+        assert_eq!(
+            stored
+                .process_evaluation
+                .as_ref()
+                .and_then(|labels| labels.overall_score),
+            Some(0.93)
+        );
+
+        let labels = read_all_ranking_labels(temp.path(), "tenant-a").expect("ranking labels read");
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].submission_id, submission_id);
+        assert_eq!(labels[0].target_use, TraceAllowedUse::RankingModelTraining);
+        assert_eq!(
+            labels[0].label_source,
+            StorageTraceRankingLabelSource::System
+        );
+        assert_eq!(
+            labels[0].utility_category,
+            StorageTraceRankingUtilityCategory::RankingTraining
+        );
+        assert_eq!(
+            labels[0].label_outcome,
+            StorageTraceRankingLabelOutcome::Useful
+        );
+        assert_eq!(labels[0].utility_delta_micros, 930_000);
+        assert!(labels[0].evidence_hash.starts_with("sha256:"));
+        assert_ne!(labels[0].evidence_hash, sha256_prefixed(""));
+        assert!(
+            !serde_json::to_string(&labels)
+                .expect("labels serialize")
+                .contains("process-eval:ranking-label-nightly-7")
+        );
+    }
+
+    #[tokio::test]
+    async fn process_evaluation_worker_rejects_non_system_ranking_label_source_before_body_read() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![
+            ConsentScope::DebuggingEvaluation,
+            ConsentScope::RankingTraining,
+        ];
+        envelope.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        envelope.trace_card.allowed_uses = vec![
+            TraceAllowedUse::Evaluation,
+            TraceAllowedUse::RankingModelTraining,
+        ];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("accepted submission succeeds");
+
+        let error = process_evaluation_worker_handler(
+            State(state.clone()),
+            auth_headers("process-eval-worker-token-a"),
+            Json(TraceProcessEvaluationJobRequest {
+                submission_id,
+                process_evaluation: ProcessEvaluationLabels {
+                    evaluator_version: "judge-v2".to_string(),
+                    overall_score: Some(0.93),
+                    ..ProcessEvaluationLabels::default()
+                },
+                reason: "ranker evaluator source denied".to_string(),
+                utility_credit_points_delta: None,
+                utility_external_ref: None,
+                ranking_label: Some(TraceProcessEvaluationRankingLabelRequest {
+                    target_use: TraceAllowedUse::RankingModelTraining,
+                    label_source: StorageTraceRankingLabelSource::FrontierLab,
+                    utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                    label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                    utility_delta_micros: 930_000,
+                    external_ref: "process-eval:ranking-label-source-denied".to_string(),
+                }),
+            }),
+        )
+        .await
+        .expect_err("process evaluation cannot claim external label sources");
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let stored = read_envelope_by_record(state.as_ref(), &record).expect("envelope reads");
+        assert!(stored.process_evaluation.is_none());
+        let labels = read_all_ranking_labels(temp.path(), "tenant-a").expect("labels read");
+        assert!(labels.is_empty());
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        assert!(audit_events.iter().all(|event| {
+            event.submission_id != submission_id
+                || (event.kind != "trace_content_read" && event.kind != "process_evaluation")
+        }));
+    }
+
+    #[tokio::test]
+    async fn process_evaluation_worker_rejects_disallowed_ranking_label_before_body_read() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::DebuggingEvaluation];
+        envelope.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::Evaluation];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("evaluation-only submission succeeds");
+
+        let error = process_evaluation_worker_handler(
+            State(state.clone()),
+            auth_headers("process-eval-worker-token-a"),
+            Json(TraceProcessEvaluationJobRequest {
+                submission_id,
+                process_evaluation: ProcessEvaluationLabels {
+                    evaluator_version: "judge-v2".to_string(),
+                    overall_score: Some(0.93),
+                    ..ProcessEvaluationLabels::default()
+                },
+                reason: "ranker evaluator label denied".to_string(),
+                utility_credit_points_delta: None,
+                utility_external_ref: None,
+                ranking_label: Some(TraceProcessEvaluationRankingLabelRequest {
+                    target_use: TraceAllowedUse::RankingModelTraining,
+                    label_source: StorageTraceRankingLabelSource::System,
+                    utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                    label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                    utility_delta_micros: 930_000,
+                    external_ref: "process-eval:ranking-label-denied".to_string(),
+                }),
+            }),
+        )
+        .await
+        .expect_err("ranking label target use must be allowed before body read");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let stored = read_envelope_by_record(state.as_ref(), &record).expect("envelope reads");
+        assert!(stored.process_evaluation.is_none());
+        let labels = read_all_ranking_labels(temp.path(), "tenant-a").expect("labels read");
+        assert!(labels.is_empty());
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        assert!(audit_events.iter().all(|event| {
+            event.submission_id != submission_id
+                || (event.kind != "trace_content_read" && event.kind != "process_evaluation")
+        }));
+    }
+
+    #[tokio::test]
     async fn process_evaluation_worker_rejects_policy_disallowed_sources_before_body_read() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut policies = BTreeMap::new();
@@ -38554,6 +39027,7 @@ mod tests {
                 reason: "policy-disallowed process evaluation".to_string(),
                 utility_credit_points_delta: Some(0.5),
                 utility_external_ref: Some("process-eval:policy-denied".to_string()),
+                ranking_label: None,
             }),
         )
         .await
@@ -38619,6 +39093,7 @@ mod tests {
                 reason: "policy-allowed process evaluation".to_string(),
                 utility_credit_points_delta: None,
                 utility_external_ref: None,
+                ranking_label: None,
             }),
         )
         .await
@@ -54104,6 +54579,7 @@ mod tests {
                 reason: "signed claim process evaluation allowed".to_string(),
                 utility_credit_points_delta: None,
                 utility_external_ref: None,
+                ranking_label: None,
             }),
         )
         .await
@@ -54123,6 +54599,7 @@ mod tests {
                 reason: "signed claim process evaluation denied".to_string(),
                 utility_credit_points_delta: None,
                 utility_external_ref: None,
+                ranking_label: None,
             }),
         )
         .await
