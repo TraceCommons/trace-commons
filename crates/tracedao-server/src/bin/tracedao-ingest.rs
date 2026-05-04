@@ -12573,7 +12573,7 @@ async fn ranking_label_handler(
     Json(body): Json<TraceRankingLabelRequest>,
 ) -> ApiResult<Json<TraceRankingLabelRecord>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_utility_operator(&tenant)?;
+    require_ranking_label_source_operator(&tenant, body.label_source)?;
     let submission = read_ranking_source_submission(
         state.as_ref(),
         &tenant,
@@ -12635,7 +12635,7 @@ async fn ranking_preference_label_handler(
     Json(body): Json<TraceRankingPreferenceLabelRequest>,
 ) -> ApiResult<Json<TraceRankingPreferenceLabelRecord>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_utility_operator(&tenant)?;
+    require_ranking_label_source_operator(&tenant, body.label_source)?;
     if body.preferred_submission_id == body.rejected_submission_id {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
@@ -22279,6 +22279,37 @@ fn require_utility_operator(auth: &TenantAuth) -> ApiResult<()> {
         Err(api_error(
             StatusCode::FORBIDDEN,
             "reviewer, admin, or utility worker token required",
+        ))
+    }
+}
+
+fn require_ranking_label_source_operator(
+    auth: &TenantAuth,
+    label_source: StorageTraceRankingLabelSource,
+) -> ApiResult<()> {
+    if auth.role.can_admin()
+        || matches!(
+            (auth.role, label_source),
+            (
+                TokenRole::UtilityWorker,
+                StorageTraceRankingLabelSource::FrontierLab
+            ) | (
+                TokenRole::Reviewer,
+                StorageTraceRankingLabelSource::Reviewer
+            ) | (
+                TokenRole::BenchmarkWorker,
+                StorageTraceRankingLabelSource::Benchmark
+            ) | (
+                TokenRole::ProcessEvalWorker,
+                StorageTraceRankingLabelSource::System
+            )
+        )
+    {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::FORBIDDEN,
+            "ranking label_source is not allowed for this token role",
         ))
     }
 }
@@ -52812,6 +52843,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ranking_label_sources_require_matching_authority_role() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut preferred = sample_envelope().await;
+        make_metadata_only_low_risk(&mut preferred);
+        preferred.consent.scopes = vec![ConsentScope::RankingTraining];
+        preferred.trace_card.consent_scope = ConsentScope::RankingTraining;
+        preferred.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let preferred_submission_id = preferred.submission_id;
+        let mut rejected = sample_envelope().await;
+        make_metadata_only_low_risk(&mut rejected);
+        rejected.consent.scopes = vec![ConsentScope::RankingTraining];
+        rejected.trace_card.consent_scope = ConsentScope::RankingTraining;
+        rejected.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let rejected_submission_id = rejected.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(preferred),
+        )
+        .await
+        .expect("preferred ranking source submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(rejected),
+        )
+        .await
+        .expect("rejected ranking source submission succeeds");
+
+        let label_error = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: preferred_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_000_000,
+                evidence_hash: "sha256:reviewer-spoofed-label-source".to_string(),
+                external_ref: "reviewer-private-spoofed-label-source".to_string(),
+            }),
+        )
+        .await
+        .expect_err("utility worker cannot self-declare reviewer ranking label authority");
+        assert_eq!(label_error.0, StatusCode::FORBIDDEN);
+
+        let preference_error = ranking_preference_label_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id,
+                rejected_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 850_000,
+                evidence_hash: "sha256:reviewer-spoofed-preference-source".to_string(),
+                external_ref: "reviewer-private-spoofed-preference-source".to_string(),
+            }),
+        )
+        .await
+        .expect_err("utility worker cannot self-declare reviewer preference authority");
+        assert_eq!(preference_error.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn ranker_training_pairs_include_explicit_preference_labels_before_score_heuristics() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -53004,7 +53104,7 @@ mod tests {
         .expect("utility worker can write correct preference label");
         let _ = ranking_preference_label_handler(
             State(state.clone()),
-            auth_headers("utility-worker-token-a"),
+            auth_headers("review-token-a"),
             Json(TraceRankingPreferenceLabelRequest {
                 preferred_submission_id: third_submission_id,
                 rejected_submission_id: first_submission_id,
@@ -53017,7 +53117,7 @@ mod tests {
             }),
         )
         .await
-        .expect("utility worker can write reversed preference label");
+        .expect("reviewer can write reversed preference label");
 
         let Json(report) =
             ranking_pairwise_evaluation_report_handler(State(state), auth_headers("admin-token-a"))
@@ -54196,7 +54296,7 @@ mod tests {
         ] {
             let Json(_) = ranking_label_handler(
                 State(state.clone()),
-                auth_headers("utility-worker-token-a"),
+                auth_headers("admin-token-a"),
                 Json(TraceRankingLabelRequest {
                     submission_id,
                     target_use: TraceAllowedUse::ModelTraining,
@@ -54209,7 +54309,7 @@ mod tests {
                 }),
             )
             .await
-            .expect("utility worker can write ranking label");
+            .expect("admin can write ranking label for source-diversity review");
         }
 
         let Json(run) = ranking_calibration_run_handler(
@@ -54717,7 +54817,7 @@ mod tests {
         .expect("utility worker can write post-calibration prediction");
         let Json(_) = ranking_label_handler(
             State(state.clone()),
-            auth_headers("utility-worker-token-a"),
+            auth_headers("review-token-a"),
             Json(TraceRankingLabelRequest {
                 submission_id: drift_submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
@@ -54730,7 +54830,7 @@ mod tests {
             }),
         )
         .await
-        .expect("utility worker can write post-calibration label");
+        .expect("reviewer can write post-calibration label");
 
         let Json(report) =
             ranking_model_risk_report_handler(State(state.clone()), auth_headers("admin-token-a"))
@@ -54965,7 +55065,7 @@ mod tests {
         .await;
         let _ = ranking_preference_label_handler(
             State(state.clone()),
-            auth_headers("utility-worker-token-a"),
+            auth_headers("review-token-a"),
             Json(TraceRankingPreferenceLabelRequest {
                 preferred_submission_id: calibrated_prediction.submission_id,
                 rejected_submission_id: higher_scored.submission_id,
@@ -54978,7 +55078,7 @@ mod tests {
             }),
         )
         .await
-        .expect("utility worker can write pairwise risk preference label");
+        .expect("reviewer can write pairwise risk preference label");
 
         let Json(report) =
             ranking_model_risk_report_handler(State(state.clone()), auth_headers("admin-token-a"))
@@ -55060,7 +55160,7 @@ mod tests {
 
         let _ = ranking_preference_label_handler(
             State(state.clone()),
-            auth_headers("utility-worker-token-a"),
+            auth_headers("review-token-a"),
             Json(TraceRankingPreferenceLabelRequest {
                 preferred_submission_id: calibrated_prediction.submission_id,
                 rejected_submission_id: higher_scored.submission_id,
@@ -55073,7 +55173,7 @@ mod tests {
             }),
         )
         .await
-        .expect("utility worker can write reversed pairwise policy label");
+        .expect("reviewer can write reversed pairwise policy label");
         let _ = ranking_preference_label_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
@@ -55178,7 +55278,7 @@ mod tests {
         .await;
         let _ = ranking_preference_label_handler(
             State(state.clone()),
-            auth_headers("utility-worker-token-a"),
+            auth_headers("review-token-a"),
             Json(TraceRankingPreferenceLabelRequest {
                 preferred_submission_id: calibrated_prediction.submission_id,
                 rejected_submission_id: lower_scored.submission_id,
@@ -55191,7 +55291,7 @@ mod tests {
             }),
         )
         .await
-        .expect("utility worker can write pairwise floor preference label");
+        .expect("reviewer can write pairwise floor preference label");
 
         let Json(report) =
             ranking_model_risk_report_handler(State(state.clone()), auth_headers("admin-token-a"))

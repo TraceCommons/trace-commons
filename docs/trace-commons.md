@@ -600,7 +600,11 @@ joined evidence, aggregate error, label-source diversity, and promotion
 thresholds. A latest `disputed` label removes that source from joined
 calibration evidence until a newer non-disputed label arrives, so challenge
 labels cannot keep a model promotable by carrying the older score forward.
-Different label sources on the same submission still count as distinct evidence.
+Different label sources on the same submission still count as distinct evidence,
+but the write path binds each label-source enum to an authority role: utility
+workers may write `frontier_lab`, reviewer/admin tokens may write `reviewer`,
+benchmark workers may write `benchmark`, process-evaluation workers may write
+`system`, and admins may override for controlled repairs.
 However, when `TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT` requires multiple
 joined sources, those sources must also be written by at least that many distinct
 actor principals; otherwise the run records
