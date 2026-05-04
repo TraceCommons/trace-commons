@@ -14267,13 +14267,14 @@ fn ranking_calibration_report(
         );
     }
 
+    let effective_labels = ranking_calibration_effective_labels(labels.iter());
     let mut joined_count = 0usize;
     let mut predicted_sum = 0i128;
     let mut label_sum = 0i128;
     let mut abs_error_sum = 0i128;
     let mut joined_label_sources = BTreeSet::new();
     let mut label_source_abs_error_sums = BTreeMap::new();
-    for label in labels {
+    for label in &effective_labels {
         let Some(predicted) =
             latest_prediction_by_submission_use.get(&(label.submission_id, label.target_use))
         else {
@@ -14300,7 +14301,7 @@ fn ranking_calibration_report(
         model_version_count,
         feature_count,
         prediction_count: predictions.len(),
-        label_count: labels.len(),
+        label_count: effective_labels.len(),
         joined_label_prediction_count: joined_count,
         joined_label_source_count: joined_label_sources.len(),
         average_predicted_utility_micros: average_i128(predicted_sum, joined_count),
@@ -15543,7 +15544,7 @@ fn ranking_calibration_effective_labels<'a>(
 ) -> Vec<&'a TraceRankingLabelRecord> {
     let mut latest_by_submission_source = BTreeMap::new();
     for label in labels {
-        let key = (label.submission_id, label.label_source);
+        let key = (label.submission_id, label.target_use, label.label_source);
         let should_replace = latest_by_submission_source.get(&key).is_none_or(
             |current: &&TraceRankingLabelRecord| {
                 (label.created_at, label.ranking_label_id)
@@ -15565,6 +15566,7 @@ fn ranking_calibration_effective_labels<'a>(
             label.ranking_label_id,
         )
     });
+    labels.retain(|label| label.label_outcome != StorageTraceRankingLabelOutcome::Disputed);
     labels
 }
 
@@ -53682,6 +53684,140 @@ mod tests {
         assert_eq!(run.average_label_utility_delta_micros, Some(1_000_000));
         assert!(!run.promotable);
         assert_eq!(run.reason_codes, vec!["insufficient_labels".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn ranking_calibration_run_excludes_latest_disputed_labels_from_joined_evidence() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(model) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-disputed-labels-v1".to_string(),
+                feature_schema_version: "ranking-features-disputed-labels-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:training-set-disputed-labels".to_string(),
+                calibration_dataset_hash: "sha256:calibration-set-disputed-labels".to_string(),
+                model_artifact_hash: "sha256:model-artifact-disputed-labels".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can register ranking model version");
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                feature_schema_version: model.feature_schema_version.clone(),
+                feature_vector_hash: "sha256:feature-vector-disputed-labels".to_string(),
+                feature_names_hash: "sha256:feature-names-disputed-labels".to_string(),
+                source_feature_hash: "sha256:redacted-summary-features-disputed-labels".to_string(),
+                duplicate_score: Some(0.05),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.88),
+                coverage_tags: vec!["tool:terminal".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking feature record");
+        let Json(_) = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                model_version: model.model_version.clone(),
+                feature_schema_version: model.feature_schema_version.clone(),
+                prediction_policy_version: model.policy_version.clone(),
+                feature_vector_hash: feature.feature_vector_hash,
+                predicted_utility_micros: 1_000_000,
+                uncertainty_micros: 100_000,
+                confidence: 0.9,
+                risk_penalty_micros: 0,
+                novelty_bonus_micros: 0,
+                explanation_codes: vec!["disputed_probe".to_string()],
+            }),
+        )
+        .await
+        .expect("utility worker can write ranking prediction");
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_000_000,
+                evidence_hash: "sha256:frontier-lab-evidence-disputed-labels-a".to_string(),
+                external_ref: "private-frontier-lab-disputed-labels-a".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write initial ranking label");
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Disputed,
+                utility_delta_micros: 1_000_000,
+                evidence_hash: "sha256:frontier-lab-evidence-disputed-labels-b".to_string(),
+                external_ref: "private-frontier-lab-disputed-labels-b".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write same-source dispute label");
+
+        let Json(run) = ranking_calibration_run_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: model.model_version,
+                target_use: TraceAllowedUse::ModelTraining,
+                policy_version: model.policy_version,
+                evaluation_dataset_hash: model.calibration_dataset_hash,
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(500_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist calibration run");
+        assert_eq!(run.label_count, 0);
+        assert_eq!(run.joined_label_prediction_count, 0);
+        assert!(!run.promotable);
+        assert_eq!(
+            run.reason_codes,
+            vec![
+                "average_error_above_threshold",
+                "insufficient_label_source_diversity",
+                "insufficient_labels"
+            ]
+        );
     }
 
     #[tokio::test]

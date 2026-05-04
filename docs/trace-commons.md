@@ -595,8 +595,11 @@ notes, raw lab refs, or source ids.
 
 Calibration sample counts use effective labels, not raw label rows. If the same
 label source writes multiple labels for the same submission and target use, the
-latest `(submission_id, label_source)` row replaces older rows for joined
-evidence, aggregate error, label-source diversity, and promotion thresholds.
+latest `(submission_id, target_use, label_source)` row replaces older rows for
+joined evidence, aggregate error, label-source diversity, and promotion
+thresholds. A latest `disputed` label removes that source from joined
+calibration evidence until a newer non-disputed label arrives, so challenge
+labels cannot keep a model promotable by carrying the older score forward.
 Different label sources on the same submission still count as distinct evidence.
 However, when `TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT` requires multiple
 joined sources, those sources must also be written by at least that many distinct
