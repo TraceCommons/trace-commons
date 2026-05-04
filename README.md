@@ -32,12 +32,13 @@ labels, calibration reports, persisted model-promotion calibration runs, and
 PostgreSQL-backed ranking evidence reads/writes behind the same DB mirror
 cutover gates.
 Benchmark publication now has the same server-side control-plane shape:
-passed benchmark artifacts enqueue hash-only registry outbox rows, workers can
-submit those rows to a configured external registry adapter, mark external
-submit/confirm/fail status with receipt refs and hashed errors, operators can
-inspect the outbox through the admin API, and maintenance backfill/reconciliation
-covers registry outbox drift before external registry adapter readiness is
-promoted.
+passed benchmark artifacts enqueue hash-only registry publish outbox rows,
+source invalidation of published artifacts enqueues matching hash-only revoke
+rows, workers can submit those rows to a configured external registry adapter,
+mark external submit/confirm/fail status with receipt refs and hashed errors,
+operators can inspect the outbox through the admin API, and maintenance
+backfill/reconciliation covers registry outbox drift before external registry
+adapter readiness is promoted.
 
 ## Trace Credits
 
@@ -63,7 +64,9 @@ artifact transport. Published benchmark artifacts enqueue durable outbox rows
 containing ids, registry refs, artifact/source hashes, evaluator refs, scores,
 and lifecycle status only. The operational summary counts pending, submitted,
 confirmed, and failed registry outbox work, and a published artifact remains in
-the external-registry-adapter gap until a confirmed outbox receipt is recorded.
+the external-registry-adapter gap until a confirmed outbox receipt is recorded;
+a revoked artifact with a registry ref remains in the external-registry
+invalidation gap until a confirmed revoke receipt is recorded.
 Configure `TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL` to let benchmark
 workers submit pending or failed rows to an operator-owned registry adapter;
 optional bearer auth and timeout are controlled by

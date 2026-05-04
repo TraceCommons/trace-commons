@@ -9057,16 +9057,33 @@ async fn ensure_benchmark_registry_publish_outbox_item_with_db_mirror(
     artifact: &TraceBenchmarkConversionArtifact,
 ) -> anyhow::Result<()> {
     let item = benchmark_registry_publish_outbox_item_from_artifact(tenant, artifact)?;
-    let mirror_result = mirror_benchmark_registry_outbox_item_to_db(state, &item).await;
+    ensure_benchmark_registry_outbox_item_with_db_mirror(state, tenant, &item).await
+}
+
+async fn ensure_benchmark_registry_revoke_outbox_item_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    artifact: &TraceBenchmarkConversionArtifact,
+) -> anyhow::Result<()> {
+    let item = benchmark_registry_revoke_outbox_item_from_artifact(tenant, artifact)?;
+    ensure_benchmark_registry_outbox_item_with_db_mirror(state, tenant, &item).await
+}
+
+async fn ensure_benchmark_registry_outbox_item_with_db_mirror(
+    state: &AppState,
+    tenant: &TenantAuth,
+    item: &TraceBenchmarkRegistryOutboxItem,
+) -> anyhow::Result<()> {
+    let mirror_result = mirror_benchmark_registry_outbox_item_to_db(state, item).await;
     if state.require_db_mirror_writes {
         if let Err(error) = &mirror_result {
             tracing::warn!(%error, benchmark_outbox_id = %item.benchmark_outbox_id, "Trace Commons DB dual-write benchmark registry outbox mirror failed");
         }
         enforce_db_mirror_write_result(state, "benchmark registry outbox item", mirror_result)?;
-        upsert_benchmark_registry_outbox_item(&state.root, &tenant.tenant_id, &item)?;
+        upsert_benchmark_registry_outbox_item(&state.root, &tenant.tenant_id, item)?;
         return Ok(());
     }
-    upsert_benchmark_registry_outbox_item(&state.root, &tenant.tenant_id, &item)?;
+    upsert_benchmark_registry_outbox_item(&state.root, &tenant.tenant_id, item)?;
     if let Err(error) = &mirror_result {
         tracing::warn!(%error, benchmark_outbox_id = %item.benchmark_outbox_id, "Trace Commons DB dual-write benchmark registry outbox mirror failed");
     }
@@ -16353,6 +16370,7 @@ async fn update_benchmark_lifecycle(
         .await
         .map_err(internal_error)?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "benchmark artifact not found"))?;
+    let previous_registry_status = artifact.registry.status;
     apply_benchmark_lifecycle_update(&mut artifact, body)?;
 
     persist_benchmark_lifecycle_artifact(state, tenant, &artifact, "benchmark lifecycle")
@@ -16360,6 +16378,12 @@ async fn update_benchmark_lifecycle(
         .map_err(internal_error)?;
     if artifact.registry.status == TraceBenchmarkRegistryStatus::Published {
         ensure_benchmark_registry_publish_outbox_item_with_db_mirror(state, tenant, &artifact)
+            .await
+            .map_err(internal_error)?;
+    } else if previous_registry_status == TraceBenchmarkRegistryStatus::Published
+        && artifact.registry.status == TraceBenchmarkRegistryStatus::Revoked
+    {
+        ensure_benchmark_registry_revoke_outbox_item_with_db_mirror(state, tenant, &artifact)
             .await
             .map_err(internal_error)?;
     }
@@ -28577,6 +28601,8 @@ async fn propagate_benchmark_artifact_source_invalidation(
             "benchmark source invalidation",
         )
         .await?;
+        ensure_benchmark_registry_revoke_outbox_item_with_db_mirror(state, tenant, &artifact)
+            .await?;
         reapply_benchmark_source_invalidation_to_db(
             state,
             tenant,
@@ -29867,6 +29893,51 @@ fn benchmark_registry_publish_outbox_item_from_artifact(
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         conversion_id: artifact.conversion_id,
         operation: StorageTraceBenchmarkRegistryOutboxOperation::Publish,
+        registry_ref,
+        artifact_payload_hash,
+        source_submission_ids_hash: artifact.source_submission_ids_hash.clone(),
+        evaluator_ref: artifact.evaluation.evaluator_ref.clone(),
+        evaluation_score,
+        status: StorageTraceBenchmarkRegistryOutboxStatus::Pending,
+        created_at: Utc::now(),
+        submitted_at: None,
+        external_receipt_ref: None,
+        last_error_hash: None,
+        confirmed_at: None,
+    })
+}
+
+fn benchmark_registry_revoke_outbox_item_from_artifact(
+    tenant: &TenantAuth,
+    artifact: &TraceBenchmarkConversionArtifact,
+) -> anyhow::Result<TraceBenchmarkRegistryOutboxItem> {
+    anyhow::ensure!(
+        artifact.registry.status == TraceBenchmarkRegistryStatus::Revoked,
+        "benchmark registry revoke outbox requires revoked artifact"
+    );
+    let registry_ref = artifact
+        .registry
+        .registry_ref
+        .clone()
+        .context("benchmark registry revoke outbox requires registry_ref")?;
+    let artifact_payload_hash = benchmark_artifact_payload_hash(artifact)?;
+    let evaluation_score = artifact.evaluation.score;
+    if let Some(score) = evaluation_score {
+        anyhow::ensure!(
+            score.is_finite() && (0.0..=1.0).contains(&score),
+            "benchmark registry revoke outbox evaluation score must be between 0 and 1"
+        );
+    }
+    Ok(TraceBenchmarkRegistryOutboxItem {
+        benchmark_outbox_id: deterministic_benchmark_registry_outbox_id(
+            &tenant.tenant_id,
+            artifact.conversion_id,
+            StorageTraceBenchmarkRegistryOutboxOperation::Revoke,
+        ),
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        conversion_id: artifact.conversion_id,
+        operation: StorageTraceBenchmarkRegistryOutboxOperation::Revoke,
         registry_ref,
         artifact_payload_hash,
         source_submission_ids_hash: artifact.source_submission_ids_hash.clone(),
@@ -32049,6 +32120,7 @@ struct TraceOperationalPromotionGateSummary {
     failed_retention_job_count: usize,
     vector_missing_count: usize,
     published_benchmark_external_registry_gap_count: usize,
+    revoked_benchmark_external_registry_invalidation_gap_count: usize,
     at_risk_ranking_model_count: usize,
     blocked_ranking_credit_event_count: usize,
     stale_ranking_worker_run_count: usize,
@@ -32077,6 +32149,8 @@ impl TraceOperationalPromotionGateSummary {
             .saturating_sub(vectors.accepted_current_derived_with_active_vector);
         let published_benchmark_external_registry_gap_count =
             benchmarks.external_registry_adapter_gap_count;
+        let revoked_benchmark_external_registry_invalidation_gap_count =
+            benchmarks.external_registry_invalidation_gap_count;
         let at_risk_ranking_model_count = ranking.at_risk_model_count;
         let blocked_ranking_credit_event_count = ranking.blocked_credit_event_count;
         let stale_ranking_worker_run_count = ranking.stale_running_worker_run_count;
@@ -32149,6 +32223,11 @@ impl TraceOperationalPromotionGateSummary {
             "published_benchmarks_waiting_for_external_registry_adapter",
             published_benchmark_external_registry_gap_count,
         );
+        push_gap_count(
+            &mut warning_gates,
+            "revoked_benchmarks_waiting_for_external_registry_invalidation",
+            revoked_benchmark_external_registry_invalidation_gap_count,
+        );
 
         Self {
             ready: blocking_gates.is_empty(),
@@ -32172,6 +32251,7 @@ impl TraceOperationalPromotionGateSummary {
             failed_retention_job_count,
             vector_missing_count,
             published_benchmark_external_registry_gap_count,
+            revoked_benchmark_external_registry_invalidation_gap_count,
             at_risk_ranking_model_count,
             blocked_ranking_credit_event_count,
             stale_ranking_worker_run_count,
@@ -32426,6 +32506,7 @@ struct TraceOperationalBenchmarkSummary {
     registry_outbox_confirmed_count: usize,
     registry_outbox_failed_count: usize,
     external_registry_adapter_gap_count: usize,
+    external_registry_invalidation_gap_count: usize,
     blocker_reasons: Vec<String>,
 }
 
@@ -32439,11 +32520,17 @@ impl TraceOperationalBenchmarkSummary {
             ..Self::default()
         };
         let mut confirmed_publish_conversion_ids = BTreeSet::new();
+        let mut confirmed_revoke_conversion_ids = BTreeSet::new();
         for item in registry_outbox {
             if item.operation == StorageTraceBenchmarkRegistryOutboxOperation::Publish
                 && item.status == StorageTraceBenchmarkRegistryOutboxStatus::Confirmed
             {
                 confirmed_publish_conversion_ids.insert(item.conversion_id);
+            }
+            if item.operation == StorageTraceBenchmarkRegistryOutboxOperation::Revoke
+                && item.status == StorageTraceBenchmarkRegistryOutboxStatus::Confirmed
+            {
+                confirmed_revoke_conversion_ids.insert(item.conversion_id);
             }
             match item.status {
                 StorageTraceBenchmarkRegistryOutboxStatus::Pending => {
@@ -32498,6 +32585,11 @@ impl TraceOperationalBenchmarkSummary {
                 }
                 TraceBenchmarkRegistryStatus::Revoked => {
                     summary.revoked_count += 1;
+                    if artifact.registry.registry_ref.is_some()
+                        && !confirmed_revoke_conversion_ids.contains(&artifact.conversion_id)
+                    {
+                        summary.external_registry_invalidation_gap_count += 1;
+                    }
                 }
             }
             if benchmark_artifact_is_publishable_by_worker(artifact) {
@@ -32528,6 +32620,11 @@ impl TraceOperationalBenchmarkSummary {
             &mut summary.blocker_reasons,
             "external_benchmark_registry_adapter_gap",
             summary.external_registry_adapter_gap_count,
+        );
+        push_gap_count(
+            &mut summary.blocker_reasons,
+            "external_benchmark_registry_invalidation_gap",
+            summary.external_registry_invalidation_gap_count,
         );
         push_gap_count(
             &mut summary.blocker_reasons,
@@ -37650,7 +37747,10 @@ mod tests {
     #[tokio::test]
     async fn benchmark_conversion_writes_provenance_and_revocation_invalidates_it() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let state = test_state(temp.path().to_path_buf());
+        let mut state = test_state(temp.path().to_path_buf());
+        let fake_submitter = FakeBenchmarkRegistrySubmitter::default();
+        let submitted_calls = fake_submitter.calls.clone();
+        Arc::make_mut(&mut state).benchmark_registry_submitter = Some(Arc::new(fake_submitter));
         let mut envelope = sample_envelope().await;
         make_metadata_only_low_risk(&mut envelope);
         envelope.consent.scopes = vec![ConsentScope::BenchmarkOnly];
@@ -37680,6 +37780,7 @@ mod tests {
         )
         .await
         .expect("benchmark conversion succeeds");
+        let raw_summary = benchmark.candidates[0].canonical_summary.clone();
 
         let provenance_path = temp
             .path()
@@ -37788,6 +37889,103 @@ mod tests {
                         && reason.contains("evaluation_status=inconclusive")
                 })
         }));
+
+        let Json(after_revoke_summary) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect benchmark registry invalidation gap");
+        assert_eq!(after_revoke_summary.benchmarks.published_count, 0);
+        assert_eq!(after_revoke_summary.benchmarks.revoked_count, 1);
+        assert_eq!(
+            after_revoke_summary
+                .benchmarks
+                .external_registry_invalidation_gap_count,
+            1
+        );
+        assert!(
+            after_revoke_summary
+                .benchmarks
+                .blocker_reasons
+                .contains(&"external_benchmark_registry_invalidation_gap=1".to_string())
+        );
+
+        let registry_outbox = read_all_benchmark_registry_outbox_items(temp.path(), "tenant-a")
+            .expect("benchmark registry outbox reads after source revocation");
+        assert_eq!(registry_outbox.len(), 2);
+        let publish_item = registry_outbox
+            .iter()
+            .find(|item| item.operation == StorageTraceBenchmarkRegistryOutboxOperation::Publish)
+            .expect("published benchmark keeps publish registry outbox item");
+        let revoke_item = registry_outbox
+            .iter()
+            .find(|item| item.operation == StorageTraceBenchmarkRegistryOutboxOperation::Revoke)
+            .expect("source invalidation enqueues revoke registry outbox item");
+        assert_eq!(revoke_item.conversion_id, benchmark.conversion_id);
+        assert_ne!(
+            revoke_item.benchmark_outbox_id,
+            publish_item.benchmark_outbox_id
+        );
+        assert_eq!(
+            revoke_item.status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Pending
+        );
+        assert_eq!(revoke_item.registry_ref, "benchmark-registry:provenance");
+        assert_eq!(
+            revoke_item.source_submission_ids_hash,
+            benchmark.source_submission_ids_hash
+        );
+        assert_eq!(
+            revoke_item.evaluator_ref.as_deref(),
+            Some("evaluator:provenance")
+        );
+        assert_eq!(revoke_item.evaluation_score, Some(1.0));
+        assert!(revoke_item.artifact_payload_hash.starts_with("sha256:"));
+        let outbox_json =
+            std::fs::read_to_string(benchmark_registry_outbox_path(temp.path(), "tenant-a"))
+                .expect("benchmark registry outbox file reads after source revocation");
+        assert!(
+            !outbox_json.contains(&raw_summary),
+            "registry revoke outbox must not persist raw benchmark summary text"
+        );
+
+        let Json(submit_response) = benchmark_registry_outbox_submit_worker_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxSubmitWorkerRequest {
+                purpose: Some("submit_revoked_benchmark_registry_items".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("benchmark worker submits publish and revoke registry outbox items");
+        assert_eq!(submit_response.checked, 2);
+        assert_eq!(submit_response.submitted, 2);
+        assert_eq!(submit_response.failed, 0);
+        assert_eq!(submit_response.pending, 0);
+
+        let calls = submitted_calls
+            .lock()
+            .expect("fake benchmark registry submitter calls lock");
+        assert_eq!(calls.len(), 2);
+        let revoke_call = calls
+            .iter()
+            .find(|call| call.operation == StorageTraceBenchmarkRegistryOutboxOperation::Revoke)
+            .expect("registry submitter receives revoke operation");
+        assert_eq!(revoke_call.conversion_id, benchmark.conversion_id);
+        assert_eq!(revoke_call.registry_ref, "benchmark-registry:provenance");
+        assert_eq!(
+            revoke_call.source_submission_ids_hash,
+            benchmark.source_submission_ids_hash
+        );
+        assert_eq!(
+            revoke_call.evaluator_ref.as_deref(),
+            Some("evaluator:provenance")
+        );
+        assert_eq!(revoke_call.evaluation_score, Some(1.0));
+        let revoke_call_json =
+            serde_json::to_string(revoke_call).expect("revoke registry call serializes");
+        assert!(!revoke_call_json.contains(&raw_summary));
     }
 
     #[tokio::test]
