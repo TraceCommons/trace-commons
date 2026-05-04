@@ -592,6 +592,9 @@ they store calibration dataset hash, target use, policy version, source-list
 manifest hash, source count, label-source count, label-actor count, lifecycle
 status, and a hashed actor principal. They do not store trace bodies, reviewer
 notes, raw lab refs, or source ids.
+Calibration runs may use matching registry rows in `candidate` or `active`
+status, but reject matching `deprecated` or `archived` rows so retired holdout
+sets cannot keep model evidence alive after stewardship review.
 
 Calibration sample counts use effective labels, not raw label rows. If the same
 label source writes multiple labels for the same submission and target use, the
