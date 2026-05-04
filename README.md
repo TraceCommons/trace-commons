@@ -149,6 +149,11 @@ suppresses that source's calibration evidence until a newer non-disputed label
 arrives. Label-source authority is enforced at write time: utility workers write
 `frontier_lab`, reviewers write `reviewer`, benchmark workers write `benchmark`,
 process-evaluation workers write `system`, and admins are the explicit override.
+Admins can inspect label-adjudication readiness through
+`/v1/admin/ranking/adjudication-report`, which groups latest absolute labels and
+pairwise preferences by source, reports unresolved disputes and cross-source
+direction/outcome conflicts, and exposes only safe counts, source/actor totals,
+submission IDs, and reason codes.
 Registered calibration datasets marked `deprecated` or `archived` are retired
 and cannot feed new calibration runs for that target use and policy; promotion,
 dataset-readiness, and active-model risk surfaces also report retired registered
@@ -229,7 +234,7 @@ appending a new running row; stale running rows surface as operational-summary
 blockers until an admin append-finalizes them through the stale recovery API,
 which also writes a hash-only audit event for the recovery action. Operational
 summary ranking readiness now also includes candidate/active backtest pass/fail
-counts and backtest reason-code totals.
+counts, backtest reason-code totals, and label-adjudication issue blockers.
 With the DB mirror configured, ranking dataset registry rows, evidence,
 calibration runs, and ranking worker runs are dual-written to PostgreSQL.
 Maintenance backfill mirrors file-backed ranking model versions, calibration
