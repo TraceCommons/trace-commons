@@ -2667,7 +2667,7 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route(
             "/v1/admin/rollout-smoke/evidence",
-            post(append_rollout_smoke_evidence_handler),
+            get(rollout_smoke_evidence_handler).post(append_rollout_smoke_evidence_handler),
         )
         .route(
             "/v1/admin/operational-metrics",
@@ -20222,6 +20222,27 @@ async fn append_rollout_smoke_evidence_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(response))
+}
+
+async fn rollout_smoke_evidence_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<TraceRolloutSmokeEvidenceResponse>>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let evidence = read_rollout_smoke_evidence_for_admin(state.as_ref(), tenant.auth())
+        .await
+        .map_err(internal_error)?;
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        tenant.auth(),
+        TraceCommonsAuditEvent::read(tenant.auth(), "rollout_smoke_evidence_list", evidence.len()),
+        StorageTraceAuditAction::Read,
+        trace_read_audit_metadata("rollout_smoke_evidence_list", evidence.len()),
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(evidence))
 }
 
 const TRACE_OPERATIONAL_METRICS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
@@ -63801,6 +63822,98 @@ mod tests {
         assert!(reason.contains("status=passed"));
         assert!(reason.contains("evidence_hash=sha256:"));
         assert!(!reason.contains("admin-token-a"));
+    }
+
+    #[tokio::test]
+    async fn admin_rollout_smoke_evidence_list_returns_hash_only_records() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let evidence_body = serde_json::json!({
+            "check_name": "contributor_credit",
+            "status": "passed",
+            "evidence_hash": sha256_prefixed("contributor credit smoke rehearsal"),
+            "evidence_ref": "runbook://trace-commons/smoke/contributor-credit"
+        });
+        let append_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/rollout-smoke/evidence")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(evidence_body.to_string()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("append response");
+        assert_eq!(append_response.status(), StatusCode::OK);
+
+        let contributor_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/rollout-smoke/evidence")
+                    .header(AUTHORIZATION, "Bearer token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("contributor response");
+        assert_eq!(contributor_response.status(), StatusCode::FORBIDDEN);
+
+        let admin_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/rollout-smoke/evidence")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("admin response");
+        assert_eq!(admin_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(admin_response.into_body(), 8192)
+            .await
+            .expect("body reads");
+        let evidence: Vec<serde_json::Value> =
+            serde_json::from_slice(&body).expect("evidence list parses");
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(
+            evidence[0]["tenant_storage_ref"],
+            serde_json::json!(tenant_storage_ref("tenant-a"))
+        );
+        assert_eq!(
+            evidence[0]["check_name"],
+            serde_json::json!("contributor_credit")
+        );
+        assert_eq!(evidence[0]["status"], serde_json::json!("passed"));
+        assert!(
+            evidence[0]["evidence_ref_hash"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("sha256:"))
+        );
+        assert!(
+            !body
+                .windows(b"runbook://".len())
+                .any(|window| window == b"runbook://")
+        );
+        assert!(
+            !body
+                .windows(b"admin-token-a".len())
+                .any(|window| window == b"admin-token-a")
+        );
+
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "read"
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.starts_with("surface=rollout_smoke_evidence_list;")
+                })
+        }));
     }
 
     #[tokio::test]
