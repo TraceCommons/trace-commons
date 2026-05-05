@@ -135,6 +135,7 @@ fn expected_trace_rls_tables() -> Vec<&'static str> {
         "trace_near_credit_outbox",
         "trace_benchmark_registry_outbox",
         "trace_ranking_model_versions",
+        "trace_ranking_calibration_datasets",
         "trace_ranking_features",
         "trace_ranking_predictions",
         "trace_ranking_labels",
@@ -789,6 +790,12 @@ fn force_rls_migration_covers_every_trace_rls_table() {
     sql.push_str(
         &std::fs::read_to_string(migrations_root.join("V15__trace_benchmark_registry_outbox.sql"))
             .expect("read benchmark registry outbox production hardening migration"),
+    );
+    sql.push_str(
+        &std::fs::read_to_string(
+            migrations_root.join("V16__trace_ranking_calibration_datasets.sql"),
+        )
+        .expect("read ranking calibration dataset production hardening migration"),
     );
     for table in expected_trace_rls_tables() {
         let statement = format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY;");
