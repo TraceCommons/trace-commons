@@ -25962,6 +25962,44 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         &[("tenant_storage_ref", &response.tenant_storage_ref)],
         response.retention.job_count,
     );
+    body.push_str("# HELP tracedao_operational_analytics_release_readiness Safe analytics broad-release readiness flags.\n");
+    body.push_str("# TYPE tracedao_operational_analytics_release_readiness gauge\n");
+    for (state, value) in [
+        (
+            "min_cell_count_configured",
+            usize::from(response.analytics.min_cell_count_configured),
+        ),
+        (
+            "broad_release_noise_configured",
+            usize::from(response.analytics.broad_release_noise_configured),
+        ),
+        (
+            "broad_release_ready",
+            usize::from(response.analytics.broad_release_ready),
+        ),
+    ] {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "tracedao_operational_analytics_release_readiness",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("state", state),
+            ],
+            value,
+        );
+    }
+    if let Some(max_delta) = response.analytics.broad_release_noise_max_delta {
+        body.push_str("# HELP tracedao_operational_analytics_noise_max_delta Configured analytics broad-release count-noise max delta.\n");
+        body.push_str("# TYPE tracedao_operational_analytics_noise_max_delta gauge\n");
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "tracedao_operational_analytics_noise_max_delta",
+            &[("tenant_storage_ref", &response.tenant_storage_ref)],
+            max_delta,
+        );
+    }
     body.push_str(
         "# HELP tracedao_operational_vector_entries Vector-entry counts by operational state.\n",
     );
@@ -46194,6 +46232,7 @@ struct TraceOperationalSummaryResponse {
     review_sla: TraceOperationalReviewSlaSummary,
     exports: TraceOperationalExportSummary,
     retention: TraceOperationalRetentionSummary,
+    analytics: TraceOperationalAnalyticsSummary,
     vectors: TraceOperationalVectorSummary,
     benchmarks: TraceOperationalBenchmarkSummary,
     ranking: TraceOperationalRankingSummary,
@@ -46224,6 +46263,7 @@ impl TraceOperationalSummaryResponse {
         let exports =
             TraceOperationalExportSummary::from_db_summary(&inputs.db_summary, inputs.generated_at);
         let retention = TraceOperationalRetentionSummary::from_db_summary(&inputs.db_summary);
+        let analytics = TraceOperationalAnalyticsSummary::from_state(inputs.state);
         let vectors = TraceOperationalVectorSummary::from_records_and_db_summary(
             &inputs.derived,
             &inputs.db_summary,
@@ -46260,6 +46300,7 @@ impl TraceOperationalSummaryResponse {
             review_sla,
             exports,
             retention,
+            analytics,
             vectors,
             benchmarks,
             ranking: inputs.ranking,
@@ -46282,6 +46323,7 @@ const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "revocation_propagation",
     "retention_dry_run",
     "vector_index",
+    "analytics_release",
     "object_primary_reads",
     "postgres_rls_readiness",
     "delayed_credit_reversal",
@@ -47075,6 +47117,43 @@ impl TraceOperationalRetentionSummary {
                 .or_insert(0) += 1;
         }
         summary
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
+struct TraceOperationalAnalyticsSummary {
+    min_cell_count: usize,
+    min_cell_count_configured: bool,
+    broad_release_noise_configured: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    broad_release_noise_max_delta: Option<usize>,
+    broad_release_ready: bool,
+    blocker_reasons: Vec<String>,
+}
+
+impl TraceOperationalAnalyticsSummary {
+    fn from_state(state: &AppState) -> Self {
+        let min_cell_count_configured = state.analytics_min_cell_count > 1;
+        let broad_release_noise_max_delta = state
+            .analytics_broad_release_noise
+            .as_ref()
+            .map(|config| config.max_delta);
+        let broad_release_noise_configured = broad_release_noise_max_delta.is_some();
+        let mut blocker_reasons = Vec::new();
+        if !min_cell_count_configured {
+            blocker_reasons.push("min_cell_count_disabled".to_string());
+        }
+        if !broad_release_noise_configured {
+            blocker_reasons.push("noise_not_configured".to_string());
+        }
+        Self {
+            min_cell_count: state.analytics_min_cell_count,
+            min_cell_count_configured,
+            broad_release_noise_configured,
+            broad_release_noise_max_delta,
+            broad_release_ready: blocker_reasons.is_empty(),
+            blocker_reasons,
+        }
     }
 }
 
@@ -58287,6 +58366,70 @@ mod tests {
         )));
         assert!(!metrics.contains("operational-summary-vector-token"));
         assert!(!metrics.contains("do not expose raw vector ops purpose"));
+    }
+
+    #[tokio::test]
+    async fn operational_summary_reports_analytics_release_readiness() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).analytics_min_cell_count = 2;
+
+        let Json(operational) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary");
+        let operational_json =
+            serde_json::to_value(&operational).expect("operational summary serializes");
+        assert_eq!(
+            operational_json["analytics"]["min_cell_count"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            operational_json["analytics"]["min_cell_count_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            operational_json["analytics"]["broad_release_noise_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            operational_json["analytics"]["broad_release_ready"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            operational_json["analytics"]["blocker_reasons"],
+            serde_json::json!(["noise_not_configured"])
+        );
+
+        let metrics_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-metrics")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("metrics response");
+        assert_eq!(metrics_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(metrics_response.into_body(), 16384)
+            .await
+            .expect("metrics body");
+        let body_text = std::str::from_utf8(&body).expect("metrics body is utf8");
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_analytics_release_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"min_cell_count_configured\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_analytics_release_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"broad_release_noise_configured\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_analytics_release_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"broad_release_ready\"}} 0"
+        )));
     }
 
     #[test]
@@ -78029,11 +78172,11 @@ mod tests {
         );
         assert_eq!(
             operational_json["rollout_smoke"]["required_check_count"],
-            serde_json::json!(17)
+            serde_json::json!(18)
         );
         assert_eq!(
             operational_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(17)
+            serde_json::json!(18)
         );
         assert!(
             operational
@@ -78081,13 +78224,19 @@ mod tests {
             operational
                 .rollout_smoke
                 .required_checks
+                .contains(&"analytics_release".to_string())
+        );
+        assert!(
+            operational
+                .rollout_smoke
+                .required_checks
                 .contains(&"audit_chain_verification".to_string())
         );
         assert!(
             operational
                 .rollout_smoke
                 .blocker_reasons
-                .contains(&"smoke_rehearsal_evidence_missing=17".to_string())
+                .contains(&"smoke_rehearsal_evidence_missing=18".to_string())
         );
     }
 
@@ -78167,7 +78316,7 @@ mod tests {
         );
         assert_eq!(
             operational_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(16)
+            serde_json::json!(17)
         );
         assert!(
             !operational
@@ -78602,7 +78751,7 @@ mod tests {
             "tracedao_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"failed_ranking_worker_runs\"}} 1"
         )));
         assert!(body_text.contains(&format!(
-            "tracedao_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 17"
+            "tracedao_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 18"
         )));
         assert!(body_text.contains(&format!(
             "tracedao_operational_rollout_smoke_recorded_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 0"
@@ -78650,6 +78799,7 @@ mod tests {
             review_sla: TraceOperationalReviewSlaSummary::default(),
             exports: TraceOperationalExportSummary::default(),
             retention: TraceOperationalRetentionSummary::default(),
+            analytics: TraceOperationalAnalyticsSummary::default(),
             vectors: TraceOperationalVectorSummary::default(),
             benchmarks: TraceOperationalBenchmarkSummary::default(),
             ranking: TraceOperationalRankingSummary::default(),
@@ -78680,6 +78830,7 @@ mod tests {
             review_sla: TraceOperationalReviewSlaSummary::default(),
             exports: TraceOperationalExportSummary::default(),
             retention: TraceOperationalRetentionSummary::default(),
+            analytics: TraceOperationalAnalyticsSummary::default(),
             vectors: TraceOperationalVectorSummary::default(),
             benchmarks: TraceOperationalBenchmarkSummary::default(),
             ranking: TraceOperationalRankingSummary::default(),
@@ -78724,6 +78875,7 @@ mod tests {
             review_sla: TraceOperationalReviewSlaSummary::default(),
             exports: TraceOperationalExportSummary::default(),
             retention: TraceOperationalRetentionSummary::default(),
+            analytics: TraceOperationalAnalyticsSummary::default(),
             vectors: TraceOperationalVectorSummary::default(),
             benchmarks: TraceOperationalBenchmarkSummary::default(),
             ranking: TraceOperationalRankingSummary::default(),
