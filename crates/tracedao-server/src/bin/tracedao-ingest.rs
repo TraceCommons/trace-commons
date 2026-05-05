@@ -232,6 +232,8 @@ const TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR";
+const TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT";
 const TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL: &str = "TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL";
 const TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN: &str =
     "TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN";
@@ -445,6 +447,7 @@ struct AppState {
     tenant_rollout_gates: TraceTenantRolloutGates,
     max_export_items_per_request: usize,
     analytics_min_cell_count: usize,
+    credit_settlement_max_micros_per_account: Option<i64>,
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Arc<BTreeSet<String>>,
     artifact_store: Option<ConfiguredTraceArtifactStore>,
@@ -1701,6 +1704,8 @@ impl AppState {
         let require_export_guardrails = env_truthy("TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS");
         let max_export_items_per_request = parse_max_export_items_per_request_from_env()?;
         let analytics_min_cell_count = parse_analytics_min_cell_count_from_env()?;
+        let credit_settlement_max_micros_per_account =
+            parse_credit_settlement_max_points_per_account_from_env()?;
         let submission_quota = parse_submission_quota_config_from_env()?;
         let legal_hold_retention_policy_ids = parse_legal_hold_retention_policy_ids_from_env()?;
         let artifact_store = trace_artifact_store_from_env(&root)?;
@@ -1889,6 +1894,7 @@ impl AppState {
             tenant_rollout_gates,
             max_export_items_per_request,
             analytics_min_cell_count,
+            credit_settlement_max_micros_per_account,
             submission_quota,
             legal_hold_retention_policy_ids: Arc::new(legal_hold_retention_policy_ids),
             artifact_store,
@@ -4690,6 +4696,28 @@ fn parse_analytics_min_cell_count(configured: &str) -> anyhow::Result<usize> {
     })
 }
 
+fn parse_credit_settlement_max_points_per_account_from_env() -> anyhow::Result<Option<i64>> {
+    match optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT)? {
+        Some(configured) => parse_credit_settlement_max_points_per_account(&configured),
+        None => Ok(None),
+    }
+}
+
+fn parse_credit_settlement_max_points_per_account(configured: &str) -> anyhow::Result<Option<i64>> {
+    let points = configured.trim().parse::<f64>().with_context(|| {
+        format!("{TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT} must be credit points")
+    })?;
+    anyhow::ensure!(
+        points.is_finite() && (0.0..=1_000_000.0).contains(&points),
+        "{TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT} must be between 0 and 1000000"
+    );
+    if points == 0.0 {
+        Ok(None)
+    } else {
+        Ok(Some((points * 1_000_000.0).round() as i64))
+    }
+}
+
 fn parse_submission_quota_config_from_env() -> anyhow::Result<TraceSubmissionQuotaConfig> {
     Ok(TraceSubmissionQuotaConfig {
         max_per_tenant_per_hour: parse_submission_quota_limit_from_env(
@@ -5070,6 +5098,7 @@ struct TraceCommonsConfigStatusResponse {
     tenant_rollout_gate_counts: BTreeMap<String, usize>,
     max_export_items_per_request: usize,
     analytics_min_cell_count: usize,
+    credit_settlement_max_micros_per_account: Option<i64>,
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Vec<String>,
     ranking_calibration_max_age_hours: Option<i64>,
@@ -5229,6 +5258,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         tenant_rollout_gate_counts: state.tenant_rollout_gates.status_counts(),
         max_export_items_per_request: state.max_export_items_per_request,
         analytics_min_cell_count: state.analytics_min_cell_count,
+        credit_settlement_max_micros_per_account: state.credit_settlement_max_micros_per_account,
         submission_quota: state.submission_quota,
         legal_hold_retention_policy_ids: state
             .legal_hold_retention_policy_ids
@@ -7666,6 +7696,9 @@ struct TraceCreditSettlementRunResponse {
     ranking_calibration_joined_evidence_hash: Option<String>,
     ranking_credit_events_excluded_count: usize,
     ranking_credit_events_excluded_reason_counts: BTreeMap<String, usize>,
+    settlement_max_credit_micros_per_account: Option<i64>,
+    settlement_policy_excluded_source_event_count: usize,
+    settlement_policy_excluded_reason_counts: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -9948,8 +9981,16 @@ async fn run_credit_settlement(
             }
         }
     }
-    selected_events.sort_by_key(|event| event.event_id);
     let eligible_source_event_count = selected_events.len();
+    let (
+        mut selected_events,
+        settlement_policy_excluded_source_event_count,
+        settlement_policy_excluded_reason_counts,
+    ) = apply_credit_settlement_account_cap(
+        selected_events,
+        state.credit_settlement_max_micros_per_account,
+    );
+    selected_events.sort_by_key(|event| event.event_id);
     if let Some(limit) = limit {
         selected_events.truncate(limit);
     }
@@ -10139,6 +10180,9 @@ async fn run_credit_settlement(
             .map(|gate| gate.joined_evidence_hash.clone()),
         ranking_credit_events_excluded_count,
         ranking_credit_events_excluded_reason_counts,
+        settlement_max_credit_micros_per_account: state.credit_settlement_max_micros_per_account,
+        settlement_policy_excluded_source_event_count,
+        settlement_policy_excluded_reason_counts,
     })
 }
 
@@ -10154,6 +10198,49 @@ fn validate_credit_settlement_run_limit(limit: Option<usize>) -> ApiResult<Optio
     } else {
         Ok(None)
     }
+}
+
+fn apply_credit_settlement_account_cap(
+    events: Vec<TraceCommonsCreditLedgerRecord>,
+    max_micros_per_account: Option<i64>,
+) -> (
+    Vec<TraceCommonsCreditLedgerRecord>,
+    usize,
+    BTreeMap<String, usize>,
+) {
+    let Some(max_micros_per_account) = max_micros_per_account else {
+        return (events, 0, BTreeMap::new());
+    };
+    let mut account_totals = BTreeMap::<String, i64>::new();
+    for event in &events {
+        *account_totals
+            .entry(event.auth_principal_ref.clone())
+            .or_insert(0) += credit_delta_micros(event.credit_points_delta);
+    }
+    let blocked_accounts = account_totals
+        .into_iter()
+        .filter_map(|(account, total)| (total > max_micros_per_account).then_some(account))
+        .collect::<BTreeSet<_>>();
+    if blocked_accounts.is_empty() {
+        return (events, 0, BTreeMap::new());
+    }
+    let mut excluded_count = 0usize;
+    let selected = events
+        .into_iter()
+        .filter(|event| {
+            let excluded = blocked_accounts.contains(&event.auth_principal_ref);
+            if excluded {
+                excluded_count += 1;
+            }
+            !excluded
+        })
+        .collect::<Vec<_>>();
+    let mut reason_counts = BTreeMap::new();
+    reason_counts.insert(
+        "account_settlement_amount_exceeds_cap".to_string(),
+        excluded_count,
+    );
+    (selected, excluded_count, reason_counts)
 }
 
 async fn repair_missing_near_credit_outbox_items_for_finalized_batches(
@@ -46458,6 +46545,7 @@ mod tests {
             tenant_rollout_gates: TraceTenantRolloutGates::default(),
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
             analytics_min_cell_count: 0,
+            credit_settlement_max_micros_per_account: None,
             submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store,
@@ -47629,6 +47717,26 @@ mod tests {
             error
                 .to_string()
                 .contains(TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT)
+        );
+    }
+
+    #[test]
+    fn parses_credit_settlement_max_points_per_account() {
+        assert_eq!(
+            parse_credit_settlement_max_points_per_account("1.25").expect("settlement cap parses"),
+            Some(1_250_000)
+        );
+        assert_eq!(
+            parse_credit_settlement_max_points_per_account("0")
+                .expect("zero disables settlement cap"),
+            None
+        );
+        let error = parse_credit_settlement_max_points_per_account("-1")
+            .expect_err("negative settlement cap is invalid");
+        assert!(
+            error
+                .to_string()
+                .contains(TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT)
         );
     }
 
@@ -57111,6 +57219,7 @@ mod tests {
             tenant_rollout_gates: TraceTenantRolloutGates::default(),
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
             analytics_min_cell_count: 0,
+            credit_settlement_max_micros_per_account: None,
             submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::from([
                 "private_corpus_revocable".to_string()
@@ -62388,6 +62497,103 @@ mod tests {
 
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
         assert!(error.1.0.error.contains("NEAR contract id"));
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement reads")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads")
+                .is_empty()
+        );
+        let Json(credit) = credit_handler(State(state), auth_headers("token-a"))
+            .await
+            .expect("credit summary succeeds");
+        assert_eq!(credit.credit_points_pending_ledger, 1.75);
+        assert_eq!(credit.credit_points_settled, 0.0);
+    }
+
+    #[tokio::test]
+    async fn credit_settlement_account_cap_blocks_large_live_settlement_without_outbox() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_max_micros_per_account = Some(1_000_000);
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(_) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.75,
+                reason: Some("frontier lab training utility attested".to_string()),
+                external_ref: Some("lab-attestation:account-cap".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+
+        let Json(dry_run) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: true,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "preview capped settlement".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("admin can preview capped settlement");
+        assert_eq!(dry_run.eligible_source_event_count, 1);
+        assert_eq!(dry_run.settled_source_event_count, 0);
+        assert_eq!(dry_run.pending_after_count, 1);
+        assert_eq!(
+            dry_run.settlement_max_credit_micros_per_account,
+            Some(1_000_000)
+        );
+        assert_eq!(dry_run.settlement_policy_excluded_source_event_count, 1);
+        assert_eq!(
+            dry_run
+                .settlement_policy_excluded_reason_counts
+                .get("account_settlement_amount_exceeds_cap"),
+            Some(&1)
+        );
+
+        let Json(live) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "finalize capped settlement".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("admin can run capped settlement without side effects");
+        assert_eq!(live.settled_source_event_count, 0);
+        assert_eq!(live.near_outbox_item_count, 0);
+        assert_eq!(live.settlement_policy_excluded_source_event_count, 1);
         assert!(
             read_all_credit_settlement_batches(temp.path(), "tenant-a")
                 .expect("settlement reads")
