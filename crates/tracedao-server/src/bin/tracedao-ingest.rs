@@ -333,6 +333,8 @@ const TRACE_BENCHMARK_REGISTRY_PUBLICATION_WORKER_RUN_DEFAULT_LIMIT: usize = 25;
 const TRACE_BENCHMARK_REGISTRY_PUBLICATION_WORKER_RUN_MAX_LIMIT: usize = 100;
 const TRACE_PROCESS_EVALUATION_WORKER_RUN_DEFAULT_LIMIT: usize = 25;
 const TRACE_PROCESS_EVALUATION_WORKER_RUN_MAX_LIMIT: usize = 100;
+const TRACE_VECTOR_INDEX_WORKER_DEFAULT_LIMIT: usize = 100;
+const TRACE_VECTOR_INDEX_WORKER_MAX_LIMIT: usize = 500;
 const TRACE_RANKING_WORKER_RUN_STALE_AFTER_HOURS: i64 = 1;
 const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
 const TRACE_DB_AUDIT_RECONCILIATION_SAMPLE_LIMIT: usize = 16;
@@ -27408,38 +27410,59 @@ struct TraceVectorIndexRequest {
     purpose: Option<String>,
     #[serde(default)]
     dry_run: bool,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceVectorIndexResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    purpose: String,
+    dry_run: bool,
+    audit_event_id: Uuid,
+    checked_count: usize,
+    vector_entries_indexed: usize,
+    skipped_existing_count: usize,
+    pending_after_count: usize,
 }
 
 async fn vector_index_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(body): Json<TraceVectorIndexRequest>,
-) -> ApiResult<Json<TraceMaintenanceResponse>> {
+) -> ApiResult<Json<TraceVectorIndexResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_vector_operator(&tenant)?;
+    if state.db_mirror.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace vector index worker requires configured DB mirror",
+        ));
+    }
+    let limit = validate_vector_index_worker_limit(body.limit)?;
     let vector_tenant_policy = tenant_vector_policy_for_request(state.as_ref(), &tenant).await?;
-    let response = run_maintenance(
+    let response = run_vector_index_worker(
         state.as_ref(),
         &tenant,
-        TraceMaintenanceRequest {
-            purpose: Some(
-                body.purpose
-                    .unwrap_or_else(|| "trace_commons_vector_index_worker".to_string()),
-            ),
-            dry_run: body.dry_run,
-            backfill_db_mirror: false,
-            index_vectors: true,
-            reconcile_db_mirror: false,
-            verify_audit_chain: false,
-            prune_export_cache: false,
-            max_export_age_hours: None,
-            purge_expired_before: None,
-        },
+        body,
+        limit,
         vector_tenant_policy.as_ref(),
     )
     .await
     .map_err(maintenance_error)?;
     Ok(Json(response))
+}
+
+fn validate_vector_index_worker_limit(limit: Option<usize>) -> ApiResult<usize> {
+    let limit = limit.unwrap_or(TRACE_VECTOR_INDEX_WORKER_DEFAULT_LIMIT);
+    if !(1..=TRACE_VECTOR_INDEX_WORKER_MAX_LIMIT).contains(&limit) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "vector index worker limit must be between 1 and 500",
+        ));
+    }
+    Ok(limit)
 }
 
 #[derive(Debug, Deserialize)]
@@ -36858,15 +36881,17 @@ async fn run_maintenance(
     }
     let db_mirror_backfilled = db_mirror_backfill.backfilled;
     let db_mirror_backfill_failed = db_mirror_backfill.failed;
-    let vector_entries_indexed = index_vector_metadata_from_db(
+    let vector_index_report = index_vector_metadata_from_db(
         state,
         tenant,
         request.index_vectors,
         request.dry_run,
         &purpose,
         vector_tenant_policy,
+        None,
     )
     .await?;
+    let vector_entries_indexed = vector_index_report.vector_entries_indexed;
     let maintenance_counts = TraceMaintenanceAuditCounts {
         records_marked_revoked,
         records_marked_expired,
@@ -38133,6 +38158,93 @@ fn replay_export_items_for_manifest_backfill(
     Ok(items)
 }
 
+#[derive(Debug, Default)]
+struct TraceVectorIndexRunReport {
+    checked_count: usize,
+    vector_entries_indexed: usize,
+    skipped_existing_count: usize,
+    pending_after_count: usize,
+}
+
+struct TraceVectorIndexCandidate<'a> {
+    record: &'a StorageTraceDerivedRecord,
+    source_hash: String,
+    vector_entry_id: Uuid,
+}
+
+async fn run_vector_index_worker(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceVectorIndexRequest,
+    limit: usize,
+    tenant_policy: Option<&TenantSubmissionPolicy>,
+) -> anyhow::Result<TraceVectorIndexResponse> {
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_vector_index_worker")
+        .to_string();
+    let report = index_vector_metadata_from_db(
+        state,
+        tenant,
+        true,
+        request.dry_run,
+        &purpose,
+        tenant_policy,
+        Some(limit),
+    )
+    .await?;
+    let audit_event = TraceCommonsAuditEvent::vector_index(
+        tenant,
+        report.vector_entries_indexed,
+        request.dry_run,
+    );
+    let audit_event_id = audit_event.event_id;
+    append_audit_event_with_db_mirror(
+        state,
+        tenant,
+        audit_event,
+        StorageTraceAuditAction::VectorIndex,
+        StorageTraceAuditSafeMetadata::Maintenance {
+            dry_run: request.dry_run,
+            action_counts: {
+                let mut counts = BTreeMap::new();
+                counts.insert(
+                    "vector_entries_checked".to_string(),
+                    report.checked_count.min(u32::MAX as usize) as u32,
+                );
+                counts.insert(
+                    "vector_entries_indexed".to_string(),
+                    report.vector_entries_indexed.min(u32::MAX as usize) as u32,
+                );
+                counts.insert(
+                    "vector_entries_skipped_existing".to_string(),
+                    report.skipped_existing_count.min(u32::MAX as usize) as u32,
+                );
+                counts.insert(
+                    "vector_entries_pending_after".to_string(),
+                    report.pending_after_count.min(u32::MAX as usize) as u32,
+                );
+                counts
+            },
+        },
+    )
+    .await?;
+    Ok(TraceVectorIndexResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        purpose,
+        dry_run: request.dry_run,
+        audit_event_id,
+        checked_count: report.checked_count,
+        vector_entries_indexed: report.vector_entries_indexed,
+        skipped_existing_count: report.skipped_existing_count,
+        pending_after_count: report.pending_after_count,
+    })
+}
+
 async fn index_vector_metadata_from_db(
     state: &AppState,
     tenant: &TenantAuth,
@@ -38140,9 +38252,10 @@ async fn index_vector_metadata_from_db(
     dry_run: bool,
     purpose: &str,
     tenant_policy: Option<&TenantSubmissionPolicy>,
-) -> anyhow::Result<usize> {
+    limit: Option<usize>,
+) -> anyhow::Result<TraceVectorIndexRunReport> {
     if !enabled {
-        return Ok(0);
+        return Ok(TraceVectorIndexRunReport::default());
     }
     let db = state
         .db_mirror
@@ -38187,16 +38300,13 @@ async fn index_vector_metadata_from_db(
         .map(|entry| entry.vector_entry_id)
         .collect::<BTreeSet<_>>();
 
-    let eligible = derived_records
+    let mut eligible = Vec::new();
+    for record in derived_records
         .iter()
         .filter(|record| record.status == StorageTraceDerivedStatus::Current)
         .filter(|record| record.worker_kind == StorageTraceWorkerKind::DuplicatePrecheck)
         .filter(|record| accepted_submissions_by_id.contains_key(&record.submission_id))
-        .filter(|record| record.canonical_summary_hash.is_some())
-        .collect::<Vec<_>>();
-
-    let mut indexed = 0usize;
-    for record in &eligible {
+    {
         let Some(source_hash) = record.canonical_summary_hash.clone() else {
             continue;
         };
@@ -38206,10 +38316,30 @@ async fn index_vector_metadata_from_db(
             record.derived_id,
             &source_hash,
         );
-        if active_vector_ids.contains(&vector_entry_id) {
-            continue;
-        }
-        indexed += 1;
+        eligible.push(TraceVectorIndexCandidate {
+            record,
+            source_hash,
+            vector_entry_id,
+        });
+    }
+    eligible.sort_by_key(|candidate| (candidate.record.submission_id, candidate.record.derived_id));
+    let pending_candidates = eligible
+        .iter()
+        .filter(|candidate| !active_vector_ids.contains(&candidate.vector_entry_id))
+        .collect::<Vec<_>>();
+    let limit = limit.unwrap_or(usize::MAX);
+    let mut report = TraceVectorIndexRunReport {
+        skipped_existing_count: eligible.len().saturating_sub(pending_candidates.len()),
+        pending_after_count: pending_candidates.len().saturating_sub(limit),
+        ..TraceVectorIndexRunReport::default()
+    };
+
+    for candidate in pending_candidates.into_iter().take(limit) {
+        let record = candidate.record;
+        let source_hash = candidate.source_hash.as_str();
+        let vector_entry_id = candidate.vector_entry_id;
+        report.checked_count += 1;
+        report.vector_entries_indexed += 1;
         if dry_run {
             continue;
         }
@@ -38228,12 +38358,12 @@ async fn index_vector_metadata_from_db(
         let neighbors = nearest_trace_neighbors(
             record.submission_id,
             record.canonical_summary.as_deref().unwrap_or_default(),
-            &source_hash,
+            source_hash,
             eligible.iter().map(|candidate| TraceSimilarityCandidate {
-                submission_id: candidate.submission_id,
-                trace_id: candidate.trace_id,
-                canonical_summary: candidate.canonical_summary.as_deref(),
-                canonical_summary_hash: candidate.canonical_summary_hash.as_deref(),
+                submission_id: candidate.record.submission_id,
+                trace_id: candidate.record.trace_id,
+                canonical_summary: candidate.record.canonical_summary.as_deref(),
+                canonical_summary_hash: candidate.record.canonical_summary_hash.as_deref(),
             }),
         );
         let nearest_trace_ids = neighbors
@@ -38267,7 +38397,7 @@ async fn index_vector_metadata_from_db(
                 .first()
                 .filter(|neighbor| neighbor.score >= 0.5)
                 .and_then(|neighbor| neighbor.source_hash.as_deref())
-                .unwrap_or(&source_hash);
+                .unwrap_or(source_hash);
             Some(format!("summary:{}", hash_fragment(cluster_hash, 16)))
         });
         db.upsert_trace_vector_entry(StorageTraceVectorEntryWrite {
@@ -38280,7 +38410,7 @@ async fn index_vector_metadata_from_db(
             embedding_dimension,
             embedding_version: embedding_version.clone(),
             source_projection,
-            source_hash: source_hash.clone(),
+            source_hash: source_hash.to_string(),
             status: StorageTraceVectorEntryStatus::Active,
             nearest_trace_ids: nearest_trace_ids.clone(),
             cluster_id: cluster_id.clone(),
@@ -38301,7 +38431,7 @@ async fn index_vector_metadata_from_db(
             derived_id: record.derived_id,
             vector_entry_id,
             source_projection,
-            source_hash: source_hash.clone(),
+            source_hash: source_hash.to_string(),
             vector_store,
             embedding_model,
             embedding_dimension,
@@ -38345,7 +38475,7 @@ async fn index_vector_metadata_from_db(
         )
         .await?;
     }
-    Ok(indexed)
+    Ok(report)
 }
 
 async fn reconcile_db_mirror(
@@ -59065,6 +59195,163 @@ mod tests {
                 .iter()
                 .any(|failure| failure.item_ref == valid_id.to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn vector_index_worker_honors_limit_without_retention_side_effects() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+
+        for index in 0..2 {
+            let mut envelope = sample_envelope().await;
+            make_metadata_only_low_risk(&mut envelope);
+            envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+            envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+            envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+            let _ = submit_trace_handler(
+                State(state.clone()),
+                auth_headers("token-a"),
+                Json(envelope),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!("vector-eligible source {index} mirrors into DB: {error:?}")
+            });
+        }
+
+        let mut expired_candidate = sample_envelope().await;
+        make_metadata_only_low_risk(&mut expired_candidate);
+        expired_candidate.consent.scopes = vec![ConsentScope::RankingTraining];
+        expired_candidate.trace_card.consent_scope = ConsentScope::RankingTraining;
+        expired_candidate.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let expired_submission_id = expired_candidate.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(expired_candidate),
+        )
+        .await
+        .expect("expired candidate source mirrors into DB before local expiration marker");
+        let mut expired_record =
+            read_submission_record(temp.path(), "tenant-a", expired_submission_id)
+                .expect("expired candidate metadata reads")
+                .expect("expired candidate metadata exists");
+        expired_record.expires_at = Some(Utc::now() - Duration::hours(1));
+        write_submission_record(temp.path(), &expired_record)
+            .expect("expired candidate metadata writes");
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/workers/vector-index")
+                    .header(AUTHORIZATION, "Bearer vector-worker-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "bounded vector worker pass",
+                            "dry_run": false,
+                            "limit": 1
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("vector worker response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("vector worker response parses");
+        assert_eq!(value["vector_entries_indexed"], serde_json::json!(1));
+        assert_eq!(value["checked_count"], serde_json::json!(1));
+        assert_eq!(value["pending_after_count"], serde_json::json!(2));
+        assert!(
+            value.get("records_marked_expired").is_none(),
+            "vector worker response should not expose retention maintenance counts"
+        );
+
+        let expired_after = read_submission_record(temp.path(), "tenant-a", expired_submission_id)
+            .expect("expired candidate metadata reads after vector worker")
+            .expect("expired candidate metadata still exists");
+        assert_eq!(expired_after.status, TraceCorpusStatus::Accepted);
+        assert!(expired_after.expires_at.is_some());
+
+        let vector_entries = backend
+            .list_trace_vector_entries("tenant-a")
+            .await
+            .expect("DB vector entries read");
+        assert_eq!(
+            vector_entries
+                .iter()
+                .filter(|entry| entry.status == StorageTraceVectorEntryStatus::Active)
+                .count(),
+            1
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn vector_index_worker_missing_db_fails_before_retention_side_effects() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("vector source submission succeeds");
+        let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("submission metadata reads")
+            .expect("submission metadata exists");
+        record.expires_at = Some(Utc::now() - Duration::hours(1));
+        write_submission_record(temp.path(), &record).expect("expired marker writes");
+
+        let error = vector_index_handler(
+            State(state),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceVectorIndexRequest {
+                purpose: Some("misconfigured vector worker".to_string()),
+                dry_run: false,
+                limit: None,
+            }),
+        )
+        .await
+        .expect_err("vector worker requires a DB mirror");
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+
+        let record_after = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("submission metadata reads after failed vector worker")
+            .expect("submission metadata still exists");
+        assert_eq!(record_after.status, TraceCorpusStatus::Accepted);
+        assert!(record_after.expires_at.is_some());
     }
 
     #[tokio::test]
