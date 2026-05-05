@@ -19247,7 +19247,9 @@ fn ensure_review_decision_eligible(
             "only quarantined trace submissions are eligible for review decisions",
         ));
     }
-    if record.is_expired_at(now) && !retention_policy_is_on_legal_hold(state, record) {
+    if record.is_expired_at(now)
+        && !retention_policy_is_on_legal_hold(state, record).map_err(internal_error)?
+    {
         return Err(api_error(
             StatusCode::CONFLICT,
             "expired trace submissions are not eligible for review decisions",
@@ -24693,7 +24695,7 @@ fn ensure_maintenance_purge_matches_privileged_action_policy(
     let records =
         read_all_submission_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
     for record in records {
-        if retention_policy_is_on_legal_hold(state, &record) {
+        if retention_policy_is_on_legal_hold(state, &record).map_err(internal_error)? {
             continue;
         }
         let purge_candidate = record
@@ -31944,7 +31946,7 @@ async fn run_maintenance(
             }
             continue;
         }
-        if record.is_expired_at(now) && !retention_policy_is_on_legal_hold(state, record) {
+        if record.is_expired_at(now) && !retention_policy_is_on_legal_hold(state, record)? {
             records_marked_expired += 1;
             expired_submission_ids.insert(record.submission_id);
             if !request.dry_run {
@@ -31993,7 +31995,7 @@ async fn run_maintenance(
     let mut encrypted_artifacts_deleted = 0usize;
     if let Some(purge_cutoff) = request.purge_expired_before {
         for record in &mut records {
-            if retention_policy_is_on_legal_hold(state, record) {
+            if retention_policy_is_on_legal_hold(state, record)? {
                 continue;
             }
             if record.status != TraceCorpusStatus::Expired
@@ -32200,10 +32202,41 @@ async fn run_maintenance(
 fn retention_policy_is_on_legal_hold(
     state: &AppState,
     record: &TraceCommonsSubmissionRecord,
-) -> bool {
-    state
+) -> anyhow::Result<bool> {
+    let is_on_legal_hold = state
         .legal_hold_retention_policy_ids
-        .contains(&record.retention_policy_id)
+        .contains(&record.retention_policy_id);
+    if is_on_legal_hold {
+        let expected_policy = retention_policy_for_submission_record(record);
+        anyhow::ensure!(
+            record.retention_policy_id == expected_policy.name,
+            "trace retention policy metadata mismatch"
+        );
+    }
+    Ok(is_on_legal_hold)
+}
+
+fn retention_policy_for_submission_record(
+    record: &TraceCommonsSubmissionRecord,
+) -> trace_commons_protocol::trace_contribution::TraceRetentionPolicy {
+    let strongest = record
+        .allowed_uses
+        .iter()
+        .copied()
+        .max_by_key(trace_allowed_use_retention_rank)
+        .unwrap_or(TraceAllowedUse::Debugging);
+    retention_policy_for_allowed_use(strongest)
+}
+
+fn trace_allowed_use_retention_rank(allowed_use: &TraceAllowedUse) -> u8 {
+    match allowed_use {
+        TraceAllowedUse::ModelTraining => 5,
+        TraceAllowedUse::RankingModelTraining => 4,
+        TraceAllowedUse::BenchmarkGeneration => 3,
+        TraceAllowedUse::Evaluation => 2,
+        TraceAllowedUse::Debugging => 1,
+        TraceAllowedUse::AggregateAnalytics => 0,
+    }
 }
 
 async fn verify_audit_chain(
@@ -49128,6 +49161,75 @@ mod tests {
         .await
         .expect("legal-hold trace remains exportable while held");
         assert_eq!(export.item_count, 1);
+    }
+
+    #[tokio::test]
+    async fn maintenance_rejects_tampered_retention_legal_hold_before_side_effects() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).legal_hold_retention_policy_ids =
+            Arc::new(BTreeSet::from(["training_revocable".to_string()]));
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        assert_eq!(record.retention_policy_id, "private_corpus_revocable");
+
+        let metadata_path = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"))
+            .join("metadata")
+            .join(format!("{submission_id}.json"));
+        let mut metadata_json = serde_json::to_value(record).expect("record serializes");
+        metadata_json["retention_policy_id"] = serde_json::json!("training_revocable");
+        metadata_json["expires_at"] =
+            serde_json::json!((Utc::now() - chrono::Duration::days(2)).to_rfc3339());
+        write_json_file(
+            &metadata_path,
+            &metadata_json,
+            "tampered retention metadata",
+        )
+        .expect("metadata writes");
+
+        let error = maintenance_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("tampered_retention_policy".to_string()),
+                dry_run: false,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: Some(Utc::now()),
+            }),
+        )
+        .await
+        .expect_err("tampered retention metadata fails closed");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        let record_after = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record still reads")
+            .expect("record still exists");
+        assert_eq!(record_after.status, TraceCorpusStatus::Accepted);
+        assert!(
+            !read_all_audit_events(temp.path(), "tenant-a")
+                .expect("audit reads")
+                .iter()
+                .any(|event| event.kind == "maintenance")
+        );
     }
 
     #[tokio::test]
