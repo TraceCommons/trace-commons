@@ -20227,12 +20227,16 @@ async fn append_rollout_smoke_evidence_handler(
 async fn rollout_smoke_evidence_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(query): Query<TraceRolloutSmokeEvidenceQuery>,
 ) -> ApiResult<Json<Vec<TraceRolloutSmokeEvidenceResponse>>> {
     let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(tenant.auth())?;
-    let evidence = read_rollout_smoke_evidence_for_admin(state.as_ref(), tenant.auth())
+    let mut evidence = read_rollout_smoke_evidence_for_admin(state.as_ref(), tenant.auth())
         .await
         .map_err(internal_error)?;
+    if query.latest_only.unwrap_or(false) {
+        evidence = latest_rollout_smoke_evidence_by_check(evidence);
+    }
     append_audit_event_with_db_mirror(
         state.as_ref(),
         tenant.auth(),
@@ -38747,6 +38751,11 @@ struct TraceRolloutSmokeEvidenceRequest {
     evidence_ref: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct TraceRolloutSmokeEvidenceQuery {
+    latest_only: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct TraceRolloutSmokeEvidenceResponse {
     event_id: Uuid,
@@ -38825,6 +38834,16 @@ async fn read_rollout_smoke_evidence_for_admin(
         .iter()
         .filter_map(trace_rollout_smoke_evidence_from_audit_event)
         .collect()
+}
+
+fn latest_rollout_smoke_evidence_by_check(
+    evidence: Vec<TraceRolloutSmokeEvidenceResponse>,
+) -> Vec<TraceRolloutSmokeEvidenceResponse> {
+    let mut latest_by_check = BTreeMap::new();
+    for record in evidence {
+        latest_by_check.insert(record.check_name.clone(), record);
+    }
+    latest_by_check.into_values().collect()
 }
 
 fn trace_rollout_smoke_evidence_from_audit_event(
@@ -63923,6 +63942,60 @@ mod tests {
         assert!(body_text.contains(&format!(
             "tracedao_operational_rollout_smoke_failed_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 1"
         )));
+    }
+
+    #[tokio::test]
+    async fn admin_rollout_smoke_evidence_list_can_return_latest_per_check() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        for (status, marker) in [
+            ("failed", "audit reads smoke rehearsal failed first"),
+            ("passed", "audit reads smoke rehearsal passed later"),
+        ] {
+            let evidence_body = serde_json::json!({
+                "check_name": "audit_reads",
+                "status": status,
+                "evidence_hash": sha256_prefixed(marker),
+                "evidence_ref": format!("runbook://trace-commons/smoke/audit-reads/{status}")
+            });
+            let append_response = app(state.clone())
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/v1/admin/rollout-smoke/evidence")
+                        .header(AUTHORIZATION, "Bearer admin-token-a")
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(evidence_body.to_string()))
+                        .expect("request builds"),
+                )
+                .await
+                .expect("append response");
+            assert_eq!(append_response.status(), StatusCode::OK);
+        }
+
+        let latest_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/rollout-smoke/evidence?latest_only=true")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("latest response");
+        assert_eq!(latest_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(latest_response.into_body(), 8192)
+            .await
+            .expect("body reads");
+        let evidence: Vec<serde_json::Value> =
+            serde_json::from_slice(&body).expect("evidence list parses");
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0]["check_name"], serde_json::json!("audit_reads"));
+        assert_eq!(evidence[0]["status"], serde_json::json!("passed"));
     }
 
     #[tokio::test]

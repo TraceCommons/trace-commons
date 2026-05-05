@@ -406,9 +406,10 @@ and promotion gates, and it includes a `rollout_smoke` preflight block that
 lists required canary smoke checks while reporting recorded, failed, and
 missing rehearsal evidence separately from promotion-gate readiness. Operators
 inspect and capture that evidence with admin-only `GET` and `POST`
-`/v1/admin/rollout-smoke/evidence`; writes name one required check, a `passed`
-or `failed` status, a sha256-prefixed evidence hash, and an optional external
-reference that is stored only as a hash in the tenant audit chain.
+`/v1/admin/rollout-smoke/evidence`; `GET` can collapse history to the latest
+record per check with `latest_only=true`, and writes name one required check, a
+`passed` or `failed` status, a sha256-prefixed evidence hash, and an optional
+external reference that is stored only as a hash in the tenant audit chain.
 `GET /v1/admin/ranking/calibration-dataset-conflicts` provides the
 operator drill-down: exact conflict keys, latest projected hash-only registry
 metadata, whether the latest row still blocks credit issuance, and a remediation
