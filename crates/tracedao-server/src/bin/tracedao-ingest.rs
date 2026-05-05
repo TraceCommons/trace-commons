@@ -38166,6 +38166,7 @@ struct TraceOperationalSummaryResponse {
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
     promotion_gates: TraceOperationalPromotionGateSummary,
+    rollout_smoke: TraceOperationalRolloutSmokeSummary,
     submissions: TraceOperationalSubmissionSummary,
     review_sla: TraceOperationalReviewSlaSummary,
     exports: TraceOperationalExportSummary,
@@ -38215,11 +38216,14 @@ impl TraceOperationalSummaryResponse {
             &benchmarks,
             &inputs.ranking,
         );
+        let rollout_smoke =
+            TraceOperationalRolloutSmokeSummary::from_promotion_gates(&promotion_gates);
         Self {
             tenant_storage_ref: tenant_storage_ref(&inputs.tenant_id),
             tenant_id: inputs.tenant_id,
             generated_at: inputs.generated_at,
             promotion_gates,
+            rollout_smoke,
             submissions,
             review_sla,
             exports,
@@ -38228,6 +38232,71 @@ impl TraceOperationalSummaryResponse {
             benchmarks,
             ranking: inputs.ranking,
             delayed_credit,
+        }
+    }
+}
+
+const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
+    "submit_status",
+    "contributor_credit",
+    "reviewer_metadata",
+    "replay_export_selection",
+    "audit_reads",
+    "revocation_propagation",
+    "retention_dry_run",
+    "object_primary_reads",
+    "delayed_credit_reversal",
+    "object_deletion_refs",
+];
+
+#[derive(Debug, Default, Serialize)]
+struct TraceOperationalRolloutSmokeSummary {
+    ready: bool,
+    evidence_status: String,
+    promotion_gate_ready: bool,
+    promotion_gate_blocking_count: usize,
+    promotion_gate_warning_count: usize,
+    required_check_count: usize,
+    missing_evidence_count: usize,
+    required_checks: Vec<String>,
+    missing_evidence_checks: Vec<String>,
+    blocker_reasons: Vec<String>,
+}
+
+impl TraceOperationalRolloutSmokeSummary {
+    fn from_promotion_gates(promotion_gates: &TraceOperationalPromotionGateSummary) -> Self {
+        let required_checks = TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS
+            .iter()
+            .map(|check| (*check).to_string())
+            .collect::<Vec<_>>();
+        let missing_evidence_checks = required_checks.clone();
+        let mut blocker_reasons = promotion_gates
+            .blocking_gates
+            .iter()
+            .map(|gate| format!("promotion_gate_blocked:{gate}"))
+            .collect::<Vec<_>>();
+        push_gap_count(
+            &mut blocker_reasons,
+            "smoke_rehearsal_evidence_missing",
+            missing_evidence_checks.len(),
+        );
+        let evidence_status = if promotion_gates.ready {
+            "missing_rehearsal_evidence"
+        } else {
+            "promotion_gates_blocked"
+        };
+
+        Self {
+            ready: promotion_gates.ready && missing_evidence_checks.is_empty(),
+            evidence_status: evidence_status.to_string(),
+            promotion_gate_ready: promotion_gates.ready,
+            promotion_gate_blocking_count: promotion_gates.blocking_count,
+            promotion_gate_warning_count: promotion_gates.warning_count,
+            required_check_count: required_checks.len(),
+            missing_evidence_count: missing_evidence_checks.len(),
+            required_checks,
+            missing_evidence_checks,
+            blocker_reasons,
         }
     }
 }
@@ -62932,6 +63001,51 @@ mod tests {
         assert!(reason.contains("ranking_worker_run_actionable_skip_count=3"));
     }
 
+    #[tokio::test]
+    async fn operational_summary_reports_rollout_smoke_preflight_evidence_gap() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let Json(operational) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary");
+        let operational_json =
+            serde_json::to_value(&operational).expect("operational summary serializes");
+        assert_eq!(
+            operational_json["rollout_smoke"]["ready"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            operational_json["rollout_smoke"]["promotion_gate_ready"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            operational_json["rollout_smoke"]["evidence_status"],
+            serde_json::json!("missing_rehearsal_evidence")
+        );
+        assert_eq!(
+            operational_json["rollout_smoke"]["required_check_count"],
+            serde_json::json!(10)
+        );
+        assert_eq!(
+            operational_json["rollout_smoke"]["missing_evidence_count"],
+            serde_json::json!(10)
+        );
+        assert!(
+            operational
+                .rollout_smoke
+                .required_checks
+                .contains(&"submit_status".to_string())
+        );
+        assert!(
+            operational
+                .rollout_smoke
+                .blocker_reasons
+                .contains(&"smoke_rehearsal_evidence_missing=10".to_string())
+        );
+    }
+
     #[test]
     fn operational_summary_promotion_gate_log_fields_are_omitted_when_clean() {
         let response = TraceOperationalSummaryResponse {
@@ -62942,6 +63056,7 @@ mod tests {
                 ready: true,
                 ..TraceOperationalPromotionGateSummary::default()
             },
+            rollout_smoke: TraceOperationalRolloutSmokeSummary::default(),
             submissions: TraceOperationalSubmissionSummary::default(),
             review_sla: TraceOperationalReviewSlaSummary::default(),
             exports: TraceOperationalExportSummary::default(),
@@ -62971,6 +63086,7 @@ mod tests {
                 ranking_worker_run_actionable_skip_count: 3,
                 ..TraceOperationalPromotionGateSummary::default()
             },
+            rollout_smoke: TraceOperationalRolloutSmokeSummary::default(),
             submissions: TraceOperationalSubmissionSummary::default(),
             review_sla: TraceOperationalReviewSlaSummary::default(),
             exports: TraceOperationalExportSummary::default(),
