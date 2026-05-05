@@ -1171,6 +1171,10 @@ pub enum TraceAuditSafeMetadata {
         lease_expires_at: Option<DateTime<Utc>>,
         review_due_at: Option<DateTime<Utc>>,
     },
+    TraceContentRead {
+        surface: String,
+        purpose_hash: Option<String>,
+    },
     Export {
         artifact_kind: TraceObjectArtifactKind,
         purpose_code: Option<String>,
