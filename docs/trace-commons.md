@@ -772,6 +772,18 @@ raw submission ids, and raw trace ids. If no adapter is configured and the
 fail-closed flag is off, vector indexing keeps using the deterministic local
 redacted-summary embedding fallback.
 
+Set `TRACE_COMMONS_VECTOR_SEARCH_URL` to point at a trusted private vector-search
+adapter for ANN/vector-store lookup; `TRACE_COMMONS_VECTOR_SEARCH_BEARER_TOKEN`
+adds bearer auth and `TRACE_COMMONS_VECTOR_SEARCH_TIMEOUT_MS` bounds calls. The
+search request contains only the target vector-entry id, redacted embedding
+vector, embedding metadata, source hash, and purpose hash. Search responses only
+return candidate vector-entry ids plus scores; the server then revalidates every
+candidate against active tenant DB vector metadata, compatible
+model/store/dimension/version fields, and the current derived trace id map
+before those neighbors can affect duplicate, novelty, nearest-trace, or
+`embedding:` cluster metadata. Invalid, stale, cross-store, same-submission,
+unknown, non-finite, or below-threshold search neighbors are ignored.
+
 Deployments that want the server to own vector-index catch-up can configure
 `TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_TOKEN` with a vector-worker bearer token.
 Startup validates that the token can call the vector worker route and that the
@@ -974,10 +986,13 @@ audits the vector-index pass. When a private vector embedder is configured, the
 route stores the adapter-returned embedding model/version/dimension/vector-store
 metadata while keeping the embedding values in the worker-intermediate payload
 artifact instead of DB rows, and compatible existing payloads can drive
-model-backed nearest-neighbor scores for later vector entries. Deployments can use
-`TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_TOKEN` to run that same bounded worker
-route in-process on an interval without granting the scheduler generic
-maintenance authority.
+model-backed nearest-neighbor scores for later vector entries. When a private
+vector-search adapter is configured, the route queries it before local payload
+scan and accepts only server-validated active tenant entries as vector neighbors;
+empty search results fall back to readable compatible payloads and then summary
+similarity. Deployments can use `TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_TOKEN` to
+run that same bounded worker route in-process on an interval without granting the
+scheduler generic maintenance authority.
 
 Admin tokens can inspect safe tenant-scoped vector metadata through
 `GET /v1/admin/vector-entries`. The route requires the DB mirror, supports
