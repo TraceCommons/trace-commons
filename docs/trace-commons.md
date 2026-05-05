@@ -421,6 +421,13 @@ hash-only evidence for `submit_status`, `tenant_canary_isolation`,
 tenant id for isolation; the response exposes only aggregate booleans, counts,
 blocker codes, and hashes before optionally appending one rollout-smoke evidence
 row per check.
+`POST /v1/admin/object-primary-read-drill` proves the object-primary read path
+for an existing canary submission: submitted-envelope object refs must be
+service-owned and tenant/hash readable, review and replay body reads must resolve
+through object refs, plaintext submitted body files must be absent, and a
+fallback tenant must remain outside object-primary rollout. The response returns
+only readiness booleans, blocker codes, hashes, and optional `object_primary_reads`
+rollout-smoke evidence.
 `POST /v1/admin/db-reconciliation-drill` runs the clean-reconciliation smoke
 check without maintenance side effects: it requires a DB mirror, reuses the
 file-vs-DB reconciliation engine, returns safe aggregate counts plus compact
@@ -663,6 +670,7 @@ The service exposes:
 - `GET /v1/admin/config-status`
 - `GET|POST /v1/admin/rollout-smoke/evidence`
 - `POST /v1/admin/canary-read-drill`
+- `POST /v1/admin/object-primary-read-drill`
 - `POST /v1/admin/db-reconciliation-drill`
 - `POST /v1/admin/rollback-drill`
 - `POST /v1/admin/key-rotation-drill`
