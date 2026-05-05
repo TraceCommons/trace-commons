@@ -14386,6 +14386,11 @@ async fn ranking_calibration_run_worker_handler(
                     return Err(api_error);
                 }
                 response.calibrated_count += 1;
+                if !run.promotable {
+                    for reason in &run.reason_codes {
+                        increment_count(&mut response.skipped_reason_counts, reason);
+                    }
+                }
                 response.calibration_runs.push(run);
             }
             Err((status, Json(error)))
@@ -55390,6 +55395,73 @@ mod tests {
         let raw_runs =
             read_all_ranking_calibration_runs(temp.path(), "tenant-a").expect("runs read");
         assert_eq!(raw_runs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ranking_calibration_worker_run_counts_nonpromotable_reason_codes() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let (candidate, prediction) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-cal-worker-reasons-v1")
+                .await;
+        let _ = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: prediction.submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Rejected,
+                utility_delta_micros: 1_250_000,
+                evidence_hash: "sha256:cal-worker-reason-reviewer-conflict".to_string(),
+                external_ref: "private-cal-worker-reason-reviewer-conflict".to_string(),
+            }),
+        )
+        .await
+        .expect("reviewer can write conflicting calibration label");
+
+        let Json(run) = ranking_calibration_run_worker_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunWorkerRequest {
+                dry_run: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                reason: "scheduled calibration reason-code pass".to_string(),
+                limit: Some(10),
+                model_version: Some(candidate.model_version.clone()),
+                policy_version: Some(candidate.policy_version.clone()),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker persists nonpromotable calibration artifact");
+
+        assert_eq!(run.checked_count, 1);
+        assert_eq!(run.calibrated_count, 1);
+        assert_eq!(run.skipped_ineligible_count, 0);
+        assert_eq!(run.calibration_runs.len(), 1);
+        assert!(!run.calibration_runs[0].promotable);
+        assert_eq!(
+            run.skipped_reason_counts
+                .get(RANKING_ADJUDICATION_ISSUES_REASON),
+            Some(&1)
+        );
+
+        let Json(worker_runs) =
+            ranking_worker_runs_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect worker run");
+        assert_eq!(
+            worker_runs[0]
+                .reason_counts
+                .get(RANKING_ADJUDICATION_ISSUES_REASON),
+            Some(&1)
+        );
+        let report_text = serde_json::to_string(&run).expect("worker run response serializes");
+        assert!(!report_text.contains("private-cal-worker-reason"));
     }
 
     #[tokio::test]

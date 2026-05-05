@@ -723,8 +723,11 @@ bounded ranking calibration, prediction-credit, model-promotion, and full
 credit-cycle automation. Rows include the run id, running/completed/failed
 status, dry-run flag, filters, limits,
 checked/succeeded/skipped counts, result refs, and machine-readable skip reason
-counts, but store only the reason hash rather than raw operator notes. The same
-ledger coordinates scheduler retries: live non-dry-run calibration,
+counts, but store only the reason hash rather than raw operator notes.
+Calibration worker runs also add non-promotable persisted calibration run
+reasons, such as `ranking_adjudication_issues_present`, to those counts so a
+successful artifact write still surfaces credit blockers. The same ledger
+coordinates scheduler retries: live non-dry-run calibration,
 prediction-credit, model-promotion, and credit-cycle runs refuse active
 overlapping non-stale rows before appending a new `running` entry. Admins can call
 `POST /v1/admin/ranking/worker-runs/{ranking_worker_run_id}/recover-stale` with
