@@ -20346,6 +20346,15 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         &[("tenant_storage_ref", &response.tenant_storage_ref)],
         response.rollout_smoke.recorded_evidence_count,
     );
+    body.push_str("# HELP trace_commons_operational_rollout_smoke_failed_evidence Count of required rollout smoke checks whose latest captured rehearsal evidence failed.\n");
+    body.push_str("# TYPE trace_commons_operational_rollout_smoke_failed_evidence gauge\n");
+    push_prometheus_gauge(
+        &mut body,
+        &mut metric_count,
+        "trace_commons_operational_rollout_smoke_failed_evidence",
+        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        response.rollout_smoke.failed_evidence_count,
+    );
     body.push_str("# HELP trace_commons_operational_submissions_total Total tenant submissions visible to operational summary.\n");
     body.push_str("# TYPE trace_commons_operational_submissions_total gauge\n");
     push_prometheus_gauge(
@@ -38872,8 +38881,10 @@ struct TraceOperationalRolloutSmokeSummary {
     required_check_count: usize,
     missing_evidence_count: usize,
     recorded_evidence_count: usize,
+    failed_evidence_count: usize,
     required_checks: Vec<String>,
     missing_evidence_checks: Vec<String>,
+    failed_evidence_checks: Vec<String>,
     blocker_reasons: Vec<String>,
 }
 
@@ -38899,6 +38910,12 @@ impl TraceOperationalRolloutSmokeSummary {
                 (record.status == TraceRolloutSmokeEvidenceStatus::Passed).then_some(check)
             })
             .collect::<BTreeSet<_>>();
+        let failed_evidence_checks = latest_evidence_by_check
+            .iter()
+            .filter_map(|(check, record)| {
+                (record.status == TraceRolloutSmokeEvidenceStatus::Failed).then_some(check.clone())
+            })
+            .collect::<Vec<_>>();
         let missing_evidence_checks = required_checks
             .iter()
             .filter(|check| !passed_evidence_checks.contains(check))
@@ -38914,8 +38931,15 @@ impl TraceOperationalRolloutSmokeSummary {
             "smoke_rehearsal_evidence_missing",
             missing_evidence_checks.len(),
         );
+        push_gap_count(
+            &mut blocker_reasons,
+            "smoke_rehearsal_evidence_failed",
+            failed_evidence_checks.len(),
+        );
         let evidence_status = if !promotion_gates.ready {
             "promotion_gates_blocked"
+        } else if !failed_evidence_checks.is_empty() {
+            "failed_rehearsal_evidence"
         } else if missing_evidence_checks.is_empty() {
             "ready"
         } else {
@@ -38931,8 +38955,10 @@ impl TraceOperationalRolloutSmokeSummary {
             required_check_count: required_checks.len(),
             missing_evidence_count: missing_evidence_checks.len(),
             recorded_evidence_count: latest_evidence_by_check.len(),
+            failed_evidence_count: failed_evidence_checks.len(),
             required_checks,
             missing_evidence_checks,
+            failed_evidence_checks,
             blocker_reasons,
         }
     }
@@ -63822,6 +63848,81 @@ mod tests {
         assert!(reason.contains("status=passed"));
         assert!(reason.contains("evidence_hash=sha256:"));
         assert!(!reason.contains("admin-token-a"));
+    }
+
+    #[tokio::test]
+    async fn operational_summary_reports_failed_rollout_smoke_evidence() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let evidence_body = serde_json::json!({
+            "check_name": "audit_reads",
+            "status": "failed",
+            "evidence_hash": sha256_prefixed("audit reads smoke rehearsal failed"),
+            "evidence_ref": "runbook://trace-commons/smoke/audit-reads"
+        });
+        let append_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/rollout-smoke/evidence")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(evidence_body.to_string()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("append response");
+        assert_eq!(append_response.status(), StatusCode::OK);
+
+        let Json(operational) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary");
+        let operational_json =
+            serde_json::to_value(&operational).expect("operational summary serializes");
+
+        assert_eq!(
+            operational_json["rollout_smoke"]["recorded_evidence_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["rollout_smoke"]["failed_evidence_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["rollout_smoke"]["failed_evidence_checks"],
+            serde_json::json!(["audit_reads"])
+        );
+        assert!(
+            operational
+                .rollout_smoke
+                .blocker_reasons
+                .contains(&"smoke_rehearsal_evidence_failed=1".to_string())
+        );
+
+        let metrics_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-metrics")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("metrics response");
+        assert_eq!(metrics_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(metrics_response.into_body(), 16384)
+            .await
+            .expect("body reads");
+        let body_text = std::str::from_utf8(&body).expect("metrics body is utf8");
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_rollout_smoke_failed_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 1"
+        )));
     }
 
     #[tokio::test]
