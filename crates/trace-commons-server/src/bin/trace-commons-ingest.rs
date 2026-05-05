@@ -3216,6 +3216,7 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/admin/ranking/calibration-runs",
             get(ranking_calibration_runs_handler),
         )
+        .route("/v1/admin/vector-entries", get(vector_entries_handler))
         .route(
             "/v1/workers/retention-maintenance",
             post(retention_maintenance_handler),
@@ -5648,6 +5649,15 @@ fn trace_export_control_db(state: &AppState) -> ApiResult<Arc<dyn Database>> {
         api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "trace export control DB is not configured",
+        )
+    })
+}
+
+fn trace_vector_metadata_db(state: &AppState) -> ApiResult<Arc<dyn Database>> {
+    state.db_mirror.as_ref().cloned().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace vector metadata DB is not configured",
         )
     })
 }
@@ -20791,6 +20801,56 @@ async fn replay_export_manifests_handler(
 struct RetentionJobsQuery {
     limit: Option<usize>,
     status: Option<StorageTraceRetentionJobStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VectorEntriesQuery {
+    limit: Option<usize>,
+    status: Option<StorageTraceVectorEntryStatus>,
+    source_projection: Option<StorageTraceVectorEntrySourceProjection>,
+    submission_id: Option<Uuid>,
+}
+
+async fn vector_entries_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<VectorEntriesQuery>,
+) -> ApiResult<Json<Vec<TraceVectorEntrySummary>>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let db = trace_vector_metadata_db(state.as_ref())?;
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let entries = db
+        .list_trace_vector_entries(&tenant.tenant_id)
+        .await
+        .map_err(internal_error)?;
+    let summaries = entries
+        .into_iter()
+        .rev()
+        .filter(|entry| query.status.is_none_or(|status| entry.status == status))
+        .filter(|entry| {
+            query
+                .source_projection
+                .is_none_or(|source_projection| entry.source_projection == source_projection)
+        })
+        .filter(|entry| {
+            query
+                .submission_id
+                .is_none_or(|id| entry.submission_id == id)
+        })
+        .take(limit)
+        .map(TraceVectorEntrySummary::from_storage_record)
+        .collect::<Vec<_>>();
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(&tenant, "vector_entries", summaries.len()),
+        StorageTraceAuditAction::Read,
+        trace_read_audit_metadata("vector_entries", summaries.len()),
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(summaries))
 }
 
 async fn retention_jobs_handler(
@@ -40902,6 +40962,65 @@ impl TraceExportManifestSummary {
 }
 
 #[derive(Debug, Serialize)]
+struct TraceVectorEntrySummary {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    submission_id: Uuid,
+    derived_id: Uuid,
+    vector_entry_id: Uuid,
+    vector_store: String,
+    embedding_model: String,
+    embedding_dimension: i32,
+    embedding_version: String,
+    source_projection: StorageTraceVectorEntrySourceProjection,
+    source_hash: String,
+    status: StorageTraceVectorEntryStatus,
+    nearest_trace_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cluster_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    duplicate_score: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    novelty_score: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    indexed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    invalidated_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    deleted_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl TraceVectorEntrySummary {
+    fn from_storage_record(record: StorageTraceVectorEntryRecord) -> Self {
+        Self {
+            tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
+            tenant_id: record.tenant_id,
+            submission_id: record.submission_id,
+            derived_id: record.derived_id,
+            vector_entry_id: record.vector_entry_id,
+            vector_store: record.vector_store,
+            embedding_model: record.embedding_model,
+            embedding_dimension: record.embedding_dimension,
+            embedding_version: record.embedding_version,
+            source_projection: record.source_projection,
+            source_hash: record.source_hash,
+            status: record.status,
+            nearest_trace_ids: record.nearest_trace_ids,
+            cluster_id: record.cluster_id,
+            duplicate_score: record.duplicate_score,
+            novelty_score: record.novelty_score,
+            indexed_at: record.indexed_at,
+            invalidated_at: record.invalidated_at,
+            deleted_at: record.deleted_at,
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 struct TraceRetentionJobSummary {
     tenant_id: String,
     tenant_storage_ref: String,
@@ -59633,6 +59752,175 @@ mod tests {
             .expect("submission metadata still exists");
         assert_eq!(record_after.status, TraceCorpusStatus::Accepted);
         assert!(record_after.expires_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn admin_vector_entries_list_returns_safe_bounded_metadata() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("vector source submission mirrors into DB");
+        let derived = backend
+            .list_trace_derived_records("tenant-a")
+            .await
+            .expect("derived records read")
+            .into_iter()
+            .find(|record| {
+                record.status == StorageTraceDerivedStatus::Current
+                    && record.worker_kind == StorageTraceWorkerKind::DuplicatePrecheck
+                    && record.canonical_summary_hash.is_some()
+            })
+            .expect("duplicate precheck derived record exists");
+        let source_hash = derived
+            .canonical_summary_hash
+            .clone()
+            .expect("canonical hash exists");
+        let vector_entry_id = deterministic_vector_entry_uuid(
+            "tenant-a",
+            derived.submission_id,
+            derived.derived_id,
+            &source_hash,
+        );
+        backend
+            .upsert_trace_vector_entry(StorageTraceVectorEntryWrite {
+                tenant_id: "tenant-a".to_string(),
+                submission_id: derived.submission_id,
+                derived_id: derived.derived_id,
+                vector_entry_id,
+                vector_store: "test-vector-store".to_string(),
+                embedding_model: "test-redacted-summary-embedding".to_string(),
+                embedding_dimension: 8,
+                embedding_version: "test-v1".to_string(),
+                source_projection: StorageTraceVectorEntrySourceProjection::CanonicalSummary,
+                source_hash,
+                status: StorageTraceVectorEntryStatus::Active,
+                nearest_trace_ids: vec!["trace:nearest-safe-ref".to_string()],
+                cluster_id: Some("cluster-safe-ref".to_string()),
+                duplicate_score: Some(0.75),
+                novelty_score: Some(0.25),
+                indexed_at: Some(Utc::now()),
+                invalidated_at: None,
+                deleted_at: None,
+            })
+            .await
+            .expect("vector entry writes");
+
+        let uri = format!(
+            "/v1/admin/vector-entries?status=active&source_projection=canonical_summary&submission_id={}&limit=1",
+            derived.submission_id
+        );
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("vector entry list response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("vector entry list parses");
+        let items = value.as_array().expect("vector entry list is an array");
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(
+            item["tenant_storage_ref"],
+            serde_json::json!(tenant_storage_ref("tenant-a"))
+        );
+        assert_eq!(item["vector_entry_id"], serde_json::json!(vector_entry_id));
+        assert_eq!(item["status"], serde_json::json!("active"));
+        assert_eq!(
+            item["source_projection"],
+            serde_json::json!("canonical_summary")
+        );
+        assert_eq!(
+            item["nearest_trace_ids"],
+            serde_json::json!(["trace:nearest-safe-ref"])
+        );
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("embedding_values"));
+        assert!(!body_text.contains("token-a"));
+
+        let audit_events = backend
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("audit events read");
+        assert!(audit_events.iter().any(|event| {
+            event.action == StorageTraceAuditAction::Read
+                && matches!(
+                    &event.metadata,
+                    StorageTraceAuditSafeMetadata::Read {
+                        surface,
+                        item_count: 1,
+                    } if surface == "vector_entries"
+                )
+        }));
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn admin_vector_entries_requires_configured_db() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/vector-entries")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("vector entry list response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response parses");
+        assert_eq!(
+            value["error"],
+            serde_json::json!("trace vector metadata DB is not configured")
+        );
     }
 
     #[tokio::test]
