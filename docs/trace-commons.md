@@ -401,7 +401,8 @@ routes project the same legacy conflict class into safe aggregate
 `ranking_calibration_dataset_manifest_conflicts` promotion-gate blockers, so
 operators can hold credit issuance without exposing the underlying manifest
 history. Operational summary also projects PostgreSQL RLS production readiness
-into aggregate-only promotion-gate fields, ranking backtest pass/fail counts,
+into aggregate-only promotion-gate fields, safe vector-infrastructure readiness
+booleans alongside vector coverage, ranking backtest pass/fail counts,
 label-adjudication issue counts, and reason-code totals into the ranking block
 and promotion gates, and it includes a `rollout_smoke` preflight block that
 lists required canary smoke checks, including `tenant_canary_isolation`,

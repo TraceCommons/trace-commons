@@ -25705,6 +25705,37 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             value,
         );
     }
+    body.push_str("# HELP trace_commons_operational_vector_infrastructure Safe vector infrastructure readiness flags.\n");
+    body.push_str("# TYPE trace_commons_operational_vector_infrastructure gauge\n");
+    for (state, value) in [
+        (
+            "private_embedder_configured",
+            usize::from(response.vectors.private_embedder_configured),
+        ),
+        (
+            "private_embedder_required",
+            usize::from(response.vectors.private_embedder_required),
+        ),
+        (
+            "private_searcher_configured",
+            usize::from(response.vectors.private_searcher_configured),
+        ),
+        (
+            "scheduler_enabled",
+            usize::from(response.vectors.scheduler_enabled),
+        ),
+    ] {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "trace_commons_operational_vector_infrastructure",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("state", state),
+            ],
+            value,
+        );
+    }
     body.push_str(
         "# HELP trace_commons_operational_benchmarks Benchmark lifecycle counts by operational state.\n",
     );
@@ -45773,6 +45804,7 @@ impl TraceOperationalSummaryResponse {
         let vectors = TraceOperationalVectorSummary::from_records_and_db_summary(
             &inputs.derived,
             &inputs.db_summary,
+            inputs.state,
         );
         let benchmarks = TraceOperationalBenchmarkSummary::from_artifacts_and_registry_outbox(
             &inputs.benchmark_artifacts,
@@ -46625,6 +46657,10 @@ impl TraceOperationalRetentionSummary {
 #[derive(Debug, Default, Serialize)]
 struct TraceOperationalVectorSummary {
     db_available: bool,
+    private_embedder_configured: bool,
+    private_embedder_required: bool,
+    private_searcher_configured: bool,
+    scheduler_enabled: bool,
     entry_count: usize,
     active_entries: usize,
     invalidated_entries: usize,
@@ -46638,6 +46674,7 @@ impl TraceOperationalVectorSummary {
     fn from_records_and_db_summary(
         derived: &[TraceCommonsDerivedRecord],
         db_summary: &TraceOperationalDbSummary,
+        state: &AppState,
     ) -> Self {
         let active_vector_submission_ids = db_summary
             .vector_entries
@@ -46656,6 +46693,10 @@ impl TraceOperationalVectorSummary {
             .count();
         let mut summary = Self {
             db_available: db_summary.db_available,
+            private_embedder_configured: state.vector_embedder.is_some(),
+            private_embedder_required: state.require_external_vector_embedder,
+            private_searcher_configured: state.vector_searcher.is_some(),
+            scheduler_enabled: state.vector_index_scheduler.is_some(),
             entry_count: db_summary.vector_entries.len(),
             accepted_current_derived,
             accepted_current_derived_with_active_vector,
@@ -57526,6 +57567,72 @@ mod tests {
             persisted.registry.status,
             TraceBenchmarkRegistryStatus::Published
         );
+    }
+
+    #[tokio::test]
+    async fn operational_summary_reports_private_vector_infrastructure_readiness() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        {
+            let state = Arc::make_mut(&mut state);
+            state.vector_embedder = Some(Arc::new(FakeVectorEmbedder::default()));
+            state.require_external_vector_embedder = true;
+            state.vector_searcher = Some(Arc::new(FakeVectorSearcher {
+                calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+                response: TraceVectorSearchResponse {
+                    neighbors: Vec::new(),
+                },
+            }));
+            state.vector_index_scheduler = Some(TraceVectorIndexSchedulerConfig {
+                worker_token: SecretString::from("operational-summary-vector-token".to_string()),
+                interval: StdDuration::from_secs(75),
+                limit: 17,
+                dry_run: true,
+                purpose: "do not expose raw vector ops purpose".to_string(),
+            });
+        }
+
+        let Json(response) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect vector infrastructure readiness");
+        let response_json = serde_json::to_value(&response).expect("response serializes");
+        assert_eq!(
+            response_json["vectors"]["private_embedder_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            response_json["vectors"]["private_embedder_required"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            response_json["vectors"]["private_searcher_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            response_json["vectors"]["scheduler_enabled"],
+            serde_json::json!(true)
+        );
+        let response_text = serde_json::to_string(&response).expect("response serializes");
+        assert!(!response_text.contains("operational-summary-vector-token"));
+        assert!(!response_text.contains("do not expose raw vector ops purpose"));
+
+        let (metrics, _) = trace_operational_metrics_body(&response);
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_vector_infrastructure{{tenant_storage_ref=\"{tenant_ref}\",state=\"private_embedder_configured\"}} 1"
+        )));
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_vector_infrastructure{{tenant_storage_ref=\"{tenant_ref}\",state=\"private_embedder_required\"}} 1"
+        )));
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_vector_infrastructure{{tenant_storage_ref=\"{tenant_ref}\",state=\"private_searcher_configured\"}} 1"
+        )));
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_vector_infrastructure{{tenant_storage_ref=\"{tenant_ref}\",state=\"scheduler_enabled\"}} 1"
+        )));
+        assert!(!metrics.contains("operational-summary-vector-token"));
+        assert!(!metrics.contains("do not expose raw vector ops purpose"));
     }
 
     #[test]
