@@ -2988,6 +2988,7 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/admin/rollout-smoke/evidence",
             get(rollout_smoke_evidence_handler).post(append_rollout_smoke_evidence_handler),
         )
+        .route("/v1/admin/rollback-drill", post(rollback_drill_handler))
         .route(
             "/v1/admin/operational-metrics",
             get(operational_metrics_handler),
@@ -21806,6 +21807,275 @@ async fn rollout_smoke_evidence_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(evidence))
+}
+
+async fn rollback_drill_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceRollbackDrillRequest>,
+) -> ApiResult<Json<TraceRollbackDrillResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let response = run_rollback_drill(state.as_ref(), tenant.auth(), request)
+        .await
+        .map_err(maintenance_error)?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceRollbackDrillRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    record_evidence: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRollbackDrillResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose: String,
+    ready: bool,
+    evidence_hash: String,
+    active_rollout_flags: Vec<String>,
+    file_submission_count: usize,
+    db_submission_count: usize,
+    file_audit_event_count: usize,
+    db_audit_event_count: usize,
+    file_tombstone_count: usize,
+    db_tombstone_count: usize,
+    blocking_gaps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+async fn run_rollback_drill(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceRollbackDrillRequest,
+) -> anyhow::Result<TraceRollbackDrillResponse> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| anyhow::Error::new(TraceDbDualWriteRequiredForReconciliation))?;
+    let generated_at = Utc::now();
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_rollback_drill")
+        .to_string();
+    let file_submissions = read_all_submission_records(&state.root, &tenant.tenant_id)?;
+    let db_submissions = db
+        .list_trace_submissions(&tenant.tenant_id)
+        .await
+        .context("failed to list Trace Commons submissions for rollback drill")?;
+    let file_audit_events = read_all_audit_events(&state.root, &tenant.tenant_id)?;
+    let db_audit_events = db
+        .list_trace_audit_events(&tenant.tenant_id)
+        .await
+        .context("failed to list Trace Commons audit events for rollback drill")?;
+    let file_tombstones = read_all_revocations(&state.root, &tenant.tenant_id)?;
+    let db_tombstones = db
+        .list_trace_tombstones(&tenant.tenant_id)
+        .await
+        .context("failed to list Trace Commons tombstones for rollback drill")?;
+
+    let file_submission_ids = file_submissions
+        .iter()
+        .map(|record| record.submission_id)
+        .collect::<BTreeSet<_>>();
+    let db_submission_ids = db_submissions
+        .iter()
+        .map(|record| record.submission_id)
+        .collect::<BTreeSet<_>>();
+    let file_audit_event_ids = file_audit_events
+        .iter()
+        .map(|event| event.event_id)
+        .collect::<BTreeSet<_>>();
+    let db_audit_event_ids = db_audit_events
+        .iter()
+        .map(|event| event.audit_event_id)
+        .collect::<BTreeSet<_>>();
+    let file_tombstone_submission_ids = file_tombstones
+        .iter()
+        .map(|record| record.submission_id)
+        .collect::<BTreeSet<_>>();
+    let db_tombstone_submission_ids = db_tombstones
+        .iter()
+        .map(|record| record.submission_id)
+        .collect::<BTreeSet<_>>();
+
+    let mut blocking_gaps = Vec::new();
+    push_rollback_gap_count(
+        &mut blocking_gaps,
+        "missing_file_submissions_in_db",
+        file_submission_ids.difference(&db_submission_ids).count(),
+    );
+    push_rollback_gap_count(
+        &mut blocking_gaps,
+        "db_submissions_not_in_file_fallback",
+        db_submission_ids.difference(&file_submission_ids).count(),
+    );
+    push_rollback_gap_count(
+        &mut blocking_gaps,
+        "missing_file_audit_events_in_db",
+        file_audit_event_ids.difference(&db_audit_event_ids).count(),
+    );
+    push_rollback_gap_count(
+        &mut blocking_gaps,
+        "db_audit_events_not_in_file_fallback",
+        db_audit_event_ids.difference(&file_audit_event_ids).count(),
+    );
+    push_rollback_gap_count(
+        &mut blocking_gaps,
+        "missing_file_tombstones_in_db",
+        file_tombstone_submission_ids
+            .difference(&db_tombstone_submission_ids)
+            .count(),
+    );
+    push_rollback_gap_count(
+        &mut blocking_gaps,
+        "db_tombstones_not_in_file_fallback",
+        db_tombstone_submission_ids
+            .difference(&file_tombstone_submission_ids)
+            .count(),
+    );
+
+    let active_rollout_flags = active_rollout_flags_for_rollback_drill(state, &tenant.tenant_id);
+    let evidence_hash = rollback_drill_evidence_hash(
+        tenant,
+        &active_rollout_flags,
+        file_submissions.len(),
+        db_submissions.len(),
+        file_audit_events.len(),
+        db_audit_events.len(),
+        file_tombstones.len(),
+        db_tombstones.len(),
+        &blocking_gaps,
+    );
+    let mut response = TraceRollbackDrillResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at,
+        purpose: purpose.clone(),
+        ready: blocking_gaps.is_empty(),
+        evidence_hash,
+        active_rollout_flags,
+        file_submission_count: file_submissions.len(),
+        db_submission_count: db_submissions.len(),
+        file_audit_event_count: file_audit_events.len(),
+        db_audit_event_count: db_audit_events.len(),
+        file_tombstone_count: file_tombstones.len(),
+        db_tombstone_count: db_tombstones.len(),
+        blocking_gaps,
+        recorded_evidence: None,
+    };
+
+    if request.record_evidence {
+        let evidence = TraceRolloutSmokeEvidenceResponse {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            check_name: "rollback_flag_drill".to_string(),
+            status: if response.ready {
+                TraceRolloutSmokeEvidenceStatus::Passed
+            } else {
+                TraceRolloutSmokeEvidenceStatus::Failed
+            },
+            evidence_hash: response.evidence_hash.clone(),
+            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            recorded_at: Utc::now(),
+        };
+        append_audit_event_with_db_mirror(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+            StorageTraceAuditAction::Read,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .await?;
+        response.recorded_evidence = Some(evidence);
+    }
+
+    Ok(response)
+}
+
+fn push_rollback_gap_count(gaps: &mut Vec<String>, label: &str, count: usize) {
+    if count > 0 {
+        gaps.push(format!("{label}={count}"));
+    }
+}
+
+fn active_rollout_flags_for_rollback_drill(state: &AppState, tenant_id: &str) -> Vec<String> {
+    TraceTenantRolloutFeature::ALL
+        .into_iter()
+        .filter(|feature| {
+            state.tenant_rollout_gates.enabled_for(
+                *feature,
+                rollout_feature_global_enabled(state, *feature),
+                tenant_id,
+            )
+        })
+        .map(|feature| feature.status_key().to_string())
+        .collect()
+}
+
+fn rollout_feature_global_enabled(state: &AppState, feature: TraceTenantRolloutFeature) -> bool {
+    match feature {
+        TraceTenantRolloutFeature::DbContributorReads => state.db_contributor_reads,
+        TraceTenantRolloutFeature::DbReviewerReads => state.db_reviewer_reads,
+        TraceTenantRolloutFeature::DbReviewerRequireObjectRefs => {
+            state.db_reviewer_require_object_refs
+        }
+        TraceTenantRolloutFeature::DbReplayExportReads => state.db_replay_export_reads,
+        TraceTenantRolloutFeature::DbReplayExportRequireObjectRefs => {
+            state.db_replay_export_require_object_refs
+        }
+        TraceTenantRolloutFeature::DbAuditReads => state.db_audit_reads,
+        TraceTenantRolloutFeature::DbTenantPolicyReads => state.db_tenant_policy_reads,
+        TraceTenantRolloutFeature::DerivedExportRequireObjectRefs => {
+            state.require_derived_export_object_refs
+        }
+        TraceTenantRolloutFeature::ObjectPrimarySubmitReview => state.object_primary_submit_review,
+        TraceTenantRolloutFeature::ObjectPrimaryReplayExport => state.object_primary_replay_export,
+        TraceTenantRolloutFeature::ObjectPrimaryDerivedExports => {
+            state.object_primary_derived_exports
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rollback_drill_evidence_hash(
+    tenant: &TenantAuth,
+    active_rollout_flags: &[String],
+    file_submission_count: usize,
+    db_submission_count: usize,
+    file_audit_event_count: usize,
+    db_audit_event_count: usize,
+    file_tombstone_count: usize,
+    db_tombstone_count: usize,
+    blocking_gaps: &[String],
+) -> String {
+    sha256_prefixed(
+        &serde_json::json!({
+            "schema": "trace_commons_rollback_drill.v1",
+            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+            "actor_principal_ref": tenant.principal_ref,
+            "active_rollout_flags": active_rollout_flags,
+            "file_submission_count": file_submission_count,
+            "db_submission_count": db_submission_count,
+            "file_audit_event_count": file_audit_event_count,
+            "db_audit_event_count": db_audit_event_count,
+            "file_tombstone_count": file_tombstone_count,
+            "db_tombstone_count": db_tombstone_count,
+            "blocking_gaps": blocking_gaps,
+        })
+        .to_string(),
+    )
 }
 
 const TRACE_OPERATIONAL_METRICS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
@@ -53168,6 +53438,190 @@ mod tests {
         .expect_err("DB reconciliation requires configured DB mirror");
         assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
         assert!(error.1.0.error.contains("TRACE_COMMONS_DB_DUAL_WRITE"));
+    }
+
+    #[tokio::test]
+    async fn rollback_drill_without_db_mirror_returns_operator_error() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/rollback-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator rollback drill",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("rollback drill response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response parses");
+        assert!(
+            value["error"]
+                .as_str()
+                .expect("error is string")
+                .contains("TRACE_COMMONS_DB_DUAL_WRITE")
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_drill_records_smoke_evidence_and_preserves_db_rows() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            true,
+            true,
+            true,
+            true,
+        );
+        Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission mirrors to DB");
+        let revoke_status = revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(submission_id),
+        )
+        .await
+        .expect("revocation mirrors tombstone to DB");
+        assert_eq!(revoke_status, StatusCode::NO_CONTENT);
+
+        let db_submission_count_before = backend
+            .list_trace_submissions("tenant-a")
+            .await
+            .expect("DB submissions read before drill")
+            .len();
+        let db_tombstone_count_before = backend
+            .list_trace_tombstones("tenant-a")
+            .await
+            .expect("DB tombstones read before drill")
+            .len();
+        assert_eq!(db_submission_count_before, 1);
+        assert_eq!(db_tombstone_count_before, 1);
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/rollback-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator rollback drill",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("rollback drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("rollback drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(true));
+        assert_eq!(value["file_submission_count"], serde_json::json!(1));
+        assert_eq!(value["db_submission_count"], serde_json::json!(1));
+        assert_eq!(value["file_tombstone_count"], serde_json::json!(1));
+        assert_eq!(value["db_tombstone_count"], serde_json::json!(1));
+        assert_eq!(
+            value["recorded_evidence"]["check_name"],
+            serde_json::json!("rollback_flag_drill")
+        );
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("passed")
+        );
+        assert!(
+            value["evidence_hash"]
+                .as_str()
+                .expect("evidence hash is string")
+                .starts_with("sha256:")
+        );
+
+        let db_submissions = backend
+            .list_trace_submissions("tenant-a")
+            .await
+            .expect("DB submissions remain after drill");
+        assert!(
+            db_submissions
+                .iter()
+                .any(|record| record.submission_id == submission_id)
+        );
+        let db_tombstones = backend
+            .list_trace_tombstones("tenant-a")
+            .await
+            .expect("DB tombstones remain after drill");
+        assert!(
+            db_tombstones
+                .iter()
+                .any(|record| record.submission_id == submission_id)
+        );
+        let db_audit_events = backend
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("DB audit events remain after drill");
+        assert!(db_audit_events.iter().any(|event| {
+            event.reason.as_deref().is_some_and(|reason| {
+                reason.contains("surface=rollout_smoke_evidence")
+                    && reason.contains("check_name=rollback_flag_drill")
+                    && reason.contains("status=passed")
+            })
+        }));
+        assert!(
+            read_all_audit_events(temp.path(), "tenant-a")
+                .expect("file audit events remain after drill")
+                .iter()
+                .any(|event| {
+                    event.kind == "rollout_smoke_evidence"
+                        && event.reason.as_deref().is_some_and(|reason| {
+                            reason.contains("check_name=rollback_flag_drill")
+                                && reason.contains("status=passed")
+                        })
+                })
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
 
     #[tokio::test]
