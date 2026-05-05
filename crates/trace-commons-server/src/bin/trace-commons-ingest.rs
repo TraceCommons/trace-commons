@@ -20350,6 +20350,15 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         &[("tenant_storage_ref", &response.tenant_storage_ref)],
         response.rollout_smoke.recorded_evidence_count,
     );
+    body.push_str("# HELP trace_commons_operational_rollout_smoke_passed_evidence Count of required rollout smoke checks whose latest captured rehearsal evidence passed.\n");
+    body.push_str("# TYPE trace_commons_operational_rollout_smoke_passed_evidence gauge\n");
+    push_prometheus_gauge(
+        &mut body,
+        &mut metric_count,
+        "trace_commons_operational_rollout_smoke_passed_evidence",
+        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        response.rollout_smoke.passed_evidence_count,
+    );
     body.push_str("# HELP trace_commons_operational_rollout_smoke_failed_evidence Count of required rollout smoke checks whose latest captured rehearsal evidence failed.\n");
     body.push_str("# TYPE trace_commons_operational_rollout_smoke_failed_evidence gauge\n");
     push_prometheus_gauge(
@@ -38900,8 +38909,10 @@ struct TraceOperationalRolloutSmokeSummary {
     required_check_count: usize,
     missing_evidence_count: usize,
     recorded_evidence_count: usize,
+    passed_evidence_count: usize,
     failed_evidence_count: usize,
     required_checks: Vec<String>,
+    passed_evidence_checks: Vec<String>,
     missing_evidence_checks: Vec<String>,
     failed_evidence_checks: Vec<String>,
     blocker_reasons: Vec<String>,
@@ -38926,8 +38937,12 @@ impl TraceOperationalRolloutSmokeSummary {
         let passed_evidence_checks = latest_evidence_by_check
             .iter()
             .filter_map(|(check, record)| {
-                (record.status == TraceRolloutSmokeEvidenceStatus::Passed).then_some(check)
+                (record.status == TraceRolloutSmokeEvidenceStatus::Passed).then_some(check.clone())
             })
+            .collect::<Vec<_>>();
+        let passed_evidence_check_set = passed_evidence_checks
+            .iter()
+            .map(String::as_str)
             .collect::<BTreeSet<_>>();
         let failed_evidence_checks = latest_evidence_by_check
             .iter()
@@ -38937,7 +38952,7 @@ impl TraceOperationalRolloutSmokeSummary {
             .collect::<Vec<_>>();
         let missing_evidence_checks = required_checks
             .iter()
-            .filter(|check| !passed_evidence_checks.contains(check))
+            .filter(|check| !passed_evidence_check_set.contains(check.as_str()))
             .cloned()
             .collect::<Vec<_>>();
         let mut blocker_reasons = promotion_gates
@@ -38974,8 +38989,10 @@ impl TraceOperationalRolloutSmokeSummary {
             required_check_count: required_checks.len(),
             missing_evidence_count: missing_evidence_checks.len(),
             recorded_evidence_count: latest_evidence_by_check.len(),
+            passed_evidence_count: passed_evidence_checks.len(),
             failed_evidence_count: failed_evidence_checks.len(),
             required_checks,
+            passed_evidence_checks,
             missing_evidence_checks,
             failed_evidence_checks,
             blocker_reasons,
@@ -63847,6 +63864,14 @@ mod tests {
             serde_json::json!(1)
         );
         assert_eq!(
+            operational_json["rollout_smoke"]["passed_evidence_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["rollout_smoke"]["passed_evidence_checks"],
+            serde_json::json!(["submit_status"])
+        );
+        assert_eq!(
             operational_json["rollout_smoke"]["missing_evidence_count"],
             serde_json::json!(9)
         );
@@ -63867,6 +63892,27 @@ mod tests {
         assert!(reason.contains("status=passed"));
         assert!(reason.contains("evidence_hash=sha256:"));
         assert!(!reason.contains("admin-token-a"));
+
+        let metrics_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-metrics")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("metrics response");
+        assert_eq!(metrics_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(metrics_response.into_body(), 16384)
+            .await
+            .expect("body reads");
+        let body_text = std::str::from_utf8(&body).expect("metrics body is utf8");
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_rollout_smoke_passed_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 1"
+        )));
     }
 
     #[tokio::test]
