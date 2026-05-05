@@ -24918,6 +24918,7 @@ fn trace_commons_audit_event_from_storage(
         event.tenant_id == expected_tenant_id,
         "DB audit event tenant mismatch"
     );
+    ensure_db_audit_canonical_projection_matches(&event)?;
     let mut kind = storage_audit_event_kind(event.action, &event.metadata);
     if event.action == StorageTraceAuditAction::Read
         && event.submission_id.is_some()
@@ -25076,6 +25077,27 @@ fn trace_commons_audit_event_from_storage(
         previous_event_hash: event.previous_event_hash,
         event_hash: event.event_hash,
     })
+}
+
+fn ensure_db_audit_canonical_projection_matches(
+    event: &StorageTraceAuditEventRecord,
+) -> anyhow::Result<()> {
+    let Some(canonical_event_json) = event.canonical_event_json.as_deref() else {
+        return Ok(());
+    };
+    let canonical_event: TraceCommonsAuditEvent = serde_json::from_str(canonical_event_json)
+        .with_context(|| {
+            format!(
+                "failed to parse canonical audit payload for DB audit event {}",
+                event.audit_event_id
+            )
+        })?;
+    let mut report = TraceDbAuditChainReport::default();
+    verify_db_audit_projection(1, event, &canonical_event, &mut report);
+    if let Some(failure) = report.failures.first() {
+        anyhow::bail!("DB audit event canonical projection mismatch: {failure}");
+    }
+    Ok(())
 }
 
 fn storage_audit_event_kind(
@@ -42914,6 +42936,62 @@ mod tests {
             .expect_err("cross-tenant DB audit row must fail closed");
 
         assert!(error.to_string().contains("DB audit event tenant mismatch"));
+    }
+
+    #[test]
+    fn storage_audit_projection_rejects_canonical_payload_drift() {
+        let canonical_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: Uuid::new_v4(),
+            kind: "trace_content_read".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Reviewer),
+            actor_principal_ref: Some("reviewer-a".to_string()),
+            reason: Some(format!(
+                "surface=review_decision;purpose_hash={}",
+                sha256_prefixed("review reason")
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+        let event = StorageTraceAuditEventRecord {
+            audit_event_id: canonical_event.event_id,
+            tenant_id: canonical_event.tenant_id.clone(),
+            audit_sequence: 1,
+            actor_principal_ref: canonical_event.actor_principal_ref.clone().unwrap(),
+            actor_role: "review".to_string(),
+            action: StorageTraceAuditAction::Read,
+            reason: Some("surface=review_decision".to_string()),
+            request_id: None,
+            submission_id: Some(canonical_event.submission_id),
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: Some(
+                serde_json::to_string(&canonical_event).expect("canonical audit serializes"),
+            ),
+            metadata: StorageTraceAuditSafeMetadata::TraceContentRead {
+                surface: "review_decision".to_string(),
+                purpose_hash: None,
+            },
+            occurred_at: canonical_event.created_at,
+        };
+
+        let error = trace_commons_audit_event_from_storage("tenant-a", event)
+            .expect_err("canonical DB audit projection drift must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("DB audit event canonical projection mismatch")
+        );
     }
 
     #[tokio::test]
