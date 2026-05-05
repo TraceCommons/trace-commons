@@ -25202,6 +25202,34 @@ fn collect_db_audit_canonical_projection_failures(
         .collect()
 }
 
+fn collect_db_audit_submission_metadata_mismatches(
+    events: &[StorageTraceAuditEventRecord],
+    db_by_submission: &BTreeMap<Uuid, &StorageTraceSubmissionRecord>,
+) -> Vec<TraceDbAuditSubmissionMetadataMismatch> {
+    events
+        .iter()
+        .filter_map(|event| {
+            let StorageTraceAuditSafeMetadata::Submission {
+                privacy_risk: metadata_privacy_risk,
+                ..
+            } = &event.metadata
+            else {
+                return None;
+            };
+            let submission_id = event.submission_id?;
+            let db_record = db_by_submission.get(&submission_id)?;
+            (metadata_privacy_risk != &db_record.privacy_risk).then(|| {
+                TraceDbAuditSubmissionMetadataMismatch {
+                    audit_event_id: event.audit_event_id,
+                    submission_id,
+                    metadata_privacy_risk: metadata_privacy_risk.clone(),
+                    db_privacy_risk: db_record.privacy_risk.clone(),
+                }
+            })
+        })
+        .collect()
+}
+
 fn collect_db_audit_hash_chain_failures(
     events: &[StorageTraceAuditEventRecord],
 ) -> Vec<TraceDbAuditHashChainFailure> {
@@ -33599,6 +33627,8 @@ async fn reconcile_db_mirror(
         .iter()
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
+    let db_audit_submission_metadata_mismatches =
+        collect_db_audit_submission_metadata_mismatches(&db_audit_events, &db_by_submission);
     let file_derived_by_submission = file_derived
         .iter()
         .map(|record| (record.submission_id, record))
@@ -33984,6 +34014,7 @@ async fn reconcile_db_mirror(
         missing_audit_event_ids_in_files,
         db_audit_hash_chain_failures,
         db_audit_canonical_projection_failures,
+        db_audit_submission_metadata_mismatches,
         db_retention_job_count: db_retention_jobs.len(),
         db_retention_job_item_count,
         missing_current_retention_job_ids_in_db,
@@ -36434,6 +36465,7 @@ struct TraceDbReconciliationReport {
     missing_audit_event_ids_in_files: Vec<Uuid>,
     db_audit_hash_chain_failures: Vec<TraceDbAuditHashChainFailure>,
     db_audit_canonical_projection_failures: Vec<TraceDbAuditProjectionFailure>,
+    db_audit_submission_metadata_mismatches: Vec<TraceDbAuditSubmissionMetadataMismatch>,
     db_retention_job_count: usize,
     db_retention_job_item_count: usize,
     missing_current_retention_job_ids_in_db: Vec<Uuid>,
@@ -36714,6 +36746,11 @@ impl TraceDbReconciliationReport {
         );
         push_gap_count(
             &mut gaps,
+            "db_audit_submission_metadata_mismatches",
+            self.db_audit_submission_metadata_mismatches.len(),
+        );
+        push_gap_count(
+            &mut gaps,
             "missing_current_retention_job_ids_in_db",
             self.missing_current_retention_job_ids_in_db.len(),
         );
@@ -36841,6 +36878,14 @@ struct TraceDbAuditProjectionFailure {
     audit_event_id: Uuid,
     failure_count: usize,
     first_failure: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceDbAuditSubmissionMetadataMismatch {
+    audit_event_id: Uuid,
+    submission_id: Uuid,
+    metadata_privacy_risk: String,
+    db_privacy_risk: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -43890,6 +43935,110 @@ mod tests {
                 .get("privacy_risk")
                 .and_then(|value| value.as_str()),
             Some("unknown")
+        );
+    }
+
+    #[test]
+    fn db_reconciliation_projects_submitted_audit_metadata_privacy_risk_drift() {
+        let submission_id = Uuid::new_v4();
+        let canonical_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id,
+            kind: "submitted".to_string(),
+            created_at: Utc::now(),
+            status: Some(TraceCorpusStatus::Accepted),
+            actor_role: Some(TokenRole::Contributor),
+            actor_principal_ref: Some("contributor-a".to_string()),
+            reason: None,
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+        let audit_event = StorageTraceAuditEventRecord {
+            audit_event_id: canonical_event.event_id,
+            tenant_id: canonical_event.tenant_id.clone(),
+            audit_sequence: 1,
+            actor_principal_ref: canonical_event.actor_principal_ref.clone().unwrap(),
+            actor_role: "contributor".to_string(),
+            action: StorageTraceAuditAction::Submit,
+            reason: None,
+            request_id: None,
+            submission_id: Some(submission_id),
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: Some(
+                serde_json::to_string(&canonical_event).expect("canonical audit serializes"),
+            ),
+            metadata: StorageTraceAuditSafeMetadata::Submission {
+                status: StorageTraceCorpusStatus::Accepted,
+                privacy_risk: "unknown".to_string(),
+            },
+            occurred_at: canonical_event.created_at,
+        };
+        let submission_record = StorageTraceSubmissionRecord {
+            tenant_id: "tenant-a".to_string(),
+            submission_id,
+            trace_id: Uuid::new_v4(),
+            status: StorageTraceCorpusStatus::Accepted,
+            auth_principal_ref: "contributor-a".to_string(),
+            contributor_pseudonym: None,
+            submitted_tenant_scope_ref: None,
+            schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
+            consent_policy_version: "trace-credit-policy-v1".to_string(),
+            consent_scopes: vec!["model_training".to_string()],
+            allowed_uses: vec!["model_training".to_string()],
+            retention_policy_id: "default".to_string(),
+            privacy_risk: "low".to_string(),
+            redaction_pipeline_version: "test-redaction-v1".to_string(),
+            redaction_counts: BTreeMap::new(),
+            redaction_hash: "sha256:redaction".to_string(),
+            canonical_summary_hash: Some("sha256:summary".to_string()),
+            submission_score: Some(1.0),
+            credit_points_pending: Some(1.0),
+            credit_points_final: None,
+            received_at: canonical_event.created_at,
+            updated_at: canonical_event.created_at,
+            reviewed_at: None,
+            review_assigned_to_principal_ref: None,
+            review_assigned_at: None,
+            review_lease_expires_at: None,
+            review_due_at: None,
+            revoked_at: None,
+            expires_at: None,
+            purged_at: None,
+        };
+        let db_by_submission = BTreeMap::from([(submission_id, &submission_record)]);
+
+        let mismatches =
+            collect_db_audit_submission_metadata_mismatches(&[audit_event], &db_by_submission);
+
+        assert_eq!(mismatches.len(), 1);
+        assert_eq!(mismatches[0].audit_event_id, canonical_event.event_id);
+        assert_eq!(mismatches[0].submission_id, submission_id);
+        assert_eq!(mismatches[0].metadata_privacy_risk, "unknown");
+        assert_eq!(mismatches[0].db_privacy_risk, "low");
+
+        let mut report = TraceDbReconciliationReport {
+            contributor_credit_reader_parity_ok: true,
+            reviewer_metadata_reader_parity_ok: true,
+            analytics_reader_parity_ok: true,
+            audit_reader_parity_ok: true,
+            audit_reader_sample_parity_ok: true,
+            replay_export_manifest_reader_parity_ok: true,
+            ..TraceDbReconciliationReport::default()
+        };
+        report.db_audit_submission_metadata_mismatches = mismatches;
+
+        assert!(
+            report
+                .compute_blocking_gap_summaries()
+                .contains(&"db_audit_submission_metadata_mismatches=1".to_string())
         );
     }
 
