@@ -3284,6 +3284,10 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/admin/rollout-smoke/evidence",
             get(rollout_smoke_evidence_handler).post(append_rollout_smoke_evidence_handler),
         )
+        .route(
+            "/v1/admin/rollout-smoke/preflight",
+            get(rollout_smoke_preflight_handler),
+        )
         .route("/v1/admin/rollback-drill", post(rollback_drill_handler))
         .route(
             "/v1/admin/key-rotation-drill",
@@ -22860,6 +22864,48 @@ async fn rollout_smoke_evidence_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(evidence))
+}
+
+async fn rollout_smoke_preflight_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<TraceRolloutSmokePreflightResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let generated_at = Utc::now();
+    let operational = read_trace_operational_summary(state.as_ref(), &tenant, generated_at)
+        .await
+        .map_err(internal_error)?;
+    let latest_evidence = latest_rollout_smoke_evidence_by_check(
+        read_rollout_smoke_evidence_for_admin(state.as_ref(), tenant.auth())
+            .await
+            .map_err(internal_error)?,
+    );
+    let item_count = latest_evidence.len();
+    let TraceOperationalSummaryResponse {
+        tenant_id,
+        tenant_storage_ref,
+        generated_at,
+        rollout_smoke,
+        ..
+    } = operational;
+    let response = TraceRolloutSmokePreflightResponse {
+        tenant_id,
+        tenant_storage_ref,
+        generated_at,
+        rollout_smoke,
+        latest_evidence,
+    };
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        tenant.auth(),
+        TraceCommonsAuditEvent::read(tenant.auth(), "rollout_smoke_preflight", item_count),
+        StorageTraceAuditAction::Read,
+        trace_read_audit_metadata("rollout_smoke_preflight", item_count),
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(response))
 }
 
 async fn rollback_drill_handler(
@@ -46408,6 +46454,15 @@ struct TraceOperationalSummaryResponse {
     benchmarks: TraceOperationalBenchmarkSummary,
     ranking: TraceOperationalRankingSummary,
     delayed_credit: TraceOperationalDelayedCreditSummary,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRolloutSmokePreflightResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    rollout_smoke: TraceOperationalRolloutSmokeSummary,
+    latest_evidence: Vec<TraceRolloutSmokeEvidenceResponse>,
 }
 
 struct TraceOperationalSummaryInputs<'a> {
@@ -78833,6 +78888,134 @@ mod tests {
         assert_eq!(evidence.len(), 1);
         assert_eq!(evidence[0]["check_name"], serde_json::json!("audit_reads"));
         assert_eq!(evidence[0]["status"], serde_json::json!("passed"));
+    }
+
+    #[tokio::test]
+    async fn admin_rollout_smoke_preflight_returns_latest_hash_only_evidence() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let contributor_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/rollout-smoke/preflight")
+                    .header(AUTHORIZATION, "Bearer token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("contributor response");
+        assert_eq!(contributor_response.status(), StatusCode::FORBIDDEN);
+
+        let raw_evidence_ref = "runbook://trace-commons/smoke/submit-status";
+        for (status, marker) in [
+            ("failed", "submit status smoke rehearsal failed first"),
+            ("passed", "submit status smoke rehearsal passed later"),
+        ] {
+            let evidence_body = serde_json::json!({
+                "check_name": "submit_status",
+                "status": status,
+                "evidence_hash": sha256_prefixed(marker),
+                "evidence_ref": raw_evidence_ref
+            });
+            let append_response = app(state.clone())
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/v1/admin/rollout-smoke/evidence")
+                        .header(AUTHORIZATION, "Bearer admin-token-a")
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(evidence_body.to_string()))
+                        .expect("request builds"),
+                )
+                .await
+                .expect("append response");
+            assert_eq!(append_response.status(), StatusCode::OK);
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+
+        let preflight_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/rollout-smoke/preflight")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("preflight response");
+        assert_eq!(preflight_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(preflight_response.into_body(), 16384)
+            .await
+            .expect("body reads");
+        let preflight_json: serde_json::Value =
+            serde_json::from_slice(&body).expect("preflight json parses");
+        assert_eq!(
+            preflight_json["tenant_storage_ref"],
+            serde_json::json!(tenant_storage_ref("tenant-a"))
+        );
+        assert_eq!(
+            preflight_json["rollout_smoke"]["required_check_count"],
+            serde_json::json!(18)
+        );
+        assert_eq!(
+            preflight_json["rollout_smoke"]["recorded_evidence_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            preflight_json["rollout_smoke"]["passed_evidence_checks"],
+            serde_json::json!(["submit_status"])
+        );
+        assert_eq!(
+            preflight_json["rollout_smoke"]["missing_evidence_count"],
+            serde_json::json!(17)
+        );
+        assert_eq!(
+            preflight_json["latest_evidence"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            preflight_json["latest_evidence"][0]["check_name"],
+            serde_json::json!("submit_status")
+        );
+        assert_eq!(
+            preflight_json["latest_evidence"][0]["status"],
+            serde_json::json!("passed")
+        );
+        assert!(
+            preflight_json["latest_evidence"][0]["evidence_hash"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("sha256:"))
+        );
+        assert!(
+            preflight_json["latest_evidence"][0]["evidence_ref_hash"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("sha256:"))
+        );
+        assert!(
+            !body
+                .windows(raw_evidence_ref.len())
+                .any(|window| window == raw_evidence_ref.as_bytes())
+        );
+        assert!(
+            !body
+                .windows(b"admin-token-a".len())
+                .any(|window| window == b"admin-token-a")
+        );
+
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "read"
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("surface=rollout_smoke_preflight;"))
+        }));
     }
 
     #[tokio::test]
