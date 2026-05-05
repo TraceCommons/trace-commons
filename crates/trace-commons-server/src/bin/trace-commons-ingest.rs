@@ -34,8 +34,9 @@ use trace_commons_server::error::DatabaseError;
 use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
 use trace_commons_server::secrets::SecretsCrypto;
 use trace_commons_server::trace_artifact_store::{
-    EncryptedTraceArtifactReceipt, LocalEncryptedTraceArtifactStore, TraceArtifactKind,
-    TraceArtifactStore,
+    EncryptedTraceArtifactReceipt, FileRemoteTraceArtifactProvider,
+    LocalEncryptedTraceArtifactStore, ServiceOwnedTraceArtifactStore, TraceArtifactKind,
+    TraceArtifactProviderConfig, TraceArtifactStore,
 };
 use trace_commons_server::trace_corpus_storage::{
     TraceArtifactInvalidationCounts as StorageTraceArtifactInvalidationCounts,
@@ -144,7 +145,8 @@ const TRACE_COMMONS_FILE_OBJECT_STORE: &str = "trace_commons_file_store";
 const TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE: &str = "trace_commons_encrypted_artifact_store";
 const TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE: &str =
     "trace_commons_service_local_encrypted";
-const TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE: &str =
+const TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE: &str = "trace_commons_service_owned_remote";
+const TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE: &str =
     "trace_commons_service_owned_remote_disabled";
 const TRACE_DEFAULT_REVOCATION_REASON: &str = "contributor_revocation";
 const TRACE_COMMONS_REMOTE_OBJECT_STORE_PROVIDER: &str =
@@ -775,11 +777,42 @@ impl ConfiguredTraceArtifactStore {
 
     fn remote_disabled(config: TraceRemoteObjectStoreConfig) -> Self {
         Self {
-            object_store_name: config.status_object_store_alias().to_string(),
+            object_store_name: TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE.to_string(),
             store: Arc::new(DisabledRemoteTraceArtifactStore::new(config)),
             object_io_enabled: false,
             plaintext_compatibility_allowed: false,
         }
+    }
+
+    fn remote_service(
+        config: TraceRemoteObjectStoreConfig,
+        key: SecretString,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            config.provider == TraceRemoteObjectStoreProvider::FileSystem,
+            "remote Trace Commons object store provider {} is not compiled",
+            config.provider.label()
+        );
+        anyhow::ensure!(
+            config.has_service_envelope_refs(),
+            "remote Trace Commons object store requires KMS and credential references"
+        );
+        let root = config.file_system_root()?;
+        let crypto = SecretsCrypto::new(key)
+            .context("failed to initialize Trace Commons remote artifact encryption")?;
+        let provider_config = TraceArtifactProviderConfig::service_owned_remote(
+            TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE,
+        )?;
+        Ok(Self {
+            object_store_name: TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE.to_string(),
+            store: Arc::new(ServiceOwnedTraceArtifactStore::new(
+                provider_config,
+                crypto,
+                FileRemoteTraceArtifactProvider::new(root),
+            )),
+            object_io_enabled: true,
+            plaintext_compatibility_allowed: false,
+        })
     }
 
     fn object_store_name(&self) -> &str {
@@ -854,6 +887,9 @@ impl ConfiguredTraceArtifactStore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TraceRemoteObjectStoreConfig {
     provider: TraceRemoteObjectStoreProvider,
+    bucket: String,
+    kms_key_id: String,
+    credential_ref: String,
 }
 
 impl TraceRemoteObjectStoreConfig {
@@ -878,23 +914,51 @@ impl TraceRemoteObjectStoreConfig {
     ) -> anyhow::Result<Self> {
         let provider =
             required_remote_object_store_env(TRACE_COMMONS_REMOTE_OBJECT_STORE_PROVIDER, provider)?;
-        let _bucket =
+        let bucket =
             required_remote_object_store_env(TRACE_COMMONS_REMOTE_OBJECT_STORE_BUCKET, bucket)?;
-        let _kms_key_id = required_remote_object_store_env(
+        let kms_key_id = required_remote_object_store_env(
             TRACE_COMMONS_REMOTE_OBJECT_STORE_KMS_KEY_ID,
             kms_key_id,
         )?;
-        let _credential_ref = required_remote_object_store_env(
+        let credential_ref = required_remote_object_store_env(
             TRACE_COMMONS_REMOTE_OBJECT_STORE_CREDENTIAL_REF,
             credential_ref,
         )?;
         Ok(Self {
             provider: TraceRemoteObjectStoreProvider::parse(provider)?,
+            bucket: bucket.to_string(),
+            kms_key_id: kms_key_id.to_string(),
+            credential_ref: credential_ref.to_string(),
         })
     }
 
+    #[cfg(test)]
     fn status_object_store_alias(&self) -> &'static str {
-        TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE
+        match self.provider {
+            TraceRemoteObjectStoreProvider::FileSystem => TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE,
+            TraceRemoteObjectStoreProvider::AwsS3
+            | TraceRemoteObjectStoreProvider::Gcs
+            | TraceRemoteObjectStoreProvider::AzureBlob => {
+                TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE
+            }
+        }
+    }
+
+    fn file_system_root(&self) -> anyhow::Result<PathBuf> {
+        anyhow::ensure!(
+            self.provider == TraceRemoteObjectStoreProvider::FileSystem,
+            "TRACE_COMMONS_REMOTE_OBJECT_STORE_BUCKET is only used as a filesystem root for provider=file_system"
+        );
+        let root = PathBuf::from(self.bucket.as_str());
+        anyhow::ensure!(
+            root.is_absolute(),
+            "TRACE_COMMONS_REMOTE_OBJECT_STORE_BUCKET must be an absolute filesystem path for provider=file_system"
+        );
+        Ok(root)
+    }
+
+    fn has_service_envelope_refs(&self) -> bool {
+        !self.kms_key_id.trim().is_empty() && !self.credential_ref.trim().is_empty()
     }
 }
 
@@ -920,6 +984,7 @@ enum TraceRemoteObjectStoreProvider {
     AwsS3,
     Gcs,
     AzureBlob,
+    FileSystem,
 }
 
 impl TraceRemoteObjectStoreProvider {
@@ -928,9 +993,19 @@ impl TraceRemoteObjectStoreProvider {
             "aws_s3" | "s3" => Ok(Self::AwsS3),
             "gcs" | "google_cloud_storage" => Ok(Self::Gcs),
             "azure_blob" | "azure" => Ok(Self::AzureBlob),
+            "file_system" | "filesystem" | "local_fs" => Ok(Self::FileSystem),
             other => anyhow::bail!(
                 "unsupported TRACE_COMMONS_REMOTE_OBJECT_STORE_PROVIDER value: {other}"
             ),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::AwsS3 => "aws_s3",
+            Self::Gcs => "gcs",
+            Self::AzureBlob => "azure_blob",
+            Self::FileSystem => "file_system",
         }
     }
 }
@@ -947,11 +1022,7 @@ impl DisabledRemoteTraceArtifactStore {
     }
 
     fn disabled_error(&self) -> anyhow::Error {
-        let provider = match self.provider {
-            TraceRemoteObjectStoreProvider::AwsS3 => "aws_s3",
-            TraceRemoteObjectStoreProvider::Gcs => "gcs",
-            TraceRemoteObjectStoreProvider::AzureBlob => "azure_blob",
-        };
+        let provider = self.provider.label();
         anyhow::anyhow!(
             "remote Trace Commons object store provider is not enabled: \
              TRACE_COMMONS_OBJECT_STORE=remote_service selected provider {provider}, \
@@ -1835,7 +1906,7 @@ fn validate_object_primary_submit_review_config(
     );
     anyhow::ensure!(
         is_enabled_object_primary_trace_object_store(artifact_store_name),
-        "{TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW} requires TRACE_COMMONS_OBJECT_STORE=local_service until the remote_service provider is enabled"
+        "{TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW} requires TRACE_COMMONS_OBJECT_STORE=local_service or an enabled remote_service provider"
     );
     Ok(())
 }
@@ -1869,7 +1940,7 @@ fn validate_object_primary_replay_export_config(
     );
     anyhow::ensure!(
         is_enabled_object_primary_trace_object_store(artifact_store_name),
-        "{TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT} requires TRACE_COMMONS_OBJECT_STORE=local_service until the remote_service provider is enabled"
+        "{TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT} requires TRACE_COMMONS_OBJECT_STORE=local_service or an enabled remote_service provider"
     );
     Ok(())
 }
@@ -1908,7 +1979,7 @@ fn validate_object_primary_derived_exports_config(
     );
     anyhow::ensure!(
         is_enabled_object_primary_trace_object_store(artifact_store_name),
-        "{TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS} requires TRACE_COMMONS_OBJECT_STORE=local_service until the remote_service provider is enabled"
+        "{TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS} requires TRACE_COMMONS_OBJECT_STORE=local_service or an enabled remote_service provider"
     );
     Ok(())
 }
@@ -1916,7 +1987,10 @@ fn validate_object_primary_derived_exports_config(
 fn is_enabled_object_primary_trace_object_store(artifact_store_name: Option<&str>) -> bool {
     matches!(
         artifact_store_name,
-        Some(TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE)
+        Some(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+                | TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE
+        )
     )
 }
 
@@ -2029,9 +2103,17 @@ fn trace_artifact_store_from_env(
         return Ok(None);
     };
     if encrypted_store_kind == TraceEncryptedObjectStoreKind::ServiceRemote {
-        return Ok(Some(ConfiguredTraceArtifactStore::remote_disabled(
-            TraceRemoteObjectStoreConfig::from_env()?,
-        )));
+        let config = TraceRemoteObjectStoreConfig::from_env()?;
+        if config.provider == TraceRemoteObjectStoreProvider::FileSystem {
+            let key = key.context(
+                "TRACE_COMMONS_OBJECT_STORE=remote_service with provider=file_system requires TRACE_COMMONS_ARTIFACT_KEY_HEX",
+            )?;
+            return Ok(Some(ConfiguredTraceArtifactStore::remote_service(
+                config,
+                SecretString::from(key),
+            )?));
+        }
+        return Ok(Some(ConfiguredTraceArtifactStore::remote_disabled(config)));
     }
     let key = key.context(
         "encrypted Trace Commons object storage requires TRACE_COMMONS_ARTIFACT_KEY_HEX",
@@ -29131,10 +29213,10 @@ async fn delete_object_payload_for_revocation_propagation(
             "delete_object_payload_already_deleted",
         ));
     }
-    if object_ref.object_store != TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE {
+    if !is_service_owned_trace_object_store(&object_ref.object_store) {
         return Ok(skipped_revocation_propagation_item(
             item,
-            "object payload deletion currently supports only service-local encrypted objects",
+            "object payload deletion currently supports only enabled service-owned encrypted objects",
         ));
     }
     ensure_local_trace_object_ref_key_ref(&object_ref, &tenant.tenant_id)?;
@@ -29152,7 +29234,7 @@ async fn delete_object_payload_for_revocation_propagation(
         }
     };
     let Some(store) = state.artifact_store.as_ref() else {
-        anyhow::bail!("service-local encrypted object store is not configured");
+        anyhow::bail!("service-owned encrypted object store is not configured");
     };
     anyhow::ensure!(
         store.object_store_name() == object_ref.object_store,
@@ -29170,7 +29252,7 @@ async fn delete_object_payload_for_revocation_propagation(
                 )
                 .map_err(|_| {
                     anyhow::anyhow!(
-                        "service-local encrypted object verification failed before deletion"
+                        "service-owned encrypted object verification failed before deletion"
                     )
                 })?;
         }
@@ -29184,16 +29266,16 @@ async fn delete_object_payload_for_revocation_propagation(
                 )
                 .map_err(|_| {
                     anyhow::anyhow!(
-                        "service-local encrypted object verification failed before deletion"
+                        "service-owned encrypted object verification failed before deletion"
                     )
                 })?;
             ensure_vector_payload_tenant(&payload, &tenant.tenant_id)
-                .context("service-local vector payload verification failed before deletion")?;
+                .context("service-owned vector payload verification failed before deletion")?;
             anyhow::ensure!(
                 payload.artifact_schema_version == TRACE_VECTOR_PAYLOAD_SCHEMA_VERSION
                     && payload.submission_id == item.source_submission_id
                     && object_ref.created_by_job_id == Some(payload.vector_entry_id),
-                "service-local vector payload verification failed before deletion"
+                "service-owned vector payload verification failed before deletion"
             );
         }
         TraceArtifactKind::BenchmarkConversion => {
@@ -29206,18 +29288,18 @@ async fn delete_object_payload_for_revocation_propagation(
                 )
                 .map_err(|_| {
                     anyhow::anyhow!(
-                        "service-local encrypted object verification failed before deletion"
+                        "service-owned encrypted object verification failed before deletion"
                     )
                 })?;
             ensure_benchmark_artifact_tenant(&artifact, &tenant.tenant_id)
-                .context("service-local benchmark artifact verification failed before deletion")?;
+                .context("service-owned benchmark artifact verification failed before deletion")?;
             anyhow::ensure!(
                 artifact.artifact_schema_version == TRACE_BENCHMARK_CONVERSION_SCHEMA_VERSION
                     && object_ref.created_by_job_id == Some(artifact.conversion_id)
                     && artifact
                         .source_submission_ids
                         .contains(&item.source_submission_id),
-                "service-local benchmark artifact verification failed before deletion"
+                "service-owned benchmark artifact verification failed before deletion"
             );
         }
         TraceArtifactKind::RankerTrainingExport => {
@@ -29230,11 +29312,11 @@ async fn delete_object_payload_for_revocation_propagation(
                 )
                 .map_err(|_| {
                     anyhow::anyhow!(
-                        "service-local encrypted object verification failed before deletion"
+                        "service-owned encrypted object verification failed before deletion"
                     )
                 })?;
             ensure_export_provenance_tenant(&provenance, &tenant.tenant_id)
-                .context("service-local ranker export verification failed before deletion")?;
+                .context("service-owned ranker export verification failed before deletion")?;
             anyhow::ensure!(
                 matches!(
                     provenance.export_kind,
@@ -29244,7 +29326,7 @@ async fn delete_object_payload_for_revocation_propagation(
                     && provenance
                         .source_submission_ids
                         .contains(&item.source_submission_id),
-                "service-local ranker export verification failed before deletion"
+                "service-owned ranker export verification failed before deletion"
             );
         }
         _ => unreachable!("unsupported physical-delete artifact kind was filtered above"),
@@ -29262,7 +29344,7 @@ async fn delete_object_payload_for_revocation_propagation(
     };
     store
         .delete_artifact(&tenant_ref, &receipt)
-        .map_err(|_| anyhow::anyhow!("service-local encrypted object deletion failed"))?;
+        .map_err(|_| anyhow::anyhow!("service-owned encrypted object deletion failed"))?;
     db.mark_trace_object_ref_deleted(
         &tenant.tenant_id,
         item.source_submission_id,
@@ -29315,7 +29397,7 @@ async fn record_physical_delete_receipt_for_revocation_propagation(
             "{}:{}:physical-delete-receipt",
             item.source_submission_id, object_ref.object_ref_id
         ),
-        reason: "service_local_object_payload_deleted".to_string(),
+        reason: "service_owned_object_payload_deleted".to_string(),
         attempt_count: 1,
         last_error: None,
         next_attempt_at: None,
@@ -30878,6 +30960,7 @@ fn ensure_local_trace_object_ref_key_ref(
         object_ref.object_store.as_str(),
         TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE
             | TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+            | TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE
     ) {
         anyhow::ensure!(
             object_ref.encryption_key_ref == format!("tenant:{}", tenant_storage_ref(tenant_id)),
@@ -30892,6 +30975,14 @@ fn is_encrypted_trace_object_store(object_store: &str) -> bool {
         object_store,
         TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE
             | TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+            | TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE
+    )
+}
+
+fn is_service_owned_trace_object_store(object_store: &str) -> bool {
+    matches!(
+        object_store,
+        TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
             | TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE
     )
 }
@@ -43829,7 +43920,7 @@ mod tests {
         );
 
         let unsupported = TraceRemoteObjectStoreConfig::from_parts(
-            Some("filesystem"),
+            Some("r2"),
             Some("trace-commons-prod-bucket"),
             Some("projects/prod/locations/global/keyRings/traces/cryptoKeys/envelope"),
             Some("secret-manager://trace-commons/remote-writer"),
@@ -43851,6 +43942,18 @@ mod tests {
         assert_eq!(config.provider, TraceRemoteObjectStoreProvider::AwsS3);
         assert_eq!(
             config.status_object_store_alias(),
+            TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE
+        );
+
+        let file_config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("filesystem"),
+            Some("/tmp/trace-commons-remote-artifacts"),
+            Some("local-kms-ref"),
+            Some("local-credential-ref"),
+        )
+        .expect("filesystem remote operator intent parses");
+        assert_eq!(
+            file_config.status_object_store_alias(),
             TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE
         );
     }
@@ -43878,6 +43981,52 @@ mod tests {
             error
                 .to_string()
                 .contains("remote Trace Commons object store provider is not enabled")
+        );
+    }
+
+    #[test]
+    fn remote_service_file_adapter_enables_object_io_without_plaintext_fallback() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let key = trace_commons_server::secrets::keychain::generate_master_key_hex();
+        let config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("file_system"),
+            Some(temp.path().to_str().expect("utf8 temp path")),
+            Some("kms-key-ref"),
+            Some("credential-ref"),
+        )
+        .expect("file remote config parses");
+        let store = ConfiguredTraceArtifactStore::remote_service(config, SecretString::from(key))
+            .expect("remote service store builds");
+        let payload = serde_json::json!({"safe": true, "body": "<redacted>"});
+
+        assert_eq!(
+            store.object_store_name(),
+            TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE
+        );
+        assert!(store.object_io_enabled());
+        assert!(store.object_primary_eligible());
+        assert!(!store.plaintext_compatibility_allowed());
+
+        let receipt = store
+            .put_json(
+                "tenant_sha256:remote",
+                TraceArtifactKind::ContributionEnvelope,
+                "remote-submit",
+                &payload,
+            )
+            .expect("remote service artifact writes");
+        assert!(
+            receipt.object_key.starts_with("v1/tenants/"),
+            "remote service receipts use partitioned object keys"
+        );
+        let read_back: serde_json::Value = store
+            .get_json("tenant_sha256:remote", &receipt)
+            .expect("remote service artifact reads");
+        assert_eq!(read_back, payload);
+        assert!(
+            store
+                .delete_artifact("tenant_sha256:remote", &receipt)
+                .expect("remote service artifact deletes")
         );
     }
 
@@ -44268,7 +44417,7 @@ mod tests {
             true,
             true,
             true,
-            Some(TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE),
+            Some(TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE),
         )
         .expect_err("disabled remote store must not satisfy object-primary submit/review");
         assert!(
@@ -44283,7 +44432,7 @@ mod tests {
             true,
             true,
             true,
-            Some(TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE),
+            Some(TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE),
         )
         .expect_err("disabled remote store must not satisfy object-primary replay export");
         assert!(
@@ -44299,7 +44448,7 @@ mod tests {
             true,
             true,
             true,
-            Some(TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE),
+            Some(TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE),
         )
         .expect_err("disabled remote store must not satisfy object-primary derived exports");
         assert!(
@@ -45481,7 +45630,7 @@ mod tests {
         assert_eq!(value["artifact_store_configured"], serde_json::json!(true));
         assert_eq!(
             value["artifact_object_store"],
-            serde_json::json!(TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE)
+            serde_json::json!(TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE)
         );
         assert_eq!(
             value["artifact_object_store_io_enabled"],
