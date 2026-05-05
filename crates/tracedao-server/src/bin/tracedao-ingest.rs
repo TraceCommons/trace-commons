@@ -30641,6 +30641,29 @@ fn normalize_audit_event_metadata(
     action: StorageTraceAuditAction,
     metadata: StorageTraceAuditSafeMetadata,
 ) -> anyhow::Result<StorageTraceAuditSafeMetadata> {
+    if action == StorageTraceAuditAction::Submit && event.kind == "submitted" {
+        let expected_status = event.status.map(storage_corpus_status).ok_or_else(|| {
+            anyhow::anyhow!(
+                "submitted audit event {} requires canonical status",
+                event.event_id
+            )
+        })?;
+        return match metadata {
+            StorageTraceAuditSafeMetadata::Submission { status, .. }
+                if status == expected_status =>
+            {
+                Ok(metadata)
+            }
+            StorageTraceAuditSafeMetadata::Submission { .. } => anyhow::bail!(
+                "submitted audit event {} metadata status does not match canonical status",
+                event.event_id
+            ),
+            _ => anyhow::bail!(
+                "submitted audit event {} requires submission metadata",
+                event.event_id
+            ),
+        };
+    }
     if action == StorageTraceAuditAction::Read && event.kind == "read" {
         let expected =
             trace_read_audit_metadata_from_reason(event.reason.as_deref()).ok_or_else(|| {
@@ -43699,6 +43722,53 @@ mod tests {
                 .as_deref()
         );
         assert!(metadata_json.get("reason").is_none());
+    }
+
+    #[test]
+    fn audit_mirror_normalization_rejects_submitted_metadata_status_drift() {
+        let audit_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: Uuid::new_v4(),
+            kind: "submitted".to_string(),
+            created_at: Utc::now(),
+            status: Some(TraceCorpusStatus::Accepted),
+            actor_role: Some(TokenRole::Contributor),
+            actor_principal_ref: Some("contributor-a".to_string()),
+            reason: Some("auth_method=static_token".to_string()),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+
+        let missing_metadata_error = normalize_audit_event_metadata(
+            &audit_event,
+            StorageTraceAuditAction::Submit,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .expect_err("submitted audit metadata is required");
+        assert!(
+            missing_metadata_error
+                .to_string()
+                .contains("requires submission metadata")
+        );
+
+        let status_drift_error = normalize_audit_event_metadata(
+            &audit_event,
+            StorageTraceAuditAction::Submit,
+            StorageTraceAuditSafeMetadata::Submission {
+                status: StorageTraceCorpusStatus::Rejected,
+                privacy_risk: "low".to_string(),
+            },
+        )
+        .expect_err("submitted audit metadata status drift fails closed");
+        assert!(
+            status_drift_error
+                .to_string()
+                .contains("metadata status does not match")
+        );
     }
 
     #[test]
