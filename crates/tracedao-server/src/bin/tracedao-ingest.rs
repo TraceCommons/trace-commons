@@ -44170,8 +44170,57 @@ struct TraceCommonsAnalyticsResponse {
     by_tool_category: BTreeMap<String, usize>,
     coverage_tags: BTreeMap<String, usize>,
     process_evaluation: TraceProcessEvaluationAnalytics,
+    privacy_budget: TraceAnalyticsPrivacyBudget,
     duplicate_groups: usize,
     average_novelty_score: f32,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct TraceAnalyticsPrivacyBudget {
+    strategy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    min_cell_count: Option<usize>,
+    suppressed_cell_count: usize,
+    released_cell_count: usize,
+    suppression_applied: bool,
+    broad_release_ready: bool,
+    broad_release_blocking_reasons: Vec<String>,
+}
+
+impl TraceAnalyticsPrivacyBudget {
+    fn disabled(released_cell_count: usize) -> Self {
+        Self {
+            strategy: "k_anonymity_min_cell".to_string(),
+            min_cell_count: None,
+            suppressed_cell_count: 0,
+            released_cell_count,
+            suppression_applied: false,
+            broad_release_ready: false,
+            broad_release_blocking_reasons: vec!["min_cell_count_disabled".to_string()],
+        }
+    }
+
+    fn applied(
+        min_cell_count: usize,
+        suppressed_cell_count: usize,
+        released_cell_count: usize,
+    ) -> Self {
+        let suppression_applied = suppressed_cell_count > 0;
+        let broad_release_blocking_reasons = if suppression_applied {
+            vec!["small_cells_suppressed".to_string()]
+        } else {
+            Vec::new()
+        };
+        Self {
+            strategy: "k_anonymity_min_cell".to_string(),
+            min_cell_count: Some(min_cell_count),
+            suppressed_cell_count,
+            released_cell_count,
+            suppression_applied,
+            broad_release_ready: broad_release_blocking_reasons.is_empty(),
+            broad_release_blocking_reasons,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize, PartialEq, Eq)]
@@ -44232,6 +44281,12 @@ impl TraceProcessEvaluationAnalytics {
         }
         suppressed
     }
+
+    fn released_cell_count(&self) -> usize {
+        self.by_label.len()
+            + self.by_score_band.len()
+            + self.by_rating.values().map(BTreeMap::len).sum::<usize>()
+    }
 }
 
 impl TraceCommonsAnalyticsResponse {
@@ -44253,6 +44308,7 @@ impl TraceCommonsAnalyticsResponse {
             by_tool_category: BTreeMap::new(),
             coverage_tags: BTreeMap::new(),
             process_evaluation: TraceProcessEvaluationAnalytics::default(),
+            privacy_budget: TraceAnalyticsPrivacyBudget::disabled(0),
             duplicate_groups: 0,
             average_novelty_score: 0.0,
         };
@@ -44303,11 +44359,14 @@ impl TraceCommonsAnalyticsResponse {
         if !derived.is_empty() {
             response.average_novelty_score = novelty_total / derived.len() as f32;
         }
+        response.privacy_budget =
+            TraceAnalyticsPrivacyBudget::disabled(response.released_cell_count());
         response
     }
 
     fn apply_min_cell_count(&mut self, min_cell_count: usize) {
         if min_cell_count <= 1 {
+            self.privacy_budget = TraceAnalyticsPrivacyBudget::disabled(self.released_cell_count());
             return;
         }
         self.min_cell_count = Some(min_cell_count);
@@ -44324,6 +44383,21 @@ impl TraceCommonsAnalyticsResponse {
         self.suppressed_cell_count +=
             suppress_small_analytics_cells(&mut self.coverage_tags, min_cell_count);
         self.suppressed_cell_count += self.process_evaluation.apply_min_cell_count(min_cell_count);
+        self.privacy_budget = TraceAnalyticsPrivacyBudget::applied(
+            min_cell_count,
+            self.suppressed_cell_count,
+            self.released_cell_count(),
+        );
+    }
+
+    fn released_cell_count(&self) -> usize {
+        self.by_status.len()
+            + self.by_privacy_risk.len()
+            + self.by_task_success.len()
+            + self.by_tool.len()
+            + self.by_tool_category.len()
+            + self.coverage_tags.len()
+            + self.process_evaluation.released_cell_count()
     }
 }
 
@@ -49848,6 +49922,25 @@ mod tests {
         assert_eq!(suppressed_analytics.submissions_total, 3);
         assert_eq!(suppressed_analytics.min_cell_count, Some(4));
         assert!(suppressed_analytics.suppressed_cell_count > 0);
+        assert_eq!(
+            suppressed_analytics.privacy_budget.strategy,
+            "k_anonymity_min_cell"
+        );
+        assert_eq!(suppressed_analytics.privacy_budget.min_cell_count, Some(4));
+        assert_eq!(
+            suppressed_analytics.privacy_budget.suppressed_cell_count,
+            suppressed_analytics.suppressed_cell_count
+        );
+        assert_eq!(suppressed_analytics.privacy_budget.released_cell_count, 0);
+        assert!(suppressed_analytics.privacy_budget.suppression_applied);
+        assert!(!suppressed_analytics.privacy_budget.broad_release_ready);
+        assert!(
+            suppressed_analytics
+                .privacy_budget
+                .broad_release_blocking_reasons
+                .iter()
+                .any(|reason| reason == "small_cells_suppressed")
+        );
         assert!(suppressed_analytics.by_privacy_risk.is_empty());
         let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
         assert!(audit_events.iter().any(|event| {
