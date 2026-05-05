@@ -10648,6 +10648,11 @@ async fn benchmark_registry_outbox_submit_worker_handler(
 ) -> ApiResult<Json<TraceBenchmarkRegistryOutboxSubmitWorkerResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_benchmarker(&tenant)?;
+    validate_u32_worker_limit(
+        body.limit,
+        TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_MAX_LIMIT,
+        "benchmark registry outbox submit worker",
+    )?;
     if !body.dry_run && state.benchmark_registry_submitter.is_none() {
         return Err(api_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -10667,6 +10672,11 @@ async fn benchmark_registry_outbox_confirm_worker_handler(
 ) -> ApiResult<Json<TraceBenchmarkRegistryOutboxConfirmWorkerResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_benchmarker(&tenant)?;
+    validate_u32_worker_limit(
+        body.limit,
+        TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_MAX_LIMIT,
+        "benchmark registry outbox confirm worker",
+    )?;
     if !body.dry_run && state.benchmark_registry_confirmer.is_none() {
         return Err(api_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -10686,6 +10696,11 @@ async fn near_credit_outbox_submit_worker_handler(
 ) -> ApiResult<Json<TraceNearCreditOutboxSubmitWorkerResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_utility_operator(&tenant)?;
+    validate_u32_worker_limit(
+        body.limit,
+        TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT,
+        "NEAR credit outbox submit worker",
+    )?;
     if !body.dry_run && state.near_credit_submitter.is_none() {
         return Err(api_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -10705,6 +10720,11 @@ async fn near_credit_outbox_confirm_worker_handler(
 ) -> ApiResult<Json<TraceNearCreditOutboxConfirmWorkerResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_utility_operator(&tenant)?;
+    validate_u32_worker_limit(
+        body.limit,
+        TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_MAX_LIMIT,
+        "NEAR credit outbox confirm worker",
+    )?;
     if !body.dry_run && state.near_credit_confirmer.is_none() {
         return Err(api_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -28034,6 +28054,11 @@ async fn revocation_propagation_worker_handler(
 ) -> ApiResult<Json<TraceRevocationPropagationWorkerResponse>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_revocation_propagation_operator(&tenant)?;
+    validate_u32_worker_limit(
+        body.limit,
+        TRACE_REVOCATION_PROPAGATION_MAX_LIMIT,
+        "trace revocation propagation worker",
+    )?;
     if state.db_mirror.is_none() {
         return Err(api_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -28128,6 +28153,16 @@ fn validate_vector_index_worker_limit(limit: Option<usize>) -> ApiResult<usize> 
         ));
     }
     Ok(limit)
+}
+
+fn validate_u32_worker_limit(limit: u32, max_limit: u32, worker_name: &str) -> ApiResult<()> {
+    if !(1..=max_limit).contains(&limit) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("{worker_name} limit must be between 1 and {max_limit}"),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -58150,6 +58185,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revocation_propagation_worker_rejects_invalid_limit_before_db_check() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let invalid_limit = revocation_propagation_worker_handler(
+            State(state),
+            auth_headers("revocation-worker-token-a"),
+            Json(TraceRevocationPropagationWorkerRequest {
+                purpose: Some("invalid revocation worker limit".to_string()),
+                dry_run: true,
+                limit: 0,
+            }),
+        )
+        .await
+        .expect_err("invalid revocation worker limit is rejected before DB checks");
+        assert_eq!(invalid_limit.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn revocation_propagation_drill_records_pending_smoke_evidence() {
         use axum::body::Body;
         use tower::ServiceExt;
@@ -63805,6 +63859,19 @@ mod tests {
         )
         .expect("benchmark registry outbox file writes");
 
+        let invalid_limit = benchmark_registry_outbox_submit_worker_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxSubmitWorkerRequest {
+                purpose: Some("registry_submitter_invalid_limit".to_string()),
+                dry_run: false,
+                limit: 0,
+            }),
+        )
+        .await
+        .expect_err("invalid submit worker limit is rejected before config checks");
+        assert_eq!(invalid_limit.0, StatusCode::BAD_REQUEST);
+
         let error = benchmark_registry_outbox_submit_worker_handler(
             State(state.clone()),
             auth_headers("benchmark-worker-token-a"),
@@ -63920,6 +63987,19 @@ mod tests {
         upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &item)
             .expect("benchmark registry outbox file writes");
 
+        let invalid_limit = benchmark_registry_outbox_confirm_worker_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxConfirmWorkerRequest {
+                purpose: Some("registry_confirmer_invalid_limit".to_string()),
+                dry_run: false,
+                limit: TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_MAX_LIMIT + 1,
+            }),
+        )
+        .await
+        .expect_err("invalid confirm worker limit is rejected before config checks");
+        assert_eq!(invalid_limit.0, StatusCode::BAD_REQUEST);
+
         let error = benchmark_registry_outbox_confirm_worker_handler(
             State(state.clone()),
             auth_headers("benchmark-worker-token-a"),
@@ -64025,6 +64105,19 @@ mod tests {
             submitted_near_credit_outbox_item(Uuid::new_v4(), "near-worker-tx-hash-1", 1_000_000);
         append_near_credit_outbox_item(temp.path(), "tenant-a", &item)
             .expect("NEAR outbox file writes");
+
+        let invalid_limit = near_credit_outbox_confirm_worker_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxConfirmWorkerRequest {
+                purpose: Some("near_confirmer_invalid_limit".to_string()),
+                dry_run: false,
+                limit: TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_MAX_LIMIT + 1,
+            }),
+        )
+        .await
+        .expect_err("invalid confirm worker limit is rejected before relayer config checks");
+        assert_eq!(invalid_limit.0, StatusCode::BAD_REQUEST);
 
         let error = near_credit_outbox_confirm_worker_handler(
             State(state.clone()),
@@ -64230,6 +64323,19 @@ mod tests {
     async fn near_credit_outbox_submit_worker_requires_configured_submitter_for_live_run() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
+
+        let invalid_limit = near_credit_outbox_submit_worker_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxSubmitWorkerRequest {
+                purpose: Some("submitter_invalid_limit".to_string()),
+                dry_run: false,
+                limit: 0,
+            }),
+        )
+        .await
+        .expect_err("invalid submit worker limit is rejected before relayer config checks");
+        assert_eq!(invalid_limit.0, StatusCode::BAD_REQUEST);
 
         let error = near_credit_outbox_submit_worker_handler(
             State(state.clone()),
