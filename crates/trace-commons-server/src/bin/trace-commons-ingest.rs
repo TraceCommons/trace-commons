@@ -30592,16 +30592,49 @@ fn normalize_audit_event_metadata(
     action: StorageTraceAuditAction,
     metadata: StorageTraceAuditSafeMetadata,
 ) -> anyhow::Result<StorageTraceAuditSafeMetadata> {
-    if action == StorageTraceAuditAction::Read
-        && event.kind == "read"
-        && matches!(metadata, StorageTraceAuditSafeMetadata::Empty)
-    {
-        return trace_read_audit_metadata_from_reason(event.reason.as_deref()).ok_or_else(|| {
-            anyhow::anyhow!(
-                "aggregate read audit event {} requires surface and item_count reason fields",
+    if action == StorageTraceAuditAction::Read && event.kind == "read" {
+        let expected =
+            trace_read_audit_metadata_from_reason(event.reason.as_deref()).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "aggregate read audit event {} requires surface and item_count reason fields",
+                    event.event_id
+                )
+            })?;
+        return match metadata {
+            StorageTraceAuditSafeMetadata::Empty => Ok(expected),
+            StorageTraceAuditSafeMetadata::Read { .. } if metadata == expected => Ok(metadata),
+            StorageTraceAuditSafeMetadata::Read { .. } => anyhow::bail!(
+                "aggregate read audit event {} metadata does not match reason fields",
                 event.event_id
-            )
-        });
+            ),
+            _ => anyhow::bail!(
+                "aggregate read audit event {} requires aggregate read metadata",
+                event.event_id
+            ),
+        };
+    }
+    if action == StorageTraceAuditAction::Read && event.kind == "trace_content_read" {
+        let expected = trace_content_read_audit_metadata_from_reason(event.reason.as_deref())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "trace content read audit event {} requires surface reason fields",
+                    event.event_id
+                )
+            })?;
+        return match metadata {
+            StorageTraceAuditSafeMetadata::Empty => Ok(expected),
+            StorageTraceAuditSafeMetadata::TraceContentRead { .. } if metadata == expected => {
+                Ok(metadata)
+            }
+            StorageTraceAuditSafeMetadata::TraceContentRead { .. } => anyhow::bail!(
+                "trace content read audit event {} metadata does not match reason fields",
+                event.event_id
+            ),
+            _ => anyhow::bail!(
+                "trace content read audit event {} requires trace content read metadata",
+                event.event_id
+            ),
+        };
     }
     Ok(metadata)
 }
@@ -31811,6 +31844,13 @@ fn storage_audit_canonical_reason(event: &StorageTraceAuditEventRecord) -> Optio
             surface,
             item_count,
         } => Some(trace_read_audit_reason(surface, *item_count as usize)),
+        StorageTraceAuditSafeMetadata::TraceContentRead {
+            surface,
+            purpose_hash,
+        } => Some(trace_content_read_audit_reason(
+            surface,
+            purpose_hash.as_deref(),
+        )),
         _ => None,
     }
 }
@@ -43455,6 +43495,46 @@ mod tests {
     }
 
     #[test]
+    fn audit_mirror_normalization_derives_trace_content_read_metadata_from_reason() {
+        let auth = test_reviewer_auth("tenant-a");
+        let audit_event = TraceCommonsAuditEvent::trace_content_read(
+            &auth,
+            Uuid::new_v4(),
+            "review_decision",
+            Some("human review reason"),
+        );
+
+        let metadata = normalize_audit_event_metadata(
+            &audit_event,
+            StorageTraceAuditAction::Read,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .expect("trace-content read metadata normalizes");
+
+        let metadata_json =
+            serde_json::to_value(&metadata).expect("trace content read metadata serializes");
+        assert_eq!(
+            metadata_json.get("kind").and_then(|value| value.as_str()),
+            Some("trace_content_read")
+        );
+        assert_eq!(
+            metadata_json
+                .get("surface")
+                .and_then(|value| value.as_str()),
+            Some("review_decision")
+        );
+        assert_eq!(
+            metadata_json
+                .get("purpose_hash")
+                .and_then(|value| value.as_str()),
+            audit_event
+                .reason
+                .as_deref()
+                .and_then(|reason| trace_audit_reason_value(Some(reason), "purpose_hash"))
+        );
+    }
+
+    #[test]
     fn storage_audit_projection_rejects_cross_tenant_rows() {
         let event = StorageTraceAuditEventRecord {
             audit_event_id: Uuid::new_v4(),
@@ -43613,6 +43693,64 @@ mod tests {
             report
                 .compute_blocking_gap_summaries()
                 .contains(&"db_audit_canonical_projection_failures=1".to_string())
+        );
+    }
+
+    #[test]
+    fn db_reconciliation_projects_trace_content_read_metadata_drift_even_when_reason_matches() {
+        let canonical_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: Uuid::new_v4(),
+            kind: "trace_content_read".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Reviewer),
+            actor_principal_ref: Some("reviewer-a".to_string()),
+            reason: Some(format!(
+                "surface=review_decision;purpose_hash={}",
+                sha256_prefixed("review reason")
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+        let event = StorageTraceAuditEventRecord {
+            audit_event_id: canonical_event.event_id,
+            tenant_id: canonical_event.tenant_id.clone(),
+            audit_sequence: 1,
+            actor_principal_ref: canonical_event.actor_principal_ref.clone().unwrap(),
+            actor_role: "reviewer".to_string(),
+            action: StorageTraceAuditAction::Read,
+            reason: canonical_event.reason.clone(),
+            request_id: None,
+            submission_id: Some(canonical_event.submission_id),
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: Some(
+                serde_json::to_string(&canonical_event).expect("canonical audit serializes"),
+            ),
+            metadata: StorageTraceAuditSafeMetadata::TraceContentRead {
+                surface: "review_decision".to_string(),
+                purpose_hash: None,
+            },
+            occurred_at: canonical_event.created_at,
+        };
+
+        let failures = collect_db_audit_canonical_projection_failures(&[event]);
+
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].audit_event_id, canonical_event.event_id);
+        assert!(
+            failures[0]
+                .first_failure
+                .contains("canonical metadata reason mismatch"),
+            "{failures:?}"
         );
     }
 
@@ -47657,6 +47795,80 @@ mod tests {
                 .iter()
                 .any(|gap| { gap == "audit_reader_sample_parity=failed" })
         );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn audit_db_mirror_derives_trace_content_read_metadata_from_reason() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        let auth = test_reviewer_auth("tenant-a");
+        let submission_id = Uuid::new_v4();
+        let event = append_audit_event(
+            temp.path(),
+            "tenant-a",
+            TraceCommonsAuditEvent::trace_content_read(
+                &auth,
+                submission_id,
+                "review_decision",
+                Some("human review reason"),
+            ),
+        )
+        .expect("file trace-content read audit event writes");
+
+        mirror_audit_event_to_db(
+            state.as_ref(),
+            &auth,
+            &event,
+            StorageTraceAuditAction::Read,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .await
+        .expect("DB mirror derives trace-content read metadata");
+
+        let rows = backend
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("DB audit rows list");
+        let row = rows
+            .iter()
+            .find(|row| row.audit_event_id == event.event_id)
+            .expect("mirrored audit row exists");
+        match &row.metadata {
+            StorageTraceAuditSafeMetadata::TraceContentRead {
+                surface,
+                purpose_hash,
+            } => {
+                assert_eq!(surface, "review_decision");
+                assert_eq!(
+                    purpose_hash.as_deref(),
+                    event.reason.as_deref().and_then(|reason| {
+                        trace_audit_reason_value(Some(reason), "purpose_hash")
+                    })
+                );
+            }
+            metadata => panic!("expected typed trace-content read metadata, got {metadata:?}"),
+        }
+
+        let projected = trace_commons_audit_event_from_storage("tenant-a", row.clone())
+            .expect("DB audit event projects");
+        assert_eq!(projected.kind, "trace_content_read");
+        assert_eq!(projected.reason, event.reason);
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
