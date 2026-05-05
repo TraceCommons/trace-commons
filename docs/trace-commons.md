@@ -425,6 +425,10 @@ requires production-shaped managed EdDSA enforcement with at least two active
 managed keys, issuer/audience/JTI/TTL policy, and a fresh guarded refresh
 window, and can append `key_rotation_drill` evidence without exposing key ids,
 PEMs, hosts, URLs, or bearer fetch credentials.
+`POST /v1/admin/audit-chain-drill` runs audit-chain verification without
+maintenance side effects and can append `audit_chain_verification` evidence;
+responses expose counts, last hashes, blocker codes, and hashes of verifier
+failures rather than raw audit failure text.
 `GET /v1/admin/ranking/calibration-dataset-conflicts` provides the
 operator drill-down: exact conflict keys, latest projected hash-only registry
 metadata, whether the latest row still blocks credit issuance, and a remediation
@@ -634,6 +638,7 @@ The service exposes:
 - `GET|POST /v1/admin/rollout-smoke/evidence`
 - `POST /v1/admin/rollback-drill`
 - `POST /v1/admin/key-rotation-drill`
+- `POST /v1/admin/audit-chain-drill`
 - `POST /v1/admin/maintenance`
 - `POST /v1/workers/retention-maintenance`
 - `POST /v1/workers/revocation-propagation`
