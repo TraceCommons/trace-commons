@@ -413,9 +413,9 @@ it includes a `rollout_smoke` preflight block that
 lists required canary smoke checks, including `tenant_canary_isolation`,
 `db_reconciliation_clean`, `rollback_flag_drill`, `key_rotation_drill`,
 revocation propagation, retention dry-run, vector indexing, analytics release,
-credit settlement, PostgreSQL RLS readiness, and audit-chain verification, while
-reporting recorded, passed, failed, stale, and missing rehearsal evidence
-separately from promotion-gate readiness. Admin-only
+credit settlement, object-store migration, PostgreSQL RLS readiness, and
+audit-chain verification, while reporting recorded, passed, failed, stale, and
+missing rehearsal evidence separately from promotion-gate readiness. Admin-only
 `GET /v1/admin/rollout-smoke/preflight`
 returns that `rollout_smoke` block together with the latest hash-only evidence
 record for each required check, so operators can review promotion readiness
@@ -439,6 +439,13 @@ through object refs, plaintext submitted body files must be absent, and a
 fallback tenant must remain outside object-primary rollout. The response returns
 only readiness booleans, blocker codes, hashes, and optional `object_primary_reads`
 rollout-smoke evidence.
+`POST /v1/admin/object-store-migration-drill` proves the configured
+service-owned object store can perform the migration-critical write/read/delete
+cycle without exposing object keys or probe payloads. It writes a short encrypted
+probe artifact, reads it back through the same artifact-store abstraction,
+deletes it by default, returns only safe object-store aliases, booleans, blocker
+codes, and hashes, and can append `object_store_migration` rollout-smoke
+evidence.
 `POST /v1/admin/db-reconciliation-drill` runs the clean-reconciliation smoke
 check without maintenance side effects: it requires a DB mirror, reuses the
 file-vs-DB reconciliation engine, returns safe aggregate counts plus compact
@@ -732,6 +739,7 @@ The service exposes:
 - `GET /v1/admin/rollout-smoke/preflight`
 - `POST /v1/admin/canary-read-drill`
 - `POST /v1/admin/object-primary-read-drill`
+- `POST /v1/admin/object-store-migration-drill`
 - `POST /v1/admin/db-reconciliation-drill`
 - `POST /v1/admin/rollback-drill`
 - `POST /v1/admin/key-rotation-drill`
