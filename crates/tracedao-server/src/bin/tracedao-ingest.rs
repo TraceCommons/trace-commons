@@ -34733,6 +34733,50 @@ fn read_envelope_from_object_ref(
     Ok(envelope)
 }
 
+fn read_trace_vector_payload_from_object_ref(
+    state: &AppState,
+    tenant_id: &str,
+    object_ref: &StorageTraceObjectRefRecord,
+) -> anyhow::Result<TraceVectorPayloadArtifact> {
+    anyhow::ensure!(
+        object_ref.tenant_id == tenant_id,
+        "trace vector payload object ref tenant mismatch"
+    );
+    anyhow::ensure!(
+        object_ref.artifact_kind == StorageTraceObjectArtifactKind::WorkerIntermediate,
+        "trace vector payload object ref artifact kind mismatch"
+    );
+    anyhow::ensure!(
+        object_ref.compression.is_none(),
+        "compressed trace vector payload object refs are not supported"
+    );
+    ensure_local_trace_object_ref_key_ref(object_ref, tenant_id)?;
+    let store = state
+        .artifact_store
+        .as_ref()
+        .context("encrypted trace vector payload store is not configured")?;
+    anyhow::ensure!(
+        store.object_store_name() == object_ref.object_store,
+        "configured trace vector payload store does not match object ref store"
+    );
+    let payload = store
+        .get_json_by_object_key::<TraceVectorPayloadArtifact>(
+            &tenant_storage_ref(tenant_id),
+            TraceArtifactKind::VectorPayload,
+            &object_ref.object_key,
+            &object_ref.content_sha256,
+        )
+        .context("failed to read trace vector payload object ref")?;
+    ensure_vector_payload_tenant(&payload, tenant_id)?;
+    anyhow::ensure!(
+        payload.artifact_schema_version == TRACE_VECTOR_PAYLOAD_SCHEMA_VERSION
+            && payload.submission_id == object_ref.submission_id
+            && object_ref.created_by_job_id == Some(payload.vector_entry_id),
+        "trace vector payload object ref payload mismatch"
+    );
+    Ok(payload)
+}
+
 fn ensure_local_trace_object_ref_key_ref(
     object_ref: &StorageTraceObjectRefRecord,
     tenant_id: &str,
@@ -35348,6 +35392,80 @@ fn trace_vector_external_embedding_material(
         embedding_values: response.embedding_values,
         embedding_sha256,
     })
+}
+
+#[derive(Debug, Clone)]
+struct TraceVectorPayloadNeighborCandidate {
+    submission_id: Uuid,
+    trace_id: Uuid,
+    source_hash: String,
+    embedding_sha256: Option<String>,
+    vector_store: String,
+    embedding_model: String,
+    embedding_dimension: i32,
+    embedding_version: String,
+    embedding_algorithm: Option<String>,
+    embedding_values: Vec<f32>,
+}
+
+fn nearest_trace_vector_payload_neighbors(
+    target_submission_id: Uuid,
+    target: &TraceVectorEmbeddingMaterial,
+    candidates: impl IntoIterator<Item = TraceVectorPayloadNeighborCandidate>,
+) -> Vec<TraceSimilarityNeighbor> {
+    let mut neighbors = candidates
+        .into_iter()
+        .filter(|candidate| candidate.submission_id != target_submission_id)
+        .filter(|candidate| trace_vector_payload_candidate_is_compatible(target, candidate))
+        .filter_map(|candidate| {
+            let score = if candidate.embedding_sha256.as_deref() == Some(&target.embedding_sha256) {
+                1.0
+            } else {
+                trace_summary_embedding_similarity(
+                    &target.embedding_values,
+                    &candidate.embedding_values,
+                )
+            };
+            (score >= TRACE_SIMILARITY_NEIGHBOR_THRESHOLD).then(|| TraceSimilarityNeighbor {
+                trace_id: candidate.trace_id.to_string(),
+                source_hash: Some(
+                    candidate
+                        .embedding_sha256
+                        .clone()
+                        .unwrap_or(candidate.source_hash),
+                ),
+                score,
+            })
+        })
+        .collect::<Vec<_>>();
+    neighbors.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.trace_id.cmp(&right.trace_id))
+    });
+    neighbors.truncate(TRACE_SIMILARITY_MAX_NEIGHBORS);
+    neighbors
+}
+
+fn trace_vector_payload_candidate_is_compatible(
+    target: &TraceVectorEmbeddingMaterial,
+    candidate: &TraceVectorPayloadNeighborCandidate,
+) -> bool {
+    candidate.vector_store == target.vector_store
+        && candidate.embedding_model == target.embedding_model
+        && candidate.embedding_dimension == target.embedding_dimension
+        && candidate.embedding_version == target.embedding_version
+        && candidate.embedding_algorithm == target.embedding_algorithm
+        && usize::try_from(candidate.embedding_dimension)
+            .is_ok_and(|dimension| dimension == candidate.embedding_values.len())
+        && candidate.embedding_values.len() == target.embedding_values.len()
+        && !candidate.embedding_values.is_empty()
+        && candidate
+            .embedding_values
+            .iter()
+            .all(|value| value.is_finite())
 }
 
 fn trace_similarity_tokens(input: &str) -> BTreeSet<String> {
@@ -39286,6 +39404,88 @@ async fn trace_vector_embedding_material_for_record(
     trace_vector_external_embedding_material(request.embedding_input_hash, response)
 }
 
+async fn active_trace_vector_payload_neighbor_candidates(
+    state: &AppState,
+    db: &dyn Database,
+    tenant_id: &str,
+    active_vector_entries: &[StorageTraceVectorEntryRecord],
+    target: &TraceVectorEmbeddingMaterial,
+) -> anyhow::Result<Vec<TraceVectorPayloadNeighborCandidate>> {
+    if state.artifact_store.is_none() {
+        return Ok(Vec::new());
+    }
+    let mut candidates = Vec::new();
+    for entry in active_vector_entries
+        .iter()
+        .filter(|entry| entry.status == StorageTraceVectorEntryStatus::Active)
+        .filter(|entry| entry.invalidated_at.is_none() && entry.deleted_at.is_none())
+        .filter(|entry| entry.vector_store == target.vector_store)
+        .filter(|entry| entry.embedding_model == target.embedding_model)
+        .filter(|entry| entry.embedding_dimension == target.embedding_dimension)
+        .filter(|entry| entry.embedding_version == target.embedding_version)
+    {
+        let object_refs = db
+            .list_trace_object_refs(tenant_id, entry.submission_id)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to list trace vector payload object refs for submission {}",
+                    entry.submission_id
+                )
+            })?;
+        let Some(object_ref) = object_refs.into_iter().rev().find(|object_ref| {
+            object_ref.artifact_kind == StorageTraceObjectArtifactKind::WorkerIntermediate
+                && object_ref.invalidated_at.is_none()
+                && object_ref.deleted_at.is_none()
+                && object_ref.created_by_job_id == Some(entry.vector_entry_id)
+        }) else {
+            continue;
+        };
+        let payload = match read_trace_vector_payload_from_object_ref(state, tenant_id, &object_ref)
+        {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::warn!(
+                    tenant_id = %tenant_id,
+                    submission_id = %entry.submission_id,
+                    vector_entry_id = %entry.vector_entry_id,
+                    error = %error,
+                    "Skipping unreadable trace vector payload neighbor"
+                );
+                continue;
+            }
+        };
+        if payload.vector_entry_id != entry.vector_entry_id
+            || payload.source_hash != entry.source_hash
+            || payload.vector_store != entry.vector_store
+            || payload.embedding_model != entry.embedding_model
+            || payload.embedding_dimension != entry.embedding_dimension
+            || payload.embedding_version != entry.embedding_version
+        {
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                submission_id = %entry.submission_id,
+                vector_entry_id = %entry.vector_entry_id,
+                "Skipping trace vector payload neighbor with stale entry metadata"
+            );
+            continue;
+        }
+        candidates.push(TraceVectorPayloadNeighborCandidate {
+            submission_id: payload.submission_id,
+            trace_id: payload.trace_id,
+            source_hash: payload.source_hash,
+            embedding_sha256: payload.embedding_sha256,
+            vector_store: payload.vector_store,
+            embedding_model: payload.embedding_model,
+            embedding_dimension: payload.embedding_dimension,
+            embedding_version: payload.embedding_version,
+            embedding_algorithm: payload.embedding_algorithm,
+            embedding_values: payload.embedding_values,
+        });
+    }
+    Ok(candidates)
+}
+
 async fn run_vector_index_worker(
     state: &AppState,
     tenant: &TenantAuth,
@@ -39405,14 +39605,21 @@ async fn index_vector_metadata_from_db(
         .list_trace_derived_records(&tenant.tenant_id)
         .await
         .context("failed to list trace derived records for vector indexing")?;
-    let active_vector_ids = db
+    let mut active_vector_entries = db
         .list_trace_vector_entries(&tenant.tenant_id)
         .await
-        .context("failed to list trace vector entries for vector indexing")?
-        .into_iter()
+        .context("failed to list trace vector entries for vector indexing")?;
+    let active_vector_ids = active_vector_entries
+        .iter()
         .filter(|entry| entry.status == StorageTraceVectorEntryStatus::Active)
+        .filter(|entry| entry.invalidated_at.is_none() && entry.deleted_at.is_none())
         .map(|entry| entry.vector_entry_id)
         .collect::<BTreeSet<_>>();
+    active_vector_entries = active_vector_entries
+        .into_iter()
+        .filter(|entry| entry.status == StorageTraceVectorEntryStatus::Active)
+        .filter(|entry| entry.invalidated_at.is_none() && entry.deleted_at.is_none())
+        .collect::<Vec<_>>();
 
     let mut eligible = Vec::new();
     for record in derived_records
@@ -39469,7 +39676,7 @@ async fn index_vector_metadata_from_db(
                 record.submission_id
             )
         })?;
-        let neighbors = nearest_trace_neighbors(
+        let summary_neighbors = nearest_trace_neighbors(
             record.submission_id,
             record.canonical_summary.as_deref().unwrap_or_default(),
             source_hash,
@@ -39480,21 +39687,6 @@ async fn index_vector_metadata_from_db(
                 canonical_summary_hash: candidate.record.canonical_summary_hash.as_deref(),
             }),
         );
-        let nearest_trace_ids = neighbors
-            .iter()
-            .map(|neighbor| neighbor.trace_id.clone())
-            .collect::<Vec<_>>();
-        let duplicate_score = record.duplicate_score.unwrap_or_default().max(
-            neighbors
-                .first()
-                .map(|neighbor| neighbor.score)
-                .unwrap_or_default(),
-        );
-        let novelty_score = if neighbors.is_empty() {
-            record.novelty_score.unwrap_or(0.5)
-        } else {
-            (1.0 - duplicate_score).clamp(0.05, 0.95)
-        };
         let indexed_at = Utc::now();
         let embedding_input = trace_vector_embedding_input(record);
         let embedding_input_hash = sha256_prefixed(&embedding_input);
@@ -39514,36 +39706,82 @@ async fn index_vector_metadata_from_db(
         )
         .await
         .context("failed to resolve trace vector embedding material")?;
+        let vector_neighbors = nearest_trace_vector_payload_neighbors(
+            record.submission_id,
+            &embedding_material,
+            active_trace_vector_payload_neighbor_candidates(
+                state,
+                db.as_ref(),
+                &tenant.tenant_id,
+                &active_vector_entries,
+                &embedding_material,
+            )
+            .await?,
+        );
+        let used_vector_neighbors = !vector_neighbors.is_empty();
+        let neighbors = if used_vector_neighbors {
+            vector_neighbors
+        } else {
+            summary_neighbors
+        };
+        let nearest_trace_ids = neighbors
+            .iter()
+            .map(|neighbor| neighbor.trace_id.clone())
+            .collect::<Vec<_>>();
+        let duplicate_score = record.duplicate_score.unwrap_or_default().max(
+            neighbors
+                .first()
+                .map(|neighbor| neighbor.score)
+                .unwrap_or_default(),
+        );
+        let novelty_score = if neighbors.is_empty() {
+            record.novelty_score.unwrap_or(0.5)
+        } else {
+            (1.0 - duplicate_score).clamp(0.05, 0.95)
+        };
         let cluster_id = record.cluster_id.clone().or_else(|| {
             let cluster_hash = neighbors
                 .first()
                 .filter(|neighbor| neighbor.score >= 0.5)
                 .and_then(|neighbor| neighbor.source_hash.as_deref())
-                .unwrap_or(source_hash);
-            Some(format!("summary:{}", hash_fragment(cluster_hash, 16)))
+                .unwrap_or(if used_vector_neighbors {
+                    &embedding_material.embedding_sha256
+                } else {
+                    source_hash
+                });
+            Some(format!(
+                "{}:{}",
+                if used_vector_neighbors {
+                    "embedding"
+                } else {
+                    "summary"
+                },
+                hash_fragment(cluster_hash, 16)
+            ))
         });
-        db.upsert_trace_vector_entry(StorageTraceVectorEntryWrite {
-            tenant_id: tenant.tenant_id.clone(),
-            submission_id: record.submission_id,
-            derived_id: record.derived_id,
-            vector_entry_id,
-            vector_store: embedding_material.vector_store.clone(),
-            embedding_model: embedding_material.embedding_model.clone(),
-            embedding_dimension: embedding_material.embedding_dimension,
-            embedding_version: embedding_material.embedding_version.clone(),
-            source_projection,
-            source_hash: source_hash.to_string(),
-            status: StorageTraceVectorEntryStatus::Active,
-            nearest_trace_ids: nearest_trace_ids.clone(),
-            cluster_id: cluster_id.clone(),
-            duplicate_score: Some(duplicate_score),
-            novelty_score: Some(novelty_score),
-            indexed_at: Some(indexed_at),
-            invalidated_at: None,
-            deleted_at: None,
-        })
-        .await
-        .context("failed to upsert trace vector entry")?;
+        let vector_entry = db
+            .upsert_trace_vector_entry(StorageTraceVectorEntryWrite {
+                tenant_id: tenant.tenant_id.clone(),
+                submission_id: record.submission_id,
+                derived_id: record.derived_id,
+                vector_entry_id,
+                vector_store: embedding_material.vector_store.clone(),
+                embedding_model: embedding_material.embedding_model.clone(),
+                embedding_dimension: embedding_material.embedding_dimension,
+                embedding_version: embedding_material.embedding_version.clone(),
+                source_projection,
+                source_hash: source_hash.to_string(),
+                status: StorageTraceVectorEntryStatus::Active,
+                nearest_trace_ids: nearest_trace_ids.clone(),
+                cluster_id: cluster_id.clone(),
+                duplicate_score: Some(duplicate_score),
+                novelty_score: Some(novelty_score),
+                indexed_at: Some(indexed_at),
+                invalidated_at: None,
+                deleted_at: None,
+            })
+            .await
+            .context("failed to upsert trace vector entry")?;
         let payload = TraceVectorPayloadArtifact {
             artifact_schema_version: TRACE_VECTOR_PAYLOAD_SCHEMA_VERSION.to_string(),
             tenant_id: tenant.tenant_id.clone(),
@@ -39587,6 +39825,7 @@ async fn index_vector_metadata_from_db(
                 .await
                 .context("failed to mirror trace vector payload object ref")?;
         }
+        active_vector_entries.push(vector_entry);
         append_trace_content_read_audit(
             state,
             tenant,
@@ -47567,7 +47806,86 @@ mod tests {
         );
     }
 
+    #[test]
+    fn trace_vector_payload_neighbors_require_compatible_embeddings() {
+        let target_submission =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid parses");
+        let compatible_trace =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000011").expect("uuid parses");
+        let incompatible_trace =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000012").expect("uuid parses");
+        let compatible_embedding_hash = sha256_prefixed("compatible-embedding");
+        let target = TraceVectorEmbeddingMaterial {
+            vector_store: "private-vector-adapter".to_string(),
+            embedding_model: "private-redacted-summary-embedder-v1".to_string(),
+            embedding_dimension: 4,
+            embedding_version: "2026-05-05".to_string(),
+            embedding_algorithm: Some("private-test-embedding".to_string()),
+            embedding_input_hash: sha256_prefixed("target-input"),
+            embedding_values: vec![1.0, 0.0, 0.0, 0.0],
+            embedding_sha256: sha256_prefixed("target-embedding"),
+        };
+
+        let neighbors = nearest_trace_vector_payload_neighbors(
+            target_submission,
+            &target,
+            [
+                TraceVectorPayloadNeighborCandidate {
+                    submission_id: Uuid::parse_str("00000000-0000-0000-0000-000000000021")
+                        .expect("uuid parses"),
+                    trace_id: compatible_trace,
+                    source_hash: "sha256:compatible".to_string(),
+                    embedding_sha256: Some(compatible_embedding_hash.clone()),
+                    vector_store: "private-vector-adapter".to_string(),
+                    embedding_model: "private-redacted-summary-embedder-v1".to_string(),
+                    embedding_dimension: 4,
+                    embedding_version: "2026-05-05".to_string(),
+                    embedding_algorithm: Some("private-test-embedding".to_string()),
+                    embedding_values: vec![1.0, 0.0, 0.0, 0.0],
+                },
+                TraceVectorPayloadNeighborCandidate {
+                    submission_id: Uuid::parse_str("00000000-0000-0000-0000-000000000022")
+                        .expect("uuid parses"),
+                    trace_id: incompatible_trace,
+                    source_hash: "sha256:incompatible".to_string(),
+                    embedding_sha256: Some(sha256_prefixed("incompatible-embedding")),
+                    vector_store: "private-vector-adapter".to_string(),
+                    embedding_model: "other-private-embedder".to_string(),
+                    embedding_dimension: 4,
+                    embedding_version: "2026-05-05".to_string(),
+                    embedding_algorithm: Some("private-test-embedding".to_string()),
+                    embedding_values: vec![1.0, 0.0, 0.0, 0.0],
+                },
+                TraceVectorPayloadNeighborCandidate {
+                    submission_id: target_submission,
+                    trace_id: Uuid::parse_str("00000000-0000-0000-0000-000000000013")
+                        .expect("uuid parses"),
+                    source_hash: "sha256:same-submission".to_string(),
+                    embedding_sha256: Some(sha256_prefixed("same-submission-embedding")),
+                    vector_store: "private-vector-adapter".to_string(),
+                    embedding_model: "private-redacted-summary-embedder-v1".to_string(),
+                    embedding_dimension: 4,
+                    embedding_version: "2026-05-05".to_string(),
+                    embedding_algorithm: Some("private-test-embedding".to_string()),
+                    embedding_values: vec![1.0, 0.0, 0.0, 0.0],
+                },
+            ],
+        );
+
+        assert_eq!(neighbors.len(), 1);
+        assert_eq!(neighbors[0].trace_id, compatible_trace.to_string());
+        assert_eq!(
+            neighbors[0].source_hash.as_deref(),
+            Some(compatible_embedding_hash.as_str())
+        );
+        assert_eq!(neighbors[0].score, 1.0);
+    }
+
     async fn sample_envelope() -> TraceContributionEnvelope {
+        sample_envelope_with_user_input("Please inspect the workspace").await
+    }
+
+    async fn sample_envelope_with_user_input(content: &str) -> TraceContributionEnvelope {
         let trace = TraceFile {
             model_name: "test-model".to_string(),
             memory_snapshot: Vec::new(),
@@ -47575,7 +47893,7 @@ mod tests {
             steps: vec![TraceStep {
                 request_hint: None,
                 response: TraceResponse::UserInput {
-                    content: "Please inspect the workspace".to_string(),
+                    content: content.to_string(),
                 },
                 expected_tool_results: Vec::new(),
             }],
@@ -61336,6 +61654,177 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vector_index_worker_uses_stored_vector_payloads_for_model_backed_neighbors() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let artifact_store = test_artifact_store(artifact_temp.path());
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            Some(artifact_store),
+            false,
+            false,
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).vector_embedder = Some(Arc::new(FakeVectorEmbedder {
+            responses: Arc::new(std::sync::Mutex::new(VecDeque::from([
+                TraceVectorEmbeddingResponse {
+                    embedding_model: "private-redacted-summary-embedder-v1".to_string(),
+                    embedding_version: "2026-05-05".to_string(),
+                    embedding_values: vec![1.0, 0.0, 0.0, 0.0],
+                    embedding_algorithm: Some("private-test-embedding".to_string()),
+                    vector_store: Some("private-vector-adapter".to_string()),
+                },
+                TraceVectorEmbeddingResponse {
+                    embedding_model: "private-redacted-summary-embedder-v1".to_string(),
+                    embedding_version: "2026-05-05".to_string(),
+                    embedding_values: vec![1.0, 0.0, 0.0, 0.0],
+                    embedding_algorithm: Some("private-test-embedding".to_string()),
+                    vector_store: Some("private-vector-adapter".to_string()),
+                },
+            ]))),
+            ..FakeVectorEmbedder::default()
+        }));
+
+        let mut first =
+            sample_envelope_with_user_input("Calendar OAuth refresh failed after timezone retry")
+                .await;
+        make_metadata_only_low_risk(&mut first);
+        first.consent.scopes = vec![ConsentScope::RankingTraining];
+        first.trace_card.consent_scope = ConsentScope::RankingTraining;
+        first.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let first_submission_id = first.submission_id;
+        let first_trace_id = first.trace_id;
+        let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
+            .await
+            .expect("first vector source submission mirrors into DB");
+        overwrite_pg_derived_summary_for_test(
+            backend.as_ref(),
+            "tenant-a",
+            first_submission_id,
+            "calendar oauth refresh timezone retry only",
+        )
+        .await;
+        let _ = vector_index_handler(
+            State(state.clone()),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceVectorIndexRequest {
+                purpose: Some("model backed vector neighbor seed".to_string()),
+                dry_run: false,
+                limit: Some(1),
+            }),
+        )
+        .await
+        .expect("first vector worker pass writes payload");
+
+        let mut second =
+            sample_envelope_with_user_input("Warehouse schema migration checksum repair").await;
+        make_metadata_only_low_risk(&mut second);
+        second.consent.scopes = vec![ConsentScope::RankingTraining];
+        second.trace_card.consent_scope = ConsentScope::RankingTraining;
+        second.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let second_submission_id = second.submission_id;
+        let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(second))
+            .await
+            .expect("second vector source submission mirrors into DB");
+        overwrite_pg_derived_summary_for_test(
+            backend.as_ref(),
+            "tenant-a",
+            second_submission_id,
+            "",
+        )
+        .await;
+        let Json(response) = vector_index_handler(
+            State(state.clone()),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceVectorIndexRequest {
+                purpose: Some("model backed vector neighbor target".to_string()),
+                dry_run: false,
+                limit: Some(1),
+            }),
+        )
+        .await
+        .expect("second vector worker pass uses stored payload neighbor");
+        assert_eq!(response.vector_entries_indexed, 1);
+
+        let vector_entries = backend
+            .list_trace_vector_entries("tenant-a")
+            .await
+            .expect("DB vector entries read");
+        let second_entry = vector_entries
+            .iter()
+            .find(|entry| entry.submission_id == second_submission_id)
+            .expect("second vector entry exists");
+        assert_eq!(
+            second_entry.nearest_trace_ids,
+            vec![first_trace_id.to_string()]
+        );
+        assert!(
+            second_entry.duplicate_score.unwrap_or_default() >= 0.99,
+            "matching private embeddings should drive duplicate score"
+        );
+        assert_eq!(second_entry.novelty_score, Some(0.05));
+        assert!(
+            second_entry
+                .cluster_id
+                .as_deref()
+                .is_some_and(|cluster_id| cluster_id.starts_with("embedding:")),
+            "model-backed vector neighbors should use an embedding cluster id"
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    async fn overwrite_pg_derived_summary_for_test(
+        backend: &PgBackend,
+        tenant_id: &str,
+        submission_id: Uuid,
+        canonical_summary: &str,
+    ) {
+        let derived = backend
+            .list_trace_derived_records(tenant_id)
+            .await
+            .expect("derived records read for summary override")
+            .into_iter()
+            .find(|record| record.submission_id == submission_id)
+            .expect("derived record exists for summary override");
+        backend
+            .append_trace_derived_record(StorageTraceDerivedRecordWrite {
+                derived_id: derived.derived_id,
+                tenant_id: derived.tenant_id,
+                submission_id: derived.submission_id,
+                trace_id: derived.trace_id,
+                status: derived.status,
+                worker_kind: derived.worker_kind,
+                worker_version: derived.worker_version,
+                input_object_ref: derived.input_object_ref,
+                input_hash: derived.input_hash,
+                output_object_ref: derived.output_object_ref,
+                canonical_summary: Some(canonical_summary.to_string()),
+                canonical_summary_hash: Some(sha256_prefixed(canonical_summary)),
+                summary_model: derived.summary_model,
+                task_success: derived.task_success,
+                privacy_risk: derived.privacy_risk,
+                event_count: derived.event_count,
+                tool_sequence: derived.tool_sequence,
+                tool_categories: derived.tool_categories,
+                coverage_tags: derived.coverage_tags,
+                duplicate_score: Some(0.0),
+                novelty_score: Some(0.9),
+                cluster_id: None,
+            })
+            .await
+            .expect("derived summary override writes");
+    }
+
+    #[tokio::test]
     async fn vector_index_worker_requires_configured_external_embedder() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
@@ -64260,6 +64749,7 @@ mod tests {
     struct FakeVectorEmbedder {
         calls: Arc<std::sync::Mutex<Vec<TraceVectorEmbeddingRequest>>>,
         response: TraceVectorEmbeddingResponse,
+        responses: Arc<std::sync::Mutex<VecDeque<TraceVectorEmbeddingResponse>>>,
         failure: Option<String>,
     }
 
@@ -64274,6 +64764,7 @@ mod tests {
                     embedding_algorithm: Some("private-test-embedding".to_string()),
                     vector_store: Some("private-vector-adapter".to_string()),
                 },
+                responses: Arc::new(std::sync::Mutex::new(VecDeque::new())),
                 failure: None,
             }
         }
@@ -64292,7 +64783,12 @@ mod tests {
                 .lock()
                 .expect("fake vector embedder calls lock")
                 .push(request);
-            Ok(self.response.clone())
+            Ok(self
+                .responses
+                .lock()
+                .expect("fake vector embedder responses lock")
+                .pop_front()
+                .unwrap_or_else(|| self.response.clone()))
         }
     }
 
