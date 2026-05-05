@@ -3129,6 +3129,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(credit_settlements_handler).post(credit_settlement_handler),
         )
         .route(
+            "/v1/admin/credit-risk-summary",
+            get(credit_risk_summary_handler),
+        )
+        .route(
             "/v1/workers/credit-settlements/run",
             post(credit_settlement_worker_run_handler),
         )
@@ -10430,6 +10434,85 @@ async fn credit_settlements_handler(
         .await
         .map_err(internal_error)?;
     Ok(Json(batches))
+}
+
+async fn credit_risk_summary_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<TraceCreditRiskSummaryResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let response = build_credit_risk_summary(state.as_ref(), &tenant).await?;
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(&tenant, "credit_risk_summary", response.accounts.len()),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(response))
+}
+
+async fn build_credit_risk_summary(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> ApiResult<TraceCreditRiskSummaryResponse> {
+    let records = read_reviewer_metadata_view(state, tenant)
+        .await
+        .map_err(internal_error)?
+        .records;
+    let delayed_credit_eligible_submission_ids = records
+        .iter()
+        .filter(|record| {
+            record.status == TraceCorpusStatus::Accepted && delayed_credit_applies_to_record(record)
+        })
+        .map(|record| record.submission_id)
+        .collect::<BTreeSet<_>>();
+    let settlement_batches = read_credit_settlement_batches_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let settled_credit_event_ids = settlement_batches
+        .iter()
+        .filter(|batch| batch.status == StorageTraceCreditSettlementBatchStatus::Finalized)
+        .flat_map(|batch| batch.source_credit_event_ids.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let held_credit_accounts = active_credit_hold_account_refs_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let credit_events = read_credit_events_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let mut account_summaries = BTreeMap::<String, TraceCreditRiskAccountAccumulator>::new();
+    for event in credit_events {
+        if !trace_credit_event_type_is_settlement_eligible(event.event_type)
+            || event.credit_points_delta <= 0.0
+            || settled_credit_event_ids.contains(&event.event_id)
+            || !delayed_credit_eligible_submission_ids.contains(&event.submission_id)
+        {
+            continue;
+        }
+        let credit_delta_micros = credit_delta_micros(event.credit_points_delta);
+        if credit_delta_micros <= 0 {
+            continue;
+        }
+        let account = account_summaries
+            .entry(event.auth_principal_ref.clone())
+            .or_default();
+        if held_credit_accounts.contains(&event.auth_principal_ref) {
+            account.held_credit_micros += credit_delta_micros;
+            account.held_source_event_count += 1;
+        } else {
+            account.pending_credit_micros += credit_delta_micros;
+            account.pending_source_event_count += 1;
+        }
+    }
+    Ok(TraceCreditRiskSummaryResponse::from_account_summaries(
+        tenant,
+        state.credit_settlement_max_micros_per_account,
+        account_summaries,
+    ))
 }
 
 async fn credit_hold_handler(
@@ -44167,6 +44250,106 @@ struct TraceCommonsTenantCreditResponse {
     last_settlement_batch_id: Option<Uuid>,
 }
 
+#[derive(Debug, Default)]
+struct TraceCreditRiskAccountAccumulator {
+    pending_credit_micros: i64,
+    held_credit_micros: i64,
+    pending_source_event_count: usize,
+    held_source_event_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceCreditRiskSummaryResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    settlement_max_credit_micros_per_account: Option<i64>,
+    pending_account_count: usize,
+    held_account_count: usize,
+    over_cap_account_count: usize,
+    pending_credit_micros: i64,
+    held_credit_micros: i64,
+    over_cap_credit_micros: i64,
+    accounts: Vec<TraceCreditRiskAccountSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceCreditRiskAccountSummary {
+    credit_account_hash: String,
+    pending_credit_micros: i64,
+    held_credit_micros: i64,
+    pending_source_event_count: usize,
+    held_source_event_count: usize,
+    held: bool,
+    over_cap: bool,
+}
+
+impl TraceCreditRiskSummaryResponse {
+    fn from_account_summaries(
+        tenant: &TenantAuth,
+        settlement_max_credit_micros_per_account: Option<i64>,
+        account_summaries: BTreeMap<String, TraceCreditRiskAccountAccumulator>,
+    ) -> Self {
+        let mut accounts = account_summaries
+            .into_iter()
+            .filter_map(|(credit_account_ref, summary)| {
+                if summary.pending_credit_micros <= 0 && summary.held_credit_micros <= 0 {
+                    return None;
+                }
+                let over_cap = settlement_max_credit_micros_per_account
+                    .is_some_and(|max_micros| summary.pending_credit_micros > max_micros);
+                Some(TraceCreditRiskAccountSummary {
+                    credit_account_hash: sha256_prefixed(&credit_account_ref),
+                    pending_credit_micros: summary.pending_credit_micros,
+                    held_credit_micros: summary.held_credit_micros,
+                    pending_source_event_count: summary.pending_source_event_count,
+                    held_source_event_count: summary.held_source_event_count,
+                    held: summary.held_credit_micros > 0,
+                    over_cap,
+                })
+            })
+            .collect::<Vec<_>>();
+        accounts.sort_by(|left, right| {
+            right
+                .over_cap
+                .cmp(&left.over_cap)
+                .then_with(|| right.pending_credit_micros.cmp(&left.pending_credit_micros))
+                .then_with(|| right.held_credit_micros.cmp(&left.held_credit_micros))
+                .then_with(|| left.credit_account_hash.cmp(&right.credit_account_hash))
+        });
+        let pending_account_count = accounts
+            .iter()
+            .filter(|account| account.pending_credit_micros > 0)
+            .count();
+        let held_account_count = accounts.iter().filter(|account| account.held).count();
+        let over_cap_account_count = accounts.iter().filter(|account| account.over_cap).count();
+        let pending_credit_micros = accounts
+            .iter()
+            .map(|account| account.pending_credit_micros)
+            .sum();
+        let held_credit_micros = accounts
+            .iter()
+            .map(|account| account.held_credit_micros)
+            .sum();
+        let over_cap_credit_micros = accounts
+            .iter()
+            .filter(|account| account.over_cap)
+            .map(|account| account.pending_credit_micros)
+            .sum();
+        Self {
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            settlement_max_credit_micros_per_account,
+            pending_account_count,
+            held_account_count,
+            over_cap_account_count,
+            pending_credit_micros,
+            held_credit_micros,
+            over_cap_credit_micros,
+            accounts,
+        }
+    }
+}
+
 impl TraceCommonsTenantCreditResponse {
     fn from_records_events_and_settlements(
         tenant_id: String,
@@ -69882,6 +70065,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_credit_risk_summary_reports_hashed_pending_over_cap_accounts() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_max_micros_per_account = Some(1_000_000);
+
+        let mut first = sample_envelope().await;
+        make_metadata_only_low_risk(&mut first);
+        first.consent.scopes = vec![ConsentScope::ModelTraining];
+        first.trace_card.consent_scope = ConsentScope::ModelTraining;
+        first.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let first_submission_id = first.submission_id;
+        let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
+            .await
+            .expect("first submission succeeds");
+        let Json(first_event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(first_submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.75,
+                reason: Some("frontier lab high utility".to_string()),
+                external_ref: Some("lab-attestation:risk-summary-high".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append high utility credit");
+
+        let mut second = sample_envelope().await;
+        make_metadata_only_low_risk(&mut second);
+        second.consent.scopes = vec![ConsentScope::ModelTraining];
+        second.trace_card.consent_scope = ConsentScope::ModelTraining;
+        second.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let second_submission_id = second.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a-2"),
+            Json(second),
+        )
+        .await
+        .expect("second submission succeeds");
+        let Json(second_event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(second_submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 0.5,
+                reason: Some("frontier lab ordinary utility".to_string()),
+                external_ref: Some("lab-attestation:risk-summary-low".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append ordinary utility credit");
+        let Json(_) = credit_hold_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditHoldRequest {
+                credit_account_ref: second_event.auth_principal_ref.clone(),
+                reason: StorageTraceCreditHoldReason::AttestationDispute,
+                reason_detail: "credit risk summary hold review".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can place held-account review hold");
+
+        let contributor_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/credit-risk-summary")
+                    .header(AUTHORIZATION, "Bearer token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("contributor response");
+        assert_eq!(contributor_response.status(), StatusCode::FORBIDDEN);
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/credit-risk-summary")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("admin response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json parses");
+        assert_eq!(value["pending_account_count"], serde_json::json!(1));
+        assert_eq!(value["held_account_count"], serde_json::json!(1));
+        assert_eq!(value["over_cap_account_count"], serde_json::json!(1));
+        assert_eq!(value["pending_credit_micros"], serde_json::json!(1_750_000));
+        assert_eq!(value["held_credit_micros"], serde_json::json!(500_000));
+        assert_eq!(
+            value["over_cap_credit_micros"],
+            serde_json::json!(1_750_000)
+        );
+        assert_eq!(
+            value["settlement_max_credit_micros_per_account"],
+            serde_json::json!(1_000_000)
+        );
+        let accounts = value["accounts"].as_array().expect("accounts array");
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(
+            accounts[0]["credit_account_hash"],
+            serde_json::json!(sha256_prefixed(&first_event.auth_principal_ref))
+        );
+        assert_eq!(
+            accounts[0]["pending_credit_micros"],
+            serde_json::json!(1_750_000)
+        );
+        assert_eq!(
+            accounts[0]["pending_source_event_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(accounts[0]["held"], serde_json::json!(false));
+        assert_eq!(accounts[0]["over_cap"], serde_json::json!(true));
+        assert_eq!(
+            accounts[1]["credit_account_hash"],
+            serde_json::json!(sha256_prefixed(&second_event.auth_principal_ref))
+        );
+        assert_eq!(accounts[1]["pending_credit_micros"], serde_json::json!(0));
+        assert_eq!(
+            accounts[1]["held_credit_micros"],
+            serde_json::json!(500_000)
+        );
+        assert_eq!(accounts[1]["held_source_event_count"], serde_json::json!(1));
+        assert_eq!(accounts[1]["held"], serde_json::json!(true));
+        assert_eq!(accounts[1]["over_cap"], serde_json::json!(false));
+        let body_text = std::str::from_utf8(&body).expect("response is utf8");
+        assert!(!body_text.contains("token-a"));
+        assert!(!body_text.contains(&first_event.event_id.to_string()));
+        assert!(!body_text.contains(&second_event.event_id.to_string()));
+        assert!(!body_text.contains("frontier lab high utility"));
+        assert!(!body_text.contains("frontier lab ordinary utility"));
+    }
+
+    #[tokio::test]
     async fn credit_control_plane_admin_reads_require_db_when_reviewer_reads_are_enabled() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state_with_options(
@@ -69893,6 +70224,12 @@ mod tests {
             false,
             false,
         );
+
+        let risk_error =
+            credit_risk_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect_err("DB reviewer reads must not silently fall back for risk summaries");
+        assert_eq!(risk_error.0, StatusCode::INTERNAL_SERVER_ERROR);
 
         let error = credit_holds_handler(State(state), auth_headers("admin-token-a"))
             .await
