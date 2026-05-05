@@ -116,7 +116,10 @@ manifest/artifact/provenance/audit paths, and terminalizes the same row as
 route can drain up to `max_jobs` queued rows across all supported dataset kinds,
 or one requested kind, and keeps making progress after per-job failures by
 marking those claimed rows `failed` with hash-only failure metadata before
-claiming the next row.
+claiming the next row. Admin retry can requeue only failed, unexpired jobs that
+still carry the replayable request snapshot; retry clears terminal execution
+fields, increments a safe retry counter, and preserves only reason hashes plus
+hashed/admin principal refs before workers claim the row again.
 
 Reconciliation also reports DB audit hash-chain drift as `db_audit_hash_chain_failures` when mirrored audit rows have invalid hash format, a genesis or predecessor mismatch, or a canonical-payload hash mismatch. Those failures are promotion blockers just like canonical projection drift.
 
