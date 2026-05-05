@@ -24862,7 +24862,7 @@ async fn read_audit_events_from_db(
         .await
         .context("failed to read Trace Commons audit events from DB mirror")?
         .into_iter()
-        .map(trace_commons_audit_event_from_storage)
+        .map(|event| trace_commons_audit_event_from_storage(&tenant.tenant_id, event))
         .collect()
 }
 
@@ -24911,8 +24911,13 @@ fn trace_commons_record_from_storage_submission(
 }
 
 fn trace_commons_audit_event_from_storage(
+    expected_tenant_id: &str,
     event: StorageTraceAuditEventRecord,
 ) -> anyhow::Result<TraceCommonsAuditEvent> {
+    anyhow::ensure!(
+        event.tenant_id == expected_tenant_id,
+        "DB audit event tenant mismatch"
+    );
     let mut kind = storage_audit_event_kind(event.action, &event.metadata);
     if event.action == StorageTraceAuditAction::Read
         && event.submission_id.is_some()
@@ -42874,10 +42879,41 @@ mod tests {
             metadata,
             occurred_at: audit_event.created_at,
         };
-        let projected_event =
-            trace_commons_audit_event_from_storage(storage_event).expect("storage audit projects");
+        let projected_event = trace_commons_audit_event_from_storage("tenant-a", storage_event)
+            .expect("storage audit projects");
         assert_eq!(projected_event.kind, "trace_content_read");
         assert_eq!(projected_event.reason, audit_event.reason);
+    }
+
+    #[test]
+    fn storage_audit_projection_rejects_cross_tenant_rows() {
+        let event = StorageTraceAuditEventRecord {
+            audit_event_id: Uuid::new_v4(),
+            tenant_id: "tenant-b".to_string(),
+            audit_sequence: 1,
+            actor_principal_ref: "reviewer-b".to_string(),
+            actor_role: "review".to_string(),
+            action: StorageTraceAuditAction::Read,
+            reason: Some("surface=review_decision".to_string()),
+            request_id: None,
+            submission_id: Some(Uuid::new_v4()),
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: None,
+            metadata: StorageTraceAuditSafeMetadata::TraceContentRead {
+                surface: "review_decision".to_string(),
+                purpose_hash: Some(sha256_prefixed("review reason")),
+            },
+            occurred_at: Utc::now(),
+        };
+
+        let error = trace_commons_audit_event_from_storage("tenant-a", event)
+            .expect_err("cross-tenant DB audit row must fail closed");
+
+        assert!(error.to_string().contains("DB audit event tenant mismatch"));
     }
 
     #[tokio::test]
