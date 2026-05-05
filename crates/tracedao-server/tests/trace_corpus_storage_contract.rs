@@ -85,6 +85,22 @@ fn audit_metadata_contract_is_typed_not_arbitrary_json() {
 }
 
 #[test]
+fn read_audit_metadata_is_typed_and_aggregate_only() {
+    let metadata = TraceAuditSafeMetadata::Read {
+        surface: "config_status".to_string(),
+        item_count: 1,
+    };
+    let json = serde_json::to_value(metadata).unwrap();
+
+    assert_eq!(json["kind"], "read");
+    assert_eq!(json["surface"], "config_status");
+    assert_eq!(json["item_count"], 1);
+    assert!(json.get("submission_ids").is_none());
+    assert!(json.get("request_body").is_none());
+    assert!(json.get("raw_reason").is_none());
+}
+
+#[test]
 fn review_lease_audit_metadata_is_typed_and_request_safe() {
     let metadata = TraceAuditSafeMetadata::ReviewLease {
         action: TraceReviewLeaseAuditAction::Claim,
