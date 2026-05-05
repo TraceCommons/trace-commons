@@ -963,6 +963,10 @@ nearest-neighbor ids, scores, cluster refs, and lifecycle timestamps. It never
 returns raw trace bodies or embedding values and appends an aggregate read audit
 row for the returned item count.
 
+Shared reviewer/admin list-style reads use the same operator page limit policy:
+omitted `limit` defaults to 100, and explicit limits outside 1..=500 are rejected
+with a client error instead of being silently clamped.
+
 `POST /v1/admin/maintenance` can also be used by reviewers/admins to bridge file-backed pilot data into the optional DB mirror. It marks submissions expired when their retention-policy `expires_at` has passed, mirrors expiration status plus artifact/export-manifest invalidation to the DB mirror when configured, writes a durable DB retention job row plus per-submission lifecycle item rows for mirrored expire/purge/revoke actions, repairs DB revocation/artifact invalidation for submissions that are already file-marked revoked, lifecycle-revokes published benchmark artifacts whose sources are revoked or expired and enqueues matching registry revoke outbox rows, prunes cached export payloads whose manifest references revoked or expired sources, and keeps expired traces out of replay, benchmark, and ranker exports.
 
 Admin tokens can inspect the durable tenant-scoped retention ledger through `GET /v1/admin/retention/jobs` and `GET /v1/admin/retention/jobs/{retention_job_id}/items`; both routes require the configured DB mirror, support bounded filtered reads, and append read-audit breadcrumbs without exposing trace bodies. The matching CLI helpers are `ironclaw traces retention-jobs-list` and `ironclaw traces retention-job-items`, and the web Trace Commons operator panel exposes the same read-only job/item lookups with its session-only admin token.
