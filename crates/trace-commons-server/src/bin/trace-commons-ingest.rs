@@ -38198,6 +38198,8 @@ struct TraceOperationalPromotionGateSummary {
     ranking_calibration_dataset_manifest_conflict_count: usize,
     stale_ranking_worker_run_count: usize,
     failed_ranking_worker_run_count: usize,
+    ranking_worker_run_actionable_skip_count: usize,
+    ranking_worker_run_skip_reason_counts: BTreeMap<String, usize>,
 }
 
 impl TraceOperationalPromotionGateSummary {
@@ -38233,6 +38235,10 @@ impl TraceOperationalPromotionGateSummary {
             ranking.calibration_dataset_manifest_conflict_count;
         let stale_ranking_worker_run_count = ranking.stale_running_worker_run_count;
         let failed_ranking_worker_run_count = ranking.failed_worker_run_count;
+        let ranking_worker_run_actionable_skip_count = ranking
+            .worker_run_skipped_model_risk_total
+            .saturating_add(ranking.worker_run_skipped_ineligible_total);
+        let ranking_worker_run_skip_reason_counts = ranking.worker_run_reason_counts.clone();
         let mut blocking_gates = Vec::new();
         let mut warning_gates = Vec::new();
 
@@ -38327,6 +38333,11 @@ impl TraceOperationalPromotionGateSummary {
             "revoked_benchmarks_waiting_for_external_registry_invalidation",
             revoked_benchmark_external_registry_invalidation_gap_count,
         );
+        push_gap_count(
+            &mut warning_gates,
+            "ranking_worker_run_actionable_skips",
+            ranking_worker_run_actionable_skip_count,
+        );
 
         Self {
             ready: blocking_gates.is_empty(),
@@ -38358,6 +38369,8 @@ impl TraceOperationalPromotionGateSummary {
             ranking_calibration_dataset_manifest_conflict_count,
             stale_ranking_worker_run_count,
             failed_ranking_worker_run_count,
+            ranking_worker_run_actionable_skip_count,
+            ranking_worker_run_skip_reason_counts,
         }
     }
 }
@@ -62725,6 +62738,74 @@ mod tests {
         assert_eq!(
             operational_json["ranking"]["worker_run_reason_counts"]["current_evidence_not_promotable"],
             serde_json::json!(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn operational_summary_warns_on_actionable_ranking_worker_skips() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        append_ranking_worker_run(
+            temp.path(),
+            "tenant-a",
+            &TraceRankingWorkerRunRecord {
+                ranking_worker_run_id: Uuid::new_v4(),
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                run_kind: TraceRankingWorkerRunKind::PredictionCredit,
+                status: TraceRankingWorkerRunStatus::Completed,
+                dry_run: false,
+                reason_hash: sha256_prefixed("worker actionable skip telemetry reason"),
+                model_version: Some("trace-ranker-actionable-skip-v1".to_string()),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                policy_version: Some("trace-credit-policy-v1".to_string()),
+                limit: 100,
+                checked_count: 9,
+                succeeded_count: 2,
+                skipped_existing_count: 4,
+                skipped_model_risk_count: 2,
+                skipped_ineligible_count: 1,
+                pending_after_count: 4,
+                result_refs: Vec::new(),
+                reason_counts: BTreeMap::from([
+                    ("calibration_stale".to_string(), 2),
+                    ("target_not_allowed".to_string(), 1),
+                ]),
+                actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+                created_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+                last_error_hash: None,
+            },
+        )
+        .expect("worker run writes");
+
+        let Json(operational) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary");
+        let operational_json =
+            serde_json::to_value(&operational).expect("operational summary serializes");
+        assert_eq!(
+            operational_json["promotion_gates"]["ranking_worker_run_actionable_skip_count"],
+            serde_json::json!(3)
+        );
+        assert_eq!(
+            operational_json["promotion_gates"]["ranking_worker_run_skip_reason_counts"]["calibration_stale"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            operational_json["promotion_gates"]["ranking_worker_run_skip_reason_counts"]["target_not_allowed"],
+            serde_json::json!(1)
+        );
+        assert!(
+            operational
+                .promotion_gates
+                .warning_gates
+                .contains(&"ranking_worker_run_actionable_skips=3".to_string())
+        );
+        assert!(
+            operational.promotion_gates.ready,
+            "worker skips warn operators but should not block promotion readiness"
         );
     }
 
