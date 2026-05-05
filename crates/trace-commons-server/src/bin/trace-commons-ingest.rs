@@ -193,6 +193,10 @@ const TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: &str =
     "TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST";
 const DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: usize = 500;
 const TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT: &str = "TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT";
+const TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_KEY: &str =
+    "TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_KEY";
+const TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_MAX_DELTA: &str =
+    "TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_MAX_DELTA";
 const TRACE_COMMONS_SIGNED_TOKEN_SECRET: &str = "TRACE_COMMONS_SIGNED_TOKEN_SECRET";
 const TRACE_COMMONS_SIGNED_TOKEN_SECRETS: &str = "TRACE_COMMONS_SIGNED_TOKEN_SECRETS";
 const TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_PEM: &str =
@@ -466,6 +470,7 @@ struct AppState {
     tenant_rollout_gates: TraceTenantRolloutGates,
     max_export_items_per_request: usize,
     analytics_min_cell_count: usize,
+    analytics_broad_release_noise: Option<TraceAnalyticsNoiseConfig>,
     credit_settlement_max_micros_per_account: Option<i64>,
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Arc<BTreeSet<String>>,
@@ -517,6 +522,12 @@ struct TraceExportJobSchedulerConfig {
 struct TraceExportJobSchedulerTickSummary {
     retry_failed: TraceExportJobsRetryFailedResponse,
     run_queued: TraceExportJobsRunQueuedResponse,
+}
+
+#[derive(Clone)]
+struct TraceAnalyticsNoiseConfig {
+    key: SecretString,
+    max_delta: usize,
 }
 
 #[derive(Clone)]
@@ -1728,6 +1739,7 @@ impl AppState {
         let require_export_guardrails = env_truthy("TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS");
         let max_export_items_per_request = parse_max_export_items_per_request_from_env()?;
         let analytics_min_cell_count = parse_analytics_min_cell_count_from_env()?;
+        let analytics_broad_release_noise = parse_analytics_noise_from_env()?;
         let credit_settlement_max_micros_per_account =
             parse_credit_settlement_max_points_per_account_from_env()?;
         let submission_quota = parse_submission_quota_config_from_env()?;
@@ -1935,6 +1947,7 @@ impl AppState {
             tenant_rollout_gates,
             max_export_items_per_request,
             analytics_min_cell_count,
+            analytics_broad_release_noise,
             credit_settlement_max_micros_per_account,
             submission_quota,
             legal_hold_retention_policy_ids: Arc::new(legal_hold_retention_policy_ids),
@@ -4894,6 +4907,36 @@ fn parse_analytics_min_cell_count(configured: &str) -> anyhow::Result<usize> {
     })
 }
 
+fn parse_analytics_noise_from_env() -> anyhow::Result<Option<TraceAnalyticsNoiseConfig>> {
+    let key = optional_trimmed_env(TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_KEY)?;
+    let max_delta = optional_trimmed_env(TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_MAX_DELTA)?;
+    match (key, max_delta) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => anyhow::bail!(
+            "{TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_MAX_DELTA} requires {TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_KEY}"
+        ),
+        (Some(key), max_delta) => Ok(Some(TraceAnalyticsNoiseConfig {
+            key: SecretString::from(key),
+            max_delta: parse_analytics_broad_release_noise_max_delta(
+                max_delta.as_deref().unwrap_or("1"),
+            )?,
+        })),
+    }
+}
+
+fn parse_analytics_broad_release_noise_max_delta(configured: &str) -> anyhow::Result<usize> {
+    let parsed = configured.trim().parse::<usize>().with_context(|| {
+        format!(
+            "{TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_MAX_DELTA} must be a positive integer"
+        )
+    })?;
+    anyhow::ensure!(
+        parsed > 0,
+        "{TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_MAX_DELTA} must be greater than zero"
+    );
+    Ok(parsed)
+}
+
 fn parse_credit_settlement_max_points_per_account_from_env() -> anyhow::Result<Option<i64>> {
     match optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT)? {
         Some(configured) => parse_credit_settlement_max_points_per_account(&configured),
@@ -5296,6 +5339,8 @@ struct TraceCommonsConfigStatusResponse {
     tenant_rollout_gate_counts: BTreeMap<String, usize>,
     max_export_items_per_request: usize,
     analytics_min_cell_count: usize,
+    analytics_broad_release_noise_configured: bool,
+    analytics_broad_release_noise_max_delta: Option<usize>,
     credit_settlement_max_micros_per_account: Option<i64>,
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Vec<String>,
@@ -5461,6 +5506,11 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         tenant_rollout_gate_counts: state.tenant_rollout_gates.status_counts(),
         max_export_items_per_request: state.max_export_items_per_request,
         analytics_min_cell_count: state.analytics_min_cell_count,
+        analytics_broad_release_noise_configured: state.analytics_broad_release_noise.is_some(),
+        analytics_broad_release_noise_max_delta: state
+            .analytics_broad_release_noise
+            .as_ref()
+            .map(|config| config.max_delta),
         credit_settlement_max_micros_per_account: state.credit_settlement_max_micros_per_account,
         submission_quota: state.submission_quota,
         legal_hold_retention_policy_ids: state
@@ -6472,7 +6522,16 @@ async fn analytics_handler(
         derived,
     );
     response.apply_min_cell_count(state.analytics_min_cell_count);
-    if query.requests_broad_release()? && !response.privacy_budget.broad_release_ready {
+    let requests_broad_release = query.requests_broad_release()?;
+    if requests_broad_release && state.analytics_broad_release_noise.is_none() {
+        response
+            .privacy_budget
+            .block_broad_release("noise_not_configured");
+    }
+    if requests_broad_release && let Some(config) = state.analytics_broad_release_noise.as_ref() {
+        response.apply_broad_release_noise(config);
+    }
+    if requests_broad_release && !response.privacy_budget.broad_release_ready {
         return Err(api_error(
             StatusCode::CONFLICT,
             format!(
@@ -45766,6 +45825,10 @@ struct TraceAnalyticsPrivacyBudget {
     strategy: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     min_cell_count: Option<usize>,
+    noise_applied: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    noise_max_delta: Option<usize>,
+    noisy_cell_count: usize,
     suppressed_cell_count: usize,
     released_cell_count: usize,
     suppression_applied: bool,
@@ -45778,6 +45841,9 @@ impl TraceAnalyticsPrivacyBudget {
         Self {
             strategy: "k_anonymity_min_cell".to_string(),
             min_cell_count: None,
+            noise_applied: false,
+            noise_max_delta: None,
+            noisy_cell_count: 0,
             suppressed_cell_count: 0,
             released_cell_count,
             suppression_applied: false,
@@ -45800,12 +45866,33 @@ impl TraceAnalyticsPrivacyBudget {
         Self {
             strategy: "k_anonymity_min_cell".to_string(),
             min_cell_count: Some(min_cell_count),
+            noise_applied: false,
+            noise_max_delta: None,
+            noisy_cell_count: 0,
             suppressed_cell_count,
             released_cell_count,
             suppression_applied,
             broad_release_ready: broad_release_blocking_reasons.is_empty(),
             broad_release_blocking_reasons,
         }
+    }
+
+    fn block_broad_release(&mut self, reason: &str) {
+        self.broad_release_ready = false;
+        if !self
+            .broad_release_blocking_reasons
+            .iter()
+            .any(|existing| existing == reason)
+        {
+            self.broad_release_blocking_reasons.push(reason.to_string());
+        }
+    }
+
+    fn apply_noise(&mut self, max_delta: usize, noisy_cell_count: usize) {
+        self.strategy = "k_anonymity_min_cell+keyed_count_noise".to_string();
+        self.noise_applied = true;
+        self.noise_max_delta = Some(max_delta);
+        self.noisy_cell_count = noisy_cell_count;
     }
 }
 
@@ -45866,6 +45953,45 @@ impl TraceProcessEvaluationAnalytics {
             }
         }
         suppressed
+    }
+
+    fn apply_broad_release_noise(
+        &mut self,
+        config: &TraceAnalyticsNoiseConfig,
+        tenant_storage_ref: &str,
+        noisy_cell_count: &mut usize,
+    ) {
+        self.evaluated_traces = noisy_analytics_count(
+            config,
+            tenant_storage_ref,
+            "process_evaluation.evaluated_traces",
+            "total",
+            self.evaluated_traces,
+            noisy_cell_count,
+        );
+        apply_noisy_analytics_cells(
+            &mut self.by_label,
+            config,
+            tenant_storage_ref,
+            "process_evaluation.by_label",
+            noisy_cell_count,
+        );
+        apply_noisy_analytics_cells(
+            &mut self.by_score_band,
+            config,
+            tenant_storage_ref,
+            "process_evaluation.by_score_band",
+            noisy_cell_count,
+        );
+        for (axis, cells) in &mut self.by_rating {
+            apply_noisy_analytics_cells(
+                cells,
+                config,
+                tenant_storage_ref,
+                &format!("process_evaluation.by_rating.{axis}"),
+                noisy_cell_count,
+            );
+        }
     }
 
     fn released_cell_count(&self) -> usize {
@@ -45974,6 +46100,76 @@ impl TraceCommonsAnalyticsResponse {
             self.suppressed_cell_count,
             self.released_cell_count(),
         );
+    }
+
+    fn apply_broad_release_noise(&mut self, config: &TraceAnalyticsNoiseConfig) {
+        let mut noisy_cell_count = 0usize;
+        let tenant_storage_ref = self.tenant_storage_ref.clone();
+        self.submissions_total = noisy_analytics_count(
+            config,
+            &tenant_storage_ref,
+            "submissions_total",
+            "total",
+            self.submissions_total,
+            &mut noisy_cell_count,
+        );
+        apply_noisy_analytics_cells(
+            &mut self.by_status,
+            config,
+            &tenant_storage_ref,
+            "by_status",
+            &mut noisy_cell_count,
+        );
+        apply_noisy_analytics_cells(
+            &mut self.by_privacy_risk,
+            config,
+            &tenant_storage_ref,
+            "by_privacy_risk",
+            &mut noisy_cell_count,
+        );
+        apply_noisy_analytics_cells(
+            &mut self.by_task_success,
+            config,
+            &tenant_storage_ref,
+            "by_task_success",
+            &mut noisy_cell_count,
+        );
+        apply_noisy_analytics_cells(
+            &mut self.by_tool,
+            config,
+            &tenant_storage_ref,
+            "by_tool",
+            &mut noisy_cell_count,
+        );
+        apply_noisy_analytics_cells(
+            &mut self.by_tool_category,
+            config,
+            &tenant_storage_ref,
+            "by_tool_category",
+            &mut noisy_cell_count,
+        );
+        apply_noisy_analytics_cells(
+            &mut self.coverage_tags,
+            config,
+            &tenant_storage_ref,
+            "coverage_tags",
+            &mut noisy_cell_count,
+        );
+        self.process_evaluation.apply_broad_release_noise(
+            config,
+            &tenant_storage_ref,
+            &mut noisy_cell_count,
+        );
+        self.duplicate_groups = noisy_analytics_count(
+            config,
+            &tenant_storage_ref,
+            "duplicate_groups",
+            "total",
+            self.duplicate_groups,
+            &mut noisy_cell_count,
+        );
+        self.privacy_budget
+            .apply_noise(config.max_delta, noisy_cell_count);
     }
 
     fn released_cell_count(&self) -> usize {
@@ -47329,6 +47525,52 @@ fn suppress_small_analytics_cells(
     before.saturating_sub(cells.len())
 }
 
+fn apply_noisy_analytics_cells(
+    cells: &mut BTreeMap<String, usize>,
+    config: &TraceAnalyticsNoiseConfig,
+    tenant_storage_ref: &str,
+    family: &str,
+    noisy_cell_count: &mut usize,
+) {
+    for (key, count) in cells {
+        *count = noisy_analytics_count(
+            config,
+            tenant_storage_ref,
+            family,
+            key,
+            *count,
+            noisy_cell_count,
+        );
+    }
+}
+
+fn noisy_analytics_count(
+    config: &TraceAnalyticsNoiseConfig,
+    tenant_storage_ref: &str,
+    family: &str,
+    key: &str,
+    count: usize,
+    noisy_cell_count: &mut usize,
+) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    *noisy_cell_count += 1;
+    let input = format!(
+        "{}:{tenant_storage_ref}:{family}:{key}:{count}:{}",
+        config.key.expose_secret(),
+        config.max_delta
+    );
+    let digest = Sha256::digest(input.as_bytes());
+    let magnitude = usize::from(digest[0]) % config.max_delta + 1;
+    let signed_noise = if digest[1] & 1 == 0 {
+        -(magnitude as isize)
+    } else {
+        magnitude as isize
+    };
+    count.saturating_add_signed(signed_noise)
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         Json(self).into_response()
@@ -48055,6 +48297,7 @@ mod tests {
             tenant_rollout_gates: TraceTenantRolloutGates::default(),
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
             analytics_min_cell_count: 0,
+            analytics_broad_release_noise: None,
             credit_settlement_max_micros_per_account: None,
             submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
@@ -49421,6 +49664,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_analytics_broad_release_noise_max_delta() {
+        assert_eq!(
+            parse_analytics_broad_release_noise_max_delta("2").expect("noise delta parses"),
+            2
+        );
+        let zero_error = parse_analytics_broad_release_noise_max_delta("0")
+            .expect_err("zero noise delta is invalid");
+        assert!(
+            zero_error
+                .to_string()
+                .contains(TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_MAX_DELTA)
+        );
+        let parse_error = parse_analytics_broad_release_noise_max_delta("many")
+            .expect_err("non-numeric noise delta is invalid");
+        assert!(
+            parse_error
+                .to_string()
+                .contains(TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_MAX_DELTA)
+        );
+    }
+
+    #[test]
     fn parses_credit_settlement_max_points_per_account() {
         assert_eq!(
             parse_credit_settlement_max_points_per_account("1.25").expect("settlement cap parses"),
@@ -50617,6 +50882,14 @@ mod tests {
             serde_json::json!(DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST)
         );
         assert_eq!(
+            value["analytics_broad_release_noise_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["analytics_broad_release_noise_max_delta"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
             value["ranking_min_label_source_count"],
             serde_json::json!(DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT)
         );
@@ -50802,6 +51075,7 @@ mod tests {
             "vector_embedder_bearer_token",
             "vector_search_url",
             "vector_search_bearer_token",
+            "analytics_broad_release_noise_key",
         ] {
             assert!(
                 !object.contains_key(forbidden_key),
@@ -50828,6 +51102,48 @@ mod tests {
             event.kind == "read"
                 && event.reason.as_deref() == Some("surface=config_status;item_count=1")
         }));
+    }
+
+    #[tokio::test]
+    async fn admin_config_status_reports_analytics_noise_without_key() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).analytics_broad_release_noise = Some(TraceAnalyticsNoiseConfig {
+            key: SecretString::from("config-status-analytics-noise-secret".to_string()),
+            max_delta: 3,
+        });
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/config-status")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("config status response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body bytes");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(
+            value["analytics_broad_release_noise_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["analytics_broad_release_noise_max_delta"],
+            serde_json::json!(3)
+        );
+        let object = value.as_object().expect("config status is object");
+        assert!(!object.contains_key("analytics_broad_release_noise_key"));
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("config-status-analytics-noise-secret"));
     }
 
     #[tokio::test]
@@ -51862,6 +52178,116 @@ mod tests {
                 .as_str()
                 .is_some_and(|error| error.contains("Please inspect"))
         );
+    }
+
+    #[tokio::test]
+    async fn analytics_broad_release_requires_noise_calibration_when_cells_clear() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).analytics_min_cell_count = 2;
+        for _ in 0..2 {
+            let envelope = sample_envelope().await;
+            let _ = submit_trace_handler(
+                State(state.clone()),
+                auth_headers("token-a"),
+                Json(envelope),
+            )
+            .await
+            .expect("submission succeeds");
+        }
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/analytics/summary?release_scope=broad")
+                    .header(AUTHORIZATION, "Bearer review-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("analytics response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json parses");
+        assert!(
+            value["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("noise_not_configured"))
+        );
+    }
+
+    #[tokio::test]
+    async fn analytics_broad_release_applies_configured_noise_without_leaking_key() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        {
+            let state = Arc::make_mut(&mut state);
+            state.analytics_min_cell_count = 2;
+            state.analytics_broad_release_noise = Some(TraceAnalyticsNoiseConfig {
+                key: SecretString::from("broad-release-analytics-secret".to_string()),
+                max_delta: 2,
+            });
+        }
+        for _ in 0..2 {
+            let envelope = sample_envelope().await;
+            let _ = submit_trace_handler(
+                State(state.clone()),
+                auth_headers("token-a"),
+                Json(envelope),
+            )
+            .await
+            .expect("submission succeeds");
+        }
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/analytics/summary?release_scope=broad")
+                    .header(AUTHORIZATION, "Bearer review-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("analytics response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json parses");
+        assert_eq!(
+            value["privacy_budget"]["noise_applied"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["privacy_budget"]["noise_max_delta"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            value["privacy_budget"]["broad_release_ready"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["privacy_budget"]["broad_release_blocking_reasons"],
+            serde_json::json!([])
+        );
+        assert_ne!(value["submissions_total"], serde_json::json!(2));
+        assert_ne!(
+            value["by_privacy_risk"]["medium"],
+            serde_json::json!(2),
+            "broad release should not return exact operator cell counts"
+        );
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("broad-release-analytics-secret"));
     }
 
     #[tokio::test]
@@ -59269,6 +59695,7 @@ mod tests {
             tenant_rollout_gates: TraceTenantRolloutGates::default(),
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
             analytics_min_cell_count: 0,
+            analytics_broad_release_noise: None,
             credit_settlement_max_micros_per_account: None,
             submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::from([
