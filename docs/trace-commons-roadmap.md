@@ -39,7 +39,7 @@ These are the next independent production slices that can be staffed in parallel
 
 ### Datasets
 
-- [ ] Replace deterministic vector similarity with a private embedding worker that reads only approved redacted projections, writes tenant-scoped vector metadata, and invalidates entries on revocation/retention.
+- [ ] Replace deterministic vector similarity with private vector infrastructure that reads only approved redacted projections, writes tenant-scoped vector metadata, validates private vector-search results against active DB rows, and invalidates entries on revocation/retention. Private embedder/search adapters now exist; remaining work is cross-model duplicate/novelty policy and rollout hardening.
 - [ ] Promote benchmark conversion and ranker training exports into durable worker jobs with source-list hashes, artifact object refs, lifecycle state, replayability checks, and idempotent delayed utility credit. Export call sites now mirror one-shot durable grant rows and running/complete job rows with safe request metadata for requested/effective limits, status/privacy/consent filters, and hashed external refs; export workers can atomically claim the oldest unexpired queued job for a dataset kind, execute queued replay, benchmark-conversion, ranker-candidate, and ranker-pair exports from that safe metadata while terminalizing the claimed row, drain bounded queued batches across all supported dataset kinds while continuing after per-job failures, admin-retry failed unexpired replayable jobs back to `queued` with hash-only retry metadata, worker-retry due failed jobs with retry-count caps plus exponential-delay backoff, and optionally run that retry/drain loop in-process from a configured export-worker bearer token. Remaining work is remote artifact storage and broader rollout hardening rather than basic queued execution.
 - [ ] Add export governance for replay, benchmark, ranker, and training slices: explicit purpose, consent/use filters, item caps, source object refs, manifest invalidation, and time-limited controlled job access. Replay, benchmark, ranker-candidate, and ranker-pair exports now validate and persist tenant/principal/purpose/dataset-kind grant/job slices.
 
@@ -223,11 +223,11 @@ Exit criteria:
 
 ### Phase 4: Derived Artifact Workers
 
-Status: vector metadata, vector-backed ranking feature derivation, and benchmark candidate plumbing are partial; production workers remain future work.
+Status: vector metadata, private embed/search adapters, vector-backed ranking feature derivation, and benchmark candidate plumbing are partial; production rollout hardening remains future work.
 
 Scope:
 
-- Implement private vector duplicate/novelty workers that embed only approved redacted projections and write `trace_vector_entries` plus derived records. The ranking feature worker can now require active vector metadata before deriving server-provenanced ranking features, but the full embedding backend remains future work.
+- Implement private vector duplicate/novelty workers that embed only approved redacted projections and write `trace_vector_entries` plus derived records. The vector worker can now call a private embedder, store compatible payloads, query a private vector-search adapter, and accept only server-validated active tenant vector-entry neighbors before writing duplicate/novelty metadata. The ranking feature worker can require active vector metadata before deriving server-provenanced ranking features; remaining work is cross-model duplicate/novelty policy, deployed vector-store operations, and promotion evidence for broad rollout.
 - Promote benchmark conversion into controlled worker jobs that record consent scope, review state, redaction version, replayability requirements, source-list hashes, and artifact refs.
 - Add ranker/model-utility jobs as offline analysis that may append delayed credit only with a downstream artifact/job reference.
 - Extend item-level export manifest rows beyond replay datasets to benchmark and ranker artifacts once those exports become durable job outputs.
