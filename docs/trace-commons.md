@@ -419,6 +419,12 @@ the current tenant: it requires a DB mirror, compares file-backed and DB-backed
 submission, audit, and tombstone ids without deleting or rewriting either side,
 returns safe aggregate counts plus compact blocker codes, and can append the
 `rollback_flag_drill` rollout-smoke evidence row with only hashes.
+`POST /v1/admin/key-rotation-drill` runs the matching managed-EdDSA rotation
+smoke check: it reports only safe keyset counts and refresh-health booleans,
+requires production-shaped managed EdDSA enforcement with at least two active
+managed keys, issuer/audience/JTI/TTL policy, and a fresh guarded refresh
+window, and can append `key_rotation_drill` evidence without exposing key ids,
+PEMs, hosts, URLs, or bearer fetch credentials.
 `GET /v1/admin/ranking/calibration-dataset-conflicts` provides the
 operator drill-down: exact conflict keys, latest projected hash-only registry
 metadata, whether the latest row still blocks credit issuance, and a remediation
@@ -627,6 +633,7 @@ The service exposes:
 - `GET /v1/admin/config-status`
 - `GET|POST /v1/admin/rollout-smoke/evidence`
 - `POST /v1/admin/rollback-drill`
+- `POST /v1/admin/key-rotation-drill`
 - `POST /v1/admin/maintenance`
 - `POST /v1/workers/retention-maintenance`
 - `POST /v1/workers/revocation-propagation`
