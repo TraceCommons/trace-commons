@@ -2082,6 +2082,14 @@ pub trait TraceCorpusStore: Send + Sync {
         update: TraceExportJobStatusUpdate,
     ) -> Result<Option<TraceExportJobRecord>, DatabaseError>;
 
+    async fn retry_failed_trace_export_job(
+        &self,
+        tenant_id: &str,
+        export_job_id: Uuid,
+        retry_at: DateTime<Utc>,
+        update: TraceExportJobStatusUpdate,
+    ) -> Result<Option<TraceExportJobRecord>, DatabaseError>;
+
     async fn upsert_trace_revocation_propagation_item(
         &self,
         item: TraceRevocationPropagationItemWrite,

@@ -614,8 +614,10 @@ The service exposes:
 - `GET /v1/admin/export/access-grants`
 - `GET /v1/admin/export/jobs`
 - `POST /v1/admin/export/jobs/{export_job_id}/recover-stale`
+- `POST /v1/admin/export/jobs/{export_job_id}/retry`
 - `POST /v1/workers/export/jobs/claim-next`
 - `POST /v1/workers/export/jobs/claim-and-run`
+- `POST /v1/workers/export/jobs/run-queued`
 - `GET /v1/admin/config-status`
 - `POST /v1/admin/maintenance`
 - `POST /v1/workers/retention-maintenance`
@@ -651,7 +653,13 @@ still open after its grant expiry, an admin can call
 `POST /v1/admin/export/jobs/{export_job_id}/recover-stale` with a non-empty
 reason to atomically mark only that stale running row `expired`. The response,
 DB row, and audit metadata store only the job id, recovered status, reason hash,
-and safe recovery markers, never the raw operator note or trace bodies.
+and safe recovery markers, never the raw operator note or trace bodies. The admin
+retry route (`POST /v1/admin/export/jobs/{export_job_id}/retry`) only requeues
+failed jobs while the job is still unexpired and still carries replayable
+`trace_export_job_request.v1` metadata. Retry clears terminal execution fields,
+returns the row to `queued`, increments a safe retry counter, records only reason
+hashes and admin principal refs, and then lets worker schedulers claim the job
+normally.
 
 Ranking model manifests must keep training and calibration dataset hashes
 disjoint. New overlapping manifests are rejected, and legacy overlapping
