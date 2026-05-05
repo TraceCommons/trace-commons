@@ -20368,6 +20368,15 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         &[("tenant_storage_ref", &response.tenant_storage_ref)],
         response.rollout_smoke.failed_evidence_count,
     );
+    body.push_str("# HELP tracedao_operational_rollout_smoke_stale_evidence Count of required rollout smoke checks whose latest captured rehearsal evidence is too old.\n");
+    body.push_str("# TYPE tracedao_operational_rollout_smoke_stale_evidence gauge\n");
+    push_prometheus_gauge(
+        &mut body,
+        &mut metric_count,
+        "tracedao_operational_rollout_smoke_stale_evidence",
+        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        response.rollout_smoke.stale_evidence_count,
+    );
     body.push_str("# HELP tracedao_operational_submissions_total Total tenant submissions visible to operational summary.\n");
     body.push_str("# TYPE tracedao_operational_submissions_total gauge\n");
     push_prometheus_gauge(
@@ -38703,6 +38712,7 @@ impl TraceOperationalSummaryResponse {
         let rollout_smoke = TraceOperationalRolloutSmokeSummary::from_promotion_gates_and_evidence(
             &promotion_gates,
             &inputs.rollout_smoke_evidence,
+            inputs.generated_at,
         );
         Self {
             tenant_storage_ref: tenant_storage_ref(&inputs.tenant_id),
@@ -38735,6 +38745,7 @@ const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "delayed_credit_reversal",
     "object_deletion_refs",
 ];
+const TRACE_OPERATIONAL_ROLLOUT_SMOKE_EVIDENCE_MAX_AGE: Duration = Duration::hours(24);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -38944,10 +38955,12 @@ struct TraceOperationalRolloutSmokeSummary {
     recorded_evidence_count: usize,
     passed_evidence_count: usize,
     failed_evidence_count: usize,
+    stale_evidence_count: usize,
     required_checks: Vec<String>,
     passed_evidence_checks: Vec<String>,
     missing_evidence_checks: Vec<String>,
     failed_evidence_checks: Vec<String>,
+    stale_evidence_checks: Vec<String>,
     blocker_reasons: Vec<String>,
 }
 
@@ -38955,6 +38968,7 @@ impl TraceOperationalRolloutSmokeSummary {
     fn from_promotion_gates_and_evidence(
         promotion_gates: &TraceOperationalPromotionGateSummary,
         evidence: &[TraceRolloutSmokeEvidenceResponse],
+        generated_at: DateTime<Utc>,
     ) -> Self {
         let required_checks = TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS
             .iter()
@@ -38965,25 +38979,35 @@ impl TraceOperationalRolloutSmokeSummary {
                 TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS
                     .contains(&record.check_name.as_str())
             }));
-        let passed_evidence_checks = latest_evidence_by_check
+        let stale_evidence_checks = latest_evidence_by_check
             .iter()
             .filter_map(|(check, record)| {
-                (record.status == TraceRolloutSmokeEvidenceStatus::Passed).then_some(check.clone())
+                rollout_smoke_evidence_is_stale(record, generated_at).then_some(check.clone())
             })
             .collect::<Vec<_>>();
-        let passed_evidence_check_set = passed_evidence_checks
+        let stale_evidence_check_set = stale_evidence_checks
             .iter()
             .map(String::as_str)
             .collect::<BTreeSet<_>>();
+        let passed_evidence_checks = latest_evidence_by_check
+            .iter()
+            .filter_map(|(check, record)| {
+                (record.status == TraceRolloutSmokeEvidenceStatus::Passed
+                    && !stale_evidence_check_set.contains(check.as_str()))
+                .then_some(check.clone())
+            })
+            .collect::<Vec<_>>();
         let failed_evidence_checks = latest_evidence_by_check
             .iter()
             .filter_map(|(check, record)| {
-                (record.status == TraceRolloutSmokeEvidenceStatus::Failed).then_some(check.clone())
+                (record.status == TraceRolloutSmokeEvidenceStatus::Failed
+                    && !stale_evidence_check_set.contains(check.as_str()))
+                .then_some(check.clone())
             })
             .collect::<Vec<_>>();
         let missing_evidence_checks = required_checks
             .iter()
-            .filter(|check| !passed_evidence_check_set.contains(check.as_str()))
+            .filter(|check| !latest_evidence_by_check.contains_key(check.as_str()))
             .cloned()
             .collect::<Vec<_>>();
         let mut blocker_reasons = promotion_gates
@@ -39001,10 +39025,17 @@ impl TraceOperationalRolloutSmokeSummary {
             "smoke_rehearsal_evidence_failed",
             failed_evidence_checks.len(),
         );
+        push_gap_count(
+            &mut blocker_reasons,
+            "smoke_rehearsal_evidence_stale",
+            stale_evidence_checks.len(),
+        );
         let evidence_status = if !promotion_gates.ready {
             "promotion_gates_blocked"
         } else if !failed_evidence_checks.is_empty() {
             "failed_rehearsal_evidence"
+        } else if !stale_evidence_checks.is_empty() {
+            "stale_rehearsal_evidence"
         } else if missing_evidence_checks.is_empty() {
             "ready"
         } else {
@@ -39012,7 +39043,10 @@ impl TraceOperationalRolloutSmokeSummary {
         };
 
         Self {
-            ready: promotion_gates.ready && missing_evidence_checks.is_empty(),
+            ready: promotion_gates.ready
+                && missing_evidence_checks.is_empty()
+                && failed_evidence_checks.is_empty()
+                && stale_evidence_checks.is_empty(),
             evidence_status: evidence_status.to_string(),
             promotion_gate_ready: promotion_gates.ready,
             promotion_gate_blocking_count: promotion_gates.blocking_count,
@@ -39022,13 +39056,22 @@ impl TraceOperationalRolloutSmokeSummary {
             recorded_evidence_count: latest_evidence_by_check.len(),
             passed_evidence_count: passed_evidence_checks.len(),
             failed_evidence_count: failed_evidence_checks.len(),
+            stale_evidence_count: stale_evidence_checks.len(),
             required_checks,
             passed_evidence_checks,
             missing_evidence_checks,
             failed_evidence_checks,
+            stale_evidence_checks,
             blocker_reasons,
         }
     }
+}
+
+fn rollout_smoke_evidence_is_stale(
+    evidence: &TraceRolloutSmokeEvidenceResponse,
+    generated_at: DateTime<Utc>,
+) -> bool {
+    generated_at - evidence.recorded_at > TRACE_OPERATIONAL_ROLLOUT_SMOKE_EVIDENCE_MAX_AGE
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -64130,6 +64173,7 @@ mod tests {
                 ..TraceOperationalPromotionGateSummary::default()
             },
             &out_of_order_evidence,
+            Utc::now(),
         );
         assert_eq!(summary.passed_evidence_checks, vec!["audit_reads"]);
         assert!(summary.failed_evidence_checks.is_empty());
@@ -64138,6 +64182,47 @@ mod tests {
                 .missing_evidence_checks
                 .contains(&"audit_reads".to_string())
         );
+    }
+
+    #[test]
+    fn rollout_smoke_summary_blocks_stale_passed_evidence() {
+        let generated_at = Utc::now();
+        let old_passed_evidence = TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS
+            .iter()
+            .map(|check_name| TraceRolloutSmokeEvidenceResponse {
+                event_id: Uuid::new_v4(),
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                check_name: (*check_name).to_string(),
+                status: TraceRolloutSmokeEvidenceStatus::Passed,
+                evidence_hash: sha256_prefixed(&format!("{check_name} stale rehearsal")),
+                evidence_ref_hash: None,
+                actor_principal_ref: principal_storage_ref("admin-token-a"),
+                recorded_at: generated_at - Duration::hours(25),
+            })
+            .collect::<Vec<_>>();
+
+        let summary = TraceOperationalRolloutSmokeSummary::from_promotion_gates_and_evidence(
+            &TraceOperationalPromotionGateSummary {
+                ready: true,
+                ..TraceOperationalPromotionGateSummary::default()
+            },
+            &old_passed_evidence,
+            generated_at,
+        );
+
+        assert!(!summary.ready);
+        assert_eq!(summary.evidence_status, "stale_rehearsal_evidence");
+        assert_eq!(
+            summary.stale_evidence_count,
+            TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS.len()
+        );
+        assert_eq!(summary.missing_evidence_count, 0);
+        assert_eq!(summary.passed_evidence_count, 0);
+        assert!(summary.blocker_reasons.contains(&format!(
+            "smoke_rehearsal_evidence_stale={}",
+            TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS.len()
+        )));
     }
 
     #[tokio::test]
@@ -64356,7 +64441,7 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("text/plain; version=0.0.4; charset=utf-8")
         );
-        let body = axum::body::to_bytes(admin_response.into_body(), 8192)
+        let body = axum::body::to_bytes(admin_response.into_body(), 65536)
             .await
             .expect("body reads");
         let body_text = std::str::from_utf8(&body).expect("metrics body is utf8");
@@ -64373,6 +64458,9 @@ mod tests {
         )));
         assert!(body_text.contains(&format!(
             "tracedao_operational_rollout_smoke_recorded_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_rollout_smoke_stale_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 0"
         )));
         assert!(body_text.contains(&format!(
             "tracedao_operational_submissions_total{{tenant_storage_ref=\"{tenant_ref}\"}} 0"

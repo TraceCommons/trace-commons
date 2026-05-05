@@ -943,6 +943,7 @@ Object-store migration:
 - `TRACE_COMMONS_OBJECT_STORE=remote_service` currently parses provider, bucket, KMS key, and credential refs but deliberately fails closed behind the disabled `trace_commons_service_owned_remote_disabled` provider. It is a configuration scaffold, not a remote object-store implementation, and object-primary modes reject it at startup until a real provider is compiled.
 - Do not promote remote object storage until a real provider, migration manifest, object versioning/restore story, payload delete receipts, and rollback drill exist. Existing migration tooling is still a local-service bridge, and `remote_service` payload deletes are unsupported future work.
 - For local object-primary canaries, smoke submit/review envelope reads, replay export body reads, benchmark/ranker source object-ref validation, and revocation/retention object deletion for submitted/review, vector, benchmark, and ranker payload refs against exact tenant/object/hash/key-ref matches.
+- Refresh rollout-smoke evidence within 24 hours of promotion. Operational summary treats latest per-check evidence older than that window as stale, reports the stale check names separately from missing or failed checks, and keeps rollout-smoke readiness blocked until fresh evidence is recorded.
 
 Retention purge dry runs:
 

@@ -254,13 +254,15 @@ benchmark, and delayed-credit gauges. The same summary response includes a
 including PostgreSQL RLS readiness, promotion-gate readiness, recorded evidence
 counts, passed evidence counts, failed evidence counts, and explicit missing
 rehearsal-evidence counts so operators do not mistake a clean gate snapshot for
-a rehearsed rollout. Admins can list or append hash-only smoke rehearsal
+an up-to-date rehearsed rollout. Latest per-check smoke evidence older than 24
+hours is reported as stale and blocks rollout-smoke readiness until a fresh
+pass or fail is recorded. Admins can list or append hash-only smoke rehearsal
 evidence through `GET` and `POST` `/v1/admin/rollout-smoke/evidence`; `GET`
 accepts `latest_only=true` when operators only need current per-check state. The
 server stores the evidence hash and a hash of any external reference in the
 tenant audit chain, then clears the matching required-check gap only after a
-latest `passed` evidence event exists and reports latest passed checks and
-failed checks separately from never-passed checks.
+latest fresh `passed` evidence event exists and reports latest passed checks,
+failed checks, stale checks, and never-recorded checks separately.
 With the DB mirror configured, ranking dataset registry rows, evidence,
 calibration runs, and ranking worker runs are dual-written to PostgreSQL.
 Maintenance backfill mirrors file-backed ranking model versions, calibration
