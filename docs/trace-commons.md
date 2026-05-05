@@ -614,6 +614,7 @@ The service exposes:
 - `GET /v1/admin/export/access-grants`
 - `GET /v1/admin/export/jobs`
 - `POST /v1/admin/export/jobs/{export_job_id}/recover-stale`
+- `POST /v1/workers/export/jobs/claim-next`
 - `GET /v1/admin/config-status`
 - `POST /v1/admin/maintenance`
 - `POST /v1/workers/retention-maintenance`
@@ -630,7 +631,10 @@ Replay dataset exports, benchmark conversion artifacts, and ranker training expo
 Export job rows preserve a `trace_export_job_request.v1` metadata snapshot
 across start, completion, and failure with requested/effective limits,
 status/privacy/consent filters, and only hashed external refs for later
-replayable worker execution.
+replayable worker execution. `POST /v1/workers/export/jobs/claim-next` lets an
+export worker atomically claim the oldest unexpired queued job for the current
+tenant and optional dataset-kind filter, marking it `running` without reading
+trace bodies.
 
 Stale export-job recovery is intentionally narrow. If a `running` export job is
 still open after its grant expiry, an admin can call

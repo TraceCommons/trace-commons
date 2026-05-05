@@ -4555,6 +4555,70 @@ impl TraceCorpusStore for PgBackend {
         Ok(record)
     }
 
+    async fn claim_next_trace_export_job(
+        &self,
+        tenant_id: &str,
+        requested_dataset_kind: Option<&str>,
+        claim_at: DateTime<Utc>,
+        worker_principal_ref: &str,
+    ) -> Result<Option<TraceExportJobRecord>, DatabaseError> {
+        let dataset_kind = requested_dataset_kind.map(str::to_string);
+        let queued_status = enum_to_storage(TraceExportJobStatus::Queued)?;
+        let running_status = enum_to_storage(TraceExportJobStatus::Running)?;
+        let metadata_patch = serde_json::to_value(BTreeMap::from([
+            ("state".to_string(), "running".to_string()),
+            (
+                "claimed_by_principal_ref".to_string(),
+                worker_principal_ref.to_string(),
+            ),
+        ]))
+        .map_err(|e| {
+            DatabaseError::Serialization(format!("trace export job metadata encode failed: {e}"))
+        })?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                &format!(
+                    "WITH next_job AS (
+                        SELECT export_job_id
+                          FROM trace_export_jobs
+                         WHERE tenant_id = $1
+                           AND status = $2
+                           AND expires_at > $3
+                           AND ($4::TEXT IS NULL OR requested_dataset_kind = $4)
+                         ORDER BY requested_at ASC, created_at ASC
+                         LIMIT 1
+                         FOR UPDATE SKIP LOCKED
+                     )
+                     UPDATE trace_export_jobs AS job
+                        SET status = $5,
+                            started_at = $3,
+                            finished_at = NULL,
+                            last_error = NULL,
+                            metadata_json = job.metadata_json || $6::JSONB,
+                            updated_at = NOW()
+                       FROM next_job
+                      WHERE job.tenant_id = $1
+                        AND job.export_job_id = next_job.export_job_id
+                      RETURNING {TRACE_EXPORT_JOB_COLUMNS}"
+                ),
+                &[
+                    &tenant_id,
+                    &queued_status,
+                    &claim_at,
+                    &dataset_kind,
+                    &running_status,
+                    &metadata_patch,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row.as_ref().map(row_to_export_job).transpose()?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
     async fn recover_stale_trace_export_job(
         &self,
         tenant_id: &str,

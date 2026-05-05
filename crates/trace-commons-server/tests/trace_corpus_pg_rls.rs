@@ -2078,6 +2078,46 @@ async fn store_facade_preserves_export_grant_job_scope_and_updates() {
     assert_eq!(alpha_jobs.len(), 1);
     assert_eq!(alpha_jobs[0].status, TraceExportJobStatus::Queued);
 
+    let claim_at = requested_at + chrono::Duration::seconds(3);
+    let claimed_alpha = backend
+        .claim_next_trace_export_job(
+            &tenant_alpha,
+            Some("replay"),
+            claim_at,
+            "principal:alpha-export-worker",
+        )
+        .await
+        .expect("claim alpha queued export job")
+        .expect("alpha queued export job is claimable");
+    assert_eq!(claimed_alpha.export_job_id, export_job_id);
+    assert_eq!(claimed_alpha.status, TraceExportJobStatus::Running);
+    assert_eq!(claimed_alpha.started_at, Some(claim_at));
+    assert_eq!(
+        claimed_alpha.metadata.get("request_id").map(String::as_str),
+        Some("pg-rls-alpha")
+    );
+    assert_eq!(
+        claimed_alpha.metadata.get("state").map(String::as_str),
+        Some("running")
+    );
+    assert_eq!(
+        claimed_alpha
+            .metadata
+            .get("claimed_by_principal_ref")
+            .map(String::as_str),
+        Some("principal:alpha-export-worker")
+    );
+    let beta_claim_miss = backend
+        .claim_next_trace_export_job(
+            &tenant_beta,
+            Some("replay"),
+            claim_at,
+            "principal:beta-export-worker",
+        )
+        .await
+        .expect("dataset-kind claim is tenant scoped");
+    assert!(beta_claim_miss.is_none());
+
     let finished_at = requested_at + chrono::Duration::seconds(12);
     let updated_alpha = backend
         .update_trace_export_job_status(
