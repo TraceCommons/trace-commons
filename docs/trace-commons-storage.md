@@ -101,6 +101,8 @@ This first production-storage slice is now owned by the TraceDAO server repo. It
 
 Reconciliation also reports DB audit hash-chain drift as `db_audit_hash_chain_failures` when mirrored audit rows have invalid hash format, a genesis or predecessor mismatch, or a canonical-payload hash mismatch. Those failures are promotion blockers just like canonical projection drift.
 
+Reviewer audit-event reads remain bounded even after DB audit reads are enabled. The API applies the `limit` at the storage boundary, parsing only the latest file-backed audit tail in compatibility mode or querying PostgreSQL by tenant with `audit_sequence DESC LIMIT` in DB-backed mode.
+
 Credit-settlement promotion uses the same maintenance channel. Backfill now counts and mirrors file-backed utility attestations, credit settlement batches, credit holds, and NEAR credit outbox rows/status with isolated per-row failure reporting; reconciliation reports file/DB counts plus missing-id gaps for each of those control-plane families, status drift for settlement batches and NEAR outbox rows, hold-release drift, and those gaps feed `blocking_gaps`.
 
 ### Safe Migration Naming

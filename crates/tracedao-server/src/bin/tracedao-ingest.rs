@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::io::{BufRead, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -22487,13 +22487,9 @@ async fn audit_events_handler(
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(&tenant)?;
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
-    let events: Vec<_> = read_audit_events(state.as_ref(), &tenant)
+    let events = read_recent_audit_events(state.as_ref(), &tenant, limit)
         .await
-        .map_err(internal_error)?
-        .into_iter()
-        .rev()
-        .take(limit)
-        .collect();
+        .map_err(internal_error)?;
     append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,
@@ -24839,15 +24835,26 @@ async fn read_contributor_credit_events_from_db(
     Ok(visible_credit_events(tenant, credit_events))
 }
 
-async fn read_audit_events(
+async fn read_recent_audit_events(
     state: &AppState,
     tenant: &TenantAuth,
+    limit: usize,
 ) -> anyhow::Result<Vec<TraceCommonsAuditEvent>> {
     if state.db_audit_reads_for_tenant(&tenant.tenant_id) {
-        return read_audit_events_from_db(state, tenant).await;
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("TRACE_COMMONS_DB_AUDIT_READS is enabled without a DB mirror")?;
+        return db
+            .list_recent_trace_audit_events(&tenant.tenant_id, limit)
+            .await
+            .context("failed to read recent Trace Commons audit events from DB mirror")?
+            .into_iter()
+            .map(|event| trace_commons_audit_event_from_storage(&tenant.tenant_id, event))
+            .collect();
     }
 
-    read_all_audit_events(&state.root, &tenant.tenant_id)
+    read_recent_audit_events_from_file(&state.root, &tenant.tenant_id, limit)
 }
 
 async fn read_audit_events_from_db(
@@ -30570,6 +30577,50 @@ fn read_all_audit_events(
         events.push(event);
     }
     events.sort_by_key(|event| event.created_at);
+    Ok(events)
+}
+
+fn read_recent_audit_events_from_file(
+    root: &Path,
+    tenant_id: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<TraceCommonsAuditEvent>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let path = audit_events_path(root, tenant_id);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let file = std::fs::File::open(&path)
+        .with_context(|| format!("failed to read audit log {}", path.display()))?;
+    let reader = std::io::BufReader::new(file);
+    let mut recent_lines = VecDeque::with_capacity(limit);
+    for (index, line) in reader.lines().enumerate() {
+        let line = line.with_context(|| format!("failed to read audit log {}", path.display()))?;
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        if recent_lines.len() == limit {
+            recent_lines.pop_front();
+        }
+        recent_lines.push_back((index + 1, line));
+    }
+
+    let mut events = Vec::with_capacity(recent_lines.len());
+    for (line_number, line) in recent_lines.into_iter().rev() {
+        let event: TraceCommonsAuditEvent = serde_json::from_str(&line).with_context(|| {
+            format!(
+                "failed to parse audit event {} line {}",
+                path.display(),
+                line_number
+            )
+        })?;
+        ensure_audit_event_tenant(&event, tenant_id)?;
+        events.push(event);
+    }
     Ok(events)
 }
 
@@ -39791,6 +39842,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn audit_events_handler_uses_bounded_file_audit_reads() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let path = audit_log_path(temp.path(), "tenant-a");
+        std::fs::create_dir_all(path.parent().expect("audit log has parent"))
+            .expect("audit dir writes");
+        let older_corrupt_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-b".to_string(),
+            submission_id: Uuid::new_v4(),
+            kind: "read".to_string(),
+            created_at: Utc::now() - Duration::minutes(1),
+            status: None,
+            actor_role: Some(TokenRole::Reviewer),
+            actor_principal_ref: Some(principal_storage_ref("review-token-b")),
+            reason: Some("older non-returned corrupt audit row".to_string()),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+        let latest_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: Uuid::new_v4(),
+            kind: "read".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Reviewer),
+            actor_principal_ref: Some(principal_storage_ref("review-token-a")),
+            reason: Some("latest bounded audit row".to_string()),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+        let body = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&older_corrupt_event).expect("older event serializes"),
+            serde_json::to_string(&latest_event).expect("latest event serializes")
+        );
+        std::fs::write(&path, body).expect("audit log writes");
+
+        let Json(events) = audit_events_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Query(AuditEventsQuery { limit: Some(1) }),
+        )
+        .await
+        .expect("bounded file audit read ignores older non-returned tenant drift");
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_id, latest_event.event_id);
+    }
+
+    #[tokio::test]
     async fn submit_rejects_mismatched_file_revocation_tenant_before_side_effects() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -47162,6 +47271,130 @@ mod tests {
                 .iter()
                 .any(|gap| { gap == "db_audit_hash_chain_failures=1" })
         );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn audit_events_handler_uses_bounded_db_audit_reads() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            true,
+        );
+        let drifted_canonical_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: Uuid::new_v4(),
+            kind: "trace_content_read".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Reviewer),
+            actor_principal_ref: Some("reviewer-a".to_string()),
+            reason: Some(format!(
+                "surface=review_decision;purpose_hash={}",
+                sha256_prefixed("review reason")
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+        backend
+            .append_trace_audit_event(StorageTraceAuditEventWrite {
+                audit_event_id: drifted_canonical_event.event_id,
+                tenant_id: drifted_canonical_event.tenant_id.clone(),
+                actor_principal_ref: drifted_canonical_event.actor_principal_ref.clone().unwrap(),
+                actor_role: "reviewer".to_string(),
+                action: StorageTraceAuditAction::Read,
+                reason: Some("surface=review_decision".to_string()),
+                request_id: None,
+                submission_id: Some(drifted_canonical_event.submission_id),
+                object_ref_id: None,
+                export_manifest_id: None,
+                decision_inputs_hash: None,
+                previous_event_hash: None,
+                event_hash: None,
+                canonical_event_json: Some(
+                    serde_json::to_string(&drifted_canonical_event)
+                        .expect("canonical audit serializes"),
+                ),
+                metadata: StorageTraceAuditSafeMetadata::TraceContentRead {
+                    surface: "review_decision".to_string(),
+                    purpose_hash: None,
+                },
+            })
+            .await
+            .expect("older drifted DB audit row writes");
+
+        let latest_canonical_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: Uuid::new_v4(),
+            kind: "trace_content_read".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Reviewer),
+            actor_principal_ref: Some("reviewer-a".to_string()),
+            reason: Some(format!(
+                "surface=review_decision;purpose_hash={}",
+                sha256_prefixed("review reason")
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+        backend
+            .append_trace_audit_event(StorageTraceAuditEventWrite {
+                audit_event_id: latest_canonical_event.event_id,
+                tenant_id: latest_canonical_event.tenant_id.clone(),
+                actor_principal_ref: latest_canonical_event.actor_principal_ref.clone().unwrap(),
+                actor_role: "reviewer".to_string(),
+                action: StorageTraceAuditAction::Read,
+                reason: latest_canonical_event.reason.clone(),
+                request_id: None,
+                submission_id: Some(latest_canonical_event.submission_id),
+                object_ref_id: None,
+                export_manifest_id: None,
+                decision_inputs_hash: None,
+                previous_event_hash: None,
+                event_hash: None,
+                canonical_event_json: Some(
+                    serde_json::to_string(&latest_canonical_event)
+                        .expect("canonical audit serializes"),
+                ),
+                metadata: StorageTraceAuditSafeMetadata::TraceContentRead {
+                    surface: "review_decision".to_string(),
+                    purpose_hash: Some(sha256_prefixed("review reason")),
+                },
+            })
+            .await
+            .expect("latest valid DB audit row writes");
+
+        let Json(events) = audit_events_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Query(AuditEventsQuery { limit: Some(1) }),
+        )
+        .await
+        .expect("bounded DB audit read ignores older non-returned projection drift");
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_id, latest_canonical_event.event_id);
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }

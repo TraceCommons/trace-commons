@@ -3522,6 +3522,38 @@ impl TraceCorpusStore for PgBackend {
         records
     }
 
+    async fn list_recent_trace_audit_events(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+    ) -> Result<Vec<TraceAuditEventRecord>, DatabaseError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = tx
+            .query(
+                "SELECT
+                    tenant_id, audit_sequence, audit_event_id, actor_principal_ref, actor_role,
+                    action, reason, request_id, submission_id, object_ref_id, export_manifest_id,
+                    decision_inputs_hash, previous_event_hash, event_hash, canonical_event_json,
+                    metadata_json,
+                    occurred_at
+                 FROM trace_audit_events
+                 WHERE tenant_id = $1
+                 ORDER BY audit_sequence DESC
+                 LIMIT $2",
+                &[&tenant_id, &limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_audit_event).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
     async fn append_trace_credit_event(
         &self,
         credit_event: TraceCreditEventWrite,
