@@ -263,7 +263,8 @@ benchmark, and delayed-credit gauges. The same summary response includes a
 `rollout_smoke` preflight block with the required canary smoke-check names,
 including `tenant_canary_isolation`, `db_reconciliation_clean`,
 `rollback_flag_drill`, `key_rotation_drill`, PostgreSQL RLS readiness, and
-audit-chain verification, along with promotion-gate readiness, recorded evidence
+audit-chain verification, plus revocation-effect checks for delayed credit
+reversal and object deletion receipts, along with promotion-gate readiness, recorded evidence
 counts, passed evidence counts, failed evidence counts, stale evidence counts,
 and explicit missing rehearsal-evidence counts so operators do not mistake a
 clean gate snapshot for an up-to-date rehearsed rollout. Latest per-check smoke

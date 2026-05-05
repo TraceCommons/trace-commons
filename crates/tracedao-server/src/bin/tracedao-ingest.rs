@@ -3022,6 +3022,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(revocation_propagation_drill_handler),
         )
         .route(
+            "/v1/admin/revocation-effects-drill",
+            post(revocation_effects_drill_handler),
+        )
+        .route(
             "/v1/admin/canary-read-drill",
             post(canary_read_drill_handler),
         )
@@ -21962,6 +21966,25 @@ async fn revocation_propagation_drill_handler(
     Ok(Json(response))
 }
 
+async fn revocation_effects_drill_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceRevocationEffectsDrillRequest>,
+) -> ApiResult<Json<TraceRevocationEffectsDrillResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    if state.db_mirror.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace revocation effects drill requires configured DB mirror",
+        ));
+    }
+    let response = run_revocation_effects_drill(state.as_ref(), tenant.auth(), request)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(response))
+}
+
 async fn canary_read_drill_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -22107,6 +22130,15 @@ struct TraceRevocationPropagationDrillRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct TraceRevocationEffectsDrillRequest {
+    submission_id: Uuid,
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    record_evidence: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct TraceCanaryReadDrillRequest {
     submission_id: Uuid,
     #[serde(default)]
@@ -22235,6 +22267,31 @@ struct TraceRevocationPropagationDrillResponse {
     blocking_gaps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRevocationEffectsDrillResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose: String,
+    ready: bool,
+    evidence_hash: String,
+    submission_ref_hash: String,
+    canary_revocation_found: bool,
+    credit_reversal_item_count: usize,
+    credit_reversal_done_count: usize,
+    reversed_credit_event_count: usize,
+    near_reversal_outbox_count: usize,
+    delayed_credit_reversal_ready: bool,
+    object_delete_item_count: usize,
+    object_delete_done_count: usize,
+    deleted_object_ref_count: usize,
+    physical_delete_receipt_count: usize,
+    object_deletion_refs_ready: bool,
+    blocking_gaps: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    recorded_evidence: Vec<TraceRolloutSmokeEvidenceResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -22645,6 +22702,224 @@ async fn run_revocation_propagation_drill(
         )
         .await?;
         response.recorded_evidence = Some(evidence);
+    }
+
+    Ok(response)
+}
+
+async fn run_revocation_effects_drill(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceRevocationEffectsDrillRequest,
+) -> anyhow::Result<TraceRevocationEffectsDrillResponse> {
+    let generated_at = Utc::now();
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_revocation_effects_drill")
+        .to_string();
+    let submission_ref_hash = sha256_prefixed(&request.submission_id.to_string());
+    let db = state
+        .db_mirror
+        .as_ref()
+        .context("trace revocation effects drill requires configured DB mirror")?;
+    let tombstones = db
+        .list_trace_tombstones(&tenant.tenant_id)
+        .await
+        .context("failed to read revocation tombstones for effects drill")?;
+    let canary_revocation_found = tombstones
+        .iter()
+        .any(|tombstone| tombstone.submission_id == request.submission_id);
+    let propagation_items = db
+        .list_trace_revocation_propagation_items(&tenant.tenant_id, request.submission_id)
+        .await
+        .context("failed to read revocation propagation items for effects drill")?;
+
+    let credit_reversal_items = propagation_items
+        .iter()
+        .filter(|item| {
+            item.action == StorageTraceRevocationPropagationAction::ReverseCreditSettlement
+        })
+        .collect::<Vec<_>>();
+    let credit_reversal_item_count = credit_reversal_items.len();
+    let credit_reversal_done_count = credit_reversal_items
+        .iter()
+        .filter(|item| item.status == StorageTraceRevocationPropagationItemStatus::Done)
+        .count();
+    let credit_reversal_done_event_ids = credit_reversal_items
+        .iter()
+        .filter(|item| item.status == StorageTraceRevocationPropagationItemStatus::Done)
+        .filter_map(|item| match &item.target {
+            StorageTraceRevocationPropagationTarget::CreditSettlement {
+                credit_event_id, ..
+            } => Some(*credit_event_id),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let db_credit_events = db
+        .list_trace_credit_events(&tenant.tenant_id)
+        .await
+        .context("failed to read credit events for effects drill")?;
+    let reversed_credit_event_count = credit_reversal_done_event_ids
+        .iter()
+        .filter(|credit_event_id| {
+            let reversal_event_id = deterministic_trace_uuid_for_external_ref(
+                "revocation-credit-reversal",
+                &tenant.tenant_id,
+                request.submission_id,
+                &credit_event_id.to_string(),
+            );
+            db_credit_events.iter().any(|event| {
+                event.credit_event_id == reversal_event_id
+                    && event.submission_id == request.submission_id
+                    && event.settlement_state == StorageTraceCreditSettlementState::Reversed
+                    && event.points_delta.trim_start().starts_with('-')
+            })
+        })
+        .count();
+    let mut expected_near_reversal_source_hashes = BTreeSet::new();
+    for batch in db
+        .list_trace_credit_settlement_batches(&tenant.tenant_id)
+        .await
+        .context("failed to read settlement batches for effects drill")?
+    {
+        if batch.status != StorageTraceCreditSettlementBatchStatus::Finalized
+            || batch.near_contract_id.is_none()
+        {
+            continue;
+        }
+        for source_id in batch.source_credit_event_ids {
+            if credit_reversal_done_event_ids.contains(&source_id) {
+                expected_near_reversal_source_hashes.insert(source_credit_event_ids_hash(
+                    &batch.policy_version,
+                    &[source_id],
+                ));
+            }
+        }
+    }
+    let near_reversal_outbox_expected_count = expected_near_reversal_source_hashes.len();
+    let near_reversal_outbox_count = db
+        .list_trace_near_credit_outbox_items(&tenant.tenant_id)
+        .await
+        .context("failed to read NEAR outbox items for effects drill")?
+        .into_iter()
+        .filter(|item| {
+            item.near_call_json
+                .get("method_name")
+                .and_then(serde_json::Value::as_str)
+                == Some("reverse_credit_receipt")
+        })
+        .filter(|item| {
+            item.near_call_json
+                .get("args")
+                .and_then(|args| args.get("source_list_hash"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|source_hash| {
+                    expected_near_reversal_source_hashes.contains(source_hash)
+                })
+        })
+        .count();
+    let delayed_credit_reversal_ready = credit_reversal_item_count > 0
+        && credit_reversal_done_count == credit_reversal_item_count
+        && reversed_credit_event_count >= credit_reversal_item_count
+        && near_reversal_outbox_count >= near_reversal_outbox_expected_count;
+
+    let object_delete_items = propagation_items
+        .iter()
+        .filter(|item| item.action == StorageTraceRevocationPropagationAction::DeleteObjectPayload)
+        .collect::<Vec<_>>();
+    let object_delete_item_count = object_delete_items.len();
+    let object_delete_done_count = object_delete_items
+        .iter()
+        .filter(|item| item.status == StorageTraceRevocationPropagationItemStatus::Done)
+        .count();
+    let physical_delete_receipt_count = propagation_items
+        .iter()
+        .filter(|item| {
+            item.action == StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt
+                && item.status == StorageTraceRevocationPropagationItemStatus::Done
+                && matches!(
+                    &item.target,
+                    StorageTraceRevocationPropagationTarget::PhysicalDeleteReceipt {
+                        object_ref_id: Some(_),
+                        ..
+                    }
+                )
+        })
+        .count();
+    let deleted_object_ref_count = db
+        .list_trace_object_refs(&tenant.tenant_id, request.submission_id)
+        .await
+        .context("failed to read object refs for effects drill")?
+        .into_iter()
+        .filter(|object_ref| is_service_owned_trace_object_store(&object_ref.object_store))
+        .filter(|object_ref| object_ref.deleted_at.is_some())
+        .count();
+    let object_deletion_refs_ready = object_delete_item_count > 0
+        && object_delete_done_count == object_delete_item_count
+        && deleted_object_ref_count >= object_delete_item_count
+        && physical_delete_receipt_count >= object_delete_item_count;
+
+    let mut response = TraceRevocationEffectsDrillResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at,
+        purpose: purpose.clone(),
+        ready: false,
+        evidence_hash: String::new(),
+        submission_ref_hash,
+        canary_revocation_found,
+        credit_reversal_item_count,
+        credit_reversal_done_count,
+        reversed_credit_event_count,
+        near_reversal_outbox_count,
+        delayed_credit_reversal_ready,
+        object_delete_item_count,
+        object_delete_done_count,
+        deleted_object_ref_count,
+        physical_delete_receipt_count,
+        object_deletion_refs_ready,
+        blocking_gaps: Vec::new(),
+        recorded_evidence: Vec::new(),
+    };
+    response.blocking_gaps = revocation_effects_drill_blocking_gaps(&response);
+    response.ready = response.blocking_gaps.is_empty();
+    response.evidence_hash = revocation_effects_drill_evidence_hash(tenant, &response);
+
+    if request.record_evidence {
+        for (check_name, passed) in revocation_effects_drill_check_statuses(&response) {
+            let evidence = TraceRolloutSmokeEvidenceResponse {
+                event_id: Uuid::new_v4(),
+                tenant_id: tenant.tenant_id.clone(),
+                tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+                check_name: check_name.to_string(),
+                status: if passed {
+                    TraceRolloutSmokeEvidenceStatus::Passed
+                } else {
+                    TraceRolloutSmokeEvidenceStatus::Failed
+                },
+                evidence_hash: revocation_effects_drill_check_evidence_hash(
+                    tenant,
+                    &response.evidence_hash,
+                    check_name,
+                    passed,
+                ),
+                evidence_ref_hash: Some(sha256_prefixed(&purpose)),
+                actor_principal_ref: tenant.principal_ref.clone(),
+                recorded_at: Utc::now(),
+            };
+            append_audit_event_with_db_mirror(
+                state,
+                tenant,
+                TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+                StorageTraceAuditAction::Read,
+                StorageTraceAuditSafeMetadata::Empty,
+            )
+            .await?;
+            response.recorded_evidence.push(evidence);
+        }
     }
 
     Ok(response)
@@ -23502,6 +23777,40 @@ fn revocation_propagation_drill_blocking_gaps(
     gaps
 }
 
+fn revocation_effects_drill_blocking_gaps(
+    response: &TraceRevocationEffectsDrillResponse,
+) -> Vec<String> {
+    let mut gaps = Vec::new();
+    push_key_rotation_gap(
+        &mut gaps,
+        "canary_revocation_missing",
+        !response.canary_revocation_found,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "delayed_credit_reversal_not_verified",
+        !response.delayed_credit_reversal_ready,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "object_deletion_refs_not_verified",
+        !response.object_deletion_refs_ready,
+    );
+    gaps
+}
+
+fn revocation_effects_drill_check_statuses(
+    response: &TraceRevocationEffectsDrillResponse,
+) -> [(&'static str, bool); 2] {
+    [
+        (
+            "delayed_credit_reversal",
+            response.delayed_credit_reversal_ready,
+        ),
+        ("object_deletion_refs", response.object_deletion_refs_ready),
+    ]
+}
+
 fn canary_contributor_auth_from_record(record: &TraceCommonsSubmissionRecord) -> TenantAuth {
     TenantAuth {
         tenant_id: record.tenant_id.clone(),
@@ -24056,6 +24365,52 @@ fn revocation_propagation_drill_evidence_hash(
             "pending": response.pending,
             "next_attempt_scheduled": response.next_attempt_scheduled,
             "blocking_gaps": blocking_gaps,
+        })
+        .to_string(),
+    )
+}
+
+fn revocation_effects_drill_evidence_hash(
+    tenant: &TenantAuth,
+    response: &TraceRevocationEffectsDrillResponse,
+) -> String {
+    sha256_prefixed(
+        &serde_json::json!({
+            "schema": "trace_commons_revocation_effects_drill.v1",
+            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+            "actor_principal_ref": tenant.principal_ref,
+            "submission_ref_hash": response.submission_ref_hash,
+            "canary_revocation_found": response.canary_revocation_found,
+            "credit_reversal_item_count": response.credit_reversal_item_count,
+            "credit_reversal_done_count": response.credit_reversal_done_count,
+            "reversed_credit_event_count": response.reversed_credit_event_count,
+            "near_reversal_outbox_count": response.near_reversal_outbox_count,
+            "delayed_credit_reversal_ready": response.delayed_credit_reversal_ready,
+            "object_delete_item_count": response.object_delete_item_count,
+            "object_delete_done_count": response.object_delete_done_count,
+            "deleted_object_ref_count": response.deleted_object_ref_count,
+            "physical_delete_receipt_count": response.physical_delete_receipt_count,
+            "object_deletion_refs_ready": response.object_deletion_refs_ready,
+            "blocking_gaps": response.blocking_gaps,
+        })
+        .to_string(),
+    )
+}
+
+fn revocation_effects_drill_check_evidence_hash(
+    tenant: &TenantAuth,
+    aggregate_evidence_hash: &str,
+    check_name: &str,
+    passed: bool,
+) -> String {
+    sha256_prefixed(
+        &serde_json::json!({
+            "schema": "trace_commons_revocation_effects_drill_check.v1",
+            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+            "actor_principal_ref": tenant.principal_ref,
+            "aggregate_evidence_hash": aggregate_evidence_hash,
+            "check_name": check_name,
+            "passed": passed,
         })
         .to_string(),
     )
@@ -30900,6 +31255,13 @@ async fn mirror_revocation_to_db(
     )
     .await
     .context("failed to enqueue credit settlement reversal propagation items")?;
+    let object_delete_items_enqueued = enqueue_object_payload_delete_items_for_revocation(
+        db.as_ref(),
+        &tenant.tenant_id,
+        submission_id,
+    )
+    .await
+    .context("failed to enqueue object payload delete propagation items")?;
 
     let audit_source = record
         .map(|record| {
@@ -30928,7 +31290,8 @@ async fn mirror_revocation_to_db(
             || vector_entries_invalidated > 0
             || export_manifests_invalidated > 0
             || export_manifest_items_invalidated > 0
-            || credit_reversal_items_enqueued > 0)
+            || credit_reversal_items_enqueued > 0
+            || object_delete_items_enqueued > 0)
     {
         let mut action_counts = lifecycle_invalidation_action_counts(
             invalidation_counts,
@@ -30941,6 +31304,12 @@ async fn mirror_revocation_to_db(
             action_counts.insert(
                 "credit_reversal_items_enqueued".to_string(),
                 credit_reversal_items_enqueued.min(u32::MAX as usize) as u32,
+            );
+        }
+        if object_delete_items_enqueued > 0 {
+            action_counts.insert(
+                "object_delete_items_enqueued".to_string(),
+                object_delete_items_enqueued.min(u32::MAX as usize) as u32,
             );
         }
         if let Some(ledger) = retention_ledger {
@@ -30980,6 +31349,70 @@ async fn mirror_revocation_to_db(
     }
 
     Ok(())
+}
+
+async fn enqueue_object_payload_delete_items_for_revocation(
+    db: &dyn Database,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> anyhow::Result<usize> {
+    let existing_idempotency_keys = db
+        .list_trace_revocation_propagation_items(tenant_id, submission_id)
+        .await
+        .context("failed to read existing revocation propagation items")?
+        .into_iter()
+        .map(|item| item.idempotency_key)
+        .collect::<BTreeSet<_>>();
+    let mut enqueued = 0usize;
+    for object_ref in db
+        .list_trace_object_refs(tenant_id, submission_id)
+        .await
+        .context("failed to read object refs for revocation payload deletion")?
+        .into_iter()
+        .filter(|object_ref| object_ref.deleted_at.is_none())
+        .filter(|object_ref| is_service_owned_trace_object_store(&object_ref.object_store))
+        .filter(|object_ref| {
+            is_supported_service_owned_physical_delete_artifact_kind(object_ref.artifact_kind)
+        })
+    {
+        let idempotency_key = sha256_prefixed(&format!(
+            "trace_revocation_object_payload_delete:v1:{tenant_id}:{submission_id}:{}",
+            object_ref.object_ref_id
+        ));
+        if existing_idempotency_keys.contains(&idempotency_key) {
+            continue;
+        }
+        db.upsert_trace_revocation_propagation_item(StorageTraceRevocationPropagationItemWrite {
+            tenant_id: tenant_id.to_string(),
+            propagation_item_id: deterministic_trace_uuid_for_external_ref(
+                "revocation-object-payload-delete",
+                tenant_id,
+                submission_id,
+                &object_ref.object_ref_id.to_string(),
+            ),
+            source_submission_id: submission_id,
+            target: StorageTraceRevocationPropagationTarget::ObjectRef {
+                object_ref_id: object_ref.object_ref_id,
+            },
+            action: StorageTraceRevocationPropagationAction::DeleteObjectPayload,
+            status: StorageTraceRevocationPropagationItemStatus::Pending,
+            idempotency_key,
+            reason: "revoked trace service-owned object payload deletion".to_string(),
+            attempt_count: 0,
+            last_error: None,
+            next_attempt_at: None,
+            completed_at: None,
+            evidence_hash: None,
+            metadata: BTreeMap::from([(
+                "source".to_string(),
+                "mirror_revocation_to_db".to_string(),
+            )]),
+        })
+        .await
+        .context("failed to upsert object payload delete propagation item")?;
+        enqueued += 1;
+    }
+    Ok(enqueued)
 }
 
 async fn enqueue_credit_settlement_reversal_items_for_revocation(
@@ -33353,6 +33786,19 @@ fn is_service_owned_trace_object_store(object_store: &str) -> bool {
         object_store,
         TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
             | TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE
+    )
+}
+
+fn is_supported_service_owned_physical_delete_artifact_kind(
+    artifact_kind: StorageTraceObjectArtifactKind,
+) -> bool {
+    matches!(
+        artifact_kind,
+        StorageTraceObjectArtifactKind::SubmittedEnvelope
+            | StorageTraceObjectArtifactKind::ReviewSnapshot
+            | StorageTraceObjectArtifactKind::WorkerIntermediate
+            | StorageTraceObjectArtifactKind::BenchmarkArtifact
+            | StorageTraceObjectArtifactKind::ExportArtifact
     )
 }
 
@@ -56153,6 +56599,249 @@ mod tests {
                         })
                 })
         );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn revocation_effects_drill_without_db_mirror_returns_operator_error() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/revocation-effects-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "submission_id": Uuid::new_v4(),
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("revocation effects drill response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response parses");
+        assert_eq!(
+            value["error"],
+            serde_json::json!("trace revocation effects drill requires configured DB mirror")
+        );
+    }
+
+    #[tokio::test]
+    async fn revocation_effects_drill_records_credit_reversal_and_object_delete_evidence() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let artifact_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            test_artifact_store(artifact_temp.path()),
+        );
+        let mut state =
+            test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
+                temp.path().to_path_buf(),
+                Some(backend.clone()),
+                Some(artifact_store),
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                BTreeMap::new(),
+                false,
+                false,
+                true,
+                false,
+            );
+        {
+            let state_mut = Arc::make_mut(&mut state);
+            state_mut.db_reviewer_require_object_refs = true;
+            state_mut.tenant_rollout_gates = TraceTenantRolloutGates {
+                tenant_ids_by_feature: Arc::new(BTreeMap::from([(
+                    TraceTenantRolloutFeature::ObjectPrimarySubmitReview,
+                    BTreeSet::from(["tenant-a".to_string()]),
+                )])),
+            };
+        }
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("object-primary submission mirrors to DB");
+
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        assert!(
+            !temp.path().join(&record.object_key).exists(),
+            "object-primary submit should not write a plaintext envelope body"
+        );
+
+        let Json(_event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.25,
+                reason: Some("frontier training utility to reverse".to_string()),
+                external_ref: Some("frontier:revocation-effects-drill".to_string()),
+            }),
+        )
+        .await
+        .expect("credit event mirrors to DB");
+
+        let Json(finalized) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "settlement before revocation".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("settlement mirrors to DB");
+        assert_eq!(finalized.near_outbox_item_count, 1);
+
+        let revoke_status = revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(submission_id),
+        )
+        .await
+        .expect("contributor can revoke settled object-primary trace");
+        assert_eq!(revoke_status, StatusCode::NO_CONTENT);
+
+        let propagation_items = backend
+            .list_trace_revocation_propagation_items("tenant-a", submission_id)
+            .await
+            .expect("revocation propagation items read");
+        assert!(propagation_items.iter().any(|item| {
+            item.action == StorageTraceRevocationPropagationAction::ReverseCreditSettlement
+        }));
+        assert!(propagation_items.iter().any(|item| {
+            item.action == StorageTraceRevocationPropagationAction::DeleteObjectPayload
+        }));
+
+        let Json(worker) = revocation_propagation_worker_handler(
+            State(state.clone()),
+            auth_headers("revocation-worker-token-a"),
+            Json(TraceRevocationPropagationWorkerRequest {
+                purpose: Some("revocation_effects_drill_setup".to_string()),
+                dry_run: false,
+                limit: 20,
+            }),
+        )
+        .await
+        .expect("revocation worker applies canary effects");
+        assert!(worker.completed >= 2);
+        assert_eq!(worker.failed, 0);
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/revocation-effects-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator revocation effects drill",
+                            "submission_id": submission_id,
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("revocation effects drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("revocation effects drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(true));
+        assert_eq!(
+            value["delayed_credit_reversal_ready"],
+            serde_json::json!(true)
+        );
+        assert_eq!(value["object_deletion_refs_ready"], serde_json::json!(true));
+        assert_eq!(value["blocking_gaps"], serde_json::json!([]));
+        assert_eq!(value["reversed_credit_event_count"], serde_json::json!(1));
+        assert_eq!(value["near_reversal_outbox_count"], serde_json::json!(1));
+        assert_eq!(value["deleted_object_ref_count"], serde_json::json!(1));
+        assert_eq!(value["physical_delete_receipt_count"], serde_json::json!(1));
+
+        let evidence = value["recorded_evidence"]
+            .as_array()
+            .expect("recorded evidence list");
+        assert!(evidence.iter().any(|item| {
+            item["check_name"] == serde_json::json!("delayed_credit_reversal")
+                && item["status"] == serde_json::json!("passed")
+        }));
+        assert!(evidence.iter().any(|item| {
+            item["check_name"] == serde_json::json!("object_deletion_refs")
+                && item["status"] == serde_json::json!("passed")
+        }));
+
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("token-a"));
+        assert!(!body_text.contains("frontier training utility"));
+        assert!(!body_text.contains("Please inspect the workspace"));
+
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("file audit events read");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "rollout_smoke_evidence"
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("check_name=delayed_credit_reversal")
+                        && reason.contains("status=passed")
+                })
+        }));
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "rollout_smoke_evidence"
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("check_name=object_deletion_refs")
+                        && reason.contains("status=passed")
+                })
+        }));
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }

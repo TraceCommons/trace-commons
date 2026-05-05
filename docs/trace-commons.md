@@ -458,6 +458,12 @@ smoke check through the real worker dry-run path. It requires a DB mirror,
 returns only aggregate due/completed/failed/skipped/pending counts plus compact
 dry-run blocker codes, leaves propagation rows unclaimed, and can append
 `revocation_propagation` evidence.
+`POST /v1/admin/revocation-effects-drill` is the post-live canary proof for the
+same revoked submission: it reads DB propagation rows, reversed credit events,
+NEAR reversal outbox rows, deleted service-owned object refs, and physical-delete
+receipt rows, then can append hash-only `delayed_credit_reversal` and
+`object_deletion_refs` evidence without exposing trace bodies, credit-account
+refs, object keys, or raw operator reasons.
 `POST /v1/admin/audit-chain-drill` runs audit-chain verification without
 maintenance side effects and can append `audit_chain_verification` evidence;
 responses expose counts, last hashes, blocker codes, and hashes of verifier
@@ -677,6 +683,7 @@ The service exposes:
 - `POST /v1/admin/postgres-rls-drill`
 - `POST /v1/admin/retention-dry-run-drill`
 - `POST /v1/admin/revocation-propagation-drill`
+- `POST /v1/admin/revocation-effects-drill`
 - `POST /v1/admin/audit-chain-drill`
 - `POST /v1/admin/maintenance`
 - `POST /v1/workers/retention-maintenance`
