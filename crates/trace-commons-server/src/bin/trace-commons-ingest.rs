@@ -3446,6 +3446,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(ranking_credit_readiness_report_handler),
         )
         .route(
+            "/v1/admin/ranking/readiness-drill",
+            post(ranking_model_readiness_drill_handler),
+        )
+        .route(
             "/v1/admin/ranking/worker-runs",
             get(ranking_worker_runs_handler),
         )
@@ -15813,6 +15817,19 @@ async fn ranking_credit_readiness_report_handler(
     )))
 }
 
+async fn ranking_model_readiness_drill_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceRankingModelReadinessDrillRequest>,
+) -> ApiResult<Json<TraceRankingModelReadinessDrillResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let response = run_ranking_model_readiness_drill(state.as_ref(), &tenant, request)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(response))
+}
+
 async fn ranking_calibration_run_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -23530,6 +23547,18 @@ struct TraceAnalyticsReleaseDrillRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct TraceRankingModelReadinessDrillRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default = "default_true")]
+    require_active_model: bool,
+    #[serde(default = "default_true")]
+    require_ready_credit: bool,
+    #[serde(default)]
+    record_evidence: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct TraceRevocationPropagationDrillRequest {
     #[serde(default)]
     purpose: Option<String>,
@@ -23715,6 +23744,37 @@ struct TraceAnalyticsReleaseDrillResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     noise_max_delta: Option<usize>,
     noisy_cell_count: usize,
+    blocking_gaps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRankingModelReadinessDrillResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose: String,
+    ready: bool,
+    evidence_hash: String,
+    require_active_model: bool,
+    require_ready_credit: bool,
+    active_model_count: usize,
+    monitored_model_count: usize,
+    at_risk_model_count: usize,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    risk_code_counts: BTreeMap<String, usize>,
+    calibration_dataset_count: usize,
+    calibration_dataset_manifest_conflict_count: usize,
+    ready_model_target_count: usize,
+    blocked_model_target_count: usize,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    dataset_reason_code_counts: BTreeMap<String, usize>,
+    pending_ranking_credit_event_count: usize,
+    ready_ranking_credit_event_count: usize,
+    blocked_ranking_credit_event_count: usize,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    credit_blocked_reason_counts: BTreeMap<String, usize>,
     blocking_gaps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
@@ -24846,6 +24906,134 @@ async fn run_analytics_release_drill(
     Ok(response)
 }
 
+async fn run_ranking_model_readiness_drill(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceRankingModelReadinessDrillRequest,
+) -> anyhow::Result<TraceRankingModelReadinessDrillResponse> {
+    let generated_at = Utc::now();
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_ranking_model_readiness_drill")
+        .to_string();
+
+    let model_versions = read_ranking_model_versions_for_admin(state, tenant).await?;
+    let features = read_ranking_features_for_admin(state, tenant).await?;
+    let predictions = read_ranking_predictions_for_admin(state, tenant).await?;
+    let labels = read_ranking_labels_for_admin(state, tenant).await?;
+    let preference_labels = read_ranking_preference_labels_for_admin(state, tenant).await?;
+    let calibration_dataset_read =
+        read_ranking_calibration_datasets_for_admin_reconciliation(state, tenant).await?;
+    let calibration_dataset_manifest_conflict_count =
+        calibration_dataset_read.manifest_conflict_keys.len();
+    let calibration_datasets = calibration_dataset_read.records;
+    let calibration_runs = read_ranking_calibration_runs_for_admin(state, tenant).await?;
+
+    let risk_report = ranking_model_risk_report(
+        state,
+        tenant,
+        &model_versions,
+        RankingModelRiskEvidence {
+            predictions: &predictions,
+            labels: &labels,
+            preference_labels: &preference_labels,
+            calibration_datasets: &calibration_datasets,
+            calibration_runs: &calibration_runs,
+        },
+    );
+    let dataset_report = ranking_dataset_readiness_report(RankingDatasetReadinessReportInputs {
+        state,
+        tenant,
+        model_versions: &model_versions,
+        predictions: &predictions,
+        labels: &labels,
+        preference_labels: &preference_labels,
+        calibration_datasets: &calibration_datasets,
+        calibration_dataset_manifest_conflict_count,
+        calibration_runs: &calibration_runs,
+    });
+    let credit_events = read_credit_events_for_admin(state, tenant).await?;
+    let settlement_batches = read_credit_settlement_batches_for_admin(state, tenant).await?;
+    let held_credit_accounts = active_credit_hold_account_refs_for_admin(state, tenant).await?;
+    let credit_report = ranking_credit_readiness_report(RankingCreditReadinessInputs {
+        state,
+        tenant,
+        credit_events: &credit_events,
+        settlement_batches: &settlement_batches,
+        held_credit_accounts: &held_credit_accounts,
+        features: &features,
+        predictions: &predictions,
+        model_versions: &model_versions,
+        labels: &labels,
+        preference_labels: &preference_labels,
+        calibration_datasets: &calibration_datasets,
+        calibration_dataset_manifest_conflict_count,
+        calibration_runs: &calibration_runs,
+    });
+
+    let mut response = TraceRankingModelReadinessDrillResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at,
+        purpose: purpose.clone(),
+        ready: false,
+        evidence_hash: String::new(),
+        require_active_model: request.require_active_model,
+        require_ready_credit: request.require_ready_credit,
+        active_model_count: risk_report.active_model_count,
+        monitored_model_count: risk_report.monitored_model_count,
+        at_risk_model_count: risk_report.at_risk_model_count,
+        risk_code_counts: risk_report.risk_code_counts,
+        calibration_dataset_count: dataset_report.calibration_dataset_count,
+        calibration_dataset_manifest_conflict_count: dataset_report
+            .calibration_dataset_manifest_conflict_count,
+        ready_model_target_count: dataset_report.ready_model_target_count,
+        blocked_model_target_count: dataset_report.blocked_model_target_count,
+        dataset_reason_code_counts: dataset_report.reason_code_counts,
+        pending_ranking_credit_event_count: credit_report.pending_ranking_credit_event_count,
+        ready_ranking_credit_event_count: credit_report.ready_count,
+        blocked_ranking_credit_event_count: credit_report.blocked_count,
+        credit_blocked_reason_counts: credit_report.blocked_reason_counts,
+        blocking_gaps: Vec::new(),
+        recorded_evidence: None,
+    };
+    response.blocking_gaps = ranking_model_readiness_drill_blocking_gaps(&response);
+    response.ready = response.blocking_gaps.is_empty();
+    response.evidence_hash = ranking_model_readiness_drill_evidence_hash(tenant, &response);
+
+    if request.record_evidence {
+        let evidence = TraceRolloutSmokeEvidenceResponse {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            check_name: "ranking_model_readiness".to_string(),
+            status: if response.ready {
+                TraceRolloutSmokeEvidenceStatus::Passed
+            } else {
+                TraceRolloutSmokeEvidenceStatus::Failed
+            },
+            evidence_hash: response.evidence_hash.clone(),
+            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            recorded_at: Utc::now(),
+        };
+        append_audit_event_with_db_mirror(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+            StorageTraceAuditAction::Read,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .await?;
+        response.recorded_evidence = Some(evidence);
+    }
+
+    Ok(response)
+}
+
 async fn run_postgres_rls_drill(
     state: &AppState,
     tenant: &TenantAuth,
@@ -25613,6 +25801,55 @@ fn vector_index_drill_blocking_gaps(
     gaps
 }
 
+fn ranking_model_readiness_drill_blocking_gaps(
+    response: &TraceRankingModelReadinessDrillResponse,
+) -> Vec<String> {
+    let mut gaps = Vec::new();
+    push_key_rotation_gap(
+        &mut gaps,
+        "active_ranking_model_missing",
+        response.require_active_model && response.active_model_count == 0,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "ranking_model_target_evidence_missing",
+        response.require_active_model && response.monitored_model_count == 0,
+    );
+    push_rollback_gap_count(
+        &mut gaps,
+        "at_risk_ranking_models",
+        response.at_risk_model_count,
+    );
+    push_rollback_gap_count(
+        &mut gaps,
+        "calibration_dataset_manifest_conflicts",
+        response.calibration_dataset_manifest_conflict_count,
+    );
+    push_rollback_gap_count(
+        &mut gaps,
+        "blocked_ranking_model_targets",
+        response.blocked_model_target_count,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "pending_ranking_credit_missing",
+        response.require_ready_credit && response.pending_ranking_credit_event_count == 0,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "ready_ranking_credit_missing",
+        response.require_ready_credit
+            && response.pending_ranking_credit_event_count > 0
+            && response.ready_ranking_credit_event_count == 0,
+    );
+    push_rollback_gap_count(
+        &mut gaps,
+        "blocked_ranking_credit_events",
+        response.blocked_ranking_credit_event_count,
+    );
+    gaps
+}
+
 fn revocation_propagation_drill_blocking_gaps(
     response: &TraceRevocationPropagationWorkerResponse,
 ) -> Vec<String> {
@@ -26290,6 +26527,36 @@ fn analytics_release_drill_evidence_hash(
             "noise_max_delta": budget.noise_max_delta,
             "noisy_cell_count": budget.noisy_cell_count,
             "blocking_gaps": blocking_gaps,
+        })
+        .to_string(),
+    )
+}
+
+fn ranking_model_readiness_drill_evidence_hash(
+    tenant: &TenantAuth,
+    response: &TraceRankingModelReadinessDrillResponse,
+) -> String {
+    sha256_prefixed(
+        &serde_json::json!({
+            "schema": "trace_commons_ranking_model_readiness_drill.v1",
+            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+            "actor_principal_ref": tenant.principal_ref,
+            "require_active_model": response.require_active_model,
+            "require_ready_credit": response.require_ready_credit,
+            "active_model_count": response.active_model_count,
+            "monitored_model_count": response.monitored_model_count,
+            "at_risk_model_count": response.at_risk_model_count,
+            "risk_code_counts": response.risk_code_counts,
+            "calibration_dataset_count": response.calibration_dataset_count,
+            "calibration_dataset_manifest_conflict_count": response.calibration_dataset_manifest_conflict_count,
+            "ready_model_target_count": response.ready_model_target_count,
+            "blocked_model_target_count": response.blocked_model_target_count,
+            "dataset_reason_code_counts": response.dataset_reason_code_counts,
+            "pending_ranking_credit_event_count": response.pending_ranking_credit_event_count,
+            "ready_ranking_credit_event_count": response.ready_ranking_credit_event_count,
+            "blocked_ranking_credit_event_count": response.blocked_ranking_credit_event_count,
+            "credit_blocked_reason_counts": response.credit_blocked_reason_counts,
+            "blocking_gaps": response.blocking_gaps,
         })
         .to_string(),
     )
@@ -47095,6 +47362,7 @@ const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "retention_dry_run",
     "vector_index",
     "analytics_release",
+    "ranking_model_readiness",
     "credit_settlement",
     "object_primary_reads",
     "object_store_migration",
@@ -69087,6 +69355,157 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ranking_model_readiness_drill_records_hash_only_smoke_evidence() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let (candidate, prediction) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-readiness-drill-v1")
+                .await;
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist readiness calibration");
+        assert!(calibration.promotable);
+        let Json(active) = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "promote model for readiness smoke drill".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can promote readiness model");
+        assert_eq!(active.model_status, StorageTraceRankingModelStatus::Active);
+        let Json(credit) = ranking_prediction_credit_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionCreditRequest {
+                ranking_prediction_id: prediction.ranking_prediction_id,
+                reason: "prediction selected for readiness drill".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can append readiness ranking credit");
+        assert_eq!(credit.appended_count, 1);
+
+        let contributor_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/ranking/readiness-drill")
+                    .header(AUTHORIZATION, "Bearer token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator ranking readiness drill",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("contributor request builds"),
+            )
+            .await
+            .expect("contributor response");
+        assert_eq!(contributor_response.status(), StatusCode::FORBIDDEN);
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/ranking/readiness-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator ranking readiness drill",
+                            "record_evidence": true,
+                            "require_active_model": true,
+                            "require_ready_credit": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("admin request builds"),
+            )
+            .await
+            .expect("readiness drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("readiness drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(true));
+        assert_eq!(value["active_model_count"], serde_json::json!(1));
+        assert_eq!(value["monitored_model_count"], serde_json::json!(1));
+        assert_eq!(value["at_risk_model_count"], serde_json::json!(0));
+        assert_eq!(
+            value["calibration_dataset_manifest_conflict_count"],
+            serde_json::json!(0)
+        );
+        assert_eq!(value["blocked_model_target_count"], serde_json::json!(0));
+        assert_eq!(
+            value["pending_ranking_credit_event_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            value["ready_ranking_credit_event_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            value["blocked_ranking_credit_event_count"],
+            serde_json::json!(0)
+        );
+        assert_eq!(value["blocking_gaps"], serde_json::json!([]));
+        assert!(
+            value["evidence_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+        assert_eq!(
+            value["recorded_evidence"]["check_name"],
+            serde_json::json!("ranking_model_readiness")
+        );
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("passed")
+        );
+
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("token-a"));
+        assert!(!body_text.contains("private-ranking"));
+        assert!(!body_text.contains(&prediction.ranking_prediction_id.to_string()));
+
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("file audit events read");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "rollout_smoke_evidence"
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("check_name=ranking_model_readiness")
+                        && reason.contains("status=passed")
+                })
+        }));
+    }
+
+    #[tokio::test]
     async fn ranking_feature_worker_creates_reserved_server_provenance_features() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -79365,11 +79784,11 @@ mod tests {
         );
         assert_eq!(
             operational_json["rollout_smoke"]["required_check_count"],
-            serde_json::json!(20)
+            serde_json::json!(21)
         );
         assert_eq!(
             operational_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(20)
+            serde_json::json!(21)
         );
         assert!(
             operational
@@ -79429,6 +79848,12 @@ mod tests {
             operational
                 .rollout_smoke
                 .required_checks
+                .contains(&"ranking_model_readiness".to_string())
+        );
+        assert!(
+            operational
+                .rollout_smoke
+                .required_checks
                 .contains(&"object_store_migration".to_string())
         );
         assert!(
@@ -79441,7 +79866,7 @@ mod tests {
             operational
                 .rollout_smoke
                 .blocker_reasons
-                .contains(&"smoke_rehearsal_evidence_missing=20".to_string())
+                .contains(&"smoke_rehearsal_evidence_missing=21".to_string())
         );
     }
 
@@ -79521,7 +79946,7 @@ mod tests {
         );
         assert_eq!(
             operational_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(19)
+            serde_json::json!(20)
         );
         assert!(
             !operational
@@ -79852,7 +80277,7 @@ mod tests {
         );
         assert_eq!(
             preflight_json["rollout_smoke"]["required_check_count"],
-            serde_json::json!(20)
+            serde_json::json!(21)
         );
         assert_eq!(
             preflight_json["rollout_smoke"]["recorded_evidence_count"],
@@ -79864,7 +80289,7 @@ mod tests {
         );
         assert_eq!(
             preflight_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(19)
+            serde_json::json!(20)
         );
         assert_eq!(
             preflight_json["latest_evidence"].as_array().map(Vec::len),
@@ -80084,7 +80509,7 @@ mod tests {
             "trace_commons_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"failed_ranking_worker_runs\"}} 1"
         )));
         assert!(body_text.contains(&format!(
-            "trace_commons_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 20"
+            "trace_commons_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 21"
         )));
         assert!(body_text.contains(&format!(
             "trace_commons_operational_rollout_smoke_recorded_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 0"
