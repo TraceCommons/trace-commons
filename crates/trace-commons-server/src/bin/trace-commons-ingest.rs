@@ -319,6 +319,11 @@ const TRACE_REVIEW_DUE_AFTER_HOURS: i64 = 24;
 const TRACE_REVIEW_OVERDUE_AFTER_HOURS: i64 = 72;
 const TRACE_REVIEW_HIGH_RISK_URGENT_AFTER_HOURS: i64 = 4;
 const TRACE_EXPORT_ONE_SHOT_GRANT_TTL_SECONDS: i64 = 300;
+const TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_JOBS: usize = 10;
+const TRACE_EXPORT_JOB_RETRY_MAX_JOBS_LIMIT: usize = 50;
+const TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_RETRY_COUNT: u32 = 3;
+const TRACE_EXPORT_JOB_RETRY_DEFAULT_BASE_DELAY_SECONDS: i64 = 60;
+const TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_DELAY_SECONDS: i64 = 3600;
 const TRACE_RANKING_DEFAULT_MIN_LABEL_COUNT: usize = 25;
 const TRACE_RANKING_DEFAULT_CONFIDENCE_THRESHOLD: f32 = 0.5;
 const TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS: i64 = 1_000_000;
@@ -2640,6 +2645,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/workers/export/jobs/run-queued",
             post(worker_export_jobs_run_queued_handler),
+        )
+        .route(
+            "/v1/workers/export/jobs/retry-failed",
+            post(worker_export_jobs_retry_failed_handler),
         )
         .route(
             "/v1/ranker/training-candidates",
@@ -13503,6 +13512,36 @@ fn next_export_job_retry_count(metadata: &BTreeMap<String, String>) -> u32 {
         .saturating_add(1)
 }
 
+fn current_export_job_retry_count(metadata: &BTreeMap<String, String>) -> u32 {
+    metadata
+        .get("retry_count")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
+fn export_job_retry_delay(
+    retry_count: u32,
+    base_delay_seconds: i64,
+    max_delay_seconds: i64,
+) -> Duration {
+    let exponent = retry_count.min(10);
+    let multiplier = 1_i64.checked_shl(exponent).unwrap_or(i64::MAX);
+    let delay_seconds = base_delay_seconds
+        .saturating_mul(multiplier)
+        .min(max_delay_seconds);
+    Duration::seconds(delay_seconds)
+}
+
+fn export_job_retry_due_at(
+    record: &StorageTraceExportJobRecord,
+    base_delay_seconds: i64,
+    max_delay_seconds: i64,
+) -> DateTime<Utc> {
+    let retry_count = current_export_job_retry_count(&record.metadata);
+    let failed_at = record.finished_at.unwrap_or(record.updated_at);
+    failed_at + export_job_retry_delay(retry_count, base_delay_seconds, max_delay_seconds)
+}
+
 fn export_job_recovery_audit_reason(
     export_job_id: Uuid,
     status: StorageTraceExportJobStatus,
@@ -20304,6 +20343,22 @@ struct TraceExportJobsRunQueuedRequest {
     max_jobs: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceExportJobsRetryFailedRequest {
+    #[serde(default)]
+    dataset_kind: Option<String>,
+    #[serde(default)]
+    max_jobs: Option<usize>,
+    #[serde(default)]
+    max_retry_count: Option<u32>,
+    #[serde(default)]
+    base_delay_seconds: Option<i64>,
+    #[serde(default)]
+    max_delay_seconds: Option<i64>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct TraceExportJobClaimNextResponse {
     tenant_id: String,
@@ -20334,6 +20389,22 @@ struct TraceExportJobsRunQueuedResponse {
     pending_after_count: usize,
     completed_jobs: Vec<TraceExportJobSummary>,
     failed_jobs: Vec<TraceExportJobSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceExportJobsRetryFailedResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    requested_dataset_kind: Option<String>,
+    max_jobs: usize,
+    max_retry_count: u32,
+    base_delay_seconds: i64,
+    max_delay_seconds: i64,
+    retried_count: usize,
+    skipped_not_due_count: usize,
+    skipped_ineligible_count: usize,
+    failed_after_count: usize,
+    retried_jobs: Vec<TraceExportJobSummary>,
 }
 
 async fn export_jobs_handler(
@@ -20567,6 +20638,119 @@ async fn worker_export_jobs_run_queued_handler(
     }))
 }
 
+async fn worker_export_jobs_retry_failed_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceExportJobsRetryFailedRequest>,
+) -> ApiResult<Json<TraceExportJobsRetryFailedResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_exporter(&tenant)?;
+    let requested_dataset_kind = body
+        .dataset_kind
+        .as_deref()
+        .map(trace_export_dataset_kind_from_storage_name)
+        .transpose()?;
+    let requested_dataset_kind_storage =
+        requested_dataset_kind.map(|dataset_kind| dataset_kind.storage_name().to_string());
+    let max_jobs = body
+        .max_jobs
+        .unwrap_or(TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_JOBS)
+        .clamp(1, TRACE_EXPORT_JOB_RETRY_MAX_JOBS_LIMIT);
+    let max_retry_count = body
+        .max_retry_count
+        .unwrap_or(TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_RETRY_COUNT)
+        .clamp(1, 25);
+    let base_delay_seconds = body
+        .base_delay_seconds
+        .unwrap_or(TRACE_EXPORT_JOB_RETRY_DEFAULT_BASE_DELAY_SECONDS)
+        .clamp(0, 86_400);
+    let requested_max_delay_seconds = body
+        .max_delay_seconds
+        .unwrap_or(TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_DELAY_SECONDS)
+        .clamp(0, 86_400);
+    let max_delay_seconds = requested_max_delay_seconds.max(base_delay_seconds);
+    let reason = validate_export_job_retry_reason(
+        body.reason
+            .as_deref()
+            .unwrap_or("scheduled export job retry"),
+    )?;
+    let now = Utc::now();
+    let db = trace_export_control_db(state.as_ref())?;
+    let mut failed_jobs = db
+        .list_trace_export_jobs(&tenant.tenant_id)
+        .await
+        .map_err(internal_error)?
+        .into_iter()
+        .filter(|job| job.status == StorageTraceExportJobStatus::Failed)
+        .filter(|job| job.expires_at > now)
+        .filter(|job| {
+            requested_dataset_kind_storage
+                .as_deref()
+                .is_none_or(|dataset_kind| job.requested_dataset_kind == dataset_kind)
+        })
+        .collect::<Vec<_>>();
+    failed_jobs.sort_by(|left, right| {
+        left.finished_at
+            .unwrap_or(left.updated_at)
+            .cmp(&right.finished_at.unwrap_or(right.updated_at))
+            .then_with(|| left.requested_at.cmp(&right.requested_at))
+    });
+
+    let mut retried_jobs = Vec::new();
+    let mut skipped_not_due_count = 0;
+    let mut skipped_ineligible_count = 0;
+    for job in failed_jobs {
+        if retried_jobs.len() >= max_jobs {
+            break;
+        }
+        if !export_job_has_replayable_request_metadata(&job)
+            || current_export_job_retry_count(&job.metadata) >= max_retry_count
+        {
+            skipped_ineligible_count += 1;
+            continue;
+        }
+        if export_job_retry_due_at(&job, base_delay_seconds, max_delay_seconds) > now {
+            skipped_not_due_count += 1;
+            continue;
+        }
+        let retried =
+            retry_failed_export_job_record(state.as_ref(), &tenant, &db, job, &reason, now).await?;
+        retried_jobs.push(TraceExportJobSummary::from_storage_record(retried));
+    }
+
+    let failed_after_count = count_failed_export_jobs(
+        &db,
+        &tenant.tenant_id,
+        requested_dataset_kind_storage.as_deref(),
+        Utc::now(),
+    )
+    .await?;
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(&tenant, "export_jobs_retry_failed", retried_jobs.len()),
+        StorageTraceAuditAction::Read,
+        trace_read_audit_metadata("export_jobs_retry_failed", retried_jobs.len()),
+    )
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(TraceExportJobsRetryFailedResponse {
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        tenant_id: tenant.tenant_id,
+        requested_dataset_kind: requested_dataset_kind_storage,
+        max_jobs,
+        max_retry_count,
+        base_delay_seconds,
+        max_delay_seconds,
+        retried_count: retried_jobs.len(),
+        skipped_not_due_count,
+        skipped_ineligible_count,
+        failed_after_count,
+        retried_jobs,
+    }))
+}
+
 async fn current_trace_export_job_or_claimed(
     db: &Arc<dyn Database>,
     claimed: StorageTraceExportJobRecord,
@@ -20598,6 +20782,26 @@ async fn count_pending_export_jobs(
     Ok(jobs
         .into_iter()
         .filter(|job| job.status == StorageTraceExportJobStatus::Queued && job.expires_at > now)
+        .filter(|job| {
+            requested_dataset_kind
+                .is_none_or(|dataset_kind| job.requested_dataset_kind == dataset_kind)
+        })
+        .count())
+}
+
+async fn count_failed_export_jobs(
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    requested_dataset_kind: Option<&str>,
+    now: DateTime<Utc>,
+) -> ApiResult<usize> {
+    let jobs = db
+        .list_trace_export_jobs(tenant_id)
+        .await
+        .map_err(internal_error)?;
+    Ok(jobs
+        .into_iter()
+        .filter(|job| job.status == StorageTraceExportJobStatus::Failed && job.expires_at > now)
         .filter(|job| {
             requested_dataset_kind
                 .is_none_or(|dataset_kind| job.requested_dataset_kind == dataset_kind)
@@ -21003,29 +21207,37 @@ async fn retry_export_job_handler(
         .into_iter()
         .find(|job| job.export_job_id == export_job_id)
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "export job not found"))?;
+    let retried =
+        retry_failed_export_job_record(state.as_ref(), &tenant, &db, record, &reason, Utc::now())
+            .await?;
+    Ok(Json(TraceExportJobSummary::from_storage_record(retried)))
+}
+
+async fn retry_failed_export_job_record(
+    state: &AppState,
+    tenant: &TenantAuth,
+    db: &Arc<dyn Database>,
+    record: StorageTraceExportJobRecord,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> ApiResult<StorageTraceExportJobRecord> {
     if record.status != StorageTraceExportJobStatus::Failed {
         return Err(api_error(StatusCode::CONFLICT, "export job is not failed"));
     }
-    let now = Utc::now();
     if record.expires_at <= now {
         return Err(api_error(
             StatusCode::CONFLICT,
             "export job grant has expired",
         ));
     }
-    if record
-        .metadata
-        .get("request_schema_version")
-        .map(String::as_str)
-        != Some("trace_export_job_request.v1")
-    {
+    if !export_job_has_replayable_request_metadata(&record) {
         return Err(api_error(
             StatusCode::CONFLICT,
             "export job is missing replayable request metadata",
         ));
     }
 
-    let retry_reason_hash = sha256_prefixed(&reason);
+    let retry_reason_hash = sha256_prefixed(reason);
     let retry_count = next_export_job_retry_count(&record.metadata);
     let mut metadata = record.metadata.clone();
     metadata.insert("state".to_string(), "queued".to_string());
@@ -21040,7 +21252,7 @@ async fn retry_export_job_handler(
     let retried = db
         .retry_failed_trace_export_job(
             &tenant.tenant_id,
-            export_job_id,
+            record.export_job_id,
             now,
             StorageTraceExportJobStatusUpdate {
                 status: StorageTraceExportJobStatus::Queued,
@@ -21056,15 +21268,23 @@ async fn retry_export_job_handler(
         .map_err(internal_error)?
         .ok_or_else(|| api_error(StatusCode::CONFLICT, "export job changed before retry"))?;
     append_audit_event_with_db_mirror(
-        state.as_ref(),
-        &tenant,
-        TraceCommonsAuditEvent::export_job_recovery(&tenant, &retried, &retry_reason_hash),
+        state,
+        tenant,
+        TraceCommonsAuditEvent::export_job_recovery(tenant, &retried, &retry_reason_hash),
         StorageTraceAuditAction::ExportJobRecovery,
         export_job_recovery_audit_metadata(&retried, &retry_reason_hash),
     )
     .await
     .map_err(internal_error)?;
-    Ok(Json(TraceExportJobSummary::from_storage_record(retried)))
+    Ok(retried)
+}
+
+fn export_job_has_replayable_request_metadata(record: &StorageTraceExportJobRecord) -> bool {
+    record
+        .metadata
+        .get("request_schema_version")
+        .map(String::as_str)
+        == Some("trace_export_job_request.v1")
 }
 
 async fn operational_summary_handler(
@@ -49123,6 +49343,189 @@ mod tests {
             failed.metadata.get("state").map(String::as_str),
             Some("failed")
         );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn export_worker_retry_failed_jobs_applies_backoff_and_retry_limits() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        let now = Utc::now();
+        let retryable_job_id = Uuid::new_v4();
+        let not_due_job_id = Uuid::new_v4();
+        let limit_job_id = Uuid::new_v4();
+        let unsafe_job_id = Uuid::new_v4();
+        for (export_job_id, purpose, finished_at, retry_count, replayable_metadata) in [
+            (
+                retryable_job_id,
+                "retry due replay",
+                now - Duration::seconds(90),
+                Some(1),
+                true,
+            ),
+            (
+                not_due_job_id,
+                "retry not due replay",
+                now - Duration::seconds(5),
+                Some(0),
+                true,
+            ),
+            (
+                limit_job_id,
+                "retry limit replay",
+                now - Duration::minutes(10),
+                Some(2),
+                true,
+            ),
+            (
+                unsafe_job_id,
+                "retry unsafe replay",
+                now - Duration::minutes(10),
+                None,
+                false,
+            ),
+        ] {
+            let grant_id = Uuid::new_v4();
+            backend
+                .upsert_trace_export_access_grant(StorageTraceExportAccessGrantWrite {
+                    tenant_id: "tenant-a".to_string(),
+                    export_job_id,
+                    grant_id,
+                    caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+                    requested_dataset_kind: TraceExportDatasetKind::ReplayDataset
+                        .storage_name()
+                        .to_string(),
+                    purpose: purpose.to_string(),
+                    max_item_cap: Some(5),
+                    status: StorageTraceExportAccessGrantStatus::Active,
+                    requested_at: now - Duration::minutes(15),
+                    expires_at: now + Duration::minutes(30),
+                    metadata: BTreeMap::from([("grant_type".to_string(), "queued".to_string())]),
+                })
+                .await
+                .expect("export grant writes");
+            let mut metadata = if replayable_metadata {
+                export_job_request_metadata(
+                    Some(5),
+                    Some(TraceCorpusStatus::Accepted),
+                    Some(ResidualPiiRisk::Low),
+                    Some(ConsentScope::DebuggingEvaluation),
+                    None,
+                )
+            } else {
+                BTreeMap::new()
+            };
+            metadata.insert("state".to_string(), "failed".to_string());
+            if let Some(retry_count) = retry_count {
+                metadata.insert("retry_count".to_string(), retry_count.to_string());
+            }
+            backend
+                .upsert_trace_export_job(StorageTraceExportJobWrite {
+                    tenant_id: "tenant-a".to_string(),
+                    export_job_id,
+                    grant_id,
+                    caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+                    requested_dataset_kind: TraceExportDatasetKind::ReplayDataset
+                        .storage_name()
+                        .to_string(),
+                    purpose: purpose.to_string(),
+                    max_item_cap: Some(5),
+                    status: StorageTraceExportJobStatus::Failed,
+                    requested_at: now - Duration::minutes(15),
+                    started_at: Some(finished_at - Duration::minutes(1)),
+                    finished_at: Some(finished_at),
+                    expires_at: now + Duration::minutes(30),
+                    result_manifest_id: None,
+                    item_count: None,
+                    last_error: Some(
+                        "queued_export_job_execution_failed;reason_hash=sha256:old".to_string(),
+                    ),
+                    metadata,
+                })
+                .await
+                .expect("failed export job writes");
+        }
+
+        let Json(retry_response) = worker_export_jobs_retry_failed_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Json(TraceExportJobsRetryFailedRequest {
+                dataset_kind: Some("replay_dataset".to_string()),
+                max_jobs: Some(5),
+                max_retry_count: Some(2),
+                base_delay_seconds: Some(30),
+                max_delay_seconds: Some(120),
+                reason: None,
+            }),
+        )
+        .await
+        .expect("worker retries due failed jobs");
+        assert_eq!(retry_response.retried_count, 1);
+        assert_eq!(retry_response.skipped_not_due_count, 1);
+        assert_eq!(retry_response.skipped_ineligible_count, 2);
+        assert_eq!(retry_response.failed_after_count, 3);
+        assert_eq!(
+            retry_response.retried_jobs[0].export_job_id,
+            retryable_job_id
+        );
+        assert_eq!(
+            retry_response.retried_jobs[0]
+                .metadata
+                .get("retry_count")
+                .map(String::as_str),
+            Some("2")
+        );
+
+        let Json(run_response) = worker_export_jobs_run_queued_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Json(TraceExportJobsRunQueuedRequest {
+                dataset_kind: Some("replay_dataset".to_string()),
+                max_jobs: Some(1),
+            }),
+        )
+        .await
+        .expect("scheduler executes auto-retried job");
+        assert_eq!(run_response.claimed_count, 1);
+        assert_eq!(
+            run_response.completed_jobs[0].export_job_id,
+            retryable_job_id
+        );
+
+        let jobs = backend
+            .list_trace_export_jobs("tenant-a")
+            .await
+            .expect("jobs list");
+        let not_due = jobs
+            .iter()
+            .find(|job| job.export_job_id == not_due_job_id)
+            .expect("not due job remains");
+        assert_eq!(not_due.status, StorageTraceExportJobStatus::Failed);
+        let retry_limited = jobs
+            .iter()
+            .find(|job| job.export_job_id == limit_job_id)
+            .expect("retry limited job remains");
+        assert_eq!(retry_limited.status, StorageTraceExportJobStatus::Failed);
+        let unsafe_job = jobs
+            .iter()
+            .find(|job| job.export_job_id == unsafe_job_id)
+            .expect("unsafe job remains");
+        assert_eq!(unsafe_job.status, StorageTraceExportJobStatus::Failed);
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
