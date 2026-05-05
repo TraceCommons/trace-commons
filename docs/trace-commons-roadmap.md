@@ -147,6 +147,7 @@ Verification gates:
 
 - For sampled tenants, DB-backed contributor status/credit, reviewer lists, analytics, replay export selection, and audit event reads match file-backed behavior.
 - Backfill-only maintenance reports malformed pilot submission/derived metadata as bounded item failures instead of aborting the whole backfill, and keeps valid records moving.
+- The dedicated vector-index worker route is worker-scoped and bounded: it requires a configured DB mirror before doing work, accepts an optional 1-500 item limit, reports checked/indexed/skipped/pending counts, and avoids retention-maintenance side effects.
 - PostgreSQL tests prove duplicate ids/hashes under separate tenants do not cross-read or cross-mutate.
 
 Exit criteria:
