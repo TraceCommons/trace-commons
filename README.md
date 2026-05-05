@@ -241,7 +241,9 @@ appending a new running row; stale running rows surface as operational-summary
 blockers until an admin append-finalizes them through the stale recovery API,
 which also writes a hash-only audit event for the recovery action. Operational
 summary ranking readiness now also includes candidate/active backtest pass/fail
-counts, backtest reason-code totals, and label-adjudication issue blockers.
+counts, backtest reason-code totals, label-adjudication issue blockers,
+ranking worker skip totals/reason aggregates, promotion-gate warnings for
+actionable worker skips, and safe promotion-gate counts in the read audit row.
 With the DB mirror configured, ranking dataset registry rows, evidence,
 calibration runs, and ranking worker runs are dual-written to PostgreSQL.
 Maintenance backfill mirrors file-backed ranking model versions, calibration
