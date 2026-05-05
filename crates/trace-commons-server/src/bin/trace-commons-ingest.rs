@@ -38738,6 +38738,7 @@ const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "reviewer_metadata",
     "replay_export_selection",
     "audit_reads",
+    "audit_chain_verification",
     "revocation_propagation",
     "retention_dry_run",
     "object_primary_reads",
@@ -63917,11 +63918,11 @@ mod tests {
         );
         assert_eq!(
             operational_json["rollout_smoke"]["required_check_count"],
-            serde_json::json!(11)
+            serde_json::json!(12)
         );
         assert_eq!(
             operational_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(11)
+            serde_json::json!(12)
         );
         assert!(
             operational
@@ -63938,8 +63939,14 @@ mod tests {
         assert!(
             operational
                 .rollout_smoke
+                .required_checks
+                .contains(&"audit_chain_verification".to_string())
+        );
+        assert!(
+            operational
+                .rollout_smoke
                 .blocker_reasons
-                .contains(&"smoke_rehearsal_evidence_missing=11".to_string())
+                .contains(&"smoke_rehearsal_evidence_missing=12".to_string())
         );
     }
 
@@ -64019,7 +64026,7 @@ mod tests {
         );
         assert_eq!(
             operational_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(10)
+            serde_json::json!(11)
         );
         assert!(
             !operational
@@ -64454,7 +64461,7 @@ mod tests {
             "trace_commons_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"failed_ranking_worker_runs\"}} 1"
         )));
         assert!(body_text.contains(&format!(
-            "trace_commons_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 11"
+            "trace_commons_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 12"
         )));
         assert!(body_text.contains(&format!(
             "trace_commons_operational_rollout_smoke_recorded_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 0"

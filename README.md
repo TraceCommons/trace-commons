@@ -251,8 +251,9 @@ for a Prometheus-text snapshot of the same safe promotion, per-gate,
 worker-skip, rollout-smoke, submission, review SLA, export, retention, vector,
 benchmark, and delayed-credit gauges. The same summary response includes a
 `rollout_smoke` preflight block with the required canary smoke-check names
-including PostgreSQL RLS readiness, promotion-gate readiness, recorded evidence
-counts, passed evidence counts, failed evidence counts, and explicit missing
+including PostgreSQL RLS readiness and audit-chain verification, along with
+promotion-gate readiness, recorded evidence counts, passed evidence counts,
+failed evidence counts, stale evidence counts, and explicit missing
 rehearsal-evidence counts so operators do not mistake a clean gate snapshot for
 an up-to-date rehearsed rollout. Latest per-check smoke evidence older than 24
 hours is reported as stale and blocks rollout-smoke readiness until a fresh

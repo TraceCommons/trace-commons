@@ -404,9 +404,9 @@ history. Operational summary also projects PostgreSQL RLS production readiness
 into aggregate-only promotion-gate fields, ranking backtest pass/fail counts,
 label-adjudication issue counts, and reason-code totals into the ranking block
 and promotion gates, and it includes a `rollout_smoke` preflight block that
-lists required canary smoke checks, including PostgreSQL RLS readiness, while
-reporting recorded, passed, failed, and missing rehearsal evidence separately
-from promotion-gate readiness.
+lists required canary smoke checks, including PostgreSQL RLS readiness and
+audit-chain verification, while reporting recorded, passed, failed, stale, and
+missing rehearsal evidence separately from promotion-gate readiness.
 Operators inspect and capture that evidence with admin-only `GET` and `POST`
 `/v1/admin/rollout-smoke/evidence`; `GET` can collapse history to the latest
 record per check with `latest_only=true`, and writes name one required check, a
