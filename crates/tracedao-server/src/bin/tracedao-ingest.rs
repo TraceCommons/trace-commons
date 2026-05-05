@@ -360,11 +360,15 @@ const TRACE_REVIEW_DUE_AFTER_HOURS: i64 = 24;
 const TRACE_REVIEW_OVERDUE_AFTER_HOURS: i64 = 72;
 const TRACE_REVIEW_HIGH_RISK_URGENT_AFTER_HOURS: i64 = 4;
 const TRACE_EXPORT_ONE_SHOT_GRANT_TTL_SECONDS: i64 = 300;
+const TRACE_EXPORT_JOBS_RUN_QUEUED_DEFAULT_MAX_JOBS: usize = 10;
+const TRACE_EXPORT_JOBS_RUN_QUEUED_MAX_JOBS_LIMIT: usize = 50;
 const TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_JOBS: usize = 10;
 const TRACE_EXPORT_JOB_RETRY_MAX_JOBS_LIMIT: usize = 50;
 const TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_RETRY_COUNT: u32 = 3;
+const TRACE_EXPORT_JOB_RETRY_MAX_RETRY_COUNT_LIMIT: u32 = 25;
 const TRACE_EXPORT_JOB_RETRY_DEFAULT_BASE_DELAY_SECONDS: i64 = 60;
 const TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_DELAY_SECONDS: i64 = 3600;
+const TRACE_EXPORT_JOB_RETRY_MAX_DELAY_SECONDS_LIMIT: i64 = 86_400;
 const TRACE_EXPORT_JOB_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 60;
 const TRACE_VECTOR_INDEX_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 60;
 const TRACE_VECTOR_INDEX_SCHEDULER_DEFAULT_PURPOSE: &str = "scheduled trace vector index";
@@ -2668,9 +2672,9 @@ fn parse_trace_export_job_scheduler_config_from_env()
     };
     let run_queued_max_jobs = parse_optional_scheduler_usize_env(
         TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RUN_QUEUED_MAX_JOBS,
-        10,
+        TRACE_EXPORT_JOBS_RUN_QUEUED_DEFAULT_MAX_JOBS,
         1,
-        50,
+        TRACE_EXPORT_JOBS_RUN_QUEUED_MAX_JOBS_LIMIT,
     )?;
     let retry_failed_max_jobs = parse_optional_scheduler_usize_env(
         TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_FAILED_MAX_JOBS,
@@ -2682,19 +2686,19 @@ fn parse_trace_export_job_scheduler_config_from_env()
         TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_FAILED_MAX_RETRY_COUNT,
         TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_RETRY_COUNT,
         1,
-        25,
+        TRACE_EXPORT_JOB_RETRY_MAX_RETRY_COUNT_LIMIT,
     )?;
     let retry_failed_base_delay_seconds = parse_optional_scheduler_i64_env(
         TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_BASE_DELAY_SECONDS,
         TRACE_EXPORT_JOB_RETRY_DEFAULT_BASE_DELAY_SECONDS,
         0,
-        86_400,
+        TRACE_EXPORT_JOB_RETRY_MAX_DELAY_SECONDS_LIMIT,
     )?;
     let requested_retry_failed_max_delay_seconds = parse_optional_scheduler_i64_env(
         TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_MAX_DELAY_SECONDS,
         TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_DELAY_SECONDS,
         0,
-        86_400,
+        TRACE_EXPORT_JOB_RETRY_MAX_DELAY_SECONDS_LIMIT,
     )?;
     let retry_failed_max_delay_seconds =
         requested_retry_failed_max_delay_seconds.max(retry_failed_base_delay_seconds);
@@ -10462,6 +10466,22 @@ fn validate_trace_read_limit(limit: Option<usize>) -> ApiResult<usize> {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "trace read limit must be between 1 and 500",
+        ));
+    }
+    Ok(limit)
+}
+
+fn validate_usize_worker_limit(
+    limit: Option<usize>,
+    default_limit: usize,
+    max_limit: usize,
+    worker_name: &str,
+) -> ApiResult<usize> {
+    let limit = limit.unwrap_or(default_limit);
+    if !(1..=max_limit).contains(&limit) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("{worker_name} limit must be between 1 and {max_limit}"),
         ));
     }
     Ok(limit)
@@ -21668,7 +21688,12 @@ async fn worker_export_jobs_run_queued_handler(
         .transpose()?;
     let requested_dataset_kind_storage =
         requested_dataset_kind.map(|dataset_kind| dataset_kind.storage_name().to_string());
-    let max_jobs = body.max_jobs.unwrap_or(10).clamp(1, 50);
+    let max_jobs = validate_usize_worker_limit(
+        body.max_jobs,
+        TRACE_EXPORT_JOBS_RUN_QUEUED_DEFAULT_MAX_JOBS,
+        TRACE_EXPORT_JOBS_RUN_QUEUED_MAX_JOBS_LIMIT,
+        "export jobs run-queued worker",
+    )?;
     let db = trace_export_control_db(state.as_ref())?;
     let mut completed_jobs = Vec::new();
     let mut failed_jobs = Vec::new();
@@ -21751,23 +21776,29 @@ async fn worker_export_jobs_retry_failed_handler(
         .transpose()?;
     let requested_dataset_kind_storage =
         requested_dataset_kind.map(|dataset_kind| dataset_kind.storage_name().to_string());
-    let max_jobs = body
-        .max_jobs
-        .unwrap_or(TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_JOBS)
-        .clamp(1, TRACE_EXPORT_JOB_RETRY_MAX_JOBS_LIMIT);
-    let max_retry_count = body
-        .max_retry_count
-        .unwrap_or(TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_RETRY_COUNT)
-        .clamp(1, 25);
-    let base_delay_seconds = body
-        .base_delay_seconds
-        .unwrap_or(TRACE_EXPORT_JOB_RETRY_DEFAULT_BASE_DELAY_SECONDS)
-        .clamp(0, 86_400);
-    let requested_max_delay_seconds = body
-        .max_delay_seconds
-        .unwrap_or(TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_DELAY_SECONDS)
-        .clamp(0, 86_400);
-    let max_delay_seconds = requested_max_delay_seconds.max(base_delay_seconds);
+    let max_jobs = validate_usize_worker_limit(
+        body.max_jobs,
+        TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_JOBS,
+        TRACE_EXPORT_JOB_RETRY_MAX_JOBS_LIMIT,
+        "export jobs retry-failed worker",
+    )?;
+    let max_retry_count = validate_export_job_retry_count_limit(body.max_retry_count)?;
+    let base_delay_seconds = validate_export_job_retry_delay_seconds(
+        body.base_delay_seconds,
+        TRACE_EXPORT_JOB_RETRY_DEFAULT_BASE_DELAY_SECONDS,
+        "base_delay_seconds",
+    )?;
+    let max_delay_seconds = validate_export_job_retry_delay_seconds(
+        body.max_delay_seconds,
+        TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_DELAY_SECONDS,
+        "max_delay_seconds",
+    )?;
+    if max_delay_seconds < base_delay_seconds {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "export jobs retry-failed max_delay_seconds must be greater than or equal to base_delay_seconds",
+        ));
+    }
     let reason = validate_export_job_retry_reason(
         body.reason
             .as_deref()
@@ -21848,6 +21879,38 @@ async fn worker_export_jobs_retry_failed_handler(
         failed_after_count,
         retried_jobs,
     }))
+}
+
+fn validate_export_job_retry_count_limit(max_retry_count: Option<u32>) -> ApiResult<u32> {
+    let max_retry_count = max_retry_count.unwrap_or(TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_RETRY_COUNT);
+    if !(1..=TRACE_EXPORT_JOB_RETRY_MAX_RETRY_COUNT_LIMIT).contains(&max_retry_count) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "export jobs retry-failed max_retry_count must be between 1 and {}",
+                TRACE_EXPORT_JOB_RETRY_MAX_RETRY_COUNT_LIMIT
+            ),
+        ));
+    }
+    Ok(max_retry_count)
+}
+
+fn validate_export_job_retry_delay_seconds(
+    delay_seconds: Option<i64>,
+    default_delay_seconds: i64,
+    field_name: &str,
+) -> ApiResult<i64> {
+    let delay_seconds = delay_seconds.unwrap_or(default_delay_seconds);
+    if !(0..=TRACE_EXPORT_JOB_RETRY_MAX_DELAY_SECONDS_LIMIT).contains(&delay_seconds) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "export jobs retry-failed {field_name} must be between 0 and {}",
+                TRACE_EXPORT_JOB_RETRY_MAX_DELAY_SECONDS_LIMIT
+            ),
+        ));
+    }
+    Ok(delay_seconds)
 }
 
 async fn run_trace_export_job_scheduler_tick(
@@ -54432,6 +54495,72 @@ mod tests {
         );
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn export_job_workers_reject_invalid_limits_before_db_check() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let invalid_run_queued_limit = worker_export_jobs_run_queued_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Json(TraceExportJobsRunQueuedRequest {
+                dataset_kind: None,
+                max_jobs: Some(0),
+            }),
+        )
+        .await
+        .expect_err("invalid run-queued max_jobs is rejected before DB checks");
+        assert_eq!(invalid_run_queued_limit.0, StatusCode::BAD_REQUEST);
+
+        let invalid_retry_max_jobs = worker_export_jobs_retry_failed_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Json(TraceExportJobsRetryFailedRequest {
+                dataset_kind: None,
+                max_jobs: Some(TRACE_EXPORT_JOB_RETRY_MAX_JOBS_LIMIT + 1),
+                max_retry_count: None,
+                base_delay_seconds: None,
+                max_delay_seconds: None,
+                reason: None,
+            }),
+        )
+        .await
+        .expect_err("invalid retry-failed max_jobs is rejected before DB checks");
+        assert_eq!(invalid_retry_max_jobs.0, StatusCode::BAD_REQUEST);
+
+        let invalid_retry_count = worker_export_jobs_retry_failed_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Json(TraceExportJobsRetryFailedRequest {
+                dataset_kind: None,
+                max_jobs: None,
+                max_retry_count: Some(26),
+                base_delay_seconds: None,
+                max_delay_seconds: None,
+                reason: None,
+            }),
+        )
+        .await
+        .expect_err("invalid retry-failed max_retry_count is rejected before DB checks");
+        assert_eq!(invalid_retry_count.0, StatusCode::BAD_REQUEST);
+
+        let invalid_retry_delay = worker_export_jobs_retry_failed_handler(
+            State(state),
+            auth_headers("export-worker-token-a"),
+            Json(TraceExportJobsRetryFailedRequest {
+                dataset_kind: None,
+                max_jobs: None,
+                max_retry_count: None,
+                base_delay_seconds: Some(120),
+                max_delay_seconds: Some(30),
+                reason: None,
+            }),
+        )
+        .await
+        .expect_err("invalid retry-failed delay window is rejected before DB checks");
+        assert_eq!(invalid_retry_delay.0, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

@@ -735,15 +735,19 @@ the next queued job for that dataset kind, reconstructs
 status/privacy/consent/limit filters from the safe metadata snapshot, runs the
 existing export/artifact/provenance path, and marks the same job row complete or
 failed instead of creating a second job. `POST /v1/workers/export/jobs/run-queued`
-is the bounded scheduler route: it claims up to `max_jobs` queued rows,
+is the bounded scheduler route: it claims up to `max_jobs` queued rows
+(default 10, max 50; explicit values outside 1..=50 are rejected),
 optionally filtered by dataset kind, continues after per-job execution failures
 by terminalizing failed rows, and returns safe completed/failed/pending counts
 plus job summaries without embedding exported trace bodies. The
 `/v1/workers/export/jobs/retry-failed` worker route is the bounded retry pass: it
 scans failed unexpired jobs with replayable request metadata, applies retry-count
 and exponential-delay bounds, requeues due rows with hash-only retry metadata,
-and reports retried/not-due/ineligible/remaining-failed counts. Deployments that
-want the server to own that loop can configure
+and reports retried/not-due/ineligible/remaining-failed counts. Explicit retry
+limits outside `max_jobs` 1..=50, `max_retry_count` 1..=25, or delay windows
+0..=86400 seconds are rejected; `max_delay_seconds` must be at least
+`base_delay_seconds`. Deployments that want the server to own that loop can
+configure
 `TRACE_COMMONS_EXPORT_JOB_SCHEDULER_TOKEN` with an export-worker bearer token;
 the optional in-process scheduler sleeps for
 `TRACE_COMMONS_EXPORT_JOB_SCHEDULER_INTERVAL_SECONDS` (default 60), runs the same
