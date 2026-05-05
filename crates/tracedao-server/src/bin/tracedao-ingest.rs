@@ -2990,6 +2990,10 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route("/v1/admin/rollback-drill", post(rollback_drill_handler))
         .route(
+            "/v1/admin/key-rotation-drill",
+            post(key_rotation_drill_handler),
+        )
+        .route(
             "/v1/admin/operational-metrics",
             get(operational_metrics_handler),
         )
@@ -21822,6 +21826,19 @@ async fn rollback_drill_handler(
     Ok(Json(response))
 }
 
+async fn key_rotation_drill_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceKeyRotationDrillRequest>,
+) -> ApiResult<Json<TraceKeyRotationDrillResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let response = run_key_rotation_drill(state.as_ref(), tenant.auth(), request)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(response))
+}
+
 #[derive(Debug, Deserialize)]
 struct TraceRollbackDrillRequest {
     #[serde(default)]
@@ -21848,6 +21865,236 @@ struct TraceRollbackDrillResponse {
     blocking_gaps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceKeyRotationDrillRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    record_evidence: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceKeyRotationDrillResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose: String,
+    ready: bool,
+    evidence_hash: String,
+    signed_token_auth_enabled: bool,
+    require_eddsa_signed_tokens: bool,
+    require_managed_eddsa_signed_tokens: bool,
+    signed_token_managed_eddsa_key_count: usize,
+    signed_token_managed_eddsa_active_key_count: usize,
+    signed_token_managed_eddsa_inactive_key_count: usize,
+    signed_token_eddsa_keyset_url_refresh_enabled: bool,
+    signed_token_eddsa_keyset_url_max_stale_seconds: Option<u64>,
+    signed_token_eddsa_keyset_url_last_refresh_success_at: Option<DateTime<Utc>>,
+    signed_token_eddsa_keyset_url_last_refresh_failure_at: Option<DateTime<Utc>>,
+    signed_token_eddsa_keyset_url_stale: bool,
+    signed_token_issuer_configured: bool,
+    signed_token_audience_configured: bool,
+    signed_token_max_ttl_seconds: Option<i64>,
+    signed_token_require_jti: bool,
+    blocking_gaps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+async fn run_key_rotation_drill(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceKeyRotationDrillRequest,
+) -> anyhow::Result<TraceKeyRotationDrillResponse> {
+    let generated_at = Utc::now();
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_key_rotation_drill")
+        .to_string();
+    let refresh = state.managed_eddsa_keyset_refresh.as_ref();
+    let max_stale = refresh.and_then(|refresh| refresh.max_stale);
+    let signed_token_verifier = state
+        .signed_token_verifier
+        .as_ref()
+        .and_then(|verifier| verifier.read().ok().map(|verifier| verifier.clone()));
+    let signed_token_auth_enabled = signed_token_verifier.is_some();
+    let signed_token_managed_eddsa_key_count = signed_token_verifier.as_ref().map_or(
+        0,
+        TraceCommonsSignedTokenVerifier::configured_managed_eddsa_key_count,
+    );
+    let signed_token_managed_eddsa_active_key_count =
+        signed_token_verifier.as_ref().map_or(0, |verifier| {
+            verifier.configured_active_managed_eddsa_key_count(generated_at)
+        });
+    let signed_token_managed_eddsa_inactive_key_count = signed_token_managed_eddsa_key_count
+        .saturating_sub(signed_token_managed_eddsa_active_key_count);
+    let signed_token_eddsa_keyset_url_refresh_enabled = refresh.is_some();
+    let signed_token_eddsa_keyset_url_max_stale_seconds =
+        max_stale.map(|duration| duration.as_secs());
+    let signed_token_eddsa_keyset_url_last_refresh_success_at = signed_token_verifier
+        .as_ref()
+        .and_then(|verifier| verifier.managed_eddsa_keyset_last_refreshed_at);
+    let signed_token_eddsa_keyset_url_last_refresh_failure_at = signed_token_verifier
+        .as_ref()
+        .and_then(|verifier| verifier.managed_eddsa_keyset_last_refresh_failed_at);
+    let signed_token_eddsa_keyset_url_stale = signed_token_verifier
+        .as_ref()
+        .zip(max_stale)
+        .is_none_or(|(verifier, max_stale)| {
+            verifier.managed_eddsa_keyset_stale(max_stale, generated_at)
+        });
+    let signed_token_issuer_configured = signed_token_verifier
+        .as_ref()
+        .is_some_and(|verifier| verifier.issuer.is_some());
+    let signed_token_audience_configured = signed_token_verifier
+        .as_ref()
+        .is_some_and(|verifier| verifier.audience.is_some());
+    let signed_token_max_ttl_seconds = signed_token_verifier
+        .as_ref()
+        .and_then(|verifier| verifier.max_ttl_seconds);
+    let signed_token_require_jti = signed_token_verifier
+        .as_ref()
+        .is_some_and(|verifier| verifier.require_jti);
+
+    let mut blocking_gaps = Vec::new();
+    push_key_rotation_gap(
+        &mut blocking_gaps,
+        "signed_token_auth_not_configured",
+        !signed_token_auth_enabled,
+    );
+    push_key_rotation_gap(
+        &mut blocking_gaps,
+        "require_eddsa_signed_tokens=false",
+        !state.require_eddsa_signed_tokens && !state.require_managed_eddsa_signed_tokens,
+    );
+    push_key_rotation_gap(
+        &mut blocking_gaps,
+        "require_managed_eddsa_signed_tokens=false",
+        !state.require_managed_eddsa_signed_tokens,
+    );
+    push_key_rotation_gap(
+        &mut blocking_gaps,
+        "managed_eddsa_active_key_count_lt_2",
+        signed_token_managed_eddsa_active_key_count < 2,
+    );
+    push_key_rotation_gap(
+        &mut blocking_gaps,
+        "keyset_url_refresh_not_configured",
+        !signed_token_eddsa_keyset_url_refresh_enabled,
+    );
+    push_key_rotation_gap(
+        &mut blocking_gaps,
+        "keyset_url_max_stale_not_configured",
+        max_stale.is_none(),
+    );
+    push_key_rotation_gap(
+        &mut blocking_gaps,
+        "keyset_url_refresh_success_missing",
+        signed_token_eddsa_keyset_url_last_refresh_success_at.is_none(),
+    );
+    push_key_rotation_gap(
+        &mut blocking_gaps,
+        "keyset_url_refresh_stale",
+        signed_token_eddsa_keyset_url_stale,
+    );
+    push_key_rotation_gap(
+        &mut blocking_gaps,
+        "signed_token_issuer_not_configured",
+        !signed_token_issuer_configured,
+    );
+    push_key_rotation_gap(
+        &mut blocking_gaps,
+        "signed_token_audience_not_configured",
+        !signed_token_audience_configured,
+    );
+    push_key_rotation_gap(
+        &mut blocking_gaps,
+        "signed_token_max_ttl_not_configured",
+        signed_token_max_ttl_seconds.is_none(),
+    );
+    push_key_rotation_gap(
+        &mut blocking_gaps,
+        "signed_token_jti_not_required",
+        !signed_token_require_jti,
+    );
+
+    let evidence_hash = key_rotation_drill_evidence_hash(
+        tenant,
+        state,
+        signed_token_auth_enabled,
+        signed_token_managed_eddsa_key_count,
+        signed_token_managed_eddsa_active_key_count,
+        signed_token_managed_eddsa_inactive_key_count,
+        signed_token_eddsa_keyset_url_refresh_enabled,
+        signed_token_eddsa_keyset_url_max_stale_seconds,
+        signed_token_eddsa_keyset_url_last_refresh_success_at,
+        signed_token_eddsa_keyset_url_last_refresh_failure_at,
+        signed_token_eddsa_keyset_url_stale,
+        signed_token_issuer_configured,
+        signed_token_audience_configured,
+        signed_token_max_ttl_seconds,
+        signed_token_require_jti,
+        &blocking_gaps,
+    );
+    let mut response = TraceKeyRotationDrillResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at,
+        purpose: purpose.clone(),
+        ready: blocking_gaps.is_empty(),
+        evidence_hash,
+        signed_token_auth_enabled,
+        require_eddsa_signed_tokens: state.require_eddsa_signed_tokens,
+        require_managed_eddsa_signed_tokens: state.require_managed_eddsa_signed_tokens,
+        signed_token_managed_eddsa_key_count,
+        signed_token_managed_eddsa_active_key_count,
+        signed_token_managed_eddsa_inactive_key_count,
+        signed_token_eddsa_keyset_url_refresh_enabled,
+        signed_token_eddsa_keyset_url_max_stale_seconds,
+        signed_token_eddsa_keyset_url_last_refresh_success_at,
+        signed_token_eddsa_keyset_url_last_refresh_failure_at,
+        signed_token_eddsa_keyset_url_stale,
+        signed_token_issuer_configured,
+        signed_token_audience_configured,
+        signed_token_max_ttl_seconds,
+        signed_token_require_jti,
+        blocking_gaps,
+        recorded_evidence: None,
+    };
+
+    if request.record_evidence {
+        let evidence = TraceRolloutSmokeEvidenceResponse {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            check_name: "key_rotation_drill".to_string(),
+            status: if response.ready {
+                TraceRolloutSmokeEvidenceStatus::Passed
+            } else {
+                TraceRolloutSmokeEvidenceStatus::Failed
+            },
+            evidence_hash: response.evidence_hash.clone(),
+            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            recorded_at: Utc::now(),
+        };
+        append_audit_event_with_db_mirror(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+            StorageTraceAuditAction::Read,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .await?;
+        response.recorded_evidence = Some(evidence);
+    }
+
+    Ok(response)
 }
 
 async fn run_rollback_drill(
@@ -22010,6 +22257,12 @@ fn push_rollback_gap_count(gaps: &mut Vec<String>, label: &str, count: usize) {
     }
 }
 
+fn push_key_rotation_gap(gaps: &mut Vec<String>, label: &str, present: bool) {
+    if present {
+        gaps.push(label.to_string());
+    }
+}
+
 fn active_rollout_flags_for_rollback_drill(state: &AppState, tenant_id: &str) -> Vec<String> {
     TraceTenantRolloutFeature::ALL
         .into_iter()
@@ -22072,6 +22325,51 @@ fn rollback_drill_evidence_hash(
             "db_audit_event_count": db_audit_event_count,
             "file_tombstone_count": file_tombstone_count,
             "db_tombstone_count": db_tombstone_count,
+            "blocking_gaps": blocking_gaps,
+        })
+        .to_string(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn key_rotation_drill_evidence_hash(
+    tenant: &TenantAuth,
+    state: &AppState,
+    signed_token_auth_enabled: bool,
+    signed_token_managed_eddsa_key_count: usize,
+    signed_token_managed_eddsa_active_key_count: usize,
+    signed_token_managed_eddsa_inactive_key_count: usize,
+    signed_token_eddsa_keyset_url_refresh_enabled: bool,
+    signed_token_eddsa_keyset_url_max_stale_seconds: Option<u64>,
+    signed_token_eddsa_keyset_url_last_refresh_success_at: Option<DateTime<Utc>>,
+    signed_token_eddsa_keyset_url_last_refresh_failure_at: Option<DateTime<Utc>>,
+    signed_token_eddsa_keyset_url_stale: bool,
+    signed_token_issuer_configured: bool,
+    signed_token_audience_configured: bool,
+    signed_token_max_ttl_seconds: Option<i64>,
+    signed_token_require_jti: bool,
+    blocking_gaps: &[String],
+) -> String {
+    sha256_prefixed(
+        &serde_json::json!({
+            "schema": "trace_commons_key_rotation_drill.v1",
+            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+            "actor_principal_ref": tenant.principal_ref,
+            "signed_token_auth_enabled": signed_token_auth_enabled,
+            "require_eddsa_signed_tokens": state.require_eddsa_signed_tokens,
+            "require_managed_eddsa_signed_tokens": state.require_managed_eddsa_signed_tokens,
+            "signed_token_managed_eddsa_key_count": signed_token_managed_eddsa_key_count,
+            "signed_token_managed_eddsa_active_key_count": signed_token_managed_eddsa_active_key_count,
+            "signed_token_managed_eddsa_inactive_key_count": signed_token_managed_eddsa_inactive_key_count,
+            "signed_token_eddsa_keyset_url_refresh_enabled": signed_token_eddsa_keyset_url_refresh_enabled,
+            "signed_token_eddsa_keyset_url_max_stale_seconds": signed_token_eddsa_keyset_url_max_stale_seconds,
+            "signed_token_eddsa_keyset_url_last_refresh_success_at": signed_token_eddsa_keyset_url_last_refresh_success_at,
+            "signed_token_eddsa_keyset_url_last_refresh_failure_at": signed_token_eddsa_keyset_url_last_refresh_failure_at,
+            "signed_token_eddsa_keyset_url_stale": signed_token_eddsa_keyset_url_stale,
+            "signed_token_issuer_configured": signed_token_issuer_configured,
+            "signed_token_audience_configured": signed_token_audience_configured,
+            "signed_token_max_ttl_seconds": signed_token_max_ttl_seconds,
+            "signed_token_require_jti": signed_token_require_jti,
             "blocking_gaps": blocking_gaps,
         })
         .to_string(),
@@ -53622,6 +53920,196 @@ mod tests {
         );
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn key_rotation_drill_records_failed_evidence_for_bridge_token_config() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/key-rotation-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator key rotation drill",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("key rotation drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("key rotation drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(false));
+        assert_eq!(value["signed_token_auth_enabled"], serde_json::json!(false));
+        assert_eq!(
+            value["require_managed_eddsa_signed_tokens"],
+            serde_json::json!(false)
+        );
+        assert!(
+            value["blocking_gaps"]
+                .as_array()
+                .expect("blocking gaps is array")
+                .contains(&serde_json::json!("signed_token_auth_not_configured"))
+        );
+        assert_eq!(
+            value["recorded_evidence"]["check_name"],
+            serde_json::json!("key_rotation_drill")
+        );
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("failed")
+        );
+        assert!(
+            value["evidence_hash"]
+                .as_str()
+                .expect("evidence hash is string")
+                .starts_with("sha256:")
+        );
+        assert!(
+            read_all_audit_events(temp.path(), "tenant-a")
+                .expect("file audit events remain after drill")
+                .iter()
+                .any(|event| {
+                    event.kind == "rollout_smoke_evidence"
+                        && event.reason.as_deref().is_some_and(|reason| {
+                            reason.contains("check_name=key_rotation_drill")
+                                && reason.contains("status=failed")
+                        })
+                })
+        );
+    }
+
+    #[tokio::test]
+    async fn key_rotation_drill_records_passed_evidence_for_managed_key_rotation_window() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state =
+            test_state_with_required_managed_eddsa_signed_token_verifier(temp.path().to_path_buf());
+        mutate_test_signed_token_verifier(&mut state, |verifier| {
+            verifier.keyed_eddsa_public_keys.insert(
+                "managed-eddsa-2".to_string(),
+                TraceCommonsSignedEddsaPublicKey {
+                    pem: TEST_EDDSA_PUBLIC_KEY_PEM.to_string(),
+                    not_before: Some(Utc::now() - Duration::minutes(1)),
+                    not_after: Some(Utc::now() + Duration::minutes(10)),
+                },
+            );
+            verifier
+                .managed_eddsa_key_ids
+                .insert("managed-eddsa-2".to_string());
+            verifier.managed_eddsa_keyset_last_refreshed_at =
+                Some(Utc::now() - Duration::minutes(5));
+            verifier.managed_eddsa_keyset_last_refresh_failed_at = None;
+        });
+        Arc::make_mut(&mut state).managed_eddsa_keyset_refresh =
+            Some(TraceCommonsManagedEddsaKeysetRefreshConfig {
+                url: "https://issuer.example/.well-known/trace-commons-ed25519-keyset.json"
+                    .to_string(),
+                allowed_hosts: BTreeSet::from(["issuer.example".to_string()]),
+                bearer_token: None,
+                timeout: StdDuration::from_secs(5),
+                refresh_interval: StdDuration::from_secs(60),
+                max_stale: Some(StdDuration::from_secs(3600)),
+            });
+
+        let now = Utc::now();
+        let admin_token = eddsa_signed_tenant_token_with_kid(
+            Some("managed-eddsa-2"),
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "role": "admin",
+                "sub": "rotation-drill-admin",
+                "iss": "trace-commons-test-issuer",
+                "aud": "trace-commons-test-audience",
+                "iat": now.timestamp(),
+                "exp": (now + Duration::minutes(5)).timestamp(),
+                "jti": "rotation-drill-admin-jti"
+            }),
+        );
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/key-rotation-drill")
+                    .header(AUTHORIZATION, format!("Bearer {admin_token}"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator key rotation drill",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("key rotation drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("key rotation drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(true));
+        assert_eq!(
+            value["require_managed_eddsa_signed_tokens"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["signed_token_managed_eddsa_key_count"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            value["signed_token_managed_eddsa_active_key_count"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            value["signed_token_eddsa_keyset_url_refresh_enabled"],
+            serde_json::json!(true)
+        );
+        assert_eq!(value["blocking_gaps"], serde_json::json!([]));
+        assert_eq!(
+            value["recorded_evidence"]["check_name"],
+            serde_json::json!("key_rotation_drill")
+        );
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("passed")
+        );
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("managed-eddsa-1"));
+        assert!(!body_text.contains("managed-eddsa-2"));
+        assert!(!body_text.contains("issuer.example"));
+        assert!(!body_text.contains("BEGIN PUBLIC KEY"));
+        assert!(
+            read_all_audit_events(temp.path(), "tenant-a")
+                .expect("file audit events remain after drill")
+                .iter()
+                .any(|event| {
+                    event.kind == "rollout_smoke_evidence"
+                        && event.reason.as_deref().is_some_and(|reason| {
+                            reason.contains("check_name=key_rotation_drill")
+                                && reason.contains("status=passed")
+                        })
+                })
+        );
     }
 
     #[tokio::test]
