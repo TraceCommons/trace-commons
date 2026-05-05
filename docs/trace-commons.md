@@ -414,6 +414,11 @@ Operators inspect and capture that evidence with admin-only `GET` and `POST`
 record per check with `latest_only=true`, and writes name one required check, a
 `passed` or `failed` status, a sha256-prefixed evidence hash, and an optional
 external reference that is stored only as a hash in the tenant audit chain.
+`POST /v1/admin/rollback-drill` runs the concrete rollback smoke check against
+the current tenant: it requires a DB mirror, compares file-backed and DB-backed
+submission, audit, and tombstone ids without deleting or rewriting either side,
+returns safe aggregate counts plus compact blocker codes, and can append the
+`rollback_flag_drill` rollout-smoke evidence row with only hashes.
 `GET /v1/admin/ranking/calibration-dataset-conflicts` provides the
 operator drill-down: exact conflict keys, latest projected hash-only registry
 metadata, whether the latest row still blocks credit issuance, and a remediation
@@ -620,6 +625,8 @@ The service exposes:
 - `POST /v1/workers/export/jobs/run-queued`
 - `POST /v1/workers/export/jobs/retry-failed`
 - `GET /v1/admin/config-status`
+- `GET|POST /v1/admin/rollout-smoke/evidence`
+- `POST /v1/admin/rollback-drill`
 - `POST /v1/admin/maintenance`
 - `POST /v1/workers/retention-maintenance`
 - `POST /v1/workers/revocation-propagation`
