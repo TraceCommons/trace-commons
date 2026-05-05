@@ -38810,7 +38810,8 @@ impl TraceOperationalSummaryResponse {
             TraceOperationalReviewSlaSummary::from_records(&inputs.records, inputs.generated_at);
         let delayed_credit =
             TraceOperationalDelayedCreditSummary::from_events(&inputs.credit_events);
-        let exports = TraceOperationalExportSummary::from_db_summary(&inputs.db_summary);
+        let exports =
+            TraceOperationalExportSummary::from_db_summary(&inputs.db_summary, inputs.generated_at);
         let retention = TraceOperationalRetentionSummary::from_db_summary(&inputs.db_summary);
         let vectors = TraceOperationalVectorSummary::from_records_and_db_summary(
             &inputs.derived,
@@ -39229,6 +39230,7 @@ struct TraceOperationalPromotionGateSummary {
     open_review_count: usize,
     urgent_review_count: usize,
     failed_export_job_count: usize,
+    stale_export_job_count: usize,
     failed_retention_job_count: usize,
     vector_missing_count: usize,
     published_benchmark_external_registry_gap_count: usize,
@@ -39271,6 +39273,7 @@ impl TraceOperationalPromotionGateSummary {
         let open_review_count = review_sla.quarantined_total;
         let urgent_review_count = review_sla.urgent;
         let failed_export_job_count = exports.jobs_by_status.get("failed").copied().unwrap_or(0);
+        let stale_export_job_count = exports.stale_running_job_count;
         let failed_retention_job_count =
             retention.jobs_by_status.get("failed").copied().unwrap_or(0);
         let vector_missing_count = vectors
@@ -39330,6 +39333,11 @@ impl TraceOperationalPromotionGateSummary {
             &mut blocking_gates,
             "failed_export_jobs",
             failed_export_job_count,
+        );
+        push_gap_count(
+            &mut blocking_gates,
+            "stale_export_jobs",
+            stale_export_job_count,
         );
         push_gap_count(
             &mut blocking_gates,
@@ -39459,6 +39467,7 @@ impl TraceOperationalPromotionGateSummary {
             open_review_count,
             urgent_review_count,
             failed_export_job_count,
+            stale_export_job_count,
             failed_retention_job_count,
             vector_missing_count,
             published_benchmark_external_registry_gap_count,
@@ -39582,10 +39591,14 @@ struct TraceOperationalExportSummary {
     by_artifact_kind: BTreeMap<String, usize>,
     job_count: usize,
     jobs_by_status: BTreeMap<String, usize>,
+    stale_running_job_count: usize,
 }
 
 impl TraceOperationalExportSummary {
-    fn from_db_summary(db_summary: &TraceOperationalDbSummary) -> Self {
+    fn from_db_summary(
+        db_summary: &TraceOperationalDbSummary,
+        generated_at: DateTime<Utc>,
+    ) -> Self {
         let mut summary = Self {
             db_available: db_summary.db_available,
             manifest_count: db_summary.export_manifests.len(),
@@ -39611,6 +39624,10 @@ impl TraceOperationalExportSummary {
                 .jobs_by_status
                 .entry(trace_operational_export_job_status_name(job.status).to_string())
                 .or_insert(0) += 1;
+            if job.status == StorageTraceExportJobStatus::Running && job.expires_at <= generated_at
+            {
+                summary.stale_running_job_count += 1;
+            }
         }
         summary
     }
@@ -64199,6 +64216,71 @@ mod tests {
                 .blocking_gates
                 .contains(&"failed_ranking_worker_runs=1".to_string())
         );
+    }
+
+    #[test]
+    fn operational_summary_blocks_stale_running_export_jobs() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let now = Utc::now();
+        let response = TraceOperationalSummaryResponse::from_parts(TraceOperationalSummaryInputs {
+            state: state.as_ref(),
+            tenant_id: "tenant-a".to_string(),
+            records: Vec::new(),
+            derived: Vec::new(),
+            credit_events: Vec::new(),
+            db_summary: TraceOperationalDbSummary {
+                db_available: true,
+                trace_corpus_rls: Some(production_ready_rls_diagnostics_for_tests()),
+                export_jobs: vec![StorageTraceExportJobRecord {
+                    tenant_id: "tenant-a".to_string(),
+                    export_job_id: Uuid::new_v4(),
+                    grant_id: Uuid::new_v4(),
+                    caller_principal_ref: principal_storage_ref("export-token-a"),
+                    requested_dataset_kind: "replay_dataset".to_string(),
+                    purpose: "stale_replay_export".to_string(),
+                    max_item_cap: Some(10),
+                    status: StorageTraceExportJobStatus::Running,
+                    requested_at: now - Duration::minutes(10),
+                    started_at: Some(now - Duration::minutes(10)),
+                    finished_at: None,
+                    expires_at: now - Duration::minutes(1),
+                    result_manifest_id: None,
+                    item_count: None,
+                    last_error: None,
+                    metadata: BTreeMap::new(),
+                    created_at: now - Duration::minutes(10),
+                    updated_at: now - Duration::minutes(10),
+                }],
+                ..TraceOperationalDbSummary::default()
+            },
+            benchmark_artifacts: Vec::new(),
+            benchmark_registry_outbox: Vec::new(),
+            ranking: TraceOperationalRankingSummary::default(),
+            rollout_smoke_evidence: Vec::new(),
+            generated_at: now,
+        });
+
+        let operational_json =
+            serde_json::to_value(&response).expect("operational summary serializes");
+        assert_eq!(
+            operational_json["exports"]["stale_running_job_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["promotion_gates"]["stale_export_job_count"],
+            serde_json::json!(1)
+        );
+        assert!(
+            response
+                .promotion_gates
+                .blocking_gates
+                .contains(&"stale_export_jobs=1".to_string())
+        );
+        let (metrics, _) = trace_operational_metrics_body(&response);
+        assert!(metrics.contains(
+            "tracedao_operational_promotion_gate{tenant_storage_ref=\"tenant_sha256:80a707af7dc77ee1228f9127180f3964\",severity=\"blocking\",gate=\"stale_export_jobs\"} 1"
+        ));
     }
 
     #[tokio::test]
