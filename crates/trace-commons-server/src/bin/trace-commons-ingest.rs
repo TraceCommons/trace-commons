@@ -24846,13 +24846,15 @@ async fn read_recent_audit_events(
             .db_mirror
             .as_ref()
             .context("TRACE_COMMONS_DB_AUDIT_READS is enabled without a DB mirror")?;
-        return db
+        let events = db
             .list_recent_trace_audit_events(&tenant.tenant_id, limit)
             .await
             .context("failed to read recent Trace Commons audit events from DB mirror")?
             .into_iter()
             .map(|event| trace_commons_audit_event_from_storage(&tenant.tenant_id, event))
-            .collect();
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        verify_recent_audit_event_hashes(&events)?;
+        return Ok(events);
     }
 
     read_recent_audit_events_from_file(&state.root, &tenant.tenant_id, limit)
@@ -30622,6 +30624,7 @@ fn read_recent_audit_events_from_file(
         ensure_audit_event_tenant(&event, tenant_id)?;
         events.push(event);
     }
+    verify_recent_audit_event_hashes(&events)?;
     Ok(events)
 }
 
@@ -30630,6 +30633,53 @@ fn ensure_audit_event_tenant(
     tenant_id: &str,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(event.tenant_id == tenant_id, "trace audit tenant mismatch");
+    Ok(())
+}
+
+fn verify_recent_audit_event_hashes(events: &[TraceCommonsAuditEvent]) -> anyhow::Result<()> {
+    for (index, event) in events.iter().enumerate() {
+        let row_number = index + 1;
+        match (
+            event.previous_event_hash.as_deref(),
+            event.event_hash.as_deref(),
+        ) {
+            (None, None) => continue,
+            (Some(previous_event_hash), Some(event_hash)) => {
+                anyhow::ensure!(
+                    event_hash.starts_with("sha256:"),
+                    "audit reader row {row_number} event {}: event_hash has invalid format",
+                    event.event_id
+                );
+                let recomputed = compute_audit_event_hash(previous_event_hash, event)?;
+                anyhow::ensure!(
+                    recomputed == event_hash,
+                    "audit reader row {row_number} event {}: canonical payload hash mismatch",
+                    event.event_id
+                );
+            }
+            _ => {
+                anyhow::bail!(
+                    "audit reader row {row_number} event {}: incomplete hash chain fields",
+                    event.event_id
+                );
+            }
+        }
+    }
+
+    for pair in events.windows(2) {
+        let newer = &pair[0];
+        let older = &pair[1];
+        if let (Some(newer_previous_hash), Some(older_event_hash)) = (
+            newer.previous_event_hash.as_deref(),
+            older.event_hash.as_deref(),
+        ) {
+            anyhow::ensure!(
+                newer_previous_hash == older_event_hash,
+                "audit reader event {}: previous_event_hash does not match prior returned event",
+                newer.event_id
+            );
+        }
+    }
     Ok(())
 }
 
@@ -47490,6 +47540,39 @@ mod tests {
         );
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn audit_events_handler_rejects_file_audit_payload_hash_drift() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let auth = test_reviewer_auth("tenant-a");
+        let mut event = append_audit_event(
+            temp.path(),
+            "tenant-a",
+            TraceCommonsAuditEvent::read(&auth, "audit_events", 1),
+        )
+        .expect("file audit event writes");
+        event.event_hash = Some("sha256:not-the-canonical-payload-hash".to_string());
+        std::fs::write(
+            audit_log_path(temp.path(), "tenant-a"),
+            format!(
+                "{}\n",
+                serde_json::to_string(&event).expect("tampered audit serializes")
+            ),
+        )
+        .expect("tampered audit event writes");
+
+        let error = audit_events_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Query(AuditEventsQuery { limit: Some(1) }),
+        )
+        .await
+        .expect_err("file audit reader rejects payload hash drift");
+
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.1.0.error, "trace commons operation failed");
     }
 
     #[tokio::test]
