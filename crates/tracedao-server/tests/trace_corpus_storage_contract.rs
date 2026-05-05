@@ -101,6 +101,20 @@ fn read_audit_metadata_is_typed_and_aggregate_only() {
 }
 
 #[test]
+fn revocation_audit_metadata_hashes_reason() {
+    let metadata = TraceAuditSafeMetadata::Revocation {
+        reason_hash: "sha256:operator-reason".to_string(),
+    };
+    let json = serde_json::to_value(metadata).unwrap();
+
+    assert_eq!(json["kind"], "revocation");
+    assert_eq!(json["reason_hash"], "sha256:operator-reason");
+    assert!(json.get("reason").is_none());
+    assert!(json.get("operator_note").is_none());
+    assert!(json.get("request_body").is_none());
+}
+
+#[test]
 fn review_lease_audit_metadata_is_typed_and_request_safe() {
     let metadata = TraceAuditSafeMetadata::ReviewLease {
         action: TraceReviewLeaseAuditAction::Claim,
