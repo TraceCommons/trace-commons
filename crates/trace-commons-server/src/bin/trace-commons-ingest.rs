@@ -2998,6 +2998,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(audit_chain_drill_handler),
         )
         .route(
+            "/v1/admin/db-reconciliation-drill",
+            post(db_reconciliation_drill_handler),
+        )
+        .route(
             "/v1/admin/operational-metrics",
             get(operational_metrics_handler),
         )
@@ -21856,6 +21860,19 @@ async fn audit_chain_drill_handler(
     Ok(Json(response))
 }
 
+async fn db_reconciliation_drill_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceDbReconciliationDrillRequest>,
+) -> ApiResult<Json<TraceDbReconciliationDrillResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let response = run_db_reconciliation_drill(state.as_ref(), tenant.auth(), request)
+        .await
+        .map_err(maintenance_error)?;
+    Ok(Json(response))
+}
+
 #[derive(Debug, Deserialize)]
 struct TraceRollbackDrillRequest {
     #[serde(default)]
@@ -21928,6 +21945,14 @@ struct TraceAuditChainDrillRequest {
     record_evidence: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceDbReconciliationDrillRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    record_evidence: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct TraceAuditChainDrillResponse {
     tenant_id: String,
@@ -21960,6 +21985,163 @@ struct TraceAuditChainDrillResponse {
     failure_hashes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceDbReconciliationDrillResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose: String,
+    ready: bool,
+    evidence_hash: String,
+    file_submission_count: usize,
+    db_submission_count: usize,
+    file_derived_count: usize,
+    db_derived_count: usize,
+    file_credit_event_count: usize,
+    db_credit_event_count: usize,
+    file_utility_attestation_count: usize,
+    db_utility_attestation_count: usize,
+    file_credit_settlement_batch_count: usize,
+    db_credit_settlement_batch_count: usize,
+    file_credit_hold_count: usize,
+    db_credit_hold_count: usize,
+    file_near_credit_outbox_item_count: usize,
+    db_near_credit_outbox_item_count: usize,
+    file_benchmark_registry_outbox_item_count: usize,
+    db_benchmark_registry_outbox_item_count: usize,
+    file_latest_ranking_model_version_count: usize,
+    db_ranking_model_version_count: usize,
+    file_ranking_calibration_dataset_count: usize,
+    db_ranking_calibration_dataset_count: usize,
+    file_ranking_feature_count: usize,
+    db_ranking_feature_count: usize,
+    file_ranking_prediction_count: usize,
+    db_ranking_prediction_count: usize,
+    file_ranking_label_count: usize,
+    db_ranking_label_count: usize,
+    file_ranking_preference_label_count: usize,
+    db_ranking_preference_label_count: usize,
+    file_ranking_calibration_run_count: usize,
+    db_ranking_calibration_run_count: usize,
+    file_ranking_worker_run_count: usize,
+    db_ranking_worker_run_count: usize,
+    file_audit_event_count: usize,
+    db_audit_event_count: usize,
+    file_replay_export_manifest_count: usize,
+    db_export_manifest_count: usize,
+    db_export_manifest_item_count: usize,
+    file_revocation_tombstone_count: usize,
+    db_tombstone_count: usize,
+    db_object_ref_count: usize,
+    active_vector_entries: usize,
+    invalid_active_vector_entries: usize,
+    blocking_gaps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+async fn run_db_reconciliation_drill(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceDbReconciliationDrillRequest,
+) -> anyhow::Result<TraceDbReconciliationDrillResponse> {
+    let generated_at = Utc::now();
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_db_reconciliation_drill")
+        .to_string();
+    let file_submissions = read_all_submission_records(&state.root, &tenant.tenant_id)?;
+    let file_derived = read_all_derived_records(&state.root, &tenant.tenant_id)?;
+    let report = reconcile_db_mirror(state, tenant, &file_submissions, &file_derived, true, None)
+        .await?
+        .context("Trace Commons DB reconciliation drill did not produce a report")?;
+    let evidence_hash = db_reconciliation_drill_evidence_hash(tenant, &report);
+    let mut response = TraceDbReconciliationDrillResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at,
+        purpose: purpose.clone(),
+        ready: report.blocking_gaps.is_empty(),
+        evidence_hash,
+        file_submission_count: report.file_submission_count,
+        db_submission_count: report.db_submission_count,
+        file_derived_count: report.file_derived_count,
+        db_derived_count: report.db_derived_count,
+        file_credit_event_count: report.file_credit_event_count,
+        db_credit_event_count: report.db_credit_event_count,
+        file_utility_attestation_count: report.file_utility_attestation_count,
+        db_utility_attestation_count: report.db_utility_attestation_count,
+        file_credit_settlement_batch_count: report.file_credit_settlement_batch_count,
+        db_credit_settlement_batch_count: report.db_credit_settlement_batch_count,
+        file_credit_hold_count: report.file_credit_hold_count,
+        db_credit_hold_count: report.db_credit_hold_count,
+        file_near_credit_outbox_item_count: report.file_near_credit_outbox_item_count,
+        db_near_credit_outbox_item_count: report.db_near_credit_outbox_item_count,
+        file_benchmark_registry_outbox_item_count: report.file_benchmark_registry_outbox_item_count,
+        db_benchmark_registry_outbox_item_count: report.db_benchmark_registry_outbox_item_count,
+        file_latest_ranking_model_version_count: report.file_latest_ranking_model_version_count,
+        db_ranking_model_version_count: report.db_ranking_model_version_count,
+        file_ranking_calibration_dataset_count: report.file_ranking_calibration_dataset_count,
+        db_ranking_calibration_dataset_count: report.db_ranking_calibration_dataset_count,
+        file_ranking_feature_count: report.file_ranking_feature_count,
+        db_ranking_feature_count: report.db_ranking_feature_count,
+        file_ranking_prediction_count: report.file_ranking_prediction_count,
+        db_ranking_prediction_count: report.db_ranking_prediction_count,
+        file_ranking_label_count: report.file_ranking_label_count,
+        db_ranking_label_count: report.db_ranking_label_count,
+        file_ranking_preference_label_count: report.file_ranking_preference_label_count,
+        db_ranking_preference_label_count: report.db_ranking_preference_label_count,
+        file_ranking_calibration_run_count: report.file_ranking_calibration_run_count,
+        db_ranking_calibration_run_count: report.db_ranking_calibration_run_count,
+        file_ranking_worker_run_count: report.file_ranking_worker_run_count,
+        db_ranking_worker_run_count: report.db_ranking_worker_run_count,
+        file_audit_event_count: report.file_audit_event_count,
+        db_audit_event_count: report.db_audit_event_count,
+        file_replay_export_manifest_count: report.file_replay_export_manifest_count,
+        db_export_manifest_count: report.db_export_manifest_count,
+        db_export_manifest_item_count: report.db_export_manifest_item_count,
+        file_revocation_tombstone_count: report.file_revocation_tombstone_count,
+        db_tombstone_count: report.db_tombstone_count,
+        db_object_ref_count: report.db_object_ref_count,
+        active_vector_entries: report.active_vector_entries,
+        invalid_active_vector_entries: report.invalid_active_vector_entries,
+        blocking_gaps: report.blocking_gaps.clone(),
+        recorded_evidence: None,
+    };
+
+    if request.record_evidence {
+        let evidence = TraceRolloutSmokeEvidenceResponse {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            check_name: "db_reconciliation_clean".to_string(),
+            status: if response.ready {
+                TraceRolloutSmokeEvidenceStatus::Passed
+            } else {
+                TraceRolloutSmokeEvidenceStatus::Failed
+            },
+            evidence_hash: response.evidence_hash.clone(),
+            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            recorded_at: Utc::now(),
+        };
+        append_audit_event_with_db_mirror(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+            StorageTraceAuditAction::Read,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .await?;
+        response.recorded_evidence = Some(evidence);
+    }
+
+    Ok(response)
 }
 
 async fn run_audit_chain_drill(
@@ -22548,6 +22730,160 @@ fn audit_chain_drill_evidence_hash(
         })
         .to_string(),
     )
+}
+
+fn db_reconciliation_drill_evidence_hash(
+    tenant: &TenantAuth,
+    report: &TraceDbReconciliationReport,
+) -> String {
+    #[derive(Serialize)]
+    struct ParityCount {
+        name: &'static str,
+        file_count: usize,
+        db_count: usize,
+    }
+
+    #[derive(Serialize)]
+    struct DbCount {
+        name: &'static str,
+        count: usize,
+    }
+
+    #[derive(Serialize)]
+    struct EvidencePayload<'a> {
+        schema: &'static str,
+        tenant_storage_ref: String,
+        actor_principal_ref: &'a str,
+        parity_counts: Vec<ParityCount>,
+        db_counts: Vec<DbCount>,
+        blocking_gaps: &'a [String],
+    }
+
+    let payload = EvidencePayload {
+        schema: "trace_commons_db_reconciliation_drill.v1",
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        actor_principal_ref: &tenant.principal_ref,
+        parity_counts: vec![
+            ParityCount {
+                name: "submissions",
+                file_count: report.file_submission_count,
+                db_count: report.db_submission_count,
+            },
+            ParityCount {
+                name: "derived",
+                file_count: report.file_derived_count,
+                db_count: report.db_derived_count,
+            },
+            ParityCount {
+                name: "credit_events",
+                file_count: report.file_credit_event_count,
+                db_count: report.db_credit_event_count,
+            },
+            ParityCount {
+                name: "utility_attestations",
+                file_count: report.file_utility_attestation_count,
+                db_count: report.db_utility_attestation_count,
+            },
+            ParityCount {
+                name: "credit_settlement_batches",
+                file_count: report.file_credit_settlement_batch_count,
+                db_count: report.db_credit_settlement_batch_count,
+            },
+            ParityCount {
+                name: "credit_holds",
+                file_count: report.file_credit_hold_count,
+                db_count: report.db_credit_hold_count,
+            },
+            ParityCount {
+                name: "near_credit_outbox_items",
+                file_count: report.file_near_credit_outbox_item_count,
+                db_count: report.db_near_credit_outbox_item_count,
+            },
+            ParityCount {
+                name: "benchmark_registry_outbox_items",
+                file_count: report.file_benchmark_registry_outbox_item_count,
+                db_count: report.db_benchmark_registry_outbox_item_count,
+            },
+            ParityCount {
+                name: "ranking_model_versions",
+                file_count: report.file_latest_ranking_model_version_count,
+                db_count: report.db_ranking_model_version_count,
+            },
+            ParityCount {
+                name: "ranking_calibration_datasets",
+                file_count: report.file_ranking_calibration_dataset_count,
+                db_count: report.db_ranking_calibration_dataset_count,
+            },
+            ParityCount {
+                name: "ranking_features",
+                file_count: report.file_ranking_feature_count,
+                db_count: report.db_ranking_feature_count,
+            },
+            ParityCount {
+                name: "ranking_predictions",
+                file_count: report.file_ranking_prediction_count,
+                db_count: report.db_ranking_prediction_count,
+            },
+            ParityCount {
+                name: "ranking_labels",
+                file_count: report.file_ranking_label_count,
+                db_count: report.db_ranking_label_count,
+            },
+            ParityCount {
+                name: "ranking_preference_labels",
+                file_count: report.file_ranking_preference_label_count,
+                db_count: report.db_ranking_preference_label_count,
+            },
+            ParityCount {
+                name: "ranking_calibration_runs",
+                file_count: report.file_ranking_calibration_run_count,
+                db_count: report.db_ranking_calibration_run_count,
+            },
+            ParityCount {
+                name: "ranking_worker_runs",
+                file_count: report.file_ranking_worker_run_count,
+                db_count: report.db_ranking_worker_run_count,
+            },
+            ParityCount {
+                name: "audit_events",
+                file_count: report.file_audit_event_count,
+                db_count: report.db_audit_event_count,
+            },
+            ParityCount {
+                name: "export_manifests",
+                file_count: report.file_replay_export_manifest_count,
+                db_count: report.db_export_manifest_count,
+            },
+            ParityCount {
+                name: "revocation_tombstones",
+                file_count: report.file_revocation_tombstone_count,
+                db_count: report.db_tombstone_count,
+            },
+        ],
+        db_counts: vec![
+            DbCount {
+                name: "export_manifest_items",
+                count: report.db_export_manifest_item_count,
+            },
+            DbCount {
+                name: "object_refs",
+                count: report.db_object_ref_count,
+            },
+            DbCount {
+                name: "active_vector_entries",
+                count: report.active_vector_entries,
+            },
+            DbCount {
+                name: "invalid_active_vector_entries",
+                count: report.invalid_active_vector_entries,
+            },
+        ],
+        blocking_gaps: &report.blocking_gaps,
+    };
+    let json = serde_json::to_string(&payload).unwrap_or_else(|error| {
+        format!("trace_commons_db_reconciliation_drill.v1:serialization_error={error}")
+    });
+    sha256_prefixed(&json)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -53995,6 +54331,139 @@ mod tests {
                 .expect("error is string")
                 .contains("TRACE_COMMONS_DB_DUAL_WRITE")
         );
+    }
+
+    #[tokio::test]
+    async fn db_reconciliation_drill_without_db_mirror_returns_operator_error() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/db-reconciliation-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator DB reconciliation drill",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("DB reconciliation drill response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response parses");
+        assert!(
+            value["error"]
+                .as_str()
+                .expect("error is string")
+                .contains("TRACE_COMMONS_DB_DUAL_WRITE")
+        );
+    }
+
+    #[tokio::test]
+    async fn db_reconciliation_drill_records_clean_smoke_evidence() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            true,
+            true,
+            true,
+            true,
+        );
+        Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission mirrors to DB");
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/db-reconciliation-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator DB reconciliation drill",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("DB reconciliation drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("DB reconciliation drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(true));
+        assert_eq!(value["file_submission_count"], serde_json::json!(1));
+        assert_eq!(value["db_submission_count"], serde_json::json!(1));
+        assert_eq!(value["file_derived_count"], serde_json::json!(1));
+        assert_eq!(value["db_derived_count"], serde_json::json!(1));
+        assert_eq!(value["blocking_gaps"], serde_json::json!([]));
+        assert_eq!(
+            value["recorded_evidence"]["check_name"],
+            serde_json::json!("db_reconciliation_clean")
+        );
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("passed")
+        );
+        assert!(
+            value["evidence_hash"]
+                .as_str()
+                .expect("evidence hash is string")
+                .starts_with("sha256:")
+        );
+        assert!(
+            read_all_audit_events(temp.path(), "tenant-a")
+                .expect("file audit events remain after drill")
+                .iter()
+                .any(|event| {
+                    event.kind == "rollout_smoke_evidence"
+                        && event.reason.as_deref().is_some_and(|reason| {
+                            reason.contains("check_name=db_reconciliation_clean")
+                                && reason.contains("status=passed")
+                        })
+                })
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
 
     #[tokio::test]
