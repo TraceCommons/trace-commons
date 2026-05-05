@@ -3348,6 +3348,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(credit_risk_summary_handler),
         )
         .route(
+            "/v1/admin/credit-settlement-drill",
+            post(credit_settlement_drill_handler),
+        )
+        .route(
             "/v1/workers/credit-settlements/run",
             post(credit_settlement_worker_run_handler),
         )
@@ -7312,6 +7316,27 @@ struct TraceCreditSettlementWorkerRunRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct TraceCreditSettlementDrillRequest {
+    policy_version: String,
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    near_contract_id: Option<String>,
+    #[serde(default)]
+    ranking_model_version: Option<String>,
+    #[serde(default)]
+    ranking_target_use: Option<TraceAllowedUse>,
+    #[serde(default)]
+    account_limit: Option<usize>,
+    #[serde(default)]
+    require_pending: Option<bool>,
+    #[serde(default)]
+    require_near_contract: Option<bool>,
+    #[serde(default)]
+    record_evidence: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct TraceCreditCycleWorkerRunRequest {
     #[serde(default)]
     dry_run: bool,
@@ -8014,6 +8039,24 @@ struct TraceCreditSettlementRunResponse {
     settlement_max_credit_micros_per_account: Option<i64>,
     settlement_policy_excluded_source_event_count: usize,
     settlement_policy_excluded_reason_counts: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceCreditSettlementDrillResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose: String,
+    ready: bool,
+    evidence_hash: String,
+    require_pending: bool,
+    require_near_contract: bool,
+    near_contract_configured: bool,
+    risk_summary: TraceCreditRiskSummaryResponse,
+    settlement: TraceCreditSettlementRunResponse,
+    blocking_gaps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -9433,6 +9476,17 @@ async fn credit_settlement_worker_run_handler(
         .map(Json)
 }
 
+async fn credit_settlement_drill_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceCreditSettlementDrillRequest>,
+) -> ApiResult<Json<TraceCreditSettlementDrillResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let response = run_credit_settlement_drill(state.as_ref(), &tenant, request).await?;
+    Ok(Json(response))
+}
+
 async fn credit_cycle_scheduler_run_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -10132,6 +10186,229 @@ fn extend_prefixed_counts(
     for (reason, count) in source {
         counts.insert(format!("{prefix}:{reason}"), *count);
     }
+}
+
+async fn run_credit_settlement_drill(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceCreditSettlementDrillRequest,
+) -> ApiResult<TraceCreditSettlementDrillResponse> {
+    let generated_at = Utc::now();
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_credit_settlement_drill")
+        .to_string();
+    let account_limit = validate_credit_risk_summary_account_limit(request.account_limit)?;
+    let require_pending = request.require_pending.unwrap_or(true);
+    let require_near_contract = request.require_near_contract.unwrap_or(true);
+    let near_contract_id = request
+        .near_contract_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|contract_id| !contract_id.is_empty())
+        .map(ToOwned::to_owned);
+    validate_credit_settlement_drill_near_contract(near_contract_id.as_deref())?;
+
+    let risk_summary = build_credit_risk_summary(state, tenant, account_limit).await?;
+    let settlement = run_credit_settlement(
+        state,
+        tenant,
+        TraceCreditSettlementRunRequest {
+            dry_run: true,
+            policy_version: request.policy_version,
+            reason: purpose.clone(),
+            near_contract_id: near_contract_id.clone(),
+            ranking_model_version: request.ranking_model_version,
+            ranking_target_use: request.ranking_target_use,
+        },
+        None,
+    )
+    .await?;
+    let blocking_gaps = credit_settlement_drill_blocking_gaps(
+        &risk_summary,
+        &settlement,
+        require_pending,
+        require_near_contract,
+        near_contract_id.is_some(),
+    );
+    let evidence_hash =
+        credit_settlement_drill_evidence_hash(TraceCreditSettlementDrillEvidenceHashInputs {
+            tenant,
+            purpose: &purpose,
+            require_pending,
+            require_near_contract,
+            near_contract_configured: near_contract_id.is_some(),
+            risk_summary: &risk_summary,
+            settlement: &settlement,
+            blocking_gaps: &blocking_gaps,
+        });
+    let mut response = TraceCreditSettlementDrillResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at,
+        purpose: purpose.clone(),
+        ready: blocking_gaps.is_empty(),
+        evidence_hash,
+        require_pending,
+        require_near_contract,
+        near_contract_configured: near_contract_id.is_some(),
+        risk_summary,
+        settlement,
+        blocking_gaps,
+        recorded_evidence: None,
+    };
+
+    if request.record_evidence {
+        let evidence = TraceRolloutSmokeEvidenceResponse {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            check_name: "credit_settlement".to_string(),
+            status: if response.ready {
+                TraceRolloutSmokeEvidenceStatus::Passed
+            } else {
+                TraceRolloutSmokeEvidenceStatus::Failed
+            },
+            evidence_hash: response.evidence_hash.clone(),
+            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            recorded_at: Utc::now(),
+        };
+        append_audit_event_with_db_mirror(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+            StorageTraceAuditAction::Read,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .await
+        .map_err(internal_error)?;
+        response.recorded_evidence = Some(evidence);
+    }
+
+    Ok(response)
+}
+
+fn validate_credit_settlement_drill_near_contract(near_contract_id: Option<&str>) -> ApiResult<()> {
+    let Some(near_contract_id) = near_contract_id else {
+        return Ok(());
+    };
+    let validation_hash = sha256_prefixed("trace_commons_credit_settlement_drill_validation");
+    let receipt = NearCreditReceipt {
+        settlement_batch_id: Uuid::nil(),
+        credit_account_hash: validation_hash.clone(),
+        policy_version: "trace-credit-settlement-drill".to_string(),
+        source_list_hash: validation_hash.clone(),
+        attestation_hash: validation_hash.clone(),
+        amount_micros: 1,
+        issuer_signature_hash: validation_hash,
+    };
+    NearCreditReceiptCall::settle(near_contract_id, receipt)
+        .map(|_| ())
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))
+}
+
+fn credit_settlement_drill_blocking_gaps(
+    risk_summary: &TraceCreditRiskSummaryResponse,
+    settlement: &TraceCreditSettlementRunResponse,
+    require_pending: bool,
+    require_near_contract: bool,
+    near_contract_configured: bool,
+) -> Vec<String> {
+    let mut blocking_gaps = Vec::new();
+    if require_near_contract && !near_contract_configured {
+        blocking_gaps.push("near_contract_id_missing".to_string());
+    }
+    if require_pending && risk_summary.pending_credit_micros <= 0 {
+        blocking_gaps.push("pending_credit_events_missing".to_string());
+    }
+    push_gap_count(
+        &mut blocking_gaps,
+        "held_credit_accounts_present",
+        risk_summary.held_account_count,
+    );
+    push_gap_count(
+        &mut blocking_gaps,
+        "over_cap_credit_accounts_present",
+        risk_summary.over_cap_account_count,
+    );
+    if risk_summary.truncated {
+        blocking_gaps.push("credit_risk_summary_truncated".to_string());
+    }
+    push_gap_count(
+        &mut blocking_gaps,
+        "settlement_policy_excluded_source_events",
+        settlement.settlement_policy_excluded_source_event_count,
+    );
+    push_gap_count(
+        &mut blocking_gaps,
+        "ranking_credit_events_excluded",
+        settlement.ranking_credit_events_excluded_count,
+    );
+    blocking_gaps
+}
+
+struct TraceCreditSettlementDrillEvidenceHashInputs<'a> {
+    tenant: &'a TenantAuth,
+    purpose: &'a str,
+    require_pending: bool,
+    require_near_contract: bool,
+    near_contract_configured: bool,
+    risk_summary: &'a TraceCreditRiskSummaryResponse,
+    settlement: &'a TraceCreditSettlementRunResponse,
+    blocking_gaps: &'a [String],
+}
+
+fn credit_settlement_drill_evidence_hash(
+    inputs: TraceCreditSettlementDrillEvidenceHashInputs<'_>,
+) -> String {
+    let TraceCreditSettlementDrillEvidenceHashInputs {
+        tenant,
+        purpose,
+        require_pending,
+        require_near_contract,
+        near_contract_configured,
+        risk_summary,
+        settlement,
+        blocking_gaps,
+    } = inputs;
+    sha256_prefixed(
+        &serde_json::json!({
+            "schema": "trace_commons_credit_settlement_drill.v1",
+            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+            "actor_principal_ref": tenant.principal_ref,
+            "purpose_hash": sha256_prefixed(purpose),
+            "policy_version": &settlement.policy_version,
+            "require_pending": require_pending,
+            "require_near_contract": require_near_contract,
+            "near_contract_configured": near_contract_configured,
+            "risk_account_count": risk_summary.account_count,
+            "risk_pending_account_count": risk_summary.pending_account_count,
+            "risk_held_account_count": risk_summary.held_account_count,
+            "risk_over_cap_account_count": risk_summary.over_cap_account_count,
+            "risk_pending_credit_micros": risk_summary.pending_credit_micros,
+            "risk_held_credit_micros": risk_summary.held_credit_micros,
+            "risk_over_cap_credit_micros": risk_summary.over_cap_credit_micros,
+            "risk_truncated": risk_summary.truncated,
+            "settled_source_event_count": settlement.settled_source_event_count,
+            "eligible_source_event_count": settlement.eligible_source_event_count,
+            "pending_after_count": settlement.pending_after_count,
+            "settled_account_count": settlement.settled_account_count,
+            "settlement_policy_excluded_source_event_count":
+                settlement.settlement_policy_excluded_source_event_count,
+            "settlement_policy_excluded_reason_counts":
+                &settlement.settlement_policy_excluded_reason_counts,
+            "ranking_credit_events_excluded_count":
+                settlement.ranking_credit_events_excluded_count,
+            "ranking_credit_events_excluded_reason_counts":
+                &settlement.ranking_credit_events_excluded_reason_counts,
+            "blocking_gaps": blocking_gaps,
+        })
+        .to_string(),
+    )
 }
 
 async fn run_credit_settlement(
@@ -46550,6 +46827,7 @@ const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "retention_dry_run",
     "vector_index",
     "analytics_release",
+    "credit_settlement",
     "object_primary_reads",
     "postgres_rls_readiness",
     "delayed_credit_reversal",
@@ -66021,6 +66299,225 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_credit_settlement_drill_dry_runs_risk_and_records_smoke_evidence() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_max_micros_per_account = Some(1_000_000);
+
+        let mut high_utility = sample_envelope().await;
+        make_metadata_only_low_risk(&mut high_utility);
+        high_utility.consent.scopes = vec![ConsentScope::ModelTraining];
+        high_utility.trace_card.consent_scope = ConsentScope::ModelTraining;
+        high_utility.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let high_utility_submission_id = high_utility.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(high_utility),
+        )
+        .await
+        .expect("high utility submission succeeds");
+        let Json(high_event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(high_utility_submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.75,
+                reason: Some("frontier lab high utility for drill".to_string()),
+                external_ref: Some("lab-attestation:settlement-drill-high".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append high utility credit");
+
+        let mut held_utility = sample_envelope().await;
+        make_metadata_only_low_risk(&mut held_utility);
+        held_utility.consent.scopes = vec![ConsentScope::ModelTraining];
+        held_utility.trace_card.consent_scope = ConsentScope::ModelTraining;
+        held_utility.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let held_utility_submission_id = held_utility.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a-2"),
+            Json(held_utility),
+        )
+        .await
+        .expect("held utility submission succeeds");
+        let Json(held_event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(held_utility_submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 0.5,
+                reason: Some("frontier lab held utility for drill".to_string()),
+                external_ref: Some("lab-attestation:settlement-drill-held".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append held utility credit");
+        let Json(_) = credit_hold_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditHoldRequest {
+                credit_account_ref: held_event.auth_principal_ref.clone(),
+                reason: StorageTraceCreditHoldReason::AttestationDispute,
+                reason_detail: "settlement drill hold review".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can place held-account review hold");
+
+        let contributor_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlement-drill")
+                    .header(AUTHORIZATION, "Bearer token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "policy_version": "trace-credit-policy-v1",
+                            "near_contract_id": "trace-credits.testnet"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("contributor request builds"),
+            )
+            .await
+            .expect("contributor response");
+        assert_eq!(contributor_response.status(), StatusCode::FORBIDDEN);
+
+        let invalid_contract_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlement-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "policy_version": "trace-credit-policy-v1",
+                            "near_contract_id": "Trace Credits.testnet"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("invalid contract request builds"),
+            )
+            .await
+            .expect("invalid contract response");
+        assert_eq!(invalid_contract_response.status(), StatusCode::BAD_REQUEST);
+        let invalid_body = axum::body::to_bytes(invalid_contract_response.into_body(), 8192)
+            .await
+            .expect("invalid body reads");
+        let invalid_text = String::from_utf8(invalid_body.to_vec()).expect("invalid body utf8");
+        assert!(invalid_text.contains("NEAR contract id"));
+
+        let drill_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlement-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "policy_version": "trace-credit-policy-v1",
+                            "near_contract_id": "trace-credits.testnet",
+                            "account_limit": 10,
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("drill request builds"),
+            )
+            .await
+            .expect("drill response");
+        assert_eq!(drill_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(drill_response.into_body(), 16384)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json parses");
+        assert_eq!(value["ready"], serde_json::json!(false));
+        assert_eq!(
+            value["risk_summary"]["pending_account_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            value["risk_summary"]["held_account_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            value["risk_summary"]["over_cap_account_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(value["settlement"]["dry_run"], serde_json::json!(true));
+        assert_eq!(
+            value["settlement"]["settled_source_event_count"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            value["settlement"]["settlement_policy_excluded_source_event_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            value["blocking_gaps"],
+            serde_json::json!([
+                "held_credit_accounts_present=1",
+                "over_cap_credit_accounts_present=1",
+                "settlement_policy_excluded_source_events=1"
+            ])
+        );
+        assert!(
+            value["evidence_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+        assert_eq!(
+            value["recorded_evidence"]["check_name"],
+            serde_json::json!("credit_settlement")
+        );
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("failed")
+        );
+        assert!(
+            value["recorded_evidence"]["evidence_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+
+        let body_text = std::str::from_utf8(&body).expect("response is utf8");
+        assert!(!body_text.contains("token-a"));
+        assert!(!body_text.contains(&high_event.event_id.to_string()));
+        assert!(!body_text.contains(&held_event.event_id.to_string()));
+        assert!(!body_text.contains("frontier lab high utility for drill"));
+        assert!(!body_text.contains("frontier lab held utility for drill"));
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement reads")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads")
+                .is_empty()
+        );
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "rollout_smoke_evidence"
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("check_name=credit_settlement")
+                        && reason.contains("status=failed")
+                })
+        }));
+    }
+
+    #[tokio::test]
     async fn credit_settlement_worker_run_finalizes_pending_utility_without_admin_scope() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -78486,11 +78983,11 @@ mod tests {
         );
         assert_eq!(
             operational_json["rollout_smoke"]["required_check_count"],
-            serde_json::json!(18)
+            serde_json::json!(19)
         );
         assert_eq!(
             operational_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(18)
+            serde_json::json!(19)
         );
         assert!(
             operational
@@ -78544,13 +79041,19 @@ mod tests {
             operational
                 .rollout_smoke
                 .required_checks
+                .contains(&"credit_settlement".to_string())
+        );
+        assert!(
+            operational
+                .rollout_smoke
+                .required_checks
                 .contains(&"audit_chain_verification".to_string())
         );
         assert!(
             operational
                 .rollout_smoke
                 .blocker_reasons
-                .contains(&"smoke_rehearsal_evidence_missing=18".to_string())
+                .contains(&"smoke_rehearsal_evidence_missing=19".to_string())
         );
     }
 
@@ -78630,7 +79133,7 @@ mod tests {
         );
         assert_eq!(
             operational_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(17)
+            serde_json::json!(18)
         );
         assert!(
             !operational
@@ -78961,7 +79464,7 @@ mod tests {
         );
         assert_eq!(
             preflight_json["rollout_smoke"]["required_check_count"],
-            serde_json::json!(18)
+            serde_json::json!(19)
         );
         assert_eq!(
             preflight_json["rollout_smoke"]["recorded_evidence_count"],
@@ -78973,7 +79476,7 @@ mod tests {
         );
         assert_eq!(
             preflight_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(17)
+            serde_json::json!(18)
         );
         assert_eq!(
             preflight_json["latest_evidence"].as_array().map(Vec::len),
@@ -79193,7 +79696,7 @@ mod tests {
             "tracedao_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"failed_ranking_worker_runs\"}} 1"
         )));
         assert!(body_text.contains(&format!(
-            "tracedao_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 18"
+            "tracedao_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 19"
         )));
         assert!(body_text.contains(&format!(
             "tracedao_operational_rollout_smoke_recorded_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 0"

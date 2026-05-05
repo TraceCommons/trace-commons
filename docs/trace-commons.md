@@ -413,9 +413,10 @@ it includes a `rollout_smoke` preflight block that
 lists required canary smoke checks, including `tenant_canary_isolation`,
 `db_reconciliation_clean`, `rollback_flag_drill`, `key_rotation_drill`,
 revocation propagation, retention dry-run, vector indexing, analytics release,
-PostgreSQL RLS readiness, and audit-chain verification, while reporting
-recorded, passed, failed, stale, and missing rehearsal evidence separately from
-promotion-gate readiness. Admin-only `GET /v1/admin/rollout-smoke/preflight`
+credit settlement, PostgreSQL RLS readiness, and audit-chain verification, while
+reporting recorded, passed, failed, stale, and missing rehearsal evidence
+separately from promotion-gate readiness. Admin-only
+`GET /v1/admin/rollout-smoke/preflight`
 returns that `rollout_smoke` block together with the latest hash-only evidence
 record for each required check, so operators can review promotion readiness
 without stitching together operational-summary and evidence-list reads.
@@ -475,6 +476,13 @@ count and keyed count-noise settings. The response returns only safe aggregate
 privacy-budget fields, compact blocker codes, and a sha256-prefixed evidence
 hash; it can append the `analytics_release` rollout-smoke evidence row directly
 without exposing the noise key, tenant token, raw trace data, or aggregate maps.
+`POST /v1/admin/credit-settlement-drill` runs the Trace Credits settlement
+promotion check through the admin credit-risk summary plus the existing dry-run
+settlement selector. It validates a supplied NEAR contract id without writing
+settlement batches or NEAR outbox rows, returns only safe account hashes,
+aggregate risk counts, settlement exclusion reason counts, blocker codes, and a
+sha256-prefixed evidence hash, and can append `credit_settlement`
+rollout-smoke evidence directly.
 Operators can still use `POST /v1/admin/rollout-smoke/evidence` for external
 manual evidence, while operational summary and metrics expose only readiness
 booleans, bounded max-delta metadata, and blocker reason codes.
@@ -731,6 +739,7 @@ The service exposes:
 - `POST /v1/admin/retention-dry-run-drill`
 - `POST /v1/admin/vector-index-drill`
 - `POST /v1/admin/analytics-release-drill`
+- `POST /v1/admin/credit-settlement-drill`
 - `POST /v1/admin/revocation-propagation-drill`
 - `POST /v1/admin/revocation-effects-drill`
 - `POST /v1/admin/audit-chain-drill`
