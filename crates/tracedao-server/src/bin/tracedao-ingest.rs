@@ -3334,6 +3334,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(object_primary_read_drill_handler),
         )
         .route(
+            "/v1/admin/object-store-migration-drill",
+            post(object_store_migration_drill_handler),
+        )
+        .route(
             "/v1/admin/operational-metrics",
             get(operational_metrics_handler),
         )
@@ -23390,6 +23394,19 @@ async fn object_primary_read_drill_handler(
     Ok(Json(response))
 }
 
+async fn object_store_migration_drill_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceObjectStoreMigrationDrillRequest>,
+) -> ApiResult<Json<TraceObjectStoreMigrationDrillResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let response = run_object_store_migration_drill(state.as_ref(), tenant.auth(), request)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(response))
+}
+
 #[derive(Debug, Deserialize)]
 struct TraceRollbackDrillRequest {
     #[serde(default)]
@@ -23549,6 +23566,16 @@ struct TraceObjectPrimaryReadDrillRequest {
     fallback_tenant_id: Option<String>,
     #[serde(default)]
     purpose: Option<String>,
+    #[serde(default)]
+    record_evidence: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceObjectStoreMigrationDrillRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default = "default_true")]
+    require_delete: bool,
     #[serde(default)]
     record_evidence: bool,
 }
@@ -23783,6 +23810,33 @@ struct TraceObjectPrimaryReadDrillResponse {
     replay_body_object_ref_readable: bool,
     plaintext_submitted_body_absent: bool,
     fallback_tenant_object_primary_disabled: bool,
+    blocking_gaps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceObjectStoreMigrationDrillResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose: String,
+    ready: bool,
+    evidence_hash: String,
+    object_store_configured: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    object_store_name: Option<String>,
+    object_store_eligible: bool,
+    object_io_enabled: bool,
+    plaintext_compatibility_allowed: bool,
+    require_delete: bool,
+    write_succeeded: bool,
+    read_succeeded: bool,
+    delete_succeeded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    probe_object_ref_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    io_error_hashes: Vec<String>,
     blocking_gaps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
@@ -24060,6 +24114,149 @@ async fn run_object_primary_read_drill(
                 TraceRolloutSmokeEvidenceStatus::Failed
             },
             evidence_hash: object_primary_read_drill_evidence_hash(tenant, &response),
+            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            recorded_at: Utc::now(),
+        };
+        append_audit_event_with_db_mirror(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+            StorageTraceAuditAction::Read,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .await?;
+        response.recorded_evidence = Some(evidence);
+    }
+
+    Ok(response)
+}
+
+async fn run_object_store_migration_drill(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceObjectStoreMigrationDrillRequest,
+) -> anyhow::Result<TraceObjectStoreMigrationDrillResponse> {
+    let generated_at = Utc::now();
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_object_store_migration_drill")
+        .to_string();
+    let tenant_ref = tenant_storage_ref(&tenant.tenant_id);
+    let object_store_configured = state.artifact_store.is_some();
+    let object_store_name = state
+        .artifact_store
+        .as_ref()
+        .map(|store| store.object_store_name().to_string());
+    let object_store_eligible = state
+        .artifact_store
+        .as_ref()
+        .is_some_and(|store| store.object_primary_eligible());
+    let object_io_enabled = state
+        .artifact_store
+        .as_ref()
+        .is_some_and(|store| store.object_io_enabled());
+    let plaintext_compatibility_allowed = state
+        .artifact_store
+        .as_ref()
+        .is_some_and(|store| store.plaintext_compatibility_allowed());
+    let mut write_succeeded = false;
+    let mut read_succeeded = false;
+    let mut delete_succeeded = false;
+    let mut probe_object_ref_hash = None;
+    let mut io_error_hashes = Vec::new();
+
+    if let Some(store) = state.artifact_store.as_ref()
+        && store.object_io_enabled()
+    {
+        let probe_object_id = format!("object-store-migration-drill-{}", Uuid::new_v4());
+        let probe_payload = serde_json::json!({
+            "schema": "trace_commons_object_store_migration_drill_probe.v1",
+            "tenant_storage_ref": &tenant_ref,
+            "purpose_hash": sha256_prefixed(&purpose),
+            "probe_nonce_hash": sha256_prefixed(&probe_object_id),
+            "secret_probe": "object-store-migration-drill-secret",
+        });
+        match store.put_json(
+            &tenant_ref,
+            TraceArtifactKind::AuditSnapshot,
+            &probe_object_id,
+            &probe_payload,
+        ) {
+            Ok(receipt) => {
+                write_succeeded = true;
+                probe_object_ref_hash = Some(object_store_migration_probe_ref_hash(
+                    store.object_store_name(),
+                    &receipt,
+                ));
+                match store.get_json::<serde_json::Value>(&tenant_ref, &receipt) {
+                    Ok(read_back) => {
+                        read_succeeded = read_back == probe_payload;
+                        if !read_succeeded {
+                            io_error_hashes.push(sha256_prefixed(
+                                "object store migration drill probe read mismatch",
+                            ));
+                        }
+                    }
+                    Err(error) => {
+                        io_error_hashes.push(sha256_prefixed(&error.to_string()));
+                    }
+                }
+                match store.delete_artifact(&tenant_ref, &receipt) {
+                    Ok(deleted) => {
+                        delete_succeeded = deleted;
+                    }
+                    Err(error) => {
+                        io_error_hashes.push(sha256_prefixed(&error.to_string()));
+                    }
+                }
+            }
+            Err(error) => {
+                io_error_hashes.push(sha256_prefixed(&error.to_string()));
+            }
+        }
+    }
+
+    let mut response = TraceObjectStoreMigrationDrillResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_ref,
+        generated_at,
+        purpose: purpose.clone(),
+        ready: false,
+        evidence_hash: String::new(),
+        object_store_configured,
+        object_store_name,
+        object_store_eligible,
+        object_io_enabled,
+        plaintext_compatibility_allowed,
+        require_delete: request.require_delete,
+        write_succeeded,
+        read_succeeded,
+        delete_succeeded,
+        probe_object_ref_hash,
+        io_error_hashes,
+        blocking_gaps: Vec::new(),
+        recorded_evidence: None,
+    };
+    response.blocking_gaps = object_store_migration_drill_blocking_gaps(&response);
+    response.ready = response.blocking_gaps.is_empty();
+    response.evidence_hash = object_store_migration_drill_evidence_hash(tenant, &response);
+
+    if request.record_evidence {
+        let evidence = TraceRolloutSmokeEvidenceResponse {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            check_name: "object_store_migration".to_string(),
+            status: if response.ready {
+                TraceRolloutSmokeEvidenceStatus::Passed
+            } else {
+                TraceRolloutSmokeEvidenceStatus::Failed
+            },
+            evidence_hash: response.evidence_hash.clone(),
             evidence_ref_hash: Some(sha256_prefixed(&purpose)),
             actor_principal_ref: tenant.principal_ref.clone(),
             recorded_at: Utc::now(),
@@ -25652,6 +25849,35 @@ fn object_primary_read_drill_blocking_gaps(
     gaps
 }
 
+fn object_store_migration_drill_blocking_gaps(
+    response: &TraceObjectStoreMigrationDrillResponse,
+) -> Vec<String> {
+    let mut gaps = Vec::new();
+    push_key_rotation_gap(
+        &mut gaps,
+        "object_store_missing",
+        !response.object_store_configured,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "object_store_io_disabled",
+        !response.object_io_enabled,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "object_store_not_migration_eligible",
+        !response.object_store_eligible,
+    );
+    push_key_rotation_gap(&mut gaps, "probe_write_failed", !response.write_succeeded);
+    push_key_rotation_gap(&mut gaps, "probe_read_failed", !response.read_succeeded);
+    push_key_rotation_gap(
+        &mut gaps,
+        "probe_delete_failed",
+        response.require_delete && !response.delete_succeeded,
+    );
+    gaps
+}
+
 fn active_rollout_flags_for_rollback_drill(state: &AppState, tenant_id: &str) -> Vec<String> {
     TraceTenantRolloutFeature::ALL
         .into_iter()
@@ -26184,6 +26410,48 @@ fn object_primary_read_drill_evidence_hash(
             "replay_body_object_ref_readable": response.replay_body_object_ref_readable,
             "plaintext_submitted_body_absent": response.plaintext_submitted_body_absent,
             "fallback_tenant_object_primary_disabled": response.fallback_tenant_object_primary_disabled,
+            "blocking_gaps": response.blocking_gaps,
+        })
+        .to_string(),
+    )
+}
+
+fn object_store_migration_probe_ref_hash(
+    object_store_name: &str,
+    receipt: &EncryptedTraceArtifactReceipt,
+) -> String {
+    sha256_prefixed(
+        &serde_json::json!({
+            "object_store_name": object_store_name,
+            "tenant_storage_ref": receipt.tenant_storage_ref,
+            "artifact_kind": receipt.artifact_kind,
+            "object_key": receipt.object_key,
+            "ciphertext_sha256": receipt.ciphertext_sha256,
+        })
+        .to_string(),
+    )
+}
+
+fn object_store_migration_drill_evidence_hash(
+    tenant: &TenantAuth,
+    response: &TraceObjectStoreMigrationDrillResponse,
+) -> String {
+    sha256_prefixed(
+        &serde_json::json!({
+            "schema": "trace_commons_object_store_migration_drill.v1",
+            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+            "actor_principal_ref": tenant.principal_ref,
+            "object_store_configured": response.object_store_configured,
+            "object_store_name": response.object_store_name,
+            "object_store_eligible": response.object_store_eligible,
+            "object_io_enabled": response.object_io_enabled,
+            "plaintext_compatibility_allowed": response.plaintext_compatibility_allowed,
+            "require_delete": response.require_delete,
+            "write_succeeded": response.write_succeeded,
+            "read_succeeded": response.read_succeeded,
+            "delete_succeeded": response.delete_succeeded,
+            "probe_object_ref_hash": response.probe_object_ref_hash,
+            "io_error_hashes": response.io_error_hashes,
             "blocking_gaps": response.blocking_gaps,
         })
         .to_string(),
@@ -46829,6 +47097,7 @@ const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "analytics_release",
     "credit_settlement",
     "object_primary_reads",
+    "object_store_migration",
     "postgres_rls_readiness",
     "delayed_credit_reversal",
     "object_deletion_refs",
@@ -61901,6 +62170,119 @@ mod tests {
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+    }
+
+    #[tokio::test]
+    async fn object_store_migration_drill_records_hash_only_probe_evidence() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let artifact_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            test_artifact_store(artifact_temp.path()),
+        );
+        let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            None,
+            Some(artifact_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+
+        let contributor_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/object-store-migration-drill")
+                    .header(AUTHORIZATION, "Bearer token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator object-store migration drill",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("contributor request builds"),
+            )
+            .await
+            .expect("contributor response");
+        assert_eq!(contributor_response.status(), StatusCode::FORBIDDEN);
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/object-store-migration-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator object-store migration drill",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("admin request builds"),
+            )
+            .await
+            .expect("migration drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("migration drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(true));
+        assert_eq!(value["object_store_configured"], serde_json::json!(true));
+        assert_eq!(value["object_store_eligible"], serde_json::json!(true));
+        assert_eq!(value["object_io_enabled"], serde_json::json!(true));
+        assert_eq!(value["write_succeeded"], serde_json::json!(true));
+        assert_eq!(value["read_succeeded"], serde_json::json!(true));
+        assert_eq!(value["delete_succeeded"], serde_json::json!(true));
+        assert_eq!(value["blocking_gaps"], serde_json::json!([]));
+        assert!(
+            value["probe_object_ref_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+        assert!(
+            value["evidence_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+        assert_eq!(
+            value["recorded_evidence"]["check_name"],
+            serde_json::json!("object_store_migration")
+        );
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("passed")
+        );
+
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("token-a"));
+        assert!(!body_text.contains("object-store-migration-drill-secret"));
+
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("file audit events read");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "rollout_smoke_evidence"
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("check_name=object_store_migration")
+                        && reason.contains("status=passed")
+                })
+        }));
     }
 
     #[tokio::test]
@@ -78983,11 +79365,11 @@ mod tests {
         );
         assert_eq!(
             operational_json["rollout_smoke"]["required_check_count"],
-            serde_json::json!(19)
+            serde_json::json!(20)
         );
         assert_eq!(
             operational_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(19)
+            serde_json::json!(20)
         );
         assert!(
             operational
@@ -79047,13 +79429,19 @@ mod tests {
             operational
                 .rollout_smoke
                 .required_checks
+                .contains(&"object_store_migration".to_string())
+        );
+        assert!(
+            operational
+                .rollout_smoke
+                .required_checks
                 .contains(&"audit_chain_verification".to_string())
         );
         assert!(
             operational
                 .rollout_smoke
                 .blocker_reasons
-                .contains(&"smoke_rehearsal_evidence_missing=19".to_string())
+                .contains(&"smoke_rehearsal_evidence_missing=20".to_string())
         );
     }
 
@@ -79133,7 +79521,7 @@ mod tests {
         );
         assert_eq!(
             operational_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(18)
+            serde_json::json!(19)
         );
         assert!(
             !operational
@@ -79464,7 +79852,7 @@ mod tests {
         );
         assert_eq!(
             preflight_json["rollout_smoke"]["required_check_count"],
-            serde_json::json!(19)
+            serde_json::json!(20)
         );
         assert_eq!(
             preflight_json["rollout_smoke"]["recorded_evidence_count"],
@@ -79476,7 +79864,7 @@ mod tests {
         );
         assert_eq!(
             preflight_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(18)
+            serde_json::json!(19)
         );
         assert_eq!(
             preflight_json["latest_evidence"].as_array().map(Vec::len),
@@ -79696,7 +80084,7 @@ mod tests {
             "tracedao_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"failed_ranking_worker_runs\"}} 1"
         )));
         assert!(body_text.contains(&format!(
-            "tracedao_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 19"
+            "tracedao_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 20"
         )));
         assert!(body_text.contains(&format!(
             "tracedao_operational_rollout_smoke_recorded_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 0"
