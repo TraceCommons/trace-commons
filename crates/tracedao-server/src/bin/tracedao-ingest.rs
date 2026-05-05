@@ -19089,6 +19089,7 @@ async fn review_decision_handler(
         &tenant,
         &record,
         allow_file_body_fallback,
+        Some(&reason),
     )
     .await
     .map_err(internal_error)?
@@ -28207,6 +28208,7 @@ async fn read_envelope_for_review_decision(
     tenant: &TenantAuth,
     record: &TraceCommonsSubmissionRecord,
     allow_file_body_fallback: bool,
+    purpose: Option<&str>,
 ) -> anyhow::Result<TraceEnvelopeBodyRead> {
     anyhow::ensure!(
         tenant.role.can_review(),
@@ -28225,7 +28227,7 @@ async fn read_envelope_for_review_decision(
         record.submission_id,
         body_read.object_ref_id,
         "review_decision",
-        None,
+        purpose,
     )
     .await?;
     Ok(body_read)
@@ -42173,13 +42175,14 @@ mod tests {
         .expect_err("review decisions reject blank reasons");
         assert_eq!(blank_reason_error.0, StatusCode::BAD_REQUEST);
 
+        let review_reason = "redaction looks safe";
         let Json(receipt) = review_decision_handler(
             State(state.clone()),
             auth_headers("review-token-a"),
             AxumPath(submission_id),
             Json(TraceReviewDecisionRequest {
                 decision: TraceReviewDecision::Approve,
-                reason: Some("redaction looks safe".to_string()),
+                reason: Some(review_reason.to_string()),
                 credit_points_pending: Some(1.25),
             }),
         )
@@ -42262,6 +42265,21 @@ mod tests {
                 && event.decision_inputs_hash
                     == Some(export.manifest.source_submission_ids_hash.clone())
         }));
+        let review_content_read_reason = audit_events
+            .iter()
+            .find_map(|event| {
+                (event.submission_id == submission_id
+                    && event.kind == "trace_content_read"
+                    && event
+                        .reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("surface=review_decision")))
+                .then_some(event.reason.as_deref())
+                .flatten()
+            })
+            .expect("review decision content read audit exists");
+        assert!(review_content_read_reason.contains("purpose_hash=sha256:"));
+        assert!(!review_content_read_reason.contains(review_reason));
         assert!(audit_events.iter().any(|event| {
             event.submission_id == submission_id
                 && event.kind == "trace_content_read"
