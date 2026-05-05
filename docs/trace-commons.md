@@ -651,7 +651,20 @@ plus job summaries without embedding exported trace bodies. The
 `/v1/workers/export/jobs/retry-failed` worker route is the bounded retry pass: it
 scans failed unexpired jobs with replayable request metadata, applies retry-count
 and exponential-delay bounds, requeues due rows with hash-only retry metadata,
-and reports retried/not-due/ineligible/remaining-failed counts.
+and reports retried/not-due/ineligible/remaining-failed counts. Deployments that
+want the server to own that loop can configure
+`TRACE_COMMONS_EXPORT_JOB_SCHEDULER_TOKEN` with an export-worker bearer token;
+the optional in-process scheduler sleeps for
+`TRACE_COMMONS_EXPORT_JOB_SCHEDULER_INTERVAL_SECONDS` (default 60), runs the same
+`retry-failed` pass, then runs the same `run-queued` pass. The scheduler accepts
+the same optional dataset-kind narrowing and bounded controls through
+`TRACE_COMMONS_EXPORT_JOB_SCHEDULER_DATASET_KIND`,
+`TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RUN_QUEUED_MAX_JOBS`,
+`TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_FAILED_MAX_JOBS`,
+`TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_FAILED_MAX_RETRY_COUNT`,
+`TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_BASE_DELAY_SECONDS`, and
+`TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_MAX_DELAY_SECONDS`; the raw token and
+retry note are never logged, and retry audit rows keep only reason hashes.
 
 Stale export-job recovery is intentionally narrow. If a `running` export job is
 still open after its grant expiry, an admin can call

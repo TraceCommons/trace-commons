@@ -39,6 +39,11 @@ registry adapter, mark external submit/confirm/fail status with receipt refs and
 operators can inspect the outbox through the admin API, and maintenance
 backfill/reconciliation covers registry outbox drift before external registry
 adapter readiness is promoted.
+Export job automation can now also run in-process when
+`TRACE_COMMONS_EXPORT_JOB_SCHEDULER_TOKEN` is configured with an export-worker
+bearer token. The scheduler retries due failed export jobs with bounded
+backoff, then drains queued replay, benchmark-conversion, and ranker export jobs
+through the same authenticated worker handlers used by external cron jobs.
 
 ## Trace Credits
 

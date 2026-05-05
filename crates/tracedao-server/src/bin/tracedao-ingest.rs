@@ -9,7 +9,7 @@ use std::time::Duration as StdDuration;
 use anyhow::Context;
 use axum::extract::{DefaultBodyLimit, Query};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router, extract::Path as AxumPath, extract::State};
@@ -258,6 +258,25 @@ const TRACE_COMMONS_BENCHMARK_EVALUATOR_BEARER_TOKEN: &str =
     "TRACE_COMMONS_BENCHMARK_EVALUATOR_BEARER_TOKEN";
 const TRACE_COMMONS_BENCHMARK_EVALUATOR_TIMEOUT_MS: &str =
     "TRACE_COMMONS_BENCHMARK_EVALUATOR_TIMEOUT_MS";
+const TRACE_COMMONS_EXPORT_JOB_SCHEDULER_ENABLED: &str =
+    "TRACE_COMMONS_EXPORT_JOB_SCHEDULER_ENABLED";
+const TRACE_COMMONS_EXPORT_JOB_SCHEDULER_TOKEN: &str = "TRACE_COMMONS_EXPORT_JOB_SCHEDULER_TOKEN";
+const TRACE_COMMONS_EXPORT_JOB_SCHEDULER_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_EXPORT_JOB_SCHEDULER_INTERVAL_SECONDS";
+const TRACE_COMMONS_EXPORT_JOB_SCHEDULER_DATASET_KIND: &str =
+    "TRACE_COMMONS_EXPORT_JOB_SCHEDULER_DATASET_KIND";
+const TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RUN_QUEUED_MAX_JOBS: &str =
+    "TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RUN_QUEUED_MAX_JOBS";
+const TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_FAILED_MAX_JOBS: &str =
+    "TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_FAILED_MAX_JOBS";
+const TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_FAILED_MAX_RETRY_COUNT: &str =
+    "TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_FAILED_MAX_RETRY_COUNT";
+const TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_BASE_DELAY_SECONDS: &str =
+    "TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_BASE_DELAY_SECONDS";
+const TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_MAX_DELAY_SECONDS: &str =
+    "TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_MAX_DELAY_SECONDS";
+const TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_REASON: &str =
+    "TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_REASON";
 const TRACE_COMMONS_PROCESS_EVALUATOR_URL: &str = "TRACE_COMMONS_PROCESS_EVALUATOR_URL";
 const TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN: &str =
     "TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN";
@@ -324,6 +343,7 @@ const TRACE_EXPORT_JOB_RETRY_MAX_JOBS_LIMIT: usize = 50;
 const TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_RETRY_COUNT: u32 = 3;
 const TRACE_EXPORT_JOB_RETRY_DEFAULT_BASE_DELAY_SECONDS: i64 = 60;
 const TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_DELAY_SECONDS: i64 = 3600;
+const TRACE_EXPORT_JOB_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 60;
 const TRACE_RANKING_DEFAULT_MIN_LABEL_COUNT: usize = 25;
 const TRACE_RANKING_DEFAULT_CONFIDENCE_THRESHOLD: f32 = 0.5;
 const TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS: i64 = 1_000_000;
@@ -355,7 +375,11 @@ fn default_trace_ranking_joined_evidence_hash() -> String {
 async fn main() -> anyhow::Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let state = Arc::new(AppState::from_env().await?);
+    let export_job_scheduler = parse_trace_export_job_scheduler_config_from_env()?;
+    validate_trace_export_job_scheduler_config(state.as_ref(), export_job_scheduler.as_ref())
+        .await?;
     spawn_managed_eddsa_keyset_refresh_task(&state);
+    spawn_trace_export_job_scheduler_task(&state, export_job_scheduler);
     let bind = std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
     let addr = bind
         .parse::<SocketAddr>()
@@ -422,6 +446,25 @@ struct AppState {
     ranking_min_label_source_count: usize,
     ranking_min_pairwise_label_count: usize,
     ranking_min_pairwise_accuracy_micros: i64,
+}
+
+#[derive(Clone)]
+struct TraceExportJobSchedulerConfig {
+    worker_token: SecretString,
+    interval: StdDuration,
+    dataset_kind: Option<String>,
+    run_queued_max_jobs: usize,
+    retry_failed_max_jobs: usize,
+    retry_failed_max_retry_count: u32,
+    retry_failed_base_delay_seconds: i64,
+    retry_failed_max_delay_seconds: i64,
+    retry_failed_reason: String,
+}
+
+#[derive(Debug)]
+struct TraceExportJobSchedulerTickSummary {
+    retry_failed: TraceExportJobsRetryFailedResponse,
+    run_queued: TraceExportJobsRunQueuedResponse,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2460,6 +2503,159 @@ fn parse_trace_process_evaluator_timeout_from_env() -> anyhow::Result<StdDuratio
     Ok(StdDuration::from_millis(timeout_ms))
 }
 
+fn parse_trace_export_job_scheduler_config_from_env()
+-> anyhow::Result<Option<TraceExportJobSchedulerConfig>> {
+    let enabled = env_truthy(TRACE_COMMONS_EXPORT_JOB_SCHEDULER_ENABLED);
+    let worker_token = optional_trimmed_env(TRACE_COMMONS_EXPORT_JOB_SCHEDULER_TOKEN)?;
+    if !enabled && worker_token.is_none() {
+        return Ok(None);
+    }
+    let Some(worker_token) = worker_token else {
+        anyhow::bail!(
+            "{TRACE_COMMONS_EXPORT_JOB_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_EXPORT_JOB_SCHEDULER_TOKEN}"
+        );
+    };
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_EXPORT_JOB_SCHEDULER_INTERVAL_SECONDS,
+        TRACE_EXPORT_JOB_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
+        5,
+        86_400,
+    )?;
+    let dataset_kind = match optional_trimmed_env(TRACE_COMMONS_EXPORT_JOB_SCHEDULER_DATASET_KIND)?
+    {
+        Some(configured) => {
+            let kind = trace_export_dataset_kind_from_storage_name(&configured)
+                .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+            Some(kind.storage_name().to_string())
+        }
+        None => None,
+    };
+    let run_queued_max_jobs = parse_optional_scheduler_usize_env(
+        TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RUN_QUEUED_MAX_JOBS,
+        10,
+        1,
+        50,
+    )?;
+    let retry_failed_max_jobs = parse_optional_scheduler_usize_env(
+        TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_FAILED_MAX_JOBS,
+        TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_JOBS,
+        1,
+        TRACE_EXPORT_JOB_RETRY_MAX_JOBS_LIMIT,
+    )?;
+    let retry_failed_max_retry_count = parse_optional_scheduler_u32_env(
+        TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_FAILED_MAX_RETRY_COUNT,
+        TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_RETRY_COUNT,
+        1,
+        25,
+    )?;
+    let retry_failed_base_delay_seconds = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_BASE_DELAY_SECONDS,
+        TRACE_EXPORT_JOB_RETRY_DEFAULT_BASE_DELAY_SECONDS,
+        0,
+        86_400,
+    )?;
+    let requested_retry_failed_max_delay_seconds = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_MAX_DELAY_SECONDS,
+        TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_DELAY_SECONDS,
+        0,
+        86_400,
+    )?;
+    let retry_failed_max_delay_seconds =
+        requested_retry_failed_max_delay_seconds.max(retry_failed_base_delay_seconds);
+    let retry_failed_reason =
+        optional_trimmed_env(TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_REASON)?
+            .unwrap_or_else(|| "scheduled export job retry".to_string());
+    validate_export_job_retry_reason(&retry_failed_reason)
+        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    Ok(Some(TraceExportJobSchedulerConfig {
+        worker_token: SecretString::from(worker_token),
+        interval: StdDuration::from_secs(interval_seconds),
+        dataset_kind,
+        run_queued_max_jobs,
+        retry_failed_max_jobs,
+        retry_failed_max_retry_count,
+        retry_failed_base_delay_seconds,
+        retry_failed_max_delay_seconds,
+        retry_failed_reason,
+    }))
+}
+
+fn parse_optional_scheduler_u64_env(
+    name: &'static str,
+    default: u64,
+    min: u64,
+    max: u64,
+) -> anyhow::Result<u64> {
+    let value = match optional_trimmed_env(name)? {
+        Some(configured) => configured
+            .parse::<u64>()
+            .with_context(|| format!("{name} must be a positive integer"))?,
+        None => default,
+    };
+    anyhow::ensure!(
+        (min..=max).contains(&value),
+        "{name} must be between {min} and {max}"
+    );
+    Ok(value)
+}
+
+fn parse_optional_scheduler_usize_env(
+    name: &'static str,
+    default: usize,
+    min: usize,
+    max: usize,
+) -> anyhow::Result<usize> {
+    let value = match optional_trimmed_env(name)? {
+        Some(configured) => configured
+            .parse::<usize>()
+            .with_context(|| format!("{name} must be a positive integer"))?,
+        None => default,
+    };
+    anyhow::ensure!(
+        (min..=max).contains(&value),
+        "{name} must be between {min} and {max}"
+    );
+    Ok(value)
+}
+
+fn parse_optional_scheduler_u32_env(
+    name: &'static str,
+    default: u32,
+    min: u32,
+    max: u32,
+) -> anyhow::Result<u32> {
+    let value = match optional_trimmed_env(name)? {
+        Some(configured) => configured
+            .parse::<u32>()
+            .with_context(|| format!("{name} must be a positive integer"))?,
+        None => default,
+    };
+    anyhow::ensure!(
+        (min..=max).contains(&value),
+        "{name} must be between {min} and {max}"
+    );
+    Ok(value)
+}
+
+fn parse_optional_scheduler_i64_env(
+    name: &'static str,
+    default: i64,
+    min: i64,
+    max: i64,
+) -> anyhow::Result<i64> {
+    let value = match optional_trimmed_env(name)? {
+        Some(configured) => configured
+            .parse::<i64>()
+            .with_context(|| format!("{name} must be a non-negative integer"))?,
+        None => default,
+    };
+    anyhow::ensure!(
+        (min..=max).contains(&value),
+        "{name} must be between {min} and {max}"
+    );
+    Ok(value)
+}
+
 async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<Arc<dyn Database>>> {
     if !env_truthy("TRACE_COMMONS_DB_DUAL_WRITE") {
         return Ok(None);
@@ -4013,6 +4209,74 @@ fn spawn_managed_eddsa_keyset_refresh_task(state: &Arc<AppState>) {
             }
         }
     });
+}
+
+fn spawn_trace_export_job_scheduler_task(
+    state: &Arc<AppState>,
+    config: Option<TraceExportJobSchedulerConfig>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    let state = state.clone();
+    let dataset_kind = config.dataset_kind.as_deref().unwrap_or("all");
+    tracing::info!(
+        dataset_kind,
+        interval_seconds = config.interval.as_secs(),
+        run_queued_max_jobs = config.run_queued_max_jobs,
+        retry_failed_max_jobs = config.retry_failed_max_jobs,
+        retry_failed_max_retry_count = config.retry_failed_max_retry_count,
+        "Trace Commons export job scheduler enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(config.interval).await;
+            match run_trace_export_job_scheduler_tick(state.clone(), &config).await {
+                Ok(summary) => {
+                    tracing::info!(
+                        tenant_storage_ref = %summary.run_queued.tenant_storage_ref,
+                        dataset_kind = ?summary.run_queued.requested_dataset_kind,
+                        retried_count = summary.retry_failed.retried_count,
+                        claimed_count = summary.run_queued.claimed_count,
+                        completed_count = summary.run_queued.completed_count,
+                        failed_count = summary.run_queued.failed_count,
+                        pending_after_count = summary.run_queued.pending_after_count,
+                        "Trace Commons export job scheduler tick completed"
+                    );
+                }
+                Err((status, Json(error))) => {
+                    tracing::warn!(
+                        status = %status,
+                        error = %error.error,
+                        "Trace Commons export job scheduler tick failed"
+                    );
+                }
+            }
+        }
+    });
+}
+
+async fn validate_trace_export_job_scheduler_config(
+    state: &AppState,
+    config: Option<&TraceExportJobSchedulerConfig>,
+) -> anyhow::Result<()> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
+        .map_err(trace_export_scheduler_config_error)?;
+    let auth = authenticate_with_tenant_access_grant(state, &headers)
+        .await
+        .map_err(trace_export_scheduler_config_error)?;
+    require_exporter(&auth).map_err(trace_export_scheduler_config_error)
+}
+
+fn trace_export_scheduler_config_error(error: (StatusCode, Json<ApiError>)) -> anyhow::Error {
+    anyhow::anyhow!(
+        "invalid Trace Commons export job scheduler configuration: status={}, error={}",
+        error.0,
+        error.1.0.error
+    )
 }
 
 fn signed_token_claims_to_auth(claims: TraceCommonsSignedTokenClaims) -> ApiResult<TenantAuth> {
@@ -20751,6 +21015,39 @@ async fn worker_export_jobs_retry_failed_handler(
     }))
 }
 
+async fn run_trace_export_job_scheduler_tick(
+    state: Arc<AppState>,
+    config: &TraceExportJobSchedulerConfig,
+) -> ApiResult<TraceExportJobSchedulerTickSummary> {
+    let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())?;
+    let Json(retry_failed) = worker_export_jobs_retry_failed_handler(
+        State(state.clone()),
+        headers.clone(),
+        Json(TraceExportJobsRetryFailedRequest {
+            dataset_kind: config.dataset_kind.clone(),
+            max_jobs: Some(config.retry_failed_max_jobs),
+            max_retry_count: Some(config.retry_failed_max_retry_count),
+            base_delay_seconds: Some(config.retry_failed_base_delay_seconds),
+            max_delay_seconds: Some(config.retry_failed_max_delay_seconds),
+            reason: Some(config.retry_failed_reason.clone()),
+        }),
+    )
+    .await?;
+    let Json(run_queued) = worker_export_jobs_run_queued_handler(
+        State(state),
+        headers,
+        Json(TraceExportJobsRunQueuedRequest {
+            dataset_kind: config.dataset_kind.clone(),
+            max_jobs: Some(config.run_queued_max_jobs),
+        }),
+    )
+    .await?;
+    Ok(TraceExportJobSchedulerTickSummary {
+        retry_failed,
+        run_queued,
+    })
+}
+
 async fn current_trace_export_job_or_claimed(
     db: &Arc<dyn Database>,
     claimed: StorageTraceExportJobRecord,
@@ -26127,6 +26424,17 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> ApiResult<TenantAuth> 
         return verifier.authenticate(token, false, false);
     }
     Err(api_error(StatusCode::FORBIDDEN, "unknown tenant token"))
+}
+
+fn bearer_auth_headers_from_token(token: &str) -> ApiResult<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    let value = format!("Bearer {token}");
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&value)
+            .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid bearer token header"))?,
+    );
+    Ok(headers)
 }
 
 fn authenticate_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult<TenantCtx> {
@@ -49528,6 +49836,169 @@ mod tests {
         assert_eq!(unsafe_job.status, StorageTraceExportJobStatus::Failed);
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn export_job_scheduler_tick_retries_due_failures_then_runs_queued_jobs() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        let now = Utc::now();
+        let failed_job_id = Uuid::new_v4();
+        let queued_job_id = Uuid::new_v4();
+        for (export_job_id, status, purpose, finished_at, metadata) in [
+            (
+                failed_job_id,
+                StorageTraceExportJobStatus::Failed,
+                "scheduler due failed replay",
+                Some(now - Duration::seconds(90)),
+                {
+                    let mut metadata = export_job_request_metadata(
+                        Some(5),
+                        Some(TraceCorpusStatus::Accepted),
+                        Some(ResidualPiiRisk::Low),
+                        Some(ConsentScope::DebuggingEvaluation),
+                        None,
+                    );
+                    metadata.insert("state".to_string(), "failed".to_string());
+                    metadata
+                },
+            ),
+            (
+                queued_job_id,
+                StorageTraceExportJobStatus::Queued,
+                "scheduler queued replay",
+                None,
+                export_job_request_metadata(
+                    Some(5),
+                    Some(TraceCorpusStatus::Accepted),
+                    Some(ResidualPiiRisk::Low),
+                    Some(ConsentScope::DebuggingEvaluation),
+                    None,
+                ),
+            ),
+        ] {
+            let grant_id = Uuid::new_v4();
+            backend
+                .upsert_trace_export_access_grant(StorageTraceExportAccessGrantWrite {
+                    tenant_id: "tenant-a".to_string(),
+                    export_job_id,
+                    grant_id,
+                    caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+                    requested_dataset_kind: TraceExportDatasetKind::ReplayDataset
+                        .storage_name()
+                        .to_string(),
+                    purpose: purpose.to_string(),
+                    max_item_cap: Some(5),
+                    status: StorageTraceExportAccessGrantStatus::Active,
+                    requested_at: now - Duration::minutes(15),
+                    expires_at: now + Duration::minutes(30),
+                    metadata: BTreeMap::from([("grant_type".to_string(), "queued".to_string())]),
+                })
+                .await
+                .expect("export grant writes");
+            backend
+                .upsert_trace_export_job(StorageTraceExportJobWrite {
+                    tenant_id: "tenant-a".to_string(),
+                    export_job_id,
+                    grant_id,
+                    caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+                    requested_dataset_kind: TraceExportDatasetKind::ReplayDataset
+                        .storage_name()
+                        .to_string(),
+                    purpose: purpose.to_string(),
+                    max_item_cap: Some(5),
+                    status,
+                    requested_at: now - Duration::minutes(15),
+                    started_at: finished_at.map(|finished_at| finished_at - Duration::minutes(1)),
+                    finished_at,
+                    expires_at: now + Duration::minutes(30),
+                    result_manifest_id: None,
+                    item_count: None,
+                    last_error: (status == StorageTraceExportJobStatus::Failed).then(|| {
+                        "queued_export_job_execution_failed;reason_hash=sha256:old".to_string()
+                    }),
+                    metadata,
+                })
+                .await
+                .expect("export job writes");
+        }
+
+        let summary = run_trace_export_job_scheduler_tick(
+            state,
+            &TraceExportJobSchedulerConfig {
+                worker_token: SecretString::from("export-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                dataset_kind: Some("replay_dataset".to_string()),
+                run_queued_max_jobs: 5,
+                retry_failed_max_jobs: 5,
+                retry_failed_max_retry_count: 3,
+                retry_failed_base_delay_seconds: 30,
+                retry_failed_max_delay_seconds: 120,
+                retry_failed_reason: "scheduled export retry".to_string(),
+            },
+        )
+        .await
+        .expect("scheduler tick runs through worker auth and handlers");
+
+        assert_eq!(summary.retry_failed.retried_count, 1);
+        assert_eq!(summary.run_queued.claimed_count, 2);
+        assert_eq!(summary.run_queued.completed_count, 2);
+        assert_eq!(summary.run_queued.failed_count, 0);
+        assert_eq!(summary.run_queued.pending_after_count, 0);
+        assert_eq!(
+            summary
+                .run_queued
+                .completed_jobs
+                .iter()
+                .map(|job| job.export_job_id)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([failed_job_id, queued_job_id])
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn export_job_scheduler_config_requires_export_worker_auth_at_startup() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = validate_trace_export_job_scheduler_config(
+            state.as_ref(),
+            Some(&TraceExportJobSchedulerConfig {
+                worker_token: SecretString::from("token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                dataset_kind: None,
+                run_queued_max_jobs: 5,
+                retry_failed_max_jobs: 5,
+                retry_failed_max_retry_count: 3,
+                retry_failed_base_delay_seconds: 30,
+                retry_failed_max_delay_seconds: 120,
+                retry_failed_reason: "scheduled export retry".to_string(),
+            }),
+        )
+        .await
+        .expect_err("contributor token must not start export scheduler");
+
+        assert!(
+            error
+                .to_string()
+                .contains("reviewer, admin, or export worker token required")
+        );
     }
 
     #[test]
