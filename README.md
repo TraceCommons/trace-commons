@@ -244,9 +244,9 @@ summary ranking readiness now also includes candidate/active backtest pass/fail
 counts, backtest reason-code totals, label-adjudication issue blockers,
 ranking worker skip totals/reason aggregates, promotion-gate warnings for
 actionable worker skips, export-job request metadata, atomic queued-job
-claiming, and claimed replay-job execution for replayable worker exports, stale
-export-job blockers with an admin-only stale job recovery route, PostgreSQL RLS
-readiness aggregate counts, safe
+claiming, and claimed replay/benchmark job execution for replayable worker
+exports, stale export-job blockers with an admin-only stale job recovery route,
+PostgreSQL RLS readiness aggregate counts, safe
 promotion-gate counts in the read audit row, and structured warning logs for the
 aggregate gate set plus each individual promotion gate whenever promotion gates
 are blocked or warning. Admins can also scrape `/v1/admin/operational-metrics`

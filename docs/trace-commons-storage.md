@@ -108,10 +108,10 @@ worker external refs without storing raw external ticket or lab references.
 Export workers can atomically claim the oldest unexpired queued job through the
 PostgreSQL control plane, which moves the row to `running` with safe claim
 metadata and leaves expired queued rows untouched for recovery/inspection. The
-first executor path uses that claimed row for replay exports: it reconstructs
-the replay filters from the safe metadata snapshot, publishes the export through
-the existing manifest/audit path, and terminalizes the same row as `complete` or
-`failed` instead of creating a second job.
+first executor path uses that claimed row for replay and benchmark-conversion
+exports: it reconstructs filters from the safe metadata snapshot, publishes the
+export through the existing manifest/artifact/audit paths, and terminalizes the
+same row as `complete` or `failed` instead of creating a second job.
 
 Reconciliation also reports DB audit hash-chain drift as `db_audit_hash_chain_failures` when mirrored audit rows have invalid hash format, a genesis or predecessor mismatch, or a canonical-payload hash mismatch. Those failures are promotion blockers just like canonical projection drift.
 
