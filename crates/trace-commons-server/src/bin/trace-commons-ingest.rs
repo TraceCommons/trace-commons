@@ -3006,6 +3006,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(postgres_rls_drill_handler),
         )
         .route(
+            "/v1/admin/retention-dry-run-drill",
+            post(retention_dry_run_drill_handler),
+        )
+        .route(
             "/v1/admin/operational-metrics",
             get(operational_metrics_handler),
         )
@@ -21890,6 +21894,35 @@ async fn postgres_rls_drill_handler(
     Ok(Json(response))
 }
 
+async fn retention_dry_run_drill_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceRetentionDryRunDrillRequest>,
+) -> ApiResult<Json<TraceRetentionDryRunDrillResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let privileged_tenant_policy = if request.purge_expired_before.is_some() {
+        tenant_privileged_action_policy_for_request(
+            state.as_ref(),
+            tenant.auth(),
+            "retention dry-run drill",
+        )
+        .await?
+    } else {
+        None
+    };
+    ensure_maintenance_purge_matches_privileged_action_policy(
+        state.as_ref(),
+        tenant.auth(),
+        request.purge_expired_before,
+        privileged_tenant_policy.as_ref(),
+    )?;
+    let response = run_retention_dry_run_drill(state.as_ref(), tenant.auth(), request)
+        .await
+        .map_err(maintenance_error)?;
+    Ok(Json(response))
+}
+
 #[derive(Debug, Deserialize)]
 struct TraceRollbackDrillRequest {
     #[serde(default)]
@@ -21978,6 +22011,20 @@ struct TracePostgresRlsDrillRequest {
     record_evidence: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceRetentionDryRunDrillRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    record_evidence: bool,
+    #[serde(default = "default_true")]
+    prune_export_cache: bool,
+    #[serde(default)]
+    max_export_age_hours: Option<i64>,
+    #[serde(default)]
+    purge_expired_before: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Serialize)]
 struct TraceAuditChainDrillResponse {
     tenant_id: String,
@@ -22035,6 +22082,126 @@ struct TracePostgresRlsDrillResponse {
     blocking_gaps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRetentionDryRunDrillResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose: String,
+    ready: bool,
+    evidence_hash: String,
+    dry_run: bool,
+    audit_event_id: Uuid,
+    revoked_submission_count: usize,
+    expired_submission_count: usize,
+    records_marked_revoked: usize,
+    records_marked_expired: usize,
+    records_marked_purged: usize,
+    derived_marked_revoked: usize,
+    derived_marked_expired: usize,
+    export_cache_files_pruned: usize,
+    export_provenance_invalidated: usize,
+    benchmark_artifacts_invalidated: usize,
+    trace_object_files_deleted: usize,
+    encrypted_artifacts_deleted: usize,
+    db_mirror_backfilled: usize,
+    db_mirror_backfill_failed: usize,
+    vector_entries_indexed: usize,
+    blocking_gaps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+async fn run_retention_dry_run_drill(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceRetentionDryRunDrillRequest,
+) -> anyhow::Result<TraceRetentionDryRunDrillResponse> {
+    let generated_at = Utc::now();
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_retention_dry_run_drill")
+        .to_string();
+    let maintenance = run_maintenance(
+        state,
+        tenant,
+        TraceMaintenanceRequest {
+            purpose: Some(purpose.clone()),
+            dry_run: true,
+            backfill_db_mirror: false,
+            index_vectors: false,
+            reconcile_db_mirror: false,
+            verify_audit_chain: false,
+            prune_export_cache: request.prune_export_cache,
+            max_export_age_hours: request.max_export_age_hours,
+            purge_expired_before: request.purge_expired_before,
+        },
+        None,
+    )
+    .await?;
+    let blocking_gaps = retention_dry_run_blocking_gaps(&maintenance);
+    let evidence_hash = retention_dry_run_drill_evidence_hash(tenant, &maintenance, &blocking_gaps);
+    let mut response = TraceRetentionDryRunDrillResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at,
+        purpose: maintenance.purpose,
+        ready: blocking_gaps.is_empty(),
+        evidence_hash,
+        dry_run: maintenance.dry_run,
+        audit_event_id: maintenance.audit_event_id,
+        revoked_submission_count: maintenance.revoked_submission_count,
+        expired_submission_count: maintenance.expired_submission_count,
+        records_marked_revoked: maintenance.records_marked_revoked,
+        records_marked_expired: maintenance.records_marked_expired,
+        records_marked_purged: maintenance.records_marked_purged,
+        derived_marked_revoked: maintenance.derived_marked_revoked,
+        derived_marked_expired: maintenance.derived_marked_expired,
+        export_cache_files_pruned: maintenance.export_cache_files_pruned,
+        export_provenance_invalidated: maintenance.export_provenance_invalidated,
+        benchmark_artifacts_invalidated: maintenance.benchmark_artifacts_invalidated,
+        trace_object_files_deleted: maintenance.trace_object_files_deleted,
+        encrypted_artifacts_deleted: maintenance.encrypted_artifacts_deleted,
+        db_mirror_backfilled: maintenance.db_mirror_backfilled,
+        db_mirror_backfill_failed: maintenance.db_mirror_backfill_failed,
+        vector_entries_indexed: maintenance.vector_entries_indexed,
+        blocking_gaps,
+        recorded_evidence: None,
+    };
+
+    if request.record_evidence {
+        let evidence = TraceRolloutSmokeEvidenceResponse {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            check_name: "retention_dry_run".to_string(),
+            status: if response.ready {
+                TraceRolloutSmokeEvidenceStatus::Passed
+            } else {
+                TraceRolloutSmokeEvidenceStatus::Failed
+            },
+            evidence_hash: response.evidence_hash.clone(),
+            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            recorded_at: Utc::now(),
+        };
+        append_audit_event_with_db_mirror(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+            StorageTraceAuditAction::Read,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .await?;
+        response.recorded_evidence = Some(evidence);
+    }
+
+    Ok(response)
 }
 
 async fn run_postgres_rls_drill(
@@ -22749,6 +22916,36 @@ fn push_key_rotation_gap(gaps: &mut Vec<String>, label: &str, present: bool) {
     }
 }
 
+fn retention_dry_run_blocking_gaps(response: &TraceMaintenanceResponse) -> Vec<String> {
+    let mut gaps = Vec::new();
+    push_key_rotation_gap(
+        &mut gaps,
+        "maintenance_response_not_dry_run",
+        !response.dry_run,
+    );
+    push_rollback_gap_count(
+        &mut gaps,
+        "trace_object_files_deleted",
+        response.trace_object_files_deleted,
+    );
+    push_rollback_gap_count(
+        &mut gaps,
+        "encrypted_artifacts_deleted",
+        response.encrypted_artifacts_deleted,
+    );
+    push_rollback_gap_count(
+        &mut gaps,
+        "db_mirror_backfilled",
+        response.db_mirror_backfilled,
+    );
+    push_rollback_gap_count(
+        &mut gaps,
+        "vector_entries_indexed",
+        response.vector_entries_indexed,
+    );
+    gaps
+}
+
 fn active_rollout_flags_for_rollback_drill(state: &AppState, tenant_id: &str) -> Vec<String> {
     TraceTenantRolloutFeature::ALL
         .into_iter()
@@ -23065,6 +23262,38 @@ fn postgres_rls_drill_evidence_hash(
             "force_rls_disabled_table_count": diagnostics.force_rls_disabled_tables.len(),
             "policy_expression_mismatch_table_count": diagnostics.policy_expression_mismatch_tables.len(),
             "current_role_bypasses_rls": diagnostics.current_role_bypasses_rls,
+            "blocking_gaps": blocking_gaps,
+        })
+        .to_string(),
+    )
+}
+
+fn retention_dry_run_drill_evidence_hash(
+    tenant: &TenantAuth,
+    response: &TraceMaintenanceResponse,
+    blocking_gaps: &[String],
+) -> String {
+    sha256_prefixed(
+        &serde_json::json!({
+            "schema": "trace_commons_retention_dry_run_drill.v1",
+            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+            "actor_principal_ref": tenant.principal_ref,
+            "dry_run": response.dry_run,
+            "revoked_submission_count": response.revoked_submission_count,
+            "expired_submission_count": response.expired_submission_count,
+            "records_marked_revoked": response.records_marked_revoked,
+            "records_marked_expired": response.records_marked_expired,
+            "records_marked_purged": response.records_marked_purged,
+            "derived_marked_revoked": response.derived_marked_revoked,
+            "derived_marked_expired": response.derived_marked_expired,
+            "export_cache_files_pruned": response.export_cache_files_pruned,
+            "export_provenance_invalidated": response.export_provenance_invalidated,
+            "benchmark_artifacts_invalidated": response.benchmark_artifacts_invalidated,
+            "trace_object_files_deleted": response.trace_object_files_deleted,
+            "encrypted_artifacts_deleted": response.encrypted_artifacts_deleted,
+            "db_mirror_backfilled": response.db_mirror_backfilled,
+            "db_mirror_backfill_failed": response.db_mirror_backfill_failed,
+            "vector_entries_indexed": response.vector_entries_indexed,
             "blocking_gaps": blocking_gaps,
         })
         .to_string(),
@@ -54199,6 +54428,136 @@ mod tests {
         artifact_store
             .read_artifact(&tenant_storage_ref("tenant-a"), &receipt)
             .expect_err("encrypted artifact was deleted");
+    }
+
+    #[tokio::test]
+    async fn retention_dry_run_drill_records_smoke_evidence_and_preserves_records() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let Json(pre_expiry_export) = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("test_retention_dry_run_drill_cache".to_string()),
+                status: None,
+                privacy_risk: None,
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("pre-expiry export succeeds");
+        let cached_export_path =
+            export_artifact_dir(temp.path(), "tenant-a", pre_expiry_export.export_id)
+                .join("dataset.json");
+        write_json_file(
+            &cached_export_path,
+            &pre_expiry_export,
+            "test retention dry-run source export cache",
+        )
+        .expect("expired source cache writes");
+
+        let metadata_path = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"))
+            .join("metadata")
+            .join(format!("{submission_id}.json"));
+        let mut metadata_json = serde_json::to_value(record).expect("record serializes");
+        metadata_json["expires_at"] =
+            serde_json::json!((Utc::now() - chrono::Duration::days(1)).to_rfc3339());
+        write_json_file(&metadata_path, &metadata_json, "expired trace metadata")
+            .expect("expired metadata writes");
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/retention-dry-run-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator retention dry-run drill",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("retention dry-run drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("retention dry-run drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(true));
+        assert_eq!(value["dry_run"], serde_json::json!(true));
+        assert_eq!(value["records_marked_expired"], serde_json::json!(1));
+        assert_eq!(value["derived_marked_expired"], serde_json::json!(1));
+        assert_eq!(value["export_cache_files_pruned"], serde_json::json!(1));
+        assert_eq!(value["trace_object_files_deleted"], serde_json::json!(0));
+        assert_eq!(value["encrypted_artifacts_deleted"], serde_json::json!(0));
+        assert_eq!(value["blocking_gaps"], serde_json::json!([]));
+        assert_eq!(
+            value["recorded_evidence"]["check_name"],
+            serde_json::json!("retention_dry_run")
+        );
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("passed")
+        );
+        assert!(
+            value["evidence_hash"]
+                .as_str()
+                .expect("evidence hash is string")
+                .starts_with("sha256:")
+        );
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(cached_export_path.exists());
+        let dry_run_record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("dry-run record reads")
+            .expect("dry-run record exists");
+        assert_eq!(dry_run_record.status, TraceCorpusStatus::Accepted);
+        let dry_run_derived = read_derived_record(temp.path(), "tenant-a", submission_id)
+            .expect("dry-run derived reads")
+            .expect("dry-run derived exists");
+        assert_eq!(dry_run_derived.status, TraceCorpusStatus::Accepted);
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("file audit events read");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "maintenance"
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("dry_run=true") && reason.contains("records_marked_expired=1")
+                })
+        }));
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "rollout_smoke_evidence"
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("check_name=retention_dry_run")
+                        && reason.contains("status=passed")
+                })
+        }));
     }
 
     #[tokio::test]

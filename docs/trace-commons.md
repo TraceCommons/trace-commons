@@ -406,9 +406,9 @@ label-adjudication issue counts, and reason-code totals into the ranking block
 and promotion gates, and it includes a `rollout_smoke` preflight block that
 lists required canary smoke checks, including `tenant_canary_isolation`,
 `db_reconciliation_clean`, `rollback_flag_drill`, `key_rotation_drill`,
-PostgreSQL RLS readiness, and audit-chain verification, while reporting
-recorded, passed, failed, stale, and missing rehearsal evidence separately from
-promotion-gate readiness.
+retention dry-run, PostgreSQL RLS readiness, and audit-chain verification,
+while reporting recorded, passed, failed, stale, and missing rehearsal evidence
+separately from promotion-gate readiness.
 Operators inspect and capture that evidence with admin-only `GET` and `POST`
 `/v1/admin/rollout-smoke/evidence`; `GET` can collapse history to the latest
 record per check with `latest_only=true`, and writes name one required check, a
@@ -433,6 +433,12 @@ PEMs, hosts, URLs, or bearer fetch credentials.
 check from the same safe diagnostics exposed by config status. It returns only
 aggregate policy/RLS/FORCE RLS counts, role-bypass state, and compact blocker
 codes, and can append `postgres_rls_readiness` evidence.
+`POST /v1/admin/retention-dry-run-drill` runs the retention/cache selection
+smoke check through the real maintenance dry-run path with backfill, vector
+indexing, reconciliation, and audit-chain verification disabled. It returns
+tenant-scoped aggregate candidate counts, dry-run deletion guards, compact
+blocker codes, and can append `retention_dry_run` evidence without changing
+trace status or deleting objects.
 `POST /v1/admin/audit-chain-drill` runs audit-chain verification without
 maintenance side effects and can append `audit_chain_verification` evidence;
 responses expose counts, last hashes, blocker codes, and hashes of verifier
@@ -648,6 +654,7 @@ The service exposes:
 - `POST /v1/admin/rollback-drill`
 - `POST /v1/admin/key-rotation-drill`
 - `POST /v1/admin/postgres-rls-drill`
+- `POST /v1/admin/retention-dry-run-drill`
 - `POST /v1/admin/audit-chain-drill`
 - `POST /v1/admin/maintenance`
 - `POST /v1/workers/retention-maintenance`
