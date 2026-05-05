@@ -38857,11 +38857,35 @@ async fn read_rollout_smoke_evidence_for_admin(
 fn latest_rollout_smoke_evidence_by_check(
     evidence: Vec<TraceRolloutSmokeEvidenceResponse>,
 ) -> Vec<TraceRolloutSmokeEvidenceResponse> {
+    latest_rollout_smoke_evidence_map(evidence.iter())
+        .into_values()
+        .cloned()
+        .collect()
+}
+
+fn latest_rollout_smoke_evidence_map<'a>(
+    evidence: impl IntoIterator<Item = &'a TraceRolloutSmokeEvidenceResponse>,
+) -> BTreeMap<String, &'a TraceRolloutSmokeEvidenceResponse> {
     let mut latest_by_check = BTreeMap::new();
     for record in evidence {
-        latest_by_check.insert(record.check_name.clone(), record);
+        latest_by_check
+            .entry(record.check_name.clone())
+            .and_modify(|current: &mut &'a TraceRolloutSmokeEvidenceResponse| {
+                if rollout_smoke_evidence_is_newer(record, current) {
+                    *current = record;
+                }
+            })
+            .or_insert(record);
     }
-    latest_by_check.into_values().collect()
+    latest_by_check
+}
+
+fn rollout_smoke_evidence_is_newer(
+    candidate: &TraceRolloutSmokeEvidenceResponse,
+    current: &TraceRolloutSmokeEvidenceResponse,
+) -> bool {
+    // Break timestamp ties with the event id so replayed evidence resolves deterministically.
+    (candidate.recorded_at, candidate.event_id) > (current.recorded_at, current.event_id)
 }
 
 fn trace_rollout_smoke_evidence_from_audit_event(
@@ -38936,13 +38960,11 @@ impl TraceOperationalRolloutSmokeSummary {
             .iter()
             .map(|check| (*check).to_string())
             .collect::<Vec<_>>();
-        let mut latest_evidence_by_check = BTreeMap::new();
-        for record in evidence {
-            if TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS.contains(&record.check_name.as_str())
-            {
-                latest_evidence_by_check.insert(record.check_name.clone(), record);
-            }
-        }
+        let latest_evidence_by_check =
+            latest_rollout_smoke_evidence_map(evidence.iter().filter(|record| {
+                TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS
+                    .contains(&record.check_name.as_str())
+            }));
         let passed_evidence_checks = latest_evidence_by_check
             .iter()
             .filter_map(|(check, record)| {
@@ -64069,6 +64091,53 @@ mod tests {
         assert!(body_text.contains(&format!(
             "tracedao_operational_rollout_smoke_failed_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 1"
         )));
+    }
+
+    #[test]
+    fn rollout_smoke_latest_evidence_uses_recorded_at_not_input_order() {
+        let newer_passed = TraceRolloutSmokeEvidenceResponse {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            check_name: "audit_reads".to_string(),
+            status: TraceRolloutSmokeEvidenceStatus::Passed,
+            evidence_hash: sha256_prefixed("newer audit reads passed"),
+            evidence_ref_hash: None,
+            actor_principal_ref: principal_storage_ref("admin-token-a"),
+            recorded_at: Utc::now(),
+        };
+        let older_failed = TraceRolloutSmokeEvidenceResponse {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            check_name: "audit_reads".to_string(),
+            status: TraceRolloutSmokeEvidenceStatus::Failed,
+            evidence_hash: sha256_prefixed("older audit reads failed"),
+            evidence_ref_hash: None,
+            actor_principal_ref: principal_storage_ref("admin-token-a"),
+            recorded_at: newer_passed.recorded_at - Duration::minutes(10),
+        };
+        let out_of_order_evidence = vec![newer_passed.clone(), older_failed];
+
+        let latest = latest_rollout_smoke_evidence_by_check(out_of_order_evidence.clone());
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest[0].status, TraceRolloutSmokeEvidenceStatus::Passed);
+        assert_eq!(latest[0].evidence_hash, newer_passed.evidence_hash);
+
+        let summary = TraceOperationalRolloutSmokeSummary::from_promotion_gates_and_evidence(
+            &TraceOperationalPromotionGateSummary {
+                ready: true,
+                ..TraceOperationalPromotionGateSummary::default()
+            },
+            &out_of_order_evidence,
+        );
+        assert_eq!(summary.passed_evidence_checks, vec!["audit_reads"]);
+        assert!(summary.failed_evidence_checks.is_empty());
+        assert!(
+            !summary
+                .missing_evidence_checks
+                .contains(&"audit_reads".to_string())
+        );
     }
 
     #[tokio::test]
