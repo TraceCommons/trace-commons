@@ -20272,6 +20272,8 @@ struct TraceExportJobClaimAndRunResponse {
     executed_job: Option<TraceExportJobSummary>,
     replay_export: Option<TraceReplayDatasetExport>,
     benchmark_artifact: Option<TraceBenchmarkConversionArtifact>,
+    ranker_candidate_export: Option<TraceRankerTrainingCandidateExport>,
+    ranker_pair_export: Option<TraceRankerTrainingPairExport>,
 }
 
 async fn export_jobs_handler(
@@ -20366,15 +20368,6 @@ async fn worker_export_job_claim_and_run_handler(
         .map(trace_export_dataset_kind_from_storage_name)
         .transpose()?
         .unwrap_or(TraceExportDatasetKind::ReplayDataset);
-    if !matches!(
-        requested_dataset_kind,
-        TraceExportDatasetKind::ReplayDataset | TraceExportDatasetKind::BenchmarkConversion
-    ) {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "queued export execution currently supports replay_dataset and benchmark_conversion jobs",
-        ));
-    }
     let db = trace_export_control_db(state.as_ref())?;
     let claimed = db
         .claim_next_trace_export_job(
@@ -20403,6 +20396,8 @@ async fn worker_export_job_claim_and_run_handler(
             executed_job: None,
             replay_export: None,
             benchmark_artifact: None,
+            ranker_candidate_export: None,
+            ranker_pair_export: None,
         }));
     };
 
@@ -20430,12 +20425,16 @@ async fn worker_export_job_claim_and_run_handler(
         executed_job: Some(TraceExportJobSummary::from_storage_record(executed_job)),
         replay_export: execution.replay_export,
         benchmark_artifact: execution.benchmark_artifact,
+        ranker_candidate_export: execution.ranker_candidate_export,
+        ranker_pair_export: execution.ranker_pair_export,
     }))
 }
 
 struct ClaimedExportJobExecution {
     replay_export: Option<TraceReplayDatasetExport>,
     benchmark_artifact: Option<TraceBenchmarkConversionArtifact>,
+    ranker_candidate_export: Option<TraceRankerTrainingCandidateExport>,
+    ranker_pair_export: Option<TraceRankerTrainingPairExport>,
 }
 
 async fn execute_claimed_export_job(
@@ -20462,6 +20461,8 @@ async fn execute_claimed_export_job(
             Ok(ClaimedExportJobExecution {
                 replay_export: Some(export),
                 benchmark_artifact: None,
+                ranker_candidate_export: None,
+                ranker_pair_export: None,
             })
         }
         TraceExportDatasetKind::BenchmarkConversion => {
@@ -20481,13 +20482,64 @@ async fn execute_claimed_export_job(
             Ok(ClaimedExportJobExecution {
                 replay_export: None,
                 benchmark_artifact: Some(artifact),
+                ranker_candidate_export: None,
+                ranker_pair_export: None,
             })
         }
-        TraceExportDatasetKind::RankerTrainingCandidates
-        | TraceExportDatasetKind::RankerTrainingPairs => Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "queued export execution does not yet support ranker training jobs",
-        )),
+        TraceExportDatasetKind::RankerTrainingCandidates => {
+            let query = ranker_training_export_query_from_claimed_job(&job)?;
+            let (consent_scope, tenant_policy, purpose) = prepare_ranker_training_export_execution(
+                state,
+                tenant,
+                &query,
+                "ranker training candidates",
+                "ranker_training_candidates_export",
+            )
+            .await?;
+            let Json(export) = run_ranker_training_candidates_export_job(
+                state,
+                tenant,
+                query,
+                job,
+                consent_scope,
+                tenant_policy,
+                purpose,
+            )
+            .await?;
+            Ok(ClaimedExportJobExecution {
+                replay_export: None,
+                benchmark_artifact: None,
+                ranker_candidate_export: Some(export),
+                ranker_pair_export: None,
+            })
+        }
+        TraceExportDatasetKind::RankerTrainingPairs => {
+            let query = ranker_training_export_query_from_claimed_job(&job)?;
+            let (consent_scope, tenant_policy, purpose) = prepare_ranker_training_export_execution(
+                state,
+                tenant,
+                &query,
+                "ranker training pairs",
+                "ranker_training_pairs_export",
+            )
+            .await?;
+            let Json(export) = run_ranker_training_pairs_export_job(
+                state,
+                tenant,
+                query,
+                job,
+                consent_scope,
+                tenant_policy,
+                purpose,
+            )
+            .await?;
+            Ok(ClaimedExportJobExecution {
+                replay_export: None,
+                benchmark_artifact: None,
+                ranker_candidate_export: None,
+                ranker_pair_export: Some(export),
+            })
+        }
     }
 }
 
@@ -20597,6 +20649,32 @@ fn benchmark_conversion_request_from_claimed_job(
         status: trace_export_job_metadata_filter(&job.metadata, "filter_status")?,
         privacy_risk: trace_export_job_metadata_filter(&job.metadata, "filter_privacy_risk")?,
         external_ref: None,
+    })
+}
+
+fn ranker_training_export_query_from_claimed_job(
+    job: &TraceExportJobSlice,
+) -> ApiResult<RankerTrainingExportQuery> {
+    if job
+        .metadata
+        .get("request_schema_version")
+        .map(String::as_str)
+        != Some("trace_export_job_request.v1")
+    {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "claimed export job is missing replayable request metadata",
+        ));
+    }
+    Ok(RankerTrainingExportQuery {
+        limit: Some(job.max_item_cap),
+        purpose: Some(job.purpose.clone()),
+        status: trace_export_job_metadata_filter(&job.metadata, "filter_status")?,
+        consent_scope: trace_export_job_metadata_string_filter(
+            &job.metadata,
+            "filter_consent_scope",
+        ),
+        privacy_risk: trace_export_job_metadata_filter(&job.metadata, "filter_privacy_risk")?,
     })
 }
 
@@ -22741,24 +22819,12 @@ async fn run_ranker_training_candidates_export_with_grant(
     grant: TraceExportAccessGrant,
     now: DateTime<Utc>,
 ) -> ApiResult<Json<TraceRankerTrainingCandidateExport>> {
-    let consent_scope = parse_ranker_consent_scope_filter(query.consent_scope.as_deref())?;
-    let purpose = normalized_export_purpose(
-        query.purpose.as_deref(),
-        "ranker_training_candidates_export",
-    );
-    enforce_ranker_export_guardrails(
-        state,
-        query.purpose.as_deref(),
-        query.status,
-        query.privacy_risk,
-        consent_scope,
-    )?;
-    let tenant_policy = tenant_export_policy_for_request(
+    let (consent_scope, tenant_policy, purpose) = prepare_ranker_training_export_execution(
         state,
         tenant,
+        &query,
         "ranker training candidates",
-        consent_scope,
-        TraceAllowedUse::RankingModelTraining,
+        "ranker_training_candidates_export",
     )
     .await?;
     let job = create_validated_export_job_slice(
@@ -22786,6 +22852,54 @@ async fn run_ranker_training_candidates_export_with_grant(
     )
     .await
     .map_err(internal_error)?;
+    run_ranker_training_candidates_export_job(
+        state,
+        tenant,
+        query,
+        job,
+        consent_scope,
+        tenant_policy,
+        purpose,
+    )
+    .await
+}
+
+async fn prepare_ranker_training_export_execution(
+    state: &AppState,
+    tenant: &TenantAuth,
+    query: &RankerTrainingExportQuery,
+    surface: &str,
+    default_purpose: &str,
+) -> ApiResult<(Option<ConsentScope>, Option<TenantSubmissionPolicy>, String)> {
+    let consent_scope = parse_ranker_consent_scope_filter(query.consent_scope.as_deref())?;
+    let purpose = normalized_export_purpose(query.purpose.as_deref(), default_purpose);
+    enforce_ranker_export_guardrails(
+        state,
+        query.purpose.as_deref(),
+        query.status,
+        query.privacy_risk,
+        consent_scope,
+    )?;
+    let tenant_policy = tenant_export_policy_for_request(
+        state,
+        tenant,
+        surface,
+        consent_scope,
+        TraceAllowedUse::RankingModelTraining,
+    )
+    .await?;
+    Ok((consent_scope, tenant_policy, purpose))
+}
+
+async fn run_ranker_training_candidates_export_job(
+    state: &AppState,
+    tenant: &TenantAuth,
+    query: RankerTrainingExportQuery,
+    job: TraceExportJobSlice,
+    consent_scope: Option<ConsentScope>,
+    tenant_policy: Option<TenantSubmissionPolicy>,
+    purpose: String,
+) -> ApiResult<Json<TraceRankerTrainingCandidateExport>> {
     let mut candidate_query = query;
     candidate_query.limit = Some(job.max_item_cap);
     let candidates = fail_export_job_on_error(
@@ -23072,22 +23186,12 @@ async fn run_ranker_training_pairs_export_with_grant(
     grant: TraceExportAccessGrant,
     now: DateTime<Utc>,
 ) -> ApiResult<Json<TraceRankerTrainingPairExport>> {
-    let consent_scope = parse_ranker_consent_scope_filter(query.consent_scope.as_deref())?;
-    let purpose =
-        normalized_export_purpose(query.purpose.as_deref(), "ranker_training_pairs_export");
-    enforce_ranker_export_guardrails(
-        state,
-        query.purpose.as_deref(),
-        query.status,
-        query.privacy_risk,
-        consent_scope,
-    )?;
-    let tenant_policy = tenant_export_policy_for_request(
+    let (consent_scope, tenant_policy, purpose) = prepare_ranker_training_export_execution(
         state,
         tenant,
+        &query,
         "ranker training pairs",
-        consent_scope,
-        TraceAllowedUse::RankingModelTraining,
+        "ranker_training_pairs_export",
     )
     .await?;
     let job = create_validated_export_job_slice(
@@ -23115,6 +23219,27 @@ async fn run_ranker_training_pairs_export_with_grant(
     )
     .await
     .map_err(internal_error)?;
+    run_ranker_training_pairs_export_job(
+        state,
+        tenant,
+        query,
+        job,
+        consent_scope,
+        tenant_policy,
+        purpose,
+    )
+    .await
+}
+
+async fn run_ranker_training_pairs_export_job(
+    state: &AppState,
+    tenant: &TenantAuth,
+    query: RankerTrainingExportQuery,
+    job: TraceExportJobSlice,
+    consent_scope: Option<ConsentScope>,
+    tenant_policy: Option<TenantSubmissionPolicy>,
+    purpose: String,
+) -> ApiResult<Json<TraceRankerTrainingPairExport>> {
     let mut pair_query = query;
     let pair_limit = job.max_item_cap;
     pair_query.limit = Some(pair_limit.saturating_add(1));
@@ -48171,6 +48296,203 @@ mod tests {
                 .count(),
             1,
             "queued benchmark execution credits included source once"
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn export_worker_claims_and_runs_queued_ranker_jobs_from_safe_metadata() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        let mut preferred = sample_envelope().await;
+        make_metadata_only_low_risk(&mut preferred);
+        preferred.consent.scopes = vec![ConsentScope::RankingTraining];
+        preferred.trace_card.consent_scope = ConsentScope::RankingTraining;
+        preferred.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let preferred_id = preferred.submission_id;
+        let mut rejected = sample_envelope().await;
+        make_metadata_only_low_risk(&mut rejected);
+        rejected.consent.scopes = vec![ConsentScope::RankingTraining];
+        rejected.trace_card.consent_scope = ConsentScope::RankingTraining;
+        rejected.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        rejected.value.submission_score = 0.1;
+        let rejected_id = rejected.submission_id;
+        for envelope in [preferred, rejected] {
+            let _ = submit_trace_handler(
+                State(state.clone()),
+                auth_headers("token-a"),
+                Json(envelope),
+            )
+            .await
+            .expect("ranking source submission writes file and DB metadata");
+        }
+
+        let now = Utc::now();
+        let candidate_job_id = Uuid::new_v4();
+        let pair_job_id = Uuid::new_v4();
+        for (export_job_id, dataset_kind, purpose) in [
+            (
+                candidate_job_id,
+                TraceExportDatasetKind::RankerTrainingCandidates,
+                "queued ranker candidates execution",
+            ),
+            (
+                pair_job_id,
+                TraceExportDatasetKind::RankerTrainingPairs,
+                "queued ranker pairs execution",
+            ),
+        ] {
+            let grant_id = Uuid::new_v4();
+            backend
+                .upsert_trace_export_access_grant(StorageTraceExportAccessGrantWrite {
+                    tenant_id: "tenant-a".to_string(),
+                    export_job_id,
+                    grant_id,
+                    caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+                    requested_dataset_kind: dataset_kind.storage_name().to_string(),
+                    purpose: purpose.to_string(),
+                    max_item_cap: Some(5),
+                    status: StorageTraceExportAccessGrantStatus::Active,
+                    requested_at: now - Duration::minutes(5),
+                    expires_at: now + Duration::minutes(30),
+                    metadata: BTreeMap::from([("grant_type".to_string(), "queued".to_string())]),
+                })
+                .await
+                .expect("export grant writes");
+            backend
+                .upsert_trace_export_job(StorageTraceExportJobWrite {
+                    tenant_id: "tenant-a".to_string(),
+                    export_job_id,
+                    grant_id,
+                    caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+                    requested_dataset_kind: dataset_kind.storage_name().to_string(),
+                    purpose: purpose.to_string(),
+                    max_item_cap: Some(5),
+                    status: StorageTraceExportJobStatus::Queued,
+                    requested_at: now - Duration::minutes(5),
+                    started_at: None,
+                    finished_at: None,
+                    expires_at: now + Duration::minutes(30),
+                    result_manifest_id: None,
+                    item_count: None,
+                    last_error: None,
+                    metadata: export_job_request_metadata(
+                        Some(5),
+                        Some(TraceCorpusStatus::Accepted),
+                        Some(ResidualPiiRisk::Low),
+                        Some(ConsentScope::RankingTraining),
+                        None,
+                    ),
+                })
+                .await
+                .expect("queued ranker job writes");
+        }
+
+        let Json(candidate_response) = worker_export_job_claim_and_run_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Json(TraceExportJobClaimAndRunRequest {
+                dataset_kind: Some("ranker-training-candidates".to_string()),
+            }),
+        )
+        .await
+        .expect("export worker runs queued ranker candidate job");
+        let candidate_export = candidate_response
+            .ranker_candidate_export
+            .expect("ranker candidate export returned");
+        assert!(candidate_response.replay_export.is_none());
+        assert!(candidate_response.benchmark_artifact.is_none());
+        assert_eq!(
+            candidate_response.executed_job.expect("job").export_job_id,
+            candidate_job_id
+        );
+        assert_eq!(candidate_export.item_count, 2);
+        assert!(
+            candidate_export
+                .candidates
+                .iter()
+                .any(|candidate| candidate.submission_id == preferred_id)
+        );
+        assert!(
+            candidate_export
+                .candidates
+                .iter()
+                .any(|candidate| candidate.submission_id == rejected_id)
+        );
+
+        let Json(pair_response) = worker_export_job_claim_and_run_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Json(TraceExportJobClaimAndRunRequest {
+                dataset_kind: Some("ranker_training_pairs".to_string()),
+            }),
+        )
+        .await
+        .expect("export worker runs queued ranker pair job");
+        let pair_export = pair_response
+            .ranker_pair_export
+            .expect("ranker pair export returned");
+        assert_eq!(pair_export.item_count, 1);
+        assert_eq!(pair_export.pairs[0].preferred_submission_id, preferred_id);
+        assert_eq!(pair_export.pairs[0].rejected_submission_id, rejected_id);
+
+        let jobs = backend
+            .list_trace_export_jobs("tenant-a")
+            .await
+            .expect("jobs list");
+        for (export_job_id, result_id, item_count) in [
+            (
+                candidate_job_id,
+                candidate_export.export_id,
+                candidate_export.item_count,
+            ),
+            (pair_job_id, pair_export.export_id, pair_export.item_count),
+        ] {
+            let completed = jobs
+                .iter()
+                .find(|job| job.export_job_id == export_job_id)
+                .expect("completed ranker job exists");
+            assert_eq!(completed.status, StorageTraceExportJobStatus::Complete);
+            assert_eq!(
+                completed.item_count,
+                Some(item_count.min(u32::MAX as usize) as u32)
+            );
+            assert_eq!(completed.result_manifest_id, Some(result_id));
+            assert_eq!(
+                completed.metadata.get("state").map(String::as_str),
+                Some("completed")
+            );
+        }
+        let credit_events =
+            read_all_credit_events(temp.path(), "tenant-a").expect("credit events read");
+        assert_eq!(
+            credit_events
+                .iter()
+                .filter(|event| event.event_type == TraceCreditLedgerEventType::TrainingUtility)
+                .count(),
+            2
+        );
+        assert_eq!(
+            credit_events
+                .iter()
+                .filter(|event| event.event_type == TraceCreditLedgerEventType::RankingUtility)
+                .count(),
+            2
         );
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
