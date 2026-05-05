@@ -414,6 +414,10 @@ Operators inspect and capture that evidence with admin-only `GET` and `POST`
 record per check with `latest_only=true`, and writes name one required check, a
 `passed` or `failed` status, a sha256-prefixed evidence hash, and an optional
 external reference that is stored only as a hash in the tenant audit chain.
+`POST /v1/admin/db-reconciliation-drill` runs the clean-reconciliation smoke
+check without maintenance side effects: it requires a DB mirror, reuses the
+file-vs-DB reconciliation engine, returns safe aggregate counts plus compact
+blocker codes, and can append `db_reconciliation_clean` rollout-smoke evidence.
 `POST /v1/admin/rollback-drill` runs the concrete rollback smoke check against
 the current tenant: it requires a DB mirror, compares file-backed and DB-backed
 submission, audit, and tombstone ids without deleting or rewriting either side,
@@ -636,6 +640,7 @@ The service exposes:
 - `POST /v1/workers/export/jobs/retry-failed`
 - `GET /v1/admin/config-status`
 - `GET|POST /v1/admin/rollout-smoke/evidence`
+- `POST /v1/admin/db-reconciliation-drill`
 - `POST /v1/admin/rollback-drill`
 - `POST /v1/admin/key-rotation-drill`
 - `POST /v1/admin/audit-chain-drill`
