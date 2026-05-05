@@ -243,13 +243,14 @@ which also writes a hash-only audit event for the recovery action. Operational
 summary ranking readiness now also includes candidate/active backtest pass/fail
 counts, backtest reason-code totals, label-adjudication issue blockers,
 ranking worker skip totals/reason aggregates, promotion-gate warnings for
-actionable worker skips, safe promotion-gate counts in the read audit row, and
-structured warning logs for the aggregate gate set plus each individual
-promotion gate whenever promotion gates are blocked or warning. Admins can also
-scrape `/v1/admin/operational-metrics` for a Prometheus-text snapshot of the
-same safe promotion, per-gate, worker-skip, rollout-smoke, submission, review
-SLA, export, retention, vector, benchmark, and delayed-credit gauges. The same
-summary response includes a `rollout_smoke` preflight block with the required
+actionable worker skips, PostgreSQL RLS readiness aggregate counts, safe
+promotion-gate counts in the read audit row, and structured warning logs for the
+aggregate gate set plus each individual promotion gate whenever promotion gates
+are blocked or warning. Admins can also scrape `/v1/admin/operational-metrics`
+for a Prometheus-text snapshot of the same safe promotion, per-gate,
+worker-skip, rollout-smoke, submission, review SLA, export, retention, vector,
+benchmark, and delayed-credit gauges. The same summary response includes a
+`rollout_smoke` preflight block with the required
 canary smoke-check names, promotion-gate readiness, recorded evidence counts,
 passed evidence counts, failed evidence counts, and explicit missing
 rehearsal-evidence counts so operators do not mistake a clean gate snapshot for

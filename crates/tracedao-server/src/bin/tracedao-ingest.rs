@@ -20758,6 +20758,7 @@ async fn read_operational_ranking_summary(
 #[derive(Debug, Default)]
 struct TraceOperationalDbSummary {
     db_available: bool,
+    trace_corpus_rls: Option<TraceCorpusRlsDiagnostics>,
     export_manifests: Vec<StorageTraceExportManifestRecord>,
     export_jobs: Vec<StorageTraceExportJobRecord>,
     retention_jobs: Vec<StorageTraceRetentionJobRecord>,
@@ -20774,6 +20775,10 @@ async fn read_operational_db_summary(
     let tenant_id = &tenant.tenant_id;
     Ok(TraceOperationalDbSummary {
         db_available: true,
+        trace_corpus_rls: db
+            .trace_corpus_rls_diagnostics()
+            .await
+            .context("failed to read Trace Commons PostgreSQL RLS diagnostics")?,
         export_manifests: db
             .list_trace_export_manifests(tenant_id)
             .await
@@ -38683,14 +38688,17 @@ impl TraceOperationalSummaryResponse {
             &inputs.benchmark_artifacts,
             &inputs.benchmark_registry_outbox,
         );
-        let promotion_gates = TraceOperationalPromotionGateSummary::from_state_and_summaries(
-            inputs.state,
-            &review_sla,
-            &exports,
-            &retention,
-            &vectors,
-            &benchmarks,
-            &inputs.ranking,
+        let promotion_gates = TraceOperationalPromotionGateSummary::from_inputs(
+            TraceOperationalPromotionGateInputs {
+                state: inputs.state,
+                db_summary: &inputs.db_summary,
+                review_sla: &review_sla,
+                exports: &exports,
+                retention: &retention,
+                vectors: &vectors,
+                benchmarks: &benchmarks,
+                ranking: &inputs.ranking,
+            },
         );
         let rollout_smoke = TraceOperationalRolloutSmokeSummary::from_promotion_gates_and_evidence(
             &promotion_gates,
@@ -39015,6 +39023,13 @@ struct TraceOperationalPromotionGateSummary {
     object_primary_submit_review: bool,
     object_primary_replay_export: bool,
     object_primary_derived_exports: bool,
+    trace_corpus_rls_ready: Option<bool>,
+    trace_corpus_rls_expected_table_count: usize,
+    trace_corpus_rls_missing_policy_table_count: usize,
+    trace_corpus_rls_disabled_table_count: usize,
+    force_rls_disabled_table_count: usize,
+    trace_corpus_rls_expression_mismatch_table_count: usize,
+    current_role_bypasses_rls: bool,
     tenant_rollout_gate_count: usize,
     tenant_rollout_gate_counts: BTreeMap<String, usize>,
     open_review_count: usize,
@@ -39035,16 +39050,27 @@ struct TraceOperationalPromotionGateSummary {
     ranking_worker_run_skip_reason_counts: BTreeMap<String, usize>,
 }
 
+struct TraceOperationalPromotionGateInputs<'a> {
+    state: &'a AppState,
+    db_summary: &'a TraceOperationalDbSummary,
+    review_sla: &'a TraceOperationalReviewSlaSummary,
+    exports: &'a TraceOperationalExportSummary,
+    retention: &'a TraceOperationalRetentionSummary,
+    vectors: &'a TraceOperationalVectorSummary,
+    benchmarks: &'a TraceOperationalBenchmarkSummary,
+    ranking: &'a TraceOperationalRankingSummary,
+}
+
 impl TraceOperationalPromotionGateSummary {
-    fn from_state_and_summaries(
-        state: &AppState,
-        review_sla: &TraceOperationalReviewSlaSummary,
-        exports: &TraceOperationalExportSummary,
-        retention: &TraceOperationalRetentionSummary,
-        vectors: &TraceOperationalVectorSummary,
-        benchmarks: &TraceOperationalBenchmarkSummary,
-        ranking: &TraceOperationalRankingSummary,
-    ) -> Self {
+    fn from_inputs(inputs: TraceOperationalPromotionGateInputs<'_>) -> Self {
+        let state = inputs.state;
+        let db_summary = inputs.db_summary;
+        let review_sla = inputs.review_sla;
+        let exports = inputs.exports;
+        let retention = inputs.retention;
+        let vectors = inputs.vectors;
+        let benchmarks = inputs.benchmarks;
+        let ranking = inputs.ranking;
         let db_mirror_configured = state.db_mirror.is_some();
         let tenant_rollout_gate_counts = state.tenant_rollout_gates.status_counts();
         let tenant_rollout_gate_count = tenant_rollout_gate_counts.values().sum();
@@ -39072,6 +39098,36 @@ impl TraceOperationalPromotionGateSummary {
             .worker_run_skipped_model_risk_total
             .saturating_add(ranking.worker_run_skipped_ineligible_total);
         let ranking_worker_run_skip_reason_counts = ranking.worker_run_reason_counts.clone();
+        let trace_corpus_rls_ready = db_summary
+            .trace_corpus_rls
+            .as_ref()
+            .map(TraceCorpusRlsDiagnostics::production_ready);
+        let trace_corpus_rls_expected_table_count = db_summary
+            .trace_corpus_rls
+            .as_ref()
+            .map_or(0, |diagnostics| diagnostics.expected_table_count);
+        let trace_corpus_rls_missing_policy_table_count = db_summary
+            .trace_corpus_rls
+            .as_ref()
+            .map_or(0, |diagnostics| diagnostics.missing_policy_tables.len());
+        let trace_corpus_rls_disabled_table_count = db_summary
+            .trace_corpus_rls
+            .as_ref()
+            .map_or(0, |diagnostics| diagnostics.rls_disabled_tables.len());
+        let force_rls_disabled_table_count = db_summary
+            .trace_corpus_rls
+            .as_ref()
+            .map_or(0, |diagnostics| diagnostics.force_rls_disabled_tables.len());
+        let trace_corpus_rls_expression_mismatch_table_count = db_summary
+            .trace_corpus_rls
+            .as_ref()
+            .map_or(0, |diagnostics| {
+                diagnostics.policy_expression_mismatch_tables.len()
+            });
+        let current_role_bypasses_rls = db_summary
+            .trace_corpus_rls
+            .as_ref()
+            .is_some_and(|diagnostics| diagnostics.current_role_bypasses_rls);
         let mut blocking_gates = Vec::new();
         let mut warning_gates = Vec::new();
 
@@ -39102,6 +39158,17 @@ impl TraceOperationalPromotionGateSummary {
             && !db_mirror_configured
         {
             blocking_gates.push("object_primary_storage_required_without_db_mirror".to_string());
+        }
+        if db_summary.db_available {
+            match trace_corpus_rls_ready {
+                Some(true) => {}
+                Some(false) => {
+                    blocking_gates.push("postgres_trace_rls_not_ready".to_string());
+                }
+                None => {
+                    blocking_gates.push("postgres_trace_rls_diagnostics_unavailable".to_string());
+                }
+            }
         }
         if state.require_derived_export_object_refs {
             push_gap_count(
@@ -39186,6 +39253,13 @@ impl TraceOperationalPromotionGateSummary {
             object_primary_submit_review: state.object_primary_submit_review,
             object_primary_replay_export: state.object_primary_replay_export,
             object_primary_derived_exports: state.object_primary_derived_exports,
+            trace_corpus_rls_ready,
+            trace_corpus_rls_expected_table_count,
+            trace_corpus_rls_missing_policy_table_count,
+            trace_corpus_rls_disabled_table_count,
+            force_rls_disabled_table_count,
+            trace_corpus_rls_expression_mismatch_table_count,
+            current_role_bypasses_rls,
             tenant_rollout_gate_count,
             tenant_rollout_gate_counts,
             open_review_count,
@@ -64359,6 +64433,58 @@ mod tests {
         assert_eq!(fields[2].gate_severity, "warning");
         assert_eq!(fields[2].gate_name, "ranking_worker_run_actionable_skips");
         assert_eq!(fields[2].gate_value, 3);
+    }
+
+    #[test]
+    fn operational_summary_blocks_postgres_trace_rls_not_ready() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut unsafe_rls = production_ready_rls_diagnostics_for_tests();
+        unsafe_rls.force_rls_enabled_count = 1;
+        unsafe_rls
+            .force_rls_disabled_tables
+            .push("trace_object_refs".to_string());
+        unsafe_rls.current_role_bypasses_rls = true;
+
+        let response = TraceOperationalSummaryResponse::from_parts(TraceOperationalSummaryInputs {
+            state: state.as_ref(),
+            tenant_id: "tenant-a".to_string(),
+            records: Vec::new(),
+            derived: Vec::new(),
+            credit_events: Vec::new(),
+            db_summary: TraceOperationalDbSummary {
+                db_available: true,
+                trace_corpus_rls: Some(unsafe_rls),
+                ..TraceOperationalDbSummary::default()
+            },
+            benchmark_artifacts: Vec::new(),
+            benchmark_registry_outbox: Vec::new(),
+            ranking: TraceOperationalRankingSummary::default(),
+            rollout_smoke_evidence: Vec::new(),
+            generated_at: Utc::now(),
+        });
+
+        assert!(!response.promotion_gates.ready);
+        assert_eq!(response.promotion_gates.trace_corpus_rls_ready, Some(false));
+        assert_eq!(response.promotion_gates.force_rls_disabled_table_count, 1);
+        assert!(response.promotion_gates.current_role_bypasses_rls);
+        assert!(
+            response
+                .promotion_gates
+                .blocking_gates
+                .contains(&"postgres_trace_rls_not_ready".to_string())
+        );
+
+        let (metrics, _) = trace_operational_metrics_body(&response);
+        assert!(metrics.contains("gate=\"postgres_trace_rls_not_ready\""));
+        assert!(!metrics.contains("trace_object_refs"));
+        let response_json =
+            serde_json::to_value(&response).expect("operational summary serializes");
+        assert_eq!(
+            response_json["promotion_gates"]["force_rls_disabled_table_count"],
+            serde_json::json!(1)
+        );
+        assert!(!response_json.to_string().contains("trace_object_refs"));
     }
 
     #[tokio::test]

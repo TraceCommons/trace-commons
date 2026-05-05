@@ -400,7 +400,8 @@ routes project the same legacy conflict class into safe aggregate
 `calibration_dataset_manifest_conflict_count` fields and
 `ranking_calibration_dataset_manifest_conflicts` promotion-gate blockers, so
 operators can hold credit issuance without exposing the underlying manifest
-history. Operational summary also projects ranking backtest pass/fail counts,
+history. Operational summary also projects PostgreSQL RLS production readiness
+into aggregate-only promotion-gate fields, ranking backtest pass/fail counts,
 label-adjudication issue counts, and reason-code totals into the ranking block
 and promotion gates, and it includes a `rollout_smoke` preflight block that
 lists required canary smoke checks while reporting recorded, passed, failed,
@@ -869,7 +870,10 @@ calibration error evidence for promotion gates, calibration joined-evidence
 hashes, and settlement calibration evidence-hash binding; config-status can
 report catalog-only RLS readiness, including policy counts, expression
 mismatches, disabled tables, force-RLS counts, force-RLS missing tables, whether
-the current role bypasses RLS, and a stricter production-ready boolean.
+the current role bypasses RLS, and a stricter production-ready boolean. The
+admin operational summary and metrics promote unsafe RLS diagnostics into a
+`postgres_trace_rls_not_ready` promotion blocker while exposing only readiness
+booleans and aggregate counts, not table names.
 Production deployments can set `TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY=true`
 to fail startup unless the configured PostgreSQL database is fully ready for RLS
 as an active tenant boundary. Production deployments still need a non-bypassing
