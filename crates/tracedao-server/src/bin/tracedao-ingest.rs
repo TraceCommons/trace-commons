@@ -19235,6 +19235,7 @@ fn ensure_review_decision_eligible(
     decision: TraceReviewDecision,
     now: DateTime<Utc>,
 ) -> ApiResult<()> {
+    ensure_retention_metadata_within_server_policy(record).map_err(internal_error)?;
     if record.is_terminal() {
         return Err(api_error(
             StatusCode::CONFLICT,
@@ -24695,6 +24696,7 @@ fn ensure_maintenance_purge_matches_privileged_action_policy(
     let records =
         read_all_submission_records(&state.root, &tenant.tenant_id).map_err(internal_error)?;
     for record in records {
+        ensure_retention_metadata_within_server_policy(&record).map_err(internal_error)?;
         if retention_policy_is_on_legal_hold(state, &record).map_err(internal_error)? {
             continue;
         }
@@ -31899,6 +31901,7 @@ async fn run_maintenance(
     let mut records_marked_expired = 0usize;
     let now = Utc::now();
     for record in &mut records {
+        ensure_retention_metadata_within_server_policy(record)?;
         if record.is_revoked() {
             revoked_submission_ids.insert(record.submission_id);
             let revocation_reason = revocation_reasons
@@ -32216,6 +32219,31 @@ fn retention_policy_is_on_legal_hold(
     Ok(is_on_legal_hold)
 }
 
+fn ensure_retention_metadata_within_server_policy(
+    record: &TraceCommonsSubmissionRecord,
+) -> anyhow::Result<()> {
+    let expected_policy = retention_policy_for_submission_record(record);
+    if is_server_retention_policy_id(&record.retention_policy_id) {
+        anyhow::ensure!(
+            record.retention_policy_id == expected_policy.name,
+            "trace retention policy metadata mismatch"
+        );
+    }
+    if record.retention_policy_id == expected_policy.name
+        && let Some(max_age_days) = expected_policy.max_age_days
+    {
+        let expected_expires_at = record.received_at + Duration::days(i64::from(max_age_days));
+        let Some(expires_at) = record.expires_at else {
+            anyhow::bail!("trace retention expiration metadata missing");
+        };
+        anyhow::ensure!(
+            expires_at <= expected_expires_at,
+            "trace retention expiration metadata exceeds server policy"
+        );
+    }
+    Ok(())
+}
+
 fn retention_policy_for_submission_record(
     record: &TraceCommonsSubmissionRecord,
 ) -> tracedao_protocol::trace_contribution::TraceRetentionPolicy {
@@ -32226,6 +32254,16 @@ fn retention_policy_for_submission_record(
         .max_by_key(trace_allowed_use_retention_rank)
         .unwrap_or(TraceAllowedUse::Debugging);
     retention_policy_for_allowed_use(strongest)
+}
+
+fn is_server_retention_policy_id(policy_id: &str) -> bool {
+    matches!(
+        policy_id,
+        "private_corpus_revocable"
+            | "benchmark_revocable"
+            | "training_revocable"
+            | "aggregate_only"
+    )
 }
 
 fn trace_allowed_use_retention_rank(allowed_use: &TraceAllowedUse) -> u8 {
@@ -44308,6 +44346,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn review_rejects_extended_retention_expiration_before_body_read() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("quarantined submission succeeds");
+        let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let server_policy = retention_policy_for_submission_record(&record);
+        let server_max_age_days = server_policy.max_age_days.expect("policy expires");
+        record.expires_at =
+            Some(record.received_at + Duration::days(i64::from(server_max_age_days + 1)));
+        write_submission_record(&state.root, &record).expect("extended retention record writes");
+
+        let error = review_decision_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some("extended retention metadata should fail closed".to_string()),
+                credit_points_pending: None,
+            }),
+        )
+        .await
+        .expect_err("extended retention metadata cannot be reviewed");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        let record_after = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record still reads")
+            .expect("record still exists");
+        assert_eq!(record_after.status, TraceCorpusStatus::Quarantined);
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
+        assert!(audit_events.iter().all(|event| {
+            event.submission_id != submission_id
+                || !matches!(
+                    event.kind.as_str(),
+                    "trace_content_read" | "review_decision"
+                )
+        }));
+    }
+
+    #[tokio::test]
     async fn review_decision_blocks_purged_trace() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -49219,6 +49308,60 @@ mod tests {
         )
         .await
         .expect_err("tampered retention metadata fails closed");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        let record_after = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record still reads")
+            .expect("record still exists");
+        assert_eq!(record_after.status, TraceCorpusStatus::Accepted);
+        assert!(
+            !read_all_audit_events(temp.path(), "tenant-a")
+                .expect("audit reads")
+                .iter()
+                .any(|event| event.kind == "maintenance")
+        );
+    }
+
+    #[tokio::test]
+    async fn maintenance_rejects_extended_retention_expiration_before_side_effects() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let server_policy = retention_policy_for_submission_record(&record);
+        let server_max_age_days = server_policy.max_age_days.expect("policy expires");
+        record.expires_at =
+            Some(record.received_at + Duration::days(i64::from(server_max_age_days + 1)));
+        write_submission_record(&state.root, &record).expect("extended retention record writes");
+
+        let error = maintenance_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("extended_retention_expiration".to_string()),
+                dry_run: false,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect_err("extended retention metadata fails closed");
         assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
         let record_after = read_submission_record(temp.path(), "tenant-a", submission_id)
             .expect("record still reads")
