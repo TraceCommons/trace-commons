@@ -1179,6 +1179,9 @@ pub enum TraceAuditSafeMetadata {
         surface: String,
         item_count: u32,
     },
+    Revocation {
+        reason_hash: String,
+    },
     Export {
         artifact_kind: TraceObjectArtifactKind,
         purpose_code: Option<String>,

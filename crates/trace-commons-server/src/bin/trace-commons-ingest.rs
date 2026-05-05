@@ -5442,7 +5442,7 @@ async fn revoke_submission(
         tenant.auth(),
         tenant.revoked_audit_event(submission_id, &revocation_reason),
         StorageTraceAuditAction::Revoke,
-        StorageTraceAuditSafeMetadata::Empty,
+        trace_revocation_audit_metadata(&revocation_reason),
     )
     .await
     .map_err(internal_error)?;
@@ -5886,6 +5886,22 @@ fn trace_content_read_audit_metadata_from_reason(
         surface,
         purpose_hash,
     })
+}
+
+fn trace_revocation_audit_metadata(reason: &str) -> StorageTraceAuditSafeMetadata {
+    StorageTraceAuditSafeMetadata::Revocation {
+        reason_hash: sha256_prefixed(reason),
+    }
+}
+
+fn trace_revocation_audit_metadata_from_reason(
+    reason: Option<&str>,
+) -> Option<StorageTraceAuditSafeMetadata> {
+    let reason = reason?.trim();
+    if reason.is_empty() {
+        return None;
+    }
+    Some(trace_revocation_audit_metadata(reason))
 }
 
 fn tenant_policy_audit_metadata_from_reason(
@@ -25017,6 +25033,11 @@ fn trace_commons_audit_event_from_storage(
             Some(trace_read_audit_reason(surface, *item_count as usize)),
             Some(*item_count as usize),
         ),
+        StorageTraceAuditSafeMetadata::Revocation { reason_hash: _ } => (
+            Some(TraceCorpusStatus::Revoked),
+            event.reason.clone(),
+            None,
+        ),
         StorageTraceAuditSafeMetadata::Export {
             artifact_kind: _,
             purpose_code,
@@ -30636,6 +30657,29 @@ fn normalize_audit_event_metadata(
             ),
         };
     }
+    if action == StorageTraceAuditAction::Revoke && event.kind == "revoked" {
+        let expected = trace_revocation_audit_metadata_from_reason(event.reason.as_deref())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "revocation audit event {} requires a non-empty reason",
+                    event.event_id
+                )
+            })?;
+        return match metadata {
+            StorageTraceAuditSafeMetadata::Empty => Ok(expected),
+            StorageTraceAuditSafeMetadata::Revocation { .. } if metadata == expected => {
+                Ok(metadata)
+            }
+            StorageTraceAuditSafeMetadata::Revocation { .. } => anyhow::bail!(
+                "revocation audit event {} metadata does not match reason",
+                event.event_id
+            ),
+            _ => anyhow::bail!(
+                "revocation audit event {} requires revocation metadata",
+                event.event_id
+            ),
+        };
+    }
     Ok(metadata)
 }
 
@@ -31762,6 +31806,18 @@ fn verify_db_audit_projection(
             "db row {row_number} event {event_ref}: canonical metadata reason mismatch"
         ));
     }
+    if let Some(expected_reason_hash) = storage_audit_canonical_reason_hash(event)
+        && canonical_event
+            .reason
+            .as_deref()
+            .map(sha256_prefixed)
+            .as_deref()
+            != Some(expected_reason_hash.as_str())
+    {
+        report.failures.push(format!(
+            "db row {row_number} event {event_ref}: canonical metadata reason hash mismatch"
+        ));
+    }
     if canonical_event.export_id != event.export_manifest_id {
         report.failures.push(format!(
             "db row {row_number} event {event_ref}: canonical export_id mismatch"
@@ -31826,6 +31882,7 @@ fn storage_audit_canonical_status(
             ..
         } => trace_corpus_status_from_storage(*status),
         StorageTraceAuditSafeMetadata::ReviewLease { .. } => Some(TraceCorpusStatus::Quarantined),
+        StorageTraceAuditSafeMetadata::Revocation { .. } => Some(TraceCorpusStatus::Revoked),
         _ => None,
     }
 }
@@ -31851,6 +31908,13 @@ fn storage_audit_canonical_reason(event: &StorageTraceAuditEventRecord) -> Optio
             surface,
             purpose_hash.as_deref(),
         )),
+        _ => None,
+    }
+}
+
+fn storage_audit_canonical_reason_hash(event: &StorageTraceAuditEventRecord) -> Option<String> {
+    match &event.metadata {
+        StorageTraceAuditSafeMetadata::Revocation { reason_hash } => Some(reason_hash.clone()),
         _ => None,
     }
 }
@@ -32519,6 +32583,8 @@ fn audit_backfill_storage_projection(
             trace_content_read_audit_metadata_from_reason(event.reason.as_deref())
                 .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
         }
+        "revoked" => trace_revocation_audit_metadata_from_reason(event.reason.as_deref())
+            .unwrap_or(StorageTraceAuditSafeMetadata::Empty),
         "dataset_export" | "ranker_training_candidates_export" | "ranker_training_pairs_export" => {
             StorageTraceAuditSafeMetadata::Export {
                 artifact_kind: StorageTraceObjectArtifactKind::ExportArtifact,
@@ -43535,6 +43601,41 @@ mod tests {
     }
 
     #[test]
+    fn audit_mirror_normalization_derives_revocation_metadata_from_reason() {
+        let auth = test_reviewer_auth("tenant-a");
+        let audit_event = TraceCommonsAuditEvent::revoked(
+            &auth,
+            Uuid::new_v4(),
+            "operator confirmed contributor removal",
+        );
+
+        let metadata = normalize_audit_event_metadata(
+            &audit_event,
+            StorageTraceAuditAction::Revoke,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .expect("revocation metadata normalizes");
+
+        let metadata_json =
+            serde_json::to_value(&metadata).expect("revocation metadata serializes");
+        assert_eq!(
+            metadata_json.get("kind").and_then(|value| value.as_str()),
+            Some("revocation")
+        );
+        assert_eq!(
+            metadata_json
+                .get("reason_hash")
+                .and_then(|value| value.as_str()),
+            audit_event
+                .reason
+                .as_deref()
+                .map(sha256_prefixed)
+                .as_deref()
+        );
+        assert!(metadata_json.get("reason").is_none());
+    }
+
+    #[test]
     fn storage_audit_projection_rejects_cross_tenant_rows() {
         let event = StorageTraceAuditEventRecord {
             audit_event_id: Uuid::new_v4(),
@@ -43697,6 +43798,37 @@ mod tests {
     }
 
     #[test]
+    fn audit_backfill_projects_revocation_metadata_without_raw_reason() {
+        let auth = test_reviewer_auth("tenant-a");
+        let audit_event = TraceCommonsAuditEvent::revoked(
+            &auth,
+            Uuid::new_v4(),
+            "operator confirmed contributor removal",
+        );
+
+        let (action, metadata) = audit_backfill_storage_projection(&audit_event);
+
+        assert_eq!(action, StorageTraceAuditAction::Revoke);
+        let metadata_json =
+            serde_json::to_value(&metadata).expect("revocation metadata serializes");
+        assert_eq!(
+            metadata_json.get("kind").and_then(|value| value.as_str()),
+            Some("revocation")
+        );
+        assert_eq!(
+            metadata_json
+                .get("reason_hash")
+                .and_then(|value| value.as_str()),
+            audit_event
+                .reason
+                .as_deref()
+                .map(sha256_prefixed)
+                .as_deref()
+        );
+        assert!(metadata_json.get("reason").is_none());
+    }
+
+    #[test]
     fn db_reconciliation_projects_trace_content_read_metadata_drift_even_when_reason_matches() {
         let canonical_event = TraceCommonsAuditEvent {
             event_id: Uuid::new_v4(),
@@ -43750,6 +43882,60 @@ mod tests {
             failures[0]
                 .first_failure
                 .contains("canonical metadata reason mismatch"),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn db_reconciliation_projects_revocation_metadata_reason_hash_drift() {
+        let canonical_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: Uuid::new_v4(),
+            kind: "revoked".to_string(),
+            created_at: Utc::now(),
+            status: Some(TraceCorpusStatus::Revoked),
+            actor_role: Some(TokenRole::Reviewer),
+            actor_principal_ref: Some("reviewer-a".to_string()),
+            reason: Some("operator confirmed contributor removal".to_string()),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+        let event = StorageTraceAuditEventRecord {
+            audit_event_id: canonical_event.event_id,
+            tenant_id: canonical_event.tenant_id.clone(),
+            audit_sequence: 1,
+            actor_principal_ref: canonical_event.actor_principal_ref.clone().unwrap(),
+            actor_role: "reviewer".to_string(),
+            action: StorageTraceAuditAction::Revoke,
+            reason: canonical_event.reason.clone(),
+            request_id: None,
+            submission_id: Some(canonical_event.submission_id),
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: Some(
+                serde_json::to_string(&canonical_event).expect("canonical audit serializes"),
+            ),
+            metadata: StorageTraceAuditSafeMetadata::Revocation {
+                reason_hash: "sha256:not-the-revocation-reason".to_string(),
+            },
+            occurred_at: canonical_event.created_at,
+        };
+
+        let failures = collect_db_audit_canonical_projection_failures(&[event]);
+
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].audit_event_id, canonical_event.event_id);
+        assert!(
+            failures[0]
+                .first_failure
+                .contains("canonical metadata reason hash mismatch"),
             "{failures:?}"
         );
     }
@@ -47869,6 +48055,72 @@ mod tests {
             .expect("DB audit event projects");
         assert_eq!(projected.kind, "trace_content_read");
         assert_eq!(projected.reason, event.reason);
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn revoke_trace_handler_mirrors_hash_only_revocation_audit_metadata() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        let envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let reason = "operator confirmed contributor removal".to_string();
+
+        revoke_trace_body_handler(
+            State(state),
+            auth_headers("token-a"),
+            Json(RevokeTraceBody {
+                submission_id,
+                reason: Some(reason.clone()),
+            }),
+        )
+        .await
+        .expect("revocation succeeds");
+
+        let rows = backend
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("DB audit rows list");
+        let revoke_row = rows
+            .iter()
+            .find(|row| {
+                row.action == StorageTraceAuditAction::Revoke
+                    && row.submission_id == Some(submission_id)
+            })
+            .expect("revocation audit row mirrors");
+        assert_eq!(revoke_row.reason.as_deref(), Some(reason.as_str()));
+        match &revoke_row.metadata {
+            StorageTraceAuditSafeMetadata::Revocation { reason_hash } => {
+                assert_eq!(reason_hash, &sha256_prefixed(&reason));
+            }
+            metadata => panic!("expected revocation metadata, got {metadata:?}"),
+        }
+        let metadata_json =
+            serde_json::to_value(&revoke_row.metadata).expect("revocation metadata serializes");
+        assert!(metadata_json.get("reason").is_none());
+        assert!(metadata_json.get("operator_note").is_none());
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
