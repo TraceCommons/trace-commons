@@ -299,6 +299,9 @@ const TRACE_COMMONS_VECTOR_EMBEDDER_BEARER_TOKEN: &str =
 const TRACE_COMMONS_VECTOR_EMBEDDER_TIMEOUT_MS: &str = "TRACE_COMMONS_VECTOR_EMBEDDER_TIMEOUT_MS";
 const TRACE_COMMONS_VECTOR_EMBEDDER_REQUIRE_EXTERNAL: &str =
     "TRACE_COMMONS_VECTOR_EMBEDDER_REQUIRE_EXTERNAL";
+const TRACE_COMMONS_VECTOR_SEARCH_URL: &str = "TRACE_COMMONS_VECTOR_SEARCH_URL";
+const TRACE_COMMONS_VECTOR_SEARCH_BEARER_TOKEN: &str = "TRACE_COMMONS_VECTOR_SEARCH_BEARER_TOKEN";
+const TRACE_COMMONS_VECTOR_SEARCH_TIMEOUT_MS: &str = "TRACE_COMMONS_VECTOR_SEARCH_TIMEOUT_MS";
 const TRACE_COMMONS_PROCESS_EVALUATOR_URL: &str = "TRACE_COMMONS_PROCESS_EVALUATOR_URL";
 const TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN: &str =
     "TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN";
@@ -329,6 +332,7 @@ const DEFAULT_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_BENCHMARK_EVALUATOR_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_PROCESS_EVALUATOR_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_VECTOR_EMBEDDER_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_VECTOR_SEARCH_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_EDDSA_KEYSET_REFRESH_INTERVAL_SECONDS: u64 = 300;
 const MAX_EDDSA_KEYSET_URL_BYTES: usize = 256 * 1024;
 const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT: u32 = 100;
@@ -481,6 +485,8 @@ struct AppState {
     vector_embedder: Option<Arc<dyn TraceVectorEmbedder>>,
     vector_embedder_timeout_ms: Option<u64>,
     require_external_vector_embedder: bool,
+    vector_searcher: Option<Arc<dyn TraceVectorSearcher>>,
+    vector_searcher_timeout_ms: Option<u64>,
     export_job_scheduler: Option<TraceExportJobSchedulerConfig>,
     vector_index_scheduler: Option<TraceVectorIndexSchedulerConfig>,
     ranking_calibration_max_age: Option<Duration>,
@@ -1771,6 +1777,11 @@ impl AppState {
                 "{TRACE_COMMONS_VECTOR_EMBEDDER_REQUIRE_EXTERNAL} requires {TRACE_COMMONS_VECTOR_EMBEDDER_URL}"
             );
         }
+        let vector_searcher_config = trace_vector_searcher_from_env()?;
+        let vector_searcher_timeout_ms = vector_searcher_config
+            .as_ref()
+            .map(|config| config.timeout_ms);
+        let vector_searcher = vector_searcher_config.map(|config| config.searcher);
         let export_job_scheduler = parse_trace_export_job_scheduler_config_from_env()?;
         let vector_index_scheduler = parse_trace_vector_index_scheduler_config_from_env()?;
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
@@ -1943,6 +1954,8 @@ impl AppState {
             vector_embedder,
             vector_embedder_timeout_ms,
             require_external_vector_embedder,
+            vector_searcher,
+            vector_searcher_timeout_ms,
             export_job_scheduler,
             vector_index_scheduler,
             ranking_calibration_max_age,
@@ -2244,6 +2257,11 @@ struct ConfiguredTraceVectorEmbedder {
     timeout_ms: u64,
 }
 
+struct ConfiguredTraceVectorSearcher {
+    searcher: Arc<dyn TraceVectorSearcher>,
+    timeout_ms: u64,
+}
+
 fn trace_near_credit_submitter_from_env()
 -> anyhow::Result<Option<ConfiguredTraceNearCreditSubmitter>> {
     let Some(url) = optional_trimmed_env(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL)? else {
@@ -2444,6 +2462,33 @@ fn trace_vector_embedder_from_env() -> anyhow::Result<Option<ConfiguredTraceVect
     }))
 }
 
+fn trace_vector_searcher_from_env() -> anyhow::Result<Option<ConfiguredTraceVectorSearcher>> {
+    let Some(url) = optional_trimmed_env(TRACE_COMMONS_VECTOR_SEARCH_URL)? else {
+        return Ok(None);
+    };
+    let parsed = reqwest::Url::parse(&url)
+        .with_context(|| format!("invalid {TRACE_COMMONS_VECTOR_SEARCH_URL}"))?;
+    validate_trace_vector_search_url(&parsed)?;
+    let timeout = parse_trace_vector_search_timeout_from_env()?;
+    let timeout_ms = timeout.as_millis() as u64;
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout.min(StdDuration::from_secs(3)))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("trace-commons-vector-search/0.1")
+        .build()
+        .context("failed to build vector search HTTP client")?;
+    Ok(Some(ConfiguredTraceVectorSearcher {
+        searcher: Arc::new(HttpTraceVectorSearcher {
+            client,
+            url,
+            bearer_token: optional_trimmed_env(TRACE_COMMONS_VECTOR_SEARCH_BEARER_TOKEN)?
+                .map(SecretString::from),
+        }),
+        timeout_ms,
+    }))
+}
+
 fn validate_trace_near_credit_submitter_url(url: &reqwest::Url) -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(url.scheme(), "https" | "http"),
@@ -2621,6 +2666,32 @@ fn validate_trace_vector_embedder_url(url: &reqwest::Url) -> anyhow::Result<()> 
     Ok(())
 }
 
+fn validate_trace_vector_search_url(url: &reqwest::Url) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        matches!(url.scheme(), "https" | "http"),
+        "{TRACE_COMMONS_VECTOR_SEARCH_URL} must use http or https"
+    );
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "{TRACE_COMMONS_VECTOR_SEARCH_URL} must not include embedded credentials"
+    );
+    anyhow::ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "{TRACE_COMMONS_VECTOR_SEARCH_URL} must not include query strings or fragments"
+    );
+    let host = url
+        .host_str()
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| anyhow::anyhow!("{TRACE_COMMONS_VECTOR_SEARCH_URL} requires a host"))?;
+    if url.scheme() == "http" {
+        anyhow::ensure!(
+            is_loopback_or_localhost_host(&host),
+            "{TRACE_COMMONS_VECTOR_SEARCH_URL} may use http only for localhost loopback searchers"
+        );
+    }
+    Ok(())
+}
+
 fn is_loopback_or_localhost_host(host: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     if host == "localhost" || host.ends_with(".localhost") {
@@ -2736,6 +2807,20 @@ fn parse_trace_vector_embedder_timeout_from_env() -> anyhow::Result<StdDuration>
     anyhow::ensure!(
         (1..=120_000).contains(&timeout_ms),
         "{TRACE_COMMONS_VECTOR_EMBEDDER_TIMEOUT_MS} must be between 1 and 120000"
+    );
+    Ok(StdDuration::from_millis(timeout_ms))
+}
+
+fn parse_trace_vector_search_timeout_from_env() -> anyhow::Result<StdDuration> {
+    let timeout_ms = match optional_trimmed_env(TRACE_COMMONS_VECTOR_SEARCH_TIMEOUT_MS)? {
+        Some(configured) => configured.parse::<u64>().with_context(|| {
+            format!("{TRACE_COMMONS_VECTOR_SEARCH_TIMEOUT_MS} must be milliseconds")
+        })?,
+        None => DEFAULT_VECTOR_SEARCH_TIMEOUT_MS,
+    };
+    anyhow::ensure!(
+        (1..=120_000).contains(&timeout_ms),
+        "{TRACE_COMMONS_VECTOR_SEARCH_TIMEOUT_MS} must be between 1 and 120000"
     );
     Ok(StdDuration::from_millis(timeout_ms))
 }
@@ -5245,6 +5330,8 @@ struct TraceCommonsConfigStatusResponse {
     vector_embedder_configured: bool,
     vector_embedder_timeout_ms: Option<u64>,
     vector_embedder_required: bool,
+    vector_searcher_configured: bool,
+    vector_searcher_timeout_ms: Option<u64>,
     export_job_scheduler_configured: bool,
     export_job_scheduler_interval_seconds: Option<u64>,
     export_job_scheduler_dataset_kind: Option<String>,
@@ -5420,6 +5507,8 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         vector_embedder_configured: state.vector_embedder.is_some(),
         vector_embedder_timeout_ms: state.vector_embedder_timeout_ms,
         vector_embedder_required: state.require_external_vector_embedder,
+        vector_searcher_configured: state.vector_searcher.is_some(),
+        vector_searcher_timeout_ms: state.vector_searcher_timeout_ms,
         export_job_scheduler_configured: state.export_job_scheduler.is_some(),
         export_job_scheduler_interval_seconds: state
             .export_job_scheduler
@@ -26287,6 +26376,80 @@ impl TraceVectorEmbedder for HttpTraceVectorEmbedder {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceVectorSearchRequest {
+    tenant_storage_ref: String,
+    vector_entry_id: Uuid,
+    source_projection: StorageTraceVectorEntrySourceProjection,
+    source_hash: String,
+    vector_store: String,
+    embedding_model: String,
+    embedding_dimension: i32,
+    embedding_version: String,
+    embedding_algorithm: Option<String>,
+    embedding_input_hash: String,
+    embedding_sha256: String,
+    embedding_values: Vec<f32>,
+    purpose_hash: String,
+    top_k: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceVectorSearchNeighborResponse {
+    vector_entry_id: Uuid,
+    score: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceVectorSearchResponse {
+    neighbors: Vec<TraceVectorSearchNeighborResponse>,
+}
+
+#[async_trait::async_trait]
+trait TraceVectorSearcher: Send + Sync {
+    async fn search(
+        &self,
+        request: TraceVectorSearchRequest,
+    ) -> anyhow::Result<TraceVectorSearchResponse>;
+}
+
+#[derive(Clone)]
+struct HttpTraceVectorSearcher {
+    client: reqwest::Client,
+    url: String,
+    bearer_token: Option<SecretString>,
+}
+
+#[async_trait::async_trait]
+impl TraceVectorSearcher for HttpTraceVectorSearcher {
+    async fn search(
+        &self,
+        request: TraceVectorSearchRequest,
+    ) -> anyhow::Result<TraceVectorSearchResponse> {
+        let mut builder = self
+            .client
+            .post(&self.url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&request);
+        if let Some(bearer_token) = &self.bearer_token {
+            builder = builder.bearer_auth(bearer_token.expose_secret());
+        }
+        let response = builder
+            .send()
+            .await
+            .context("failed to request trace vector search")?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!("trace vector searcher returned HTTP {}", status.as_u16());
+        }
+        let response: TraceVectorSearchResponse = response
+            .json()
+            .await
+            .context("failed to decode trace vector searcher response")?;
+        validate_trace_vector_search_response(response)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct BenchmarkEvaluationWorkerRunRequest {
     limit: Option<usize>,
@@ -35394,6 +35557,81 @@ fn trace_vector_external_embedding_material(
     })
 }
 
+fn validate_trace_vector_search_response(
+    response: TraceVectorSearchResponse,
+) -> anyhow::Result<TraceVectorSearchResponse> {
+    anyhow::ensure!(
+        response.neighbors.len() <= 100,
+        "trace vector searcher response neighbors must contain at most 100 entries"
+    );
+    for neighbor in &response.neighbors {
+        anyhow::ensure!(
+            neighbor.score.is_finite() && (0.0..=1.0).contains(&neighbor.score),
+            "trace vector searcher response neighbor scores must be finite values between 0 and 1"
+        );
+    }
+    Ok(response)
+}
+
+fn trace_vector_search_neighbors_from_response(
+    target_submission_id: Uuid,
+    target: &TraceVectorEmbeddingMaterial,
+    active_entries: &[StorageTraceVectorEntryRecord],
+    trace_ids_by_vector_entry: &BTreeMap<Uuid, Uuid>,
+    response: TraceVectorSearchResponse,
+) -> Vec<TraceSimilarityNeighbor> {
+    let active_entries_by_id = active_entries
+        .iter()
+        .filter(|entry| entry.status == StorageTraceVectorEntryStatus::Active)
+        .filter(|entry| entry.invalidated_at.is_none() && entry.deleted_at.is_none())
+        .map(|entry| (entry.vector_entry_id, entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut neighbors_by_trace_id: BTreeMap<String, TraceSimilarityNeighbor> = BTreeMap::new();
+    for neighbor in response.neighbors {
+        if !neighbor.score.is_finite()
+            || !(TRACE_SIMILARITY_NEIGHBOR_THRESHOLD..=1.0).contains(&neighbor.score)
+        {
+            continue;
+        }
+        let Some(entry) = active_entries_by_id.get(&neighbor.vector_entry_id) else {
+            continue;
+        };
+        if entry.submission_id == target_submission_id
+            || entry.vector_store != target.vector_store
+            || entry.embedding_model != target.embedding_model
+            || entry.embedding_dimension != target.embedding_dimension
+            || entry.embedding_version != target.embedding_version
+        {
+            continue;
+        }
+        let Some(trace_id) = trace_ids_by_vector_entry.get(&neighbor.vector_entry_id) else {
+            continue;
+        };
+        let trace_id = trace_id.to_string();
+        let candidate = TraceSimilarityNeighbor {
+            trace_id: trace_id.clone(),
+            source_hash: Some(entry.source_hash.clone()),
+            score: neighbor.score,
+        };
+        match neighbors_by_trace_id.get(&trace_id) {
+            Some(existing) if existing.score >= candidate.score => {}
+            _ => {
+                neighbors_by_trace_id.insert(trace_id, candidate);
+            }
+        }
+    }
+    let mut neighbors = neighbors_by_trace_id.into_values().collect::<Vec<_>>();
+    neighbors.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.trace_id.cmp(&right.trace_id))
+    });
+    neighbors.truncate(TRACE_SIMILARITY_MAX_NEIGHBORS);
+    neighbors
+}
+
 #[derive(Debug, Clone)]
 struct TraceVectorPayloadNeighborCandidate {
     submission_id: Uuid,
@@ -39644,6 +39882,10 @@ async fn index_vector_metadata_from_db(
         });
     }
     eligible.sort_by_key(|candidate| (candidate.record.submission_id, candidate.record.derived_id));
+    let trace_ids_by_vector_entry = eligible
+        .iter()
+        .map(|candidate| (candidate.vector_entry_id, candidate.record.trace_id))
+        .collect::<BTreeMap<_, _>>();
     let pending_candidates = eligible
         .iter()
         .filter(|candidate| !active_vector_ids.contains(&candidate.vector_entry_id))
@@ -39706,7 +39948,37 @@ async fn index_vector_metadata_from_db(
         )
         .await
         .context("failed to resolve trace vector embedding material")?;
-        let vector_neighbors = nearest_trace_vector_payload_neighbors(
+        let vector_search_neighbors = if let Some(searcher) = state.vector_searcher.as_ref() {
+            let response = searcher
+                .search(TraceVectorSearchRequest {
+                    tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+                    vector_entry_id,
+                    source_projection,
+                    source_hash: source_hash.to_string(),
+                    vector_store: embedding_material.vector_store.clone(),
+                    embedding_model: embedding_material.embedding_model.clone(),
+                    embedding_dimension: embedding_material.embedding_dimension,
+                    embedding_version: embedding_material.embedding_version.clone(),
+                    embedding_algorithm: embedding_material.embedding_algorithm.clone(),
+                    embedding_input_hash: embedding_material.embedding_input_hash.clone(),
+                    embedding_sha256: embedding_material.embedding_sha256.clone(),
+                    embedding_values: embedding_material.embedding_values.clone(),
+                    purpose_hash: sha256_prefixed(purpose),
+                    top_k: TRACE_SIMILARITY_MAX_NEIGHBORS,
+                })
+                .await
+                .context("failed to query trace vector search adapter")?;
+            trace_vector_search_neighbors_from_response(
+                record.submission_id,
+                &embedding_material,
+                &active_vector_entries,
+                &trace_ids_by_vector_entry,
+                response,
+            )
+        } else {
+            Vec::new()
+        };
+        let vector_payload_neighbors = nearest_trace_vector_payload_neighbors(
             record.submission_id,
             &embedding_material,
             active_trace_vector_payload_neighbor_candidates(
@@ -39718,9 +39990,12 @@ async fn index_vector_metadata_from_db(
             )
             .await?,
         );
-        let used_vector_neighbors = !vector_neighbors.is_empty();
-        let neighbors = if used_vector_neighbors {
-            vector_neighbors
+        let used_vector_neighbors =
+            !vector_search_neighbors.is_empty() || !vector_payload_neighbors.is_empty();
+        let neighbors = if !vector_search_neighbors.is_empty() {
+            vector_search_neighbors
+        } else if !vector_payload_neighbors.is_empty() {
+            vector_payload_neighbors
         } else {
             summary_neighbors
         };
@@ -47530,6 +47805,8 @@ mod tests {
             vector_embedder: None,
             vector_embedder_timeout_ms: None,
             require_external_vector_embedder: false,
+            vector_searcher: None,
+            vector_searcher_timeout_ms: None,
             export_job_scheduler: None,
             vector_index_scheduler: None,
             ranking_calibration_max_age: None,
@@ -47879,6 +48156,112 @@ mod tests {
             Some(compatible_embedding_hash.as_str())
         );
         assert_eq!(neighbors[0].score, 1.0);
+    }
+
+    #[test]
+    fn trace_vector_search_neighbors_validate_active_tenant_scoped_entries() {
+        let target_submission =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid parses");
+        let compatible_trace =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000011").expect("uuid parses");
+        let compatible_entry =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000101").expect("uuid parses");
+        let incompatible_entry =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000102").expect("uuid parses");
+        let target = TraceVectorEmbeddingMaterial {
+            vector_store: "private-vector-adapter".to_string(),
+            embedding_model: "private-redacted-summary-embedder-v1".to_string(),
+            embedding_dimension: 4,
+            embedding_version: "2026-05-05".to_string(),
+            embedding_algorithm: Some("private-test-embedding".to_string()),
+            embedding_input_hash: sha256_prefixed("target-input"),
+            embedding_values: vec![1.0, 0.0, 0.0, 0.0],
+            embedding_sha256: sha256_prefixed("target-embedding"),
+        };
+        let active_entries = vec![
+            StorageTraceVectorEntryRecord {
+                tenant_id: "tenant-a".to_string(),
+                submission_id: Uuid::parse_str("00000000-0000-0000-0000-000000000021")
+                    .expect("uuid parses"),
+                derived_id: Uuid::new_v4(),
+                vector_entry_id: compatible_entry,
+                vector_store: target.vector_store.clone(),
+                embedding_model: target.embedding_model.clone(),
+                embedding_dimension: target.embedding_dimension,
+                embedding_version: target.embedding_version.clone(),
+                source_projection: StorageTraceVectorEntrySourceProjection::CanonicalSummary,
+                source_hash: "sha256:compatible".to_string(),
+                status: StorageTraceVectorEntryStatus::Active,
+                nearest_trace_ids: Vec::new(),
+                cluster_id: None,
+                duplicate_score: None,
+                novelty_score: None,
+                indexed_at: Some(Utc::now()),
+                invalidated_at: None,
+                deleted_at: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+            StorageTraceVectorEntryRecord {
+                tenant_id: "tenant-a".to_string(),
+                submission_id: Uuid::parse_str("00000000-0000-0000-0000-000000000022")
+                    .expect("uuid parses"),
+                derived_id: Uuid::new_v4(),
+                vector_entry_id: incompatible_entry,
+                vector_store: "other-vector-store".to_string(),
+                embedding_model: target.embedding_model.clone(),
+                embedding_dimension: target.embedding_dimension,
+                embedding_version: target.embedding_version.clone(),
+                source_projection: StorageTraceVectorEntrySourceProjection::CanonicalSummary,
+                source_hash: "sha256:incompatible".to_string(),
+                status: StorageTraceVectorEntryStatus::Active,
+                nearest_trace_ids: Vec::new(),
+                cluster_id: None,
+                duplicate_score: None,
+                novelty_score: None,
+                indexed_at: Some(Utc::now()),
+                invalidated_at: None,
+                deleted_at: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+        ];
+        let trace_ids_by_vector_entry = BTreeMap::from([(compatible_entry, compatible_trace)]);
+
+        let neighbors = trace_vector_search_neighbors_from_response(
+            target_submission,
+            &target,
+            &active_entries,
+            &trace_ids_by_vector_entry,
+            TraceVectorSearchResponse {
+                neighbors: vec![
+                    TraceVectorSearchNeighborResponse {
+                        vector_entry_id: compatible_entry,
+                        score: 0.91,
+                    },
+                    TraceVectorSearchNeighborResponse {
+                        vector_entry_id: incompatible_entry,
+                        score: 0.99,
+                    },
+                    TraceVectorSearchNeighborResponse {
+                        vector_entry_id: Uuid::new_v4(),
+                        score: 1.0,
+                    },
+                    TraceVectorSearchNeighborResponse {
+                        vector_entry_id: compatible_entry,
+                        score: f32::NAN,
+                    },
+                ],
+            },
+        );
+
+        assert_eq!(neighbors.len(), 1);
+        assert_eq!(neighbors[0].trace_id, compatible_trace.to_string());
+        assert_eq!(
+            neighbors[0].source_hash.as_deref(),
+            Some("sha256:compatible")
+        );
+        assert_eq!(neighbors[0].score, 0.91);
     }
 
     async fn sample_envelope() -> TraceContributionEnvelope {
@@ -50075,6 +50458,11 @@ mod tests {
         assert_eq!(value["vector_embedder_timeout_ms"], serde_json::Value::Null);
         assert_eq!(value["vector_embedder_required"], serde_json::json!(false));
         assert_eq!(
+            value["vector_searcher_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(value["vector_searcher_timeout_ms"], serde_json::Value::Null);
+        assert_eq!(
             value["credit_cycle_worker_step_count"],
             serde_json::json!(TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT)
         );
@@ -50143,6 +50531,8 @@ mod tests {
             "benchmark_evaluator_bearer_token",
             "vector_embedder_url",
             "vector_embedder_bearer_token",
+            "vector_search_url",
+            "vector_search_bearer_token",
         ] {
             assert!(
                 !object.contains_key(forbidden_key),
@@ -50448,6 +50838,13 @@ mod tests {
         Arc::make_mut(&mut state).vector_embedder = Some(Arc::new(FakeVectorEmbedder::default()));
         Arc::make_mut(&mut state).vector_embedder_timeout_ms = Some(8_901);
         Arc::make_mut(&mut state).require_external_vector_embedder = true;
+        Arc::make_mut(&mut state).vector_searcher = Some(Arc::new(FakeVectorSearcher {
+            calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+            response: TraceVectorSearchResponse {
+                neighbors: Vec::new(),
+            },
+        }));
+        Arc::make_mut(&mut state).vector_searcher_timeout_ms = Some(9_012);
 
         let response = app(state)
             .oneshot(
@@ -50495,6 +50892,11 @@ mod tests {
             serde_json::json!(8_901)
         );
         assert_eq!(value["vector_embedder_required"], serde_json::json!(true));
+        assert_eq!(value["vector_searcher_configured"], serde_json::json!(true));
+        assert_eq!(
+            value["vector_searcher_timeout_ms"],
+            serde_json::json!(9_012)
+        );
 
         let object = value.as_object().expect("status response is object");
         assert!(!object.contains_key("benchmark_evaluator_url"));
@@ -50503,6 +50905,8 @@ mod tests {
         assert!(!object.contains_key("process_evaluator_bearer_token"));
         assert!(!object.contains_key("vector_embedder_url"));
         assert!(!object.contains_key("vector_embedder_bearer_token"));
+        assert!(!object.contains_key("vector_search_url"));
+        assert!(!object.contains_key("vector_search_bearer_token"));
         let body_text = std::str::from_utf8(&body).expect("body is utf8");
         assert!(!body_text.contains(TRACE_COMMONS_BENCHMARK_EVALUATOR_URL));
         assert!(!body_text.contains(TRACE_COMMONS_BENCHMARK_EVALUATOR_BEARER_TOKEN));
@@ -50510,6 +50914,8 @@ mod tests {
         assert!(!body_text.contains(TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN));
         assert!(!body_text.contains(TRACE_COMMONS_VECTOR_EMBEDDER_URL));
         assert!(!body_text.contains(TRACE_COMMONS_VECTOR_EMBEDDER_BEARER_TOKEN));
+        assert!(!body_text.contains(TRACE_COMMONS_VECTOR_SEARCH_URL));
+        assert!(!body_text.contains(TRACE_COMMONS_VECTOR_SEARCH_BEARER_TOKEN));
     }
 
     #[tokio::test]
@@ -58437,6 +58843,8 @@ mod tests {
             vector_embedder: None,
             vector_embedder_timeout_ms: None,
             require_external_vector_embedder: false,
+            vector_searcher: None,
+            vector_searcher_timeout_ms: None,
             export_job_scheduler: None,
             vector_index_scheduler: None,
             ranking_calibration_max_age: None,
@@ -61782,6 +62190,158 @@ mod tests {
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
 
+    #[tokio::test]
+    async fn vector_index_worker_uses_configured_vector_searcher_after_server_validation() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).vector_embedder = Some(Arc::new(FakeVectorEmbedder {
+            responses: Arc::new(std::sync::Mutex::new(VecDeque::from([
+                TraceVectorEmbeddingResponse {
+                    embedding_model: "private-redacted-summary-embedder-v1".to_string(),
+                    embedding_version: "2026-05-05".to_string(),
+                    embedding_values: vec![1.0, 0.0, 0.0, 0.0],
+                    embedding_algorithm: Some("private-test-embedding".to_string()),
+                    vector_store: Some("private-vector-adapter".to_string()),
+                },
+                TraceVectorEmbeddingResponse {
+                    embedding_model: "private-redacted-summary-embedder-v1".to_string(),
+                    embedding_version: "2026-05-05".to_string(),
+                    embedding_values: vec![0.0, 1.0, 0.0, 0.0],
+                    embedding_algorithm: Some("private-test-embedding".to_string()),
+                    vector_store: Some("private-vector-adapter".to_string()),
+                },
+            ]))),
+            ..FakeVectorEmbedder::default()
+        }));
+        let search_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        Arc::make_mut(&mut state).vector_searcher = Some(Arc::new(FakeVectorSearcher {
+            calls: search_calls.clone(),
+            response: TraceVectorSearchResponse {
+                neighbors: Vec::new(),
+            },
+        }));
+
+        let mut first =
+            sample_envelope_with_user_input("Calendar OAuth refresh failed after timezone retry")
+                .await;
+        make_metadata_only_low_risk(&mut first);
+        first.consent.scopes = vec![ConsentScope::RankingTraining];
+        first.trace_card.consent_scope = ConsentScope::RankingTraining;
+        first.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let first_trace_id = first.trace_id;
+        let first_submission_id = first.submission_id;
+        let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
+            .await
+            .expect("first vector source submission mirrors into DB");
+        let _ = vector_index_handler(
+            State(state.clone()),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceVectorIndexRequest {
+                purpose: Some("vector search seed".to_string()),
+                dry_run: false,
+                limit: Some(1),
+            }),
+        )
+        .await
+        .expect("first vector worker pass writes seed vector entry");
+        let seed_entry = backend
+            .list_trace_vector_entries("tenant-a")
+            .await
+            .expect("seed vector entry reads")
+            .into_iter()
+            .find(|entry| entry.submission_id == first_submission_id)
+            .expect("seed vector entry exists");
+        Arc::make_mut(&mut state).vector_searcher = Some(Arc::new(FakeVectorSearcher {
+            calls: search_calls.clone(),
+            response: TraceVectorSearchResponse {
+                neighbors: vec![TraceVectorSearchNeighborResponse {
+                    vector_entry_id: seed_entry.vector_entry_id,
+                    score: 0.92,
+                }],
+            },
+        }));
+
+        let mut second =
+            sample_envelope_with_user_input("Warehouse schema migration checksum repair").await;
+        make_metadata_only_low_risk(&mut second);
+        second.consent.scopes = vec![ConsentScope::RankingTraining];
+        second.trace_card.consent_scope = ConsentScope::RankingTraining;
+        second.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let second_submission_id = second.submission_id;
+        let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(second))
+            .await
+            .expect("second vector source submission mirrors into DB");
+        overwrite_pg_derived_summary_for_test(
+            backend.as_ref(),
+            "tenant-a",
+            second_submission_id,
+            "",
+        )
+        .await;
+        let Json(response) = vector_index_handler(
+            State(state.clone()),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceVectorIndexRequest {
+                purpose: Some("vector search target".to_string()),
+                dry_run: false,
+                limit: Some(1),
+            }),
+        )
+        .await
+        .expect("second vector worker pass uses validated vector search response");
+        assert_eq!(response.vector_entries_indexed, 1);
+
+        {
+            let calls = search_calls
+                .lock()
+                .expect("fake vector searcher calls lock");
+            assert!(
+                calls
+                    .iter()
+                    .any(|call| call.purpose_hash == sha256_prefixed("vector search target")),
+                "vector searcher should be called with hash-only purpose metadata"
+            );
+        }
+
+        let vector_entries = backend
+            .list_trace_vector_entries("tenant-a")
+            .await
+            .expect("DB vector entries read");
+        let second_entry = vector_entries
+            .iter()
+            .find(|entry| entry.submission_id == second_submission_id)
+            .expect("second vector entry exists");
+        assert_eq!(
+            second_entry.nearest_trace_ids,
+            vec![first_trace_id.to_string()]
+        );
+        assert_eq!(second_entry.duplicate_score, Some(0.92));
+        assert_eq!(second_entry.novelty_score, Some(0.08000004));
+        assert!(
+            second_entry
+                .cluster_id
+                .as_deref()
+                .is_some_and(|cluster_id| cluster_id.starts_with("embedding:")),
+            "validated vector-search neighbors should use an embedding cluster id"
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
     async fn overwrite_pg_derived_summary_for_test(
         backend: &PgBackend,
         tenant_id: &str,
@@ -64789,6 +65349,26 @@ mod tests {
                 .expect("fake vector embedder responses lock")
                 .pop_front()
                 .unwrap_or_else(|| self.response.clone()))
+        }
+    }
+
+    #[derive(Clone)]
+    struct FakeVectorSearcher {
+        calls: Arc<std::sync::Mutex<Vec<TraceVectorSearchRequest>>>,
+        response: TraceVectorSearchResponse,
+    }
+
+    #[async_trait::async_trait]
+    impl TraceVectorSearcher for FakeVectorSearcher {
+        async fn search(
+            &self,
+            request: TraceVectorSearchRequest,
+        ) -> anyhow::Result<TraceVectorSearchResponse> {
+            self.calls
+                .lock()
+                .expect("fake vector searcher calls lock")
+                .push(request);
+            Ok(self.response.clone())
         }
     }
 
