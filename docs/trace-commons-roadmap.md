@@ -329,7 +329,7 @@ These lanes can proceed in parallel as long as their write scopes stay disjoint 
 - Tenant gate: every read/write/mutation/export path is driven by auth-derived tenant and actor context, with same-id cross-tenant tests.
 - Parity gate: DB-backed reader-projection diagnostics are green before a surface-specific read flag is promoted.
 - Object gate: every trace body read verifies object ref tenant linkage, hash, decryptability, source status, consent scope, and allowed use.
-- Audit gate: privileged mutations and content reads emit typed, tenant-scoped, append-only audit events with reason and decision input hashes where needed.
+- Audit gate: privileged mutations and content reads emit typed, tenant-scoped, append-only audit events with reason, purpose, and decision input hashes where needed.
 - Revocation gate: revoke and retention flows invalidate or block submissions, object refs, derived rows, vectors, benchmarks, exports, worker queues, and credit settlement.
 - Rollback gate: disabling DB/object/vector read flags leaves file-backed pilot behavior available and preserves audit/tombstone history.
 

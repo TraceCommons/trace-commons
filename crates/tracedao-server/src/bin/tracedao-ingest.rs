@@ -5814,6 +5814,53 @@ where
     .ok()
 }
 
+fn trace_content_read_purpose_hash(purpose: Option<&str>) -> Option<String> {
+    purpose
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .map(sha256_prefixed)
+}
+
+fn trace_content_read_audit_reason(surface: &str, purpose_hash: Option<&str>) -> String {
+    let mut reason = format!("surface={surface}");
+    if let Some(purpose_hash) = purpose_hash
+        .map(str::trim)
+        .filter(|purpose_hash| !purpose_hash.is_empty())
+    {
+        reason.push_str(";purpose_hash=");
+        reason.push_str(purpose_hash);
+    }
+    reason
+}
+
+fn trace_content_read_audit_metadata(
+    surface: &str,
+    purpose: Option<&str>,
+) -> StorageTraceAuditSafeMetadata {
+    StorageTraceAuditSafeMetadata::TraceContentRead {
+        surface: surface.to_string(),
+        purpose_hash: trace_content_read_purpose_hash(purpose),
+    }
+}
+
+fn trace_content_read_audit_metadata_from_reason(
+    reason: Option<&str>,
+) -> Option<StorageTraceAuditSafeMetadata> {
+    let surface = trace_audit_reason_value(reason, "surface")?.to_string();
+    let purpose_hash = trace_audit_reason_value(reason, "purpose_hash")
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            trace_audit_reason_value(reason, "purpose")
+                .map(str::trim)
+                .filter(|purpose| !purpose.is_empty())
+                .map(sha256_prefixed)
+        });
+    Some(StorageTraceAuditSafeMetadata::TraceContentRead {
+        surface,
+        purpose_hash,
+    })
+}
+
 fn tenant_policy_audit_metadata_from_reason(
     reason: Option<&str>,
 ) -> Option<StorageTraceAuditSafeMetadata> {
@@ -24908,6 +24955,17 @@ fn trace_commons_audit_event_from_storage(
             }),
             None,
         ),
+        StorageTraceAuditSafeMetadata::TraceContentRead {
+            surface,
+            purpose_hash,
+        } => (
+            None,
+            Some(trace_content_read_audit_reason(
+                surface,
+                purpose_hash.as_deref(),
+            )),
+            None,
+        ),
         StorageTraceAuditSafeMetadata::Export {
             artifact_kind: _,
             purpose_code,
@@ -25034,6 +25092,14 @@ fn storage_audit_event_kind(
         && matches!(metadata, StorageTraceAuditSafeMetadata::ReviewLease { .. })
     {
         return "review_lease".to_string();
+    }
+    if let StorageTraceAuditAction::Read = action
+        && matches!(
+            metadata,
+            StorageTraceAuditSafeMetadata::TraceContentRead { .. }
+        )
+    {
+        return "trace_content_read".to_string();
     }
     if let StorageTraceAuditAction::PolicyUpdate = action
         && matches!(
@@ -30206,12 +30272,13 @@ async fn append_trace_content_read_audit(
 ) -> anyhow::Result<()> {
     let event = TraceCommonsAuditEvent::trace_content_read(tenant, submission_id, surface, purpose);
     let event = append_audit_event(&state.root, &tenant.tenant_id, event)?;
+    let metadata = trace_content_read_audit_metadata(surface, purpose);
     let mirror_result = mirror_audit_event_to_db_with_object_ref(
         state,
         tenant,
         &event,
         StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Empty,
+        metadata,
         object_ref_id,
     )
     .await;
@@ -32065,7 +32132,7 @@ fn audit_backfill_storage_projection(
 ) -> (StorageTraceAuditAction, StorageTraceAuditSafeMetadata) {
     let action = match event.kind.as_str() {
         "submitted" => StorageTraceAuditAction::Submit,
-        "read" => StorageTraceAuditAction::Read,
+        "read" | "trace_content_read" => StorageTraceAuditAction::Read,
         "review_decision" => StorageTraceAuditAction::Review,
         "credit_mutate" => StorageTraceAuditAction::CreditMutate,
         "revoked" => StorageTraceAuditAction::Revoke,
@@ -32109,6 +32176,10 @@ fn audit_backfill_storage_projection(
                 ),
             })
             .unwrap_or(StorageTraceAuditSafeMetadata::Empty),
+        "trace_content_read" => {
+            trace_content_read_audit_metadata_from_reason(event.reason.as_deref())
+                .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
+        }
         "dataset_export" | "ranker_training_candidates_export" | "ranker_training_pairs_export" => {
             StorageTraceAuditSafeMetadata::Export {
                 artifact_kind: StorageTraceObjectArtifactKind::ExportArtifact,
@@ -36749,11 +36820,8 @@ impl TraceCommonsAuditEvent {
         surface: &str,
         purpose: Option<&str>,
     ) -> Self {
-        let mut reason = format!("surface={surface}");
-        if let Some(purpose) = purpose.map(str::trim).filter(|purpose| !purpose.is_empty()) {
-            reason.push_str(";purpose=");
-            reason.push_str(purpose);
-        }
+        let purpose_hash = trace_content_read_purpose_hash(purpose);
+        let reason = trace_content_read_audit_reason(surface, purpose_hash.as_deref());
         Self {
             event_id: Uuid::new_v4(),
             tenant_id: auth.tenant_id.clone(),
@@ -42199,7 +42267,8 @@ mod tests {
                 && event.kind == "trace_content_read"
                 && event.reason.as_deref().is_some_and(|reason| {
                     reason.contains("surface=replay_dataset_export")
-                        && reason.contains("purpose=trace_commons_replay_dataset")
+                        && reason.contains("purpose_hash=sha256:")
+                        && !reason.contains("purpose=trace_commons_replay_dataset")
                 })
         }));
 
@@ -42568,6 +42637,7 @@ mod tests {
         .expect_err("process evaluation utility credit requires external ref");
         assert_eq!(missing_external_ref_error.0, StatusCode::BAD_REQUEST);
 
+        let process_eval_reason = "offline trajectory evaluator";
         let Json(response) = process_evaluation_worker_handler(
             State(state.clone()),
             auth_headers("process-eval-worker-token-a"),
@@ -42585,7 +42655,7 @@ mod tests {
                     overall_score: Some(0.91),
                     ..ProcessEvaluationLabels::default()
                 },
-                reason: "offline trajectory evaluator".to_string(),
+                reason: process_eval_reason.to_string(),
                 utility_credit_points_delta: Some(0.85),
                 utility_external_ref: Some("process-eval:nightly-42".to_string()),
                 ranking_label: None,
@@ -42616,7 +42686,7 @@ mod tests {
                     overall_score: Some(0.91),
                     ..ProcessEvaluationLabels::default()
                 },
-                reason: "offline trajectory evaluator".to_string(),
+                reason: process_eval_reason.to_string(),
                 utility_credit_points_delta: Some(0.85),
                 utility_external_ref: Some("process-eval:nightly-42".to_string()),
                 ranking_label: None,
@@ -42702,14 +42772,17 @@ mod tests {
         );
 
         let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
-        assert!(audit_events.iter().any(|event| {
-            event.kind == "trace_content_read"
-                && event.submission_id == submission_id
-                && event
-                    .reason
-                    .as_deref()
-                    .is_some_and(|reason| reason.contains("surface=process_evaluation_worker"))
-        }));
+        let content_read_reason = audit_events
+            .iter()
+            .find_map(|event| {
+                (event.kind == "trace_content_read" && event.submission_id == submission_id)
+                    .then_some(event.reason.as_deref())
+                    .flatten()
+            })
+            .expect("process evaluation content read audit exists");
+        assert!(content_read_reason.contains("surface=process_evaluation_worker"));
+        assert!(content_read_reason.contains("purpose_hash=sha256:"));
+        assert!(!content_read_reason.contains(process_eval_reason));
         assert!(audit_events.iter().any(|event| {
             event.kind == "process_evaluation"
                 && event.submission_id == submission_id
@@ -42718,6 +42791,75 @@ mod tests {
                         && reason.contains("offline trajectory evaluator")
                 })
         }));
+    }
+
+    #[test]
+    fn audit_backfill_projects_trace_content_read_metadata_without_raw_purpose() {
+        let purpose_hash = sha256_prefixed("operator replay reason");
+        let audit_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: Uuid::new_v4(),
+            kind: "trace_content_read".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Reviewer),
+            actor_principal_ref: Some("reviewer-a".to_string()),
+            reason: Some(format!(
+                "surface=process_evaluation_worker;purpose_hash={purpose_hash}"
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+
+        let (action, metadata) = audit_backfill_storage_projection(&audit_event);
+
+        assert_eq!(action, StorageTraceAuditAction::Read);
+        let metadata_json =
+            serde_json::to_value(&metadata).expect("trace content read metadata serializes");
+        assert_eq!(
+            metadata_json.get("kind").and_then(|value| value.as_str()),
+            Some("trace_content_read")
+        );
+        assert_eq!(
+            metadata_json
+                .get("surface")
+                .and_then(|value| value.as_str()),
+            Some("process_evaluation_worker")
+        );
+        assert_eq!(
+            metadata_json
+                .get("purpose_hash")
+                .and_then(|value| value.as_str()),
+            Some(purpose_hash.as_str())
+        );
+
+        let storage_event = StorageTraceAuditEventRecord {
+            audit_event_id: audit_event.event_id,
+            tenant_id: audit_event.tenant_id.clone(),
+            audit_sequence: 1,
+            actor_principal_ref: audit_event.actor_principal_ref.clone().unwrap(),
+            actor_role: "review".to_string(),
+            action,
+            reason: audit_event.reason.clone(),
+            request_id: None,
+            submission_id: Some(audit_event.submission_id),
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: None,
+            metadata,
+            occurred_at: audit_event.created_at,
+        };
+        let projected_event =
+            trace_commons_audit_event_from_storage(storage_event).expect("storage audit projects");
+        assert_eq!(projected_event.kind, "trace_content_read");
+        assert_eq!(projected_event.reason, audit_event.reason);
     }
 
     #[tokio::test]
