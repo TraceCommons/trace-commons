@@ -32135,7 +32135,8 @@ async fn backfill_db_mirror_from_files(
         if existing_audit_event_ids.contains(&event.event_id) {
             continue;
         }
-        let (action, metadata) = audit_backfill_storage_projection(event);
+        let (action, metadata) =
+            audit_backfill_storage_projection_for_records(event, &records_by_submission);
         match mirror_audit_event_to_db(state, tenant, event, action, metadata).await {
             Ok(()) => report.backfilled += 1,
             Err(error) => {
@@ -32623,6 +32624,26 @@ fn audit_backfill_storage_projection(
         }
         _ => StorageTraceAuditSafeMetadata::Empty,
     };
+    (action, metadata)
+}
+
+fn audit_backfill_storage_projection_for_records(
+    event: &TraceCommonsAuditEvent,
+    records_by_submission: &BTreeMap<Uuid, &TraceCommonsSubmissionRecord>,
+) -> (StorageTraceAuditAction, StorageTraceAuditSafeMetadata) {
+    let (action, metadata) = audit_backfill_storage_projection(event);
+    if event.kind == "submitted"
+        && let Some(record) = records_by_submission.get(&event.submission_id)
+    {
+        return (
+            action,
+            StorageTraceAuditSafeMetadata::Submission {
+                status: storage_corpus_status(record.status),
+                privacy_risk: serde_storage_string(&record.privacy_risk)
+                    .unwrap_or_else(|_| "unknown".to_string()),
+            },
+        );
+    }
     (action, metadata)
 }
 
@@ -43826,6 +43847,50 @@ mod tests {
                 .as_deref()
         );
         assert!(metadata_json.get("reason").is_none());
+    }
+
+    #[tokio::test]
+    async fn audit_backfill_enriches_submitted_metadata_from_file_record() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+            .await
+            .expect("submission succeeds");
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let audit_event = read_all_audit_events(temp.path(), "tenant-a")
+            .expect("audit reads")
+            .into_iter()
+            .find(|event| event.kind == "submitted" && event.submission_id == submission_id)
+            .expect("submitted audit event exists");
+        let records_by_submission = BTreeMap::from([(submission_id, &record)]);
+
+        let (_action, metadata) =
+            audit_backfill_storage_projection_for_records(&audit_event, &records_by_submission);
+
+        let metadata_json =
+            serde_json::to_value(&metadata).expect("submitted audit metadata serializes");
+        assert_eq!(
+            metadata_json.get("kind").and_then(|value| value.as_str()),
+            Some("submission")
+        );
+        assert_eq!(
+            metadata_json
+                .get("privacy_risk")
+                .and_then(|value| value.as_str()),
+            Some("low")
+        );
+        assert_ne!(
+            metadata_json
+                .get("privacy_risk")
+                .and_then(|value| value.as_str()),
+            Some("unknown")
+        );
     }
 
     #[test]
