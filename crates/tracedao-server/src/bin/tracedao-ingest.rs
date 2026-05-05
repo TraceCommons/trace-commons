@@ -3010,6 +3010,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(retention_dry_run_drill_handler),
         )
         .route(
+            "/v1/admin/revocation-propagation-drill",
+            post(revocation_propagation_drill_handler),
+        )
+        .route(
             "/v1/admin/operational-metrics",
             get(operational_metrics_handler),
         )
@@ -21923,6 +21927,25 @@ async fn retention_dry_run_drill_handler(
     Ok(Json(response))
 }
 
+async fn revocation_propagation_drill_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceRevocationPropagationDrillRequest>,
+) -> ApiResult<Json<TraceRevocationPropagationDrillResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    if state.db_mirror.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace revocation propagation drill requires configured DB mirror",
+        ));
+    }
+    let response = run_revocation_propagation_drill(state.as_ref(), tenant.auth(), request)
+        .await
+        .map_err(maintenance_error)?;
+    Ok(Json(response))
+}
+
 #[derive(Debug, Deserialize)]
 struct TraceRollbackDrillRequest {
     #[serde(default)]
@@ -22025,6 +22048,16 @@ struct TraceRetentionDryRunDrillRequest {
     purge_expired_before: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceRevocationPropagationDrillRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    record_evidence: bool,
+    #[serde(default = "default_revocation_propagation_limit")]
+    limit: u32,
+}
+
 #[derive(Debug, Serialize)]
 struct TraceAuditChainDrillResponse {
     tenant_id: String,
@@ -22112,6 +22145,99 @@ struct TraceRetentionDryRunDrillResponse {
     blocking_gaps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRevocationPropagationDrillResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose: String,
+    ready: bool,
+    evidence_hash: String,
+    dry_run: bool,
+    checked: usize,
+    completed: usize,
+    failed: usize,
+    skipped: usize,
+    pending: usize,
+    next_attempt_scheduled: usize,
+    blocking_gaps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+async fn run_revocation_propagation_drill(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceRevocationPropagationDrillRequest,
+) -> anyhow::Result<TraceRevocationPropagationDrillResponse> {
+    let generated_at = Utc::now();
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_revocation_propagation_drill")
+        .to_string();
+    let worker = run_revocation_propagation_worker(
+        state,
+        tenant,
+        TraceRevocationPropagationWorkerRequest {
+            purpose: Some(purpose.clone()),
+            dry_run: true,
+            limit: request.limit,
+        },
+    )
+    .await?;
+    let blocking_gaps = revocation_propagation_drill_blocking_gaps(&worker);
+    let evidence_hash = revocation_propagation_drill_evidence_hash(tenant, &worker, &blocking_gaps);
+    let mut response = TraceRevocationPropagationDrillResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at,
+        purpose: worker.purpose,
+        ready: blocking_gaps.is_empty(),
+        evidence_hash,
+        dry_run: worker.dry_run,
+        checked: worker.checked,
+        completed: worker.completed,
+        failed: worker.failed,
+        skipped: worker.skipped,
+        pending: worker.pending,
+        next_attempt_scheduled: worker.next_attempt_scheduled,
+        blocking_gaps,
+        recorded_evidence: None,
+    };
+
+    if request.record_evidence {
+        let evidence = TraceRolloutSmokeEvidenceResponse {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            check_name: "revocation_propagation".to_string(),
+            status: if response.ready {
+                TraceRolloutSmokeEvidenceStatus::Passed
+            } else {
+                TraceRolloutSmokeEvidenceStatus::Failed
+            },
+            evidence_hash: response.evidence_hash.clone(),
+            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            recorded_at: Utc::now(),
+        };
+        append_audit_event_with_db_mirror(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+            StorageTraceAuditAction::Read,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .await?;
+        response.recorded_evidence = Some(evidence);
+    }
+
+    Ok(response)
 }
 
 async fn run_retention_dry_run_drill(
@@ -22946,6 +23072,26 @@ fn retention_dry_run_blocking_gaps(response: &TraceMaintenanceResponse) -> Vec<S
     gaps
 }
 
+fn revocation_propagation_drill_blocking_gaps(
+    response: &TraceRevocationPropagationWorkerResponse,
+) -> Vec<String> {
+    let mut gaps = Vec::new();
+    push_key_rotation_gap(
+        &mut gaps,
+        "revocation_propagation_response_not_dry_run",
+        !response.dry_run,
+    );
+    push_rollback_gap_count(&mut gaps, "completed_items", response.completed);
+    push_rollback_gap_count(&mut gaps, "failed_items", response.failed);
+    push_rollback_gap_count(&mut gaps, "skipped_items", response.skipped);
+    push_rollback_gap_count(
+        &mut gaps,
+        "next_attempt_scheduled",
+        response.next_attempt_scheduled,
+    );
+    gaps
+}
+
 fn active_rollout_flags_for_rollback_drill(state: &AppState, tenant_id: &str) -> Vec<String> {
     TraceTenantRolloutFeature::ALL
         .into_iter()
@@ -23294,6 +23440,29 @@ fn retention_dry_run_drill_evidence_hash(
             "db_mirror_backfilled": response.db_mirror_backfilled,
             "db_mirror_backfill_failed": response.db_mirror_backfill_failed,
             "vector_entries_indexed": response.vector_entries_indexed,
+            "blocking_gaps": blocking_gaps,
+        })
+        .to_string(),
+    )
+}
+
+fn revocation_propagation_drill_evidence_hash(
+    tenant: &TenantAuth,
+    response: &TraceRevocationPropagationWorkerResponse,
+    blocking_gaps: &[String],
+) -> String {
+    sha256_prefixed(
+        &serde_json::json!({
+            "schema": "trace_commons_revocation_propagation_drill.v1",
+            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+            "actor_principal_ref": tenant.principal_ref,
+            "dry_run": response.dry_run,
+            "checked": response.checked,
+            "completed": response.completed,
+            "failed": response.failed,
+            "skipped": response.skipped,
+            "pending": response.pending,
+            "next_attempt_scheduled": response.next_attempt_scheduled,
             "blocking_gaps": blocking_gaps,
         })
         .to_string(),
@@ -55148,6 +55317,175 @@ mod tests {
                     event.kind == "rollout_smoke_evidence"
                         && event.reason.as_deref().is_some_and(|reason| {
                             reason.contains("check_name=postgres_rls_readiness")
+                                && reason.contains("status=passed")
+                        })
+                })
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn revocation_propagation_drill_without_db_mirror_returns_operator_error() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/revocation-propagation-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator revocation propagation drill",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("revocation propagation drill response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response parses");
+        assert!(
+            value["error"]
+                .as_str()
+                .expect("error is string")
+                .contains("configured DB mirror")
+        );
+    }
+
+    #[tokio::test]
+    async fn revocation_propagation_drill_records_pending_smoke_evidence() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            true,
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission mirrors to DB");
+        let revoke_status = revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(submission_id),
+        )
+        .await
+        .expect("revocation mirrors propagation items to DB");
+        assert_eq!(revoke_status, StatusCode::NO_CONTENT);
+
+        let propagation_items = backend
+            .list_trace_revocation_propagation_items("tenant-a", submission_id)
+            .await
+            .expect("revocation propagation items read");
+        assert!(!propagation_items.is_empty());
+        assert!(
+            propagation_items.iter().all(|item| {
+                item.status == StorageTraceRevocationPropagationItemStatus::Pending
+            })
+        );
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/revocation-propagation-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator revocation propagation drill",
+                            "record_evidence": true,
+                            "limit": 25
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("revocation propagation drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("revocation propagation drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(true));
+        assert_eq!(value["dry_run"], serde_json::json!(true));
+        assert_eq!(value["checked"], serde_json::json!(propagation_items.len()));
+        assert_eq!(value["pending"], serde_json::json!(propagation_items.len()));
+        assert_eq!(value["completed"], serde_json::json!(0));
+        assert_eq!(value["failed"], serde_json::json!(0));
+        assert_eq!(value["skipped"], serde_json::json!(0));
+        assert_eq!(value["blocking_gaps"], serde_json::json!([]));
+        assert_eq!(
+            value["recorded_evidence"]["check_name"],
+            serde_json::json!("revocation_propagation")
+        );
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("passed")
+        );
+        assert!(
+            value["evidence_hash"]
+                .as_str()
+                .expect("evidence hash is string")
+                .starts_with("sha256:")
+        );
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("admin-token-a"));
+
+        let propagation_items_after = backend
+            .list_trace_revocation_propagation_items("tenant-a", submission_id)
+            .await
+            .expect("revocation propagation items read after drill");
+        assert_eq!(propagation_items_after.len(), propagation_items.len());
+        assert!(propagation_items_after.iter().all(|item| {
+            item.status == StorageTraceRevocationPropagationItemStatus::Pending
+                && item.attempt_count == 0
+                && item.completed_at.is_none()
+        }));
+        assert!(
+            read_all_audit_events(temp.path(), "tenant-a")
+                .expect("file audit events remain after drill")
+                .iter()
+                .any(|event| {
+                    event.kind == "rollout_smoke_evidence"
+                        && event.reason.as_deref().is_some_and(|reason| {
+                            reason.contains("check_name=revocation_propagation")
                                 && reason.contains("status=passed")
                         })
                 })
