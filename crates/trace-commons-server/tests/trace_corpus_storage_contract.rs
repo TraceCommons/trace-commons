@@ -5,13 +5,13 @@ use trace_commons_server::trace_corpus_storage::{
     TenantScopedTraceObjectRef, TraceAuditAction, TraceAuditSafeMetadata, TraceCorpusStatus,
     TraceCreditAccountSettlementLineItem, TraceCreditEventType, TraceCreditHoldReason,
     TraceCreditSettlementBatchStatus, TraceCreditSettlementNearStatus, TraceDerivedRecord,
-    TraceDerivedStatus, TraceExportManifestItemInvalidationReason, TraceExportManifestItemRecord,
-    TraceExportManifestRecord, TraceObjectArtifactKind, TraceObjectRefRecord,
-    TraceRankingLabelOutcome, TraceRankingLabelSource, TraceRankingModelStatus,
-    TraceRankingUtilityCategory, TraceRankingWorkerRunKind, TraceRankingWorkerRunStatus,
-    TraceReviewLeaseAuditAction, TraceSubmissionWrite, TraceTombstoneRecord,
-    TraceVectorEntryRecord, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
-    TraceWorkerKind,
+    TraceDerivedStatus, TraceExportJobStatus, TraceExportManifestItemInvalidationReason,
+    TraceExportManifestItemRecord, TraceExportManifestRecord, TraceObjectArtifactKind,
+    TraceObjectRefRecord, TraceRankingLabelOutcome, TraceRankingLabelSource,
+    TraceRankingModelStatus, TraceRankingUtilityCategory, TraceRankingWorkerRunKind,
+    TraceRankingWorkerRunStatus, TraceReviewLeaseAuditAction, TraceSubmissionWrite,
+    TraceTombstoneRecord, TraceVectorEntryRecord, TraceVectorEntrySourceProjection,
+    TraceVectorEntryStatus, TraceWorkerKind,
 };
 use uuid::Uuid;
 
@@ -169,6 +169,28 @@ fn ranking_worker_run_recovery_audit_metadata_is_hash_only() {
     );
     assert_eq!(json["run_kind"], "prediction_credit");
     assert_eq!(json["recovered_status"], "failed");
+    assert_eq!(json["reason_hash"], "sha256:operator-note");
+    assert!(json.get("reason").is_none());
+    assert!(json.get("operator_note").is_none());
+    assert!(json.get("raw_error").is_none());
+}
+
+#[test]
+fn export_job_recovery_audit_metadata_is_hash_only() {
+    let metadata = TraceAuditSafeMetadata::ExportJobRecovery {
+        export_job_id: Uuid::from_u128(0x45),
+        recovered_status: TraceExportJobStatus::Expired,
+        reason_hash: "sha256:operator-note".to_string(),
+    };
+    let json = serde_json::to_value(metadata).unwrap();
+
+    assert_eq!(
+        serde_json::to_value(TraceAuditAction::ExportJobRecovery).unwrap(),
+        "export_job_recovery"
+    );
+    assert_eq!(json["kind"], "export_job_recovery");
+    assert_eq!(json["export_job_id"], Uuid::from_u128(0x45).to_string());
+    assert_eq!(json["recovered_status"], "expired");
     assert_eq!(json["reason_hash"], "sha256:operator-note");
     assert!(json.get("reason").is_none());
     assert!(json.get("operator_note").is_none());

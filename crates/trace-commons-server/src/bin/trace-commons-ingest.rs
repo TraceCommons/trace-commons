@@ -2662,6 +2662,10 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route("/v1/admin/export/jobs", get(export_jobs_handler))
         .route(
+            "/v1/admin/export/jobs/{export_job_id}/recover-stale",
+            post(recover_stale_export_job_handler),
+        )
+        .route(
             "/v1/admin/operational-summary",
             get(operational_summary_handler),
         )
@@ -5973,6 +5977,21 @@ fn ranking_worker_run_recovery_audit_metadata_from_reason(
     Some(StorageTraceAuditSafeMetadata::RankingWorkerRunRecovery {
         ranking_worker_run_id,
         run_kind,
+        recovered_status,
+        reason_hash,
+    })
+}
+
+fn export_job_recovery_audit_metadata_from_reason(
+    reason: Option<&str>,
+) -> Option<StorageTraceAuditSafeMetadata> {
+    let export_job_id = trace_audit_reason_value(reason, "export_job_id")
+        .and_then(|value| Uuid::parse_str(value).ok())?;
+    let recovered_status =
+        trace_audit_reason_enum::<StorageTraceExportJobStatus>(reason, "status")?;
+    let reason_hash = trace_audit_reason_value(reason, "reason_hash")?.to_string();
+    Some(StorageTraceAuditSafeMetadata::ExportJobRecovery {
+        export_job_id,
         recovered_status,
         reason_hash,
     })
@@ -13446,6 +13465,32 @@ fn ranking_worker_run_recovery_error_hash(reason: &str) -> String {
     ))
 }
 
+fn export_job_recovery_last_error(reason_hash: &str) -> String {
+    format!("stale_export_job_expired;reason_hash={reason_hash}")
+}
+
+fn export_job_recovery_audit_reason(
+    export_job_id: Uuid,
+    status: StorageTraceExportJobStatus,
+    reason_hash: &str,
+) -> String {
+    format!(
+        "export_job_id={export_job_id};status={};reason_hash={reason_hash}",
+        serde_enum_tag(&status)
+    )
+}
+
+fn export_job_recovery_audit_metadata(
+    record: &StorageTraceExportJobRecord,
+    reason_hash: &str,
+) -> StorageTraceAuditSafeMetadata {
+    StorageTraceAuditSafeMetadata::ExportJobRecovery {
+        export_job_id: record.export_job_id,
+        recovered_status: record.status,
+        reason_hash: reason_hash.to_string(),
+    }
+}
+
 fn ranking_worker_run_recovery_audit_reason(
     ranking_worker_run_id: Uuid,
     run_kind: StorageTraceRankingWorkerRunKind,
@@ -14623,6 +14668,23 @@ fn validate_ranking_worker_run_recovery_reason(reason: &str) -> ApiResult<String
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "ranking worker run recovery reason is too long",
+        ));
+    }
+    Ok(reason)
+}
+
+fn validate_export_job_recovery_reason(reason: &str) -> ApiResult<String> {
+    let reason = reason.trim().to_string();
+    if reason.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "export job recovery requires a non-empty reason",
+        ));
+    }
+    if reason.len() > 1024 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "export job recovery reason is too long",
         ));
     }
     Ok(reason)
@@ -20121,6 +20183,11 @@ struct ExportJobsQuery {
     dataset_kind: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceExportJobRecoveryRequest {
+    reason: String,
+}
+
 async fn export_jobs_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -20160,6 +20227,70 @@ async fn export_jobs_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(summaries))
+}
+
+async fn recover_stale_export_job_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(export_job_id): AxumPath<Uuid>,
+    Json(body): Json<TraceExportJobRecoveryRequest>,
+) -> ApiResult<Json<TraceExportJobSummary>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let reason = validate_export_job_recovery_reason(&body.reason)?;
+    let db = trace_export_control_db(state.as_ref())?;
+    let jobs = db
+        .list_trace_export_jobs(&tenant.tenant_id)
+        .await
+        .map_err(internal_error)?;
+    let record = jobs
+        .into_iter()
+        .find(|job| job.export_job_id == export_job_id)
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "export job not found"))?;
+    if record.status != StorageTraceExportJobStatus::Running {
+        return Err(api_error(StatusCode::CONFLICT, "export job is not running"));
+    }
+    let now = Utc::now();
+    if record.expires_at > now {
+        return Err(api_error(StatusCode::CONFLICT, "export job is not stale"));
+    }
+
+    let recovery_reason_hash = sha256_prefixed(&reason);
+    let mut metadata = record.metadata.clone();
+    metadata.insert("state".to_string(), "expired".to_string());
+    metadata.insert(
+        "recovery".to_string(),
+        "stale_running_export_job".to_string(),
+    );
+    metadata.insert("reason_hash".to_string(), recovery_reason_hash.clone());
+    let recovered = db
+        .recover_stale_trace_export_job(
+            &tenant.tenant_id,
+            export_job_id,
+            now,
+            StorageTraceExportJobStatusUpdate {
+                status: StorageTraceExportJobStatus::Expired,
+                started_at: record.started_at,
+                finished_at: Some(now),
+                result_manifest_id: record.result_manifest_id,
+                item_count: record.item_count,
+                last_error: Some(export_job_recovery_last_error(&recovery_reason_hash)),
+                metadata,
+            },
+        )
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| api_error(StatusCode::CONFLICT, "export job changed before recovery"))?;
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::export_job_recovery(&tenant, &recovered, &recovery_reason_hash),
+        StorageTraceAuditAction::ExportJobRecovery,
+        export_job_recovery_audit_metadata(&recovered, &recovery_reason_hash),
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(TraceExportJobSummary::from_storage_record(recovered)))
 }
 
 async fn operational_summary_handler(
@@ -25643,6 +25774,19 @@ fn trace_commons_audit_event_from_storage(
             allowed_use_count: _,
             grant_projection_hash: _,
         } => (None, event.reason.clone(), None),
+        StorageTraceAuditSafeMetadata::ExportJobRecovery {
+            export_job_id,
+            recovered_status,
+            reason_hash,
+        } => (
+            None,
+            Some(export_job_recovery_audit_reason(
+                *export_job_id,
+                *recovered_status,
+                reason_hash,
+            )),
+            None,
+        ),
         StorageTraceAuditSafeMetadata::RankingWorkerRunRecovery {
             ranking_worker_run_id,
             run_kind,
@@ -25886,6 +26030,7 @@ fn storage_audit_action_kind(action: StorageTraceAuditAction) -> &'static str {
         StorageTraceAuditAction::BenchmarkConvert => "benchmark_conversion",
         StorageTraceAuditAction::ProcessEvaluate => "process_evaluation",
         StorageTraceAuditAction::PolicyUpdate => "tenant_policy_update",
+        StorageTraceAuditAction::ExportJobRecovery => "export_job_recovery",
         StorageTraceAuditAction::RankingWorkerRunRecovery => "ranking_worker_run_recovery",
         StorageTraceAuditAction::RankingCalibrationDatasetQuarantine => {
             "ranking_calibration_dataset_quarantine"
@@ -33250,6 +33395,7 @@ fn audit_backfill_storage_projection(
         "tenant_policy_update" | "tenant_access_grant_update" => {
             StorageTraceAuditAction::PolicyUpdate
         }
+        "export_job_recovery" => StorageTraceAuditAction::ExportJobRecovery,
         "ranking_worker_run_recovery" => StorageTraceAuditAction::RankingWorkerRunRecovery,
         "ranking_calibration_dataset_quarantine" => {
             StorageTraceAuditAction::RankingCalibrationDatasetQuarantine
@@ -33309,6 +33455,10 @@ fn audit_backfill_storage_projection(
             .unwrap_or(StorageTraceAuditSafeMetadata::Empty),
         "tenant_access_grant_update" => {
             tenant_access_grant_audit_metadata_from_reason(event.reason.as_deref())
+                .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
+        }
+        "export_job_recovery" => {
+            export_job_recovery_audit_metadata_from_reason(event.reason.as_deref())
                 .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
         }
         "ranking_worker_run_recovery" => {
@@ -38389,6 +38539,33 @@ impl TraceCommonsAuditEvent {
             )),
             export_count: None,
             export_id: None,
+            decision_inputs_hash: Some(reason_hash.to_string()),
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    fn export_job_recovery(
+        auth: &TenantAuth,
+        record: &StorageTraceExportJobRecord,
+        reason_hash: &str,
+    ) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "export_job_recovery".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(export_job_recovery_audit_reason(
+                record.export_job_id,
+                record.status,
+                reason_hash,
+            )),
+            export_count: None,
+            export_id: Some(record.export_job_id),
             decision_inputs_hash: Some(reason_hash.to_string()),
             previous_event_hash: None,
             event_hash: None,
@@ -64281,6 +64458,194 @@ mod tests {
         assert!(metrics.contains(
             "trace_commons_operational_promotion_gate{tenant_storage_ref=\"tenant_sha256:80a707af7dc77ee1228f9127180f3964\",severity=\"blocking\",gate=\"stale_export_jobs\"} 1"
         ));
+    }
+
+    #[tokio::test]
+    async fn admin_can_expire_stale_running_export_job_without_trace_body_reads() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        let now = Utc::now();
+        let export_job_id = Uuid::new_v4();
+        let grant_id = Uuid::new_v4();
+        backend
+            .upsert_trace_export_job(StorageTraceExportJobWrite {
+                tenant_id: "tenant-a".to_string(),
+                export_job_id,
+                grant_id,
+                caller_principal_ref: principal_storage_ref("review-token-a"),
+                requested_dataset_kind: "replay_dataset".to_string(),
+                purpose: "stale_replay_export".to_string(),
+                max_item_cap: Some(10),
+                status: StorageTraceExportJobStatus::Running,
+                requested_at: now - Duration::minutes(15),
+                started_at: Some(now - Duration::minutes(15)),
+                finished_at: None,
+                expires_at: now - Duration::minutes(1),
+                result_manifest_id: None,
+                item_count: None,
+                last_error: None,
+                metadata: BTreeMap::from([("state".to_string(), "started".to_string())]),
+            })
+            .await
+            .expect("stale export job writes");
+
+        let utility_error = recover_stale_export_job_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            AxumPath(export_job_id),
+            Json(TraceExportJobRecoveryRequest {
+                reason: "utility worker should not recover".to_string(),
+            }),
+        )
+        .await
+        .expect_err("utility workers cannot recover stale export jobs");
+        assert_eq!(utility_error.0, StatusCode::FORBIDDEN);
+
+        let fresh_export_job_id = Uuid::new_v4();
+        backend
+            .upsert_trace_export_job(StorageTraceExportJobWrite {
+                tenant_id: "tenant-a".to_string(),
+                export_job_id: fresh_export_job_id,
+                grant_id: Uuid::new_v4(),
+                caller_principal_ref: principal_storage_ref("review-token-a"),
+                requested_dataset_kind: "replay_dataset".to_string(),
+                purpose: "fresh_replay_export".to_string(),
+                max_item_cap: Some(10),
+                status: StorageTraceExportJobStatus::Running,
+                requested_at: now,
+                started_at: Some(now),
+                finished_at: None,
+                expires_at: now + Duration::minutes(5),
+                result_manifest_id: None,
+                item_count: None,
+                last_error: None,
+                metadata: BTreeMap::from([("state".to_string(), "started".to_string())]),
+            })
+            .await
+            .expect("fresh export job writes");
+        let fresh_error = recover_stale_export_job_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            AxumPath(fresh_export_job_id),
+            Json(TraceExportJobRecoveryRequest {
+                reason: "fresh job should not be terminalized".to_string(),
+            }),
+        )
+        .await
+        .expect_err("fresh running export jobs cannot be recovered");
+        assert_eq!(fresh_error.0, StatusCode::CONFLICT);
+        assert_eq!(fresh_error.1.0.error, "export job is not stale");
+
+        let Json(recovered) = recover_stale_export_job_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            AxumPath(export_job_id),
+            Json(TraceExportJobRecoveryRequest {
+                reason: "scheduler pod was replaced".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can recover stale export job");
+        assert_eq!(recovered.export_job_id, export_job_id);
+        assert_eq!(recovered.status, StorageTraceExportJobStatus::Expired);
+        assert!(recovered.finished_at.is_some());
+        assert_eq!(
+            recovered.metadata.get("state").map(String::as_str),
+            Some("expired")
+        );
+        assert_eq!(
+            recovered.metadata.get("recovery").map(String::as_str),
+            Some("stale_running_export_job")
+        );
+        let recovery_reason_hash = sha256_prefixed("scheduler pod was replaced");
+        assert_eq!(
+            recovered.metadata.get("reason_hash").map(String::as_str),
+            Some(recovery_reason_hash.as_str())
+        );
+        let recovered_json = serde_json::to_string(&recovered).expect("recovered serializes");
+        assert!(recovered_json.contains(&recovery_reason_hash));
+        assert!(!recovered_json.contains("scheduler pod was replaced"));
+
+        let db_jobs = backend
+            .list_trace_export_jobs("tenant-a")
+            .await
+            .expect("DB export jobs read");
+        let db_job = db_jobs
+            .iter()
+            .find(|job| job.export_job_id == export_job_id)
+            .expect("recovered export job persisted");
+        assert_eq!(db_job.status, StorageTraceExportJobStatus::Expired);
+        let fresh_db_job = db_jobs
+            .iter()
+            .find(|job| job.export_job_id == fresh_export_job_id)
+            .expect("fresh export job persisted");
+        assert_eq!(fresh_db_job.status, StorageTraceExportJobStatus::Running);
+        assert!(db_job.last_error.as_deref().is_some_and(|error| {
+            error.contains("stale_export_job_expired")
+                && error.contains(&recovery_reason_hash)
+                && !error.contains("scheduler pod was replaced")
+        }));
+
+        let audit_events = backend
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("DB audit events read");
+        let recovery_audit = audit_events
+            .iter()
+            .find(|event| event.action == StorageTraceAuditAction::ExportJobRecovery)
+            .expect("export job recovery writes audit event");
+        match &recovery_audit.metadata {
+            StorageTraceAuditSafeMetadata::ExportJobRecovery {
+                export_job_id: audited_job_id,
+                recovered_status,
+                reason_hash,
+            } => {
+                assert_eq!(*audited_job_id, export_job_id);
+                assert_eq!(*recovered_status, StorageTraceExportJobStatus::Expired);
+                assert_eq!(reason_hash, &recovery_reason_hash);
+            }
+            other => panic!("unexpected export job recovery audit metadata: {other:?}"),
+        }
+        let audit_json = serde_json::to_string(&audit_events).expect("audit events serialize");
+        assert!(audit_json.contains(&recovery_reason_hash));
+        assert!(!audit_json.contains("scheduler pod was replaced"));
+        assert!(!audit_json.contains("trace_content_read"));
+
+        let Json(operational) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary after recovery");
+        let operational_json = serde_json::to_value(operational).expect("operational serializes");
+        assert_eq!(
+            operational_json["exports"]["stale_running_job_count"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            operational_json["promotion_gates"]["stale_export_job_count"],
+            serde_json::json!(0)
+        );
+        assert!(
+            !operational_json["promotion_gates"]["blocking_gates"]
+                .as_array()
+                .expect("blocking gates array")
+                .contains(&serde_json::json!("stale_export_jobs=1"))
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
 
     #[tokio::test]

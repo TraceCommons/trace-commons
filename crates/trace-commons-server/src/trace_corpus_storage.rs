@@ -100,6 +100,7 @@ pub enum TraceAuditAction {
     BenchmarkConvert,
     ProcessEvaluate,
     PolicyUpdate,
+    ExportJobRecovery,
     RankingWorkerRunRecovery,
     RankingCalibrationDatasetQuarantine,
 }
@@ -1219,6 +1220,11 @@ pub enum TraceAuditSafeMetadata {
         allowed_use_count: u32,
         grant_projection_hash: String,
     },
+    ExportJobRecovery {
+        export_job_id: Uuid,
+        recovered_status: TraceExportJobStatus,
+        reason_hash: String,
+    },
     RankingWorkerRunRecovery {
         ranking_worker_run_id: Uuid,
         run_kind: TraceRankingWorkerRunKind,
@@ -2057,6 +2063,14 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         tenant_id: &str,
         export_job_id: Uuid,
+        update: TraceExportJobStatusUpdate,
+    ) -> Result<Option<TraceExportJobRecord>, DatabaseError>;
+
+    async fn recover_stale_trace_export_job(
+        &self,
+        tenant_id: &str,
+        export_job_id: Uuid,
+        stale_at: DateTime<Utc>,
         update: TraceExportJobStatusUpdate,
     ) -> Result<Option<TraceExportJobRecord>, DatabaseError>;
 
