@@ -120,8 +120,9 @@ ranker-candidate, and ranker-pair exports: it reconstructs filters from the
 safe metadata snapshot, publishes the export through the existing
 manifest/artifact/provenance/audit paths, and terminalizes the same row as
 `complete` or `failed` instead of creating a second job. A bounded scheduler
-route can drain up to `max_jobs` queued rows across all supported dataset kinds,
-or one requested kind, and keeps making progress after per-job failures by
+route can drain up to `max_jobs` queued rows across all supported dataset kinds
+(default 10, max 50; explicit values outside 1..=50 are rejected), or one
+requested kind, and keeps making progress after per-job failures by
 marking those claimed rows `failed` with hash-only failure metadata before
 claiming the next row. Admin retry can requeue only failed, unexpired jobs that
 still carry the replayable request snapshot; retry clears terminal execution
@@ -129,7 +130,9 @@ fields, increments a safe retry counter, and preserves only reason hashes plus
 hashed/admin principal refs before workers claim the row again. The worker retry
 pass applies the same replayability guard with bounded max jobs, retry-count
 caps, and exponential-delay backoff before returning due failed rows to
-`queued`.
+`queued`; explicit retry values outside `max_jobs` 1..=50, `max_retry_count`
+1..=25, or delay windows 0..=86400 seconds are rejected, and
+`max_delay_seconds` must be at least `base_delay_seconds`.
 
 Reconciliation also reports DB audit hash-chain drift as `db_audit_hash_chain_failures` when mirrored audit rows have invalid hash format, a genesis or predecessor mismatch, or a canonical-payload hash mismatch. Those failures are promotion blockers just like canonical projection drift.
 
