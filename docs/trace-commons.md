@@ -414,6 +414,13 @@ Operators inspect and capture that evidence with admin-only `GET` and `POST`
 record per check with `latest_only=true`, and writes name one required check, a
 `passed` or `failed` status, a sha256-prefixed evidence hash, and an optional
 external reference that is stored only as a hash in the tenant audit chain.
+`POST /v1/admin/canary-read-drill` turns an existing canary submission into
+hash-only evidence for `submit_status`, `tenant_canary_isolation`,
+`contributor_credit`, `reviewer_metadata`, `replay_export_selection`, and
+`audit_reads`. Operators provide the canary `submission_id` plus a fallback
+tenant id for isolation; the response exposes only aggregate booleans, counts,
+blocker codes, and hashes before optionally appending one rollout-smoke evidence
+row per check.
 `POST /v1/admin/db-reconciliation-drill` runs the clean-reconciliation smoke
 check without maintenance side effects: it requires a DB mirror, reuses the
 file-vs-DB reconciliation engine, returns safe aggregate counts plus compact
@@ -655,6 +662,7 @@ The service exposes:
 - `POST /v1/workers/export/jobs/retry-failed`
 - `GET /v1/admin/config-status`
 - `GET|POST /v1/admin/rollout-smoke/evidence`
+- `POST /v1/admin/canary-read-drill`
 - `POST /v1/admin/db-reconciliation-drill`
 - `POST /v1/admin/rollback-drill`
 - `POST /v1/admin/key-rotation-drill`

@@ -3014,6 +3014,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(revocation_propagation_drill_handler),
         )
         .route(
+            "/v1/admin/canary-read-drill",
+            post(canary_read_drill_handler),
+        )
+        .route(
             "/v1/admin/operational-metrics",
             get(operational_metrics_handler),
         )
@@ -21946,6 +21950,19 @@ async fn revocation_propagation_drill_handler(
     Ok(Json(response))
 }
 
+async fn canary_read_drill_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceCanaryReadDrillRequest>,
+) -> ApiResult<Json<TraceCanaryReadDrillResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let response = run_canary_read_drill(state.as_ref(), tenant.auth(), request)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(response))
+}
+
 #[derive(Debug, Deserialize)]
 struct TraceRollbackDrillRequest {
     #[serde(default)]
@@ -22058,6 +22075,17 @@ struct TraceRevocationPropagationDrillRequest {
     limit: u32,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceCanaryReadDrillRequest {
+    submission_id: Uuid,
+    #[serde(default)]
+    isolation_tenant_id: Option<String>,
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    record_evidence: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct TraceAuditChainDrillResponse {
     tenant_id: String,
@@ -22165,6 +22193,165 @@ struct TraceRevocationPropagationDrillResponse {
     blocking_gaps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceCanaryReadDrillResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose: String,
+    ready: bool,
+    evidence_hash: String,
+    submission_ref_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    isolation_tenant_storage_ref: Option<String>,
+    canary_submission_found: bool,
+    submit_status_visible: bool,
+    tenant_canary_isolated: bool,
+    contributor_credit_visible: bool,
+    reviewer_metadata_visible: bool,
+    replay_export_selection_visible: bool,
+    audit_read_count: usize,
+    blocking_gaps: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    recorded_evidence: Vec<TraceRolloutSmokeEvidenceResponse>,
+}
+
+async fn run_canary_read_drill(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceCanaryReadDrillRequest,
+) -> anyhow::Result<TraceCanaryReadDrillResponse> {
+    let generated_at = Utc::now();
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_canary_read_drill")
+        .to_string();
+    let submission_ref_hash = sha256_prefixed(&request.submission_id.to_string());
+    let isolation_tenant_id = request
+        .isolation_tenant_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|tenant_id| !tenant_id.is_empty());
+    let isolation_tenant_storage_ref = isolation_tenant_id.map(tenant_storage_ref);
+    let record = read_submission_record(&state.root, &tenant.tenant_id, request.submission_id)
+        .with_context(|| {
+            format!(
+                "failed to read Trace Commons canary submission {}",
+                request.submission_id
+            )
+        })?;
+
+    let mut submit_status_visible = false;
+    let mut contributor_credit_visible = false;
+    let mut reviewer_metadata_visible = false;
+    let mut replay_export_selection_visible = false;
+    let mut tenant_canary_isolated = false;
+    let mut audit_read_count = 0usize;
+
+    if let Some(record) = record.as_ref() {
+        ensure_retention_metadata_within_server_policy(record)?;
+        let contributor_auth = canary_contributor_auth_from_record(record);
+        let credit_view = read_contributor_credit_view(state, &contributor_auth).await?;
+        let visible_status_record = credit_view
+            .records
+            .iter()
+            .find(|candidate| candidate.submission_id == request.submission_id);
+        if let Some(status_record) = visible_status_record {
+            let status_credit_events = read_contributor_status_credit_events(
+                state,
+                &contributor_auth,
+                &credit_view.records,
+            )
+            .await?;
+            let status = submission_status_from_record(status_record, &status_credit_events);
+            submit_status_visible = status.submission_id == request.submission_id
+                && status.status == record.status.as_str();
+        }
+        contributor_credit_visible = visible_status_record.is_some();
+
+        let TraceCommonsMetadataView { records, derived } =
+            read_reviewer_metadata_view(state, tenant).await?;
+        reviewer_metadata_visible = records
+            .iter()
+            .any(|candidate| candidate.submission_id == request.submission_id)
+            && derived
+                .iter()
+                .any(|candidate| candidate.submission_id == request.submission_id);
+        replay_export_selection_visible =
+            canary_replay_export_selection_visible(state, tenant, request.submission_id).await?;
+        audit_read_count = read_recent_audit_events(state, tenant, 100).await?.len();
+
+        tenant_canary_isolated = canary_submission_is_isolated_from_tenant(
+            state,
+            request.submission_id,
+            isolation_tenant_id,
+        )
+        .await?;
+    }
+
+    let mut response = TraceCanaryReadDrillResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at,
+        purpose: purpose.clone(),
+        ready: false,
+        evidence_hash: String::new(),
+        submission_ref_hash,
+        isolation_tenant_storage_ref,
+        canary_submission_found: record.is_some(),
+        submit_status_visible,
+        tenant_canary_isolated,
+        contributor_credit_visible,
+        reviewer_metadata_visible,
+        replay_export_selection_visible,
+        audit_read_count,
+        blocking_gaps: Vec::new(),
+        recorded_evidence: Vec::new(),
+    };
+    response.blocking_gaps = canary_read_drill_blocking_gaps(&response);
+    response.ready = response.blocking_gaps.is_empty();
+    response.evidence_hash = canary_read_drill_evidence_hash(tenant, &response);
+
+    if request.record_evidence {
+        for (check_name, passed) in canary_read_drill_check_statuses(&response) {
+            let evidence = TraceRolloutSmokeEvidenceResponse {
+                event_id: Uuid::new_v4(),
+                tenant_id: tenant.tenant_id.clone(),
+                tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+                check_name: check_name.to_string(),
+                status: if passed {
+                    TraceRolloutSmokeEvidenceStatus::Passed
+                } else {
+                    TraceRolloutSmokeEvidenceStatus::Failed
+                },
+                evidence_hash: canary_read_drill_check_evidence_hash(
+                    tenant,
+                    &response.evidence_hash,
+                    check_name,
+                    passed,
+                ),
+                evidence_ref_hash: Some(sha256_prefixed(&purpose)),
+                actor_principal_ref: tenant.principal_ref.clone(),
+                recorded_at: Utc::now(),
+            };
+            append_audit_event_with_db_mirror(
+                state,
+                tenant,
+                TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+                StorageTraceAuditAction::Read,
+                StorageTraceAuditSafeMetadata::Empty,
+            )
+            .await?;
+            response.recorded_evidence.push(evidence);
+        }
+    }
+
+    Ok(response)
 }
 
 async fn run_revocation_propagation_drill(
@@ -23092,6 +23279,126 @@ fn revocation_propagation_drill_blocking_gaps(
     gaps
 }
 
+fn canary_contributor_auth_from_record(record: &TraceCommonsSubmissionRecord) -> TenantAuth {
+    TenantAuth {
+        tenant_id: record.tenant_id.clone(),
+        role: TokenRole::Contributor,
+        principal_ref: record.auth_principal_ref.clone(),
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    }
+}
+
+async fn canary_replay_export_selection_visible(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+) -> anyhow::Result<bool> {
+    let TraceCommonsMetadataView { records, .. } =
+        read_replay_export_metadata_view(state, tenant).await?;
+    for record in records {
+        if record.submission_id != submission_id {
+            continue;
+        }
+        ensure_retention_metadata_within_server_policy(&record)?;
+        return Ok(record.is_export_eligible());
+    }
+    Ok(false)
+}
+
+async fn canary_submission_is_isolated_from_tenant(
+    state: &AppState,
+    submission_id: Uuid,
+    isolation_tenant_id: Option<&str>,
+) -> anyhow::Result<bool> {
+    let Some(isolation_tenant_id) = isolation_tenant_id else {
+        return Ok(false);
+    };
+    if isolation_tenant_id.trim().is_empty() {
+        return Ok(false);
+    }
+    let file_record = read_submission_record(&state.root, isolation_tenant_id, submission_id)?;
+    if file_record.is_some() {
+        return Ok(false);
+    }
+    if let Some(db) = state.db_mirror.as_ref() {
+        let db_record = db
+            .get_trace_submission(isolation_tenant_id, submission_id)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to read isolation canary submission from DB tenant {}",
+                    tenant_storage_ref(isolation_tenant_id)
+                )
+            })?;
+        if db_record.is_some() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn canary_read_drill_blocking_gaps(response: &TraceCanaryReadDrillResponse) -> Vec<String> {
+    let mut gaps = Vec::new();
+    push_key_rotation_gap(
+        &mut gaps,
+        "canary_submission_missing",
+        !response.canary_submission_found,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "submit_status_not_visible",
+        !response.submit_status_visible,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "tenant_canary_not_isolated",
+        !response.tenant_canary_isolated,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "contributor_credit_not_visible",
+        !response.contributor_credit_visible,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "reviewer_metadata_not_visible",
+        !response.reviewer_metadata_visible,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "replay_export_selection_not_visible",
+        !response.replay_export_selection_visible,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "audit_reads_empty",
+        response.audit_read_count == 0,
+    );
+    gaps
+}
+
+fn canary_read_drill_check_statuses(
+    response: &TraceCanaryReadDrillResponse,
+) -> [(&'static str, bool); 6] {
+    [
+        ("submit_status", response.submit_status_visible),
+        ("tenant_canary_isolation", response.tenant_canary_isolated),
+        ("contributor_credit", response.contributor_credit_visible),
+        ("reviewer_metadata", response.reviewer_metadata_visible),
+        (
+            "replay_export_selection",
+            response.replay_export_selection_visible,
+        ),
+        ("audit_reads", response.audit_read_count > 0),
+    ]
+}
+
 fn active_rollout_flags_for_rollback_drill(state: &AppState, tenant_id: &str) -> Vec<String> {
     TraceTenantRolloutFeature::ALL
         .into_iter()
@@ -23464,6 +23771,49 @@ fn revocation_propagation_drill_evidence_hash(
             "pending": response.pending,
             "next_attempt_scheduled": response.next_attempt_scheduled,
             "blocking_gaps": blocking_gaps,
+        })
+        .to_string(),
+    )
+}
+
+fn canary_read_drill_evidence_hash(
+    tenant: &TenantAuth,
+    response: &TraceCanaryReadDrillResponse,
+) -> String {
+    sha256_prefixed(
+        &serde_json::json!({
+            "schema": "trace_commons_canary_read_drill.v1",
+            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+            "actor_principal_ref": tenant.principal_ref,
+            "submission_ref_hash": response.submission_ref_hash,
+            "isolation_tenant_storage_ref": response.isolation_tenant_storage_ref,
+            "canary_submission_found": response.canary_submission_found,
+            "submit_status_visible": response.submit_status_visible,
+            "tenant_canary_isolated": response.tenant_canary_isolated,
+            "contributor_credit_visible": response.contributor_credit_visible,
+            "reviewer_metadata_visible": response.reviewer_metadata_visible,
+            "replay_export_selection_visible": response.replay_export_selection_visible,
+            "audit_read_count": response.audit_read_count,
+            "blocking_gaps": response.blocking_gaps,
+        })
+        .to_string(),
+    )
+}
+
+fn canary_read_drill_check_evidence_hash(
+    tenant: &TenantAuth,
+    aggregate_evidence_hash: &str,
+    check_name: &str,
+    passed: bool,
+) -> String {
+    sha256_prefixed(
+        &serde_json::json!({
+            "schema": "trace_commons_canary_read_drill_check.v1",
+            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+            "actor_principal_ref": tenant.principal_ref,
+            "aggregate_evidence_hash": aggregate_evidence_hash,
+            "check_name": check_name,
+            "passed": passed,
         })
         .to_string(),
     )
@@ -55492,6 +55842,122 @@ mod tests {
         );
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn canary_read_drill_records_core_smoke_evidence() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/canary-read-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator canary read drill",
+                            "submission_id": submission_id,
+                            "isolation_tenant_id": "tenant-b",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("canary read drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("canary read drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(true));
+        assert_eq!(value["submit_status_visible"], serde_json::json!(true));
+        assert_eq!(value["tenant_canary_isolated"], serde_json::json!(true));
+        assert_eq!(value["contributor_credit_visible"], serde_json::json!(true));
+        assert_eq!(value["reviewer_metadata_visible"], serde_json::json!(true));
+        assert_eq!(
+            value["replay_export_selection_visible"],
+            serde_json::json!(true)
+        );
+        assert!(
+            value["audit_read_count"]
+                .as_u64()
+                .expect("audit read count is numeric")
+                > 0
+        );
+        assert_eq!(value["blocking_gaps"], serde_json::json!([]));
+        let recorded = value["recorded_evidence"]
+            .as_array()
+            .expect("recorded evidence is an array");
+        let recorded_checks = recorded
+            .iter()
+            .map(|evidence| {
+                evidence["check_name"]
+                    .as_str()
+                    .expect("check name is string")
+                    .to_string()
+            })
+            .collect::<BTreeSet<_>>();
+        for check_name in [
+            "submit_status",
+            "tenant_canary_isolation",
+            "contributor_credit",
+            "reviewer_metadata",
+            "replay_export_selection",
+            "audit_reads",
+        ] {
+            assert!(recorded_checks.contains(check_name));
+            assert!(
+                recorded.iter().any(|evidence| {
+                    evidence["check_name"] == serde_json::json!(check_name)
+                        && evidence["status"] == serde_json::json!("passed")
+                }),
+                "{check_name} evidence is passed"
+            );
+        }
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("token-a"));
+
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("file audit events read");
+        for check_name in [
+            "submit_status",
+            "tenant_canary_isolation",
+            "contributor_credit",
+            "reviewer_metadata",
+            "replay_export_selection",
+            "audit_reads",
+        ] {
+            assert!(
+                audit_events.iter().any(|event| {
+                    event.kind == "rollout_smoke_evidence"
+                        && event.reason.as_deref().is_some_and(|reason| {
+                            reason.contains(&format!("check_name={check_name}"))
+                                && reason.contains("status=passed")
+                        })
+                }),
+                "{check_name} evidence audit exists"
+            );
+        }
     }
 
     #[tokio::test]
