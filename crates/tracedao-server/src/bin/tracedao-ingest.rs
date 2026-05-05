@@ -20222,6 +20222,15 @@ struct TraceOperationalPromotionGateLogFields {
     ranking_worker_run_actionable_skip_count: usize,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct TraceOperationalPromotionGateMetricFields {
+    tenant_storage_ref: String,
+    ready: bool,
+    gate_severity: &'static str,
+    gate_name: String,
+    gate_value: usize,
+}
+
 fn operational_summary_promotion_gate_log_fields(
     response: &TraceOperationalSummaryResponse,
 ) -> Option<TraceOperationalPromotionGateLogFields> {
@@ -20240,6 +20249,48 @@ fn operational_summary_promotion_gate_log_fields(
     })
 }
 
+fn operational_summary_promotion_gate_metric_fields(
+    response: &TraceOperationalSummaryResponse,
+) -> Vec<TraceOperationalPromotionGateMetricFields> {
+    let mut fields = Vec::new();
+    for gate in &response.promotion_gates.blocking_gates {
+        fields.push(operational_summary_promotion_gate_metric_field(
+            response, "blocking", gate,
+        ));
+    }
+    for gate in &response.promotion_gates.warning_gates {
+        fields.push(operational_summary_promotion_gate_metric_field(
+            response, "warning", gate,
+        ));
+    }
+    fields
+}
+
+fn operational_summary_promotion_gate_metric_field(
+    response: &TraceOperationalSummaryResponse,
+    gate_severity: &'static str,
+    gate: &str,
+) -> TraceOperationalPromotionGateMetricFields {
+    let (gate_name, gate_value) = operational_summary_promotion_gate_metric_name_value(gate);
+    TraceOperationalPromotionGateMetricFields {
+        tenant_storage_ref: response.tenant_storage_ref.clone(),
+        ready: response.promotion_gates.ready,
+        gate_severity,
+        gate_name,
+        gate_value,
+    }
+}
+
+fn operational_summary_promotion_gate_metric_name_value(gate: &str) -> (String, usize) {
+    match gate.rsplit_once('=') {
+        Some((name, value)) => match value.parse::<usize>() {
+            Ok(parsed) => (name.to_string(), parsed),
+            Err(_) => (gate.to_string(), 1),
+        },
+        None => (gate.to_string(), 1),
+    }
+}
+
 fn log_operational_summary_promotion_gates(response: &TraceOperationalSummaryResponse) {
     let Some(fields) = operational_summary_promotion_gate_log_fields(response) else {
         return;
@@ -20254,6 +20305,16 @@ fn log_operational_summary_promotion_gates(response: &TraceOperationalSummaryRes
         ranking_worker_run_actionable_skip_count = fields.ranking_worker_run_actionable_skip_count,
         "Trace Commons operational promotion gates need attention"
     );
+    for metric_fields in operational_summary_promotion_gate_metric_fields(response) {
+        tracing::warn!(
+            tenant_storage_ref = %metric_fields.tenant_storage_ref,
+            ready = metric_fields.ready,
+            gate_severity = metric_fields.gate_severity,
+            gate_name = %metric_fields.gate_name,
+            gate_value = metric_fields.gate_value,
+            "Trace Commons operational promotion gate metric"
+        );
+    }
 }
 
 fn normalized_export_dataset_kind_filter(value: &str) -> String {
@@ -63109,6 +63170,53 @@ mod tests {
             "ranking_worker_run_actionable_skips=3"
         );
         assert_eq!(fields.ranking_worker_run_actionable_skip_count, 3);
+    }
+
+    #[test]
+    fn operational_summary_promotion_gate_metric_fields_split_each_gate() {
+        let response = TraceOperationalSummaryResponse {
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            generated_at: Utc::now(),
+            promotion_gates: TraceOperationalPromotionGateSummary {
+                ready: false,
+                blocking_count: 2,
+                warning_count: 1,
+                blocking_gates: vec![
+                    "failed_ranking_worker_runs=2".to_string(),
+                    "db_mirror_writes_required_without_db_mirror".to_string(),
+                ],
+                warning_gates: vec!["ranking_worker_run_actionable_skips=3".to_string()],
+                failed_ranking_worker_run_count: 2,
+                ranking_worker_run_actionable_skip_count: 3,
+                ..TraceOperationalPromotionGateSummary::default()
+            },
+            rollout_smoke: TraceOperationalRolloutSmokeSummary::default(),
+            submissions: TraceOperationalSubmissionSummary::default(),
+            review_sla: TraceOperationalReviewSlaSummary::default(),
+            exports: TraceOperationalExportSummary::default(),
+            retention: TraceOperationalRetentionSummary::default(),
+            vectors: TraceOperationalVectorSummary::default(),
+            benchmarks: TraceOperationalBenchmarkSummary::default(),
+            ranking: TraceOperationalRankingSummary::default(),
+            delayed_credit: TraceOperationalDelayedCreditSummary::default(),
+        };
+
+        let fields = operational_summary_promotion_gate_metric_fields(&response);
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].tenant_storage_ref, tenant_storage_ref("tenant-a"));
+        assert_eq!(fields[0].gate_severity, "blocking");
+        assert_eq!(fields[0].gate_name, "failed_ranking_worker_runs");
+        assert_eq!(fields[0].gate_value, 2);
+        assert_eq!(fields[1].gate_severity, "blocking");
+        assert_eq!(
+            fields[1].gate_name,
+            "db_mirror_writes_required_without_db_mirror"
+        );
+        assert_eq!(fields[1].gate_value, 1);
+        assert_eq!(fields[2].gate_severity, "warning");
+        assert_eq!(fields[2].gate_name, "ranking_worker_run_actionable_skips");
+        assert_eq!(fields[2].gate_value, 3);
     }
 
     #[tokio::test]

@@ -244,9 +244,10 @@ summary ranking readiness now also includes candidate/active backtest pass/fail
 counts, backtest reason-code totals, label-adjudication issue blockers,
 ranking worker skip totals/reason aggregates, promotion-gate warnings for
 actionable worker skips, safe promotion-gate counts in the read audit row, and
-a structured warning log whenever promotion gates are blocked or warning. The
-same response includes a `rollout_smoke` preflight block with the required
-canary smoke-check names, promotion-gate readiness, and explicit missing
+structured warning logs for the aggregate gate set plus each individual
+promotion gate whenever promotion gates are blocked or warning. The same
+response includes a `rollout_smoke` preflight block with the required canary
+smoke-check names, promotion-gate readiness, and explicit missing
 rehearsal-evidence counts so operators do not mistake a clean gate snapshot for
 a rehearsed rollout.
 With the DB mirror configured, ranking dataset registry rows, evidence,
