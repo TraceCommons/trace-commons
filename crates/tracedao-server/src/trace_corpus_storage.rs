@@ -2066,6 +2066,14 @@ pub trait TraceCorpusStore: Send + Sync {
         update: TraceExportJobStatusUpdate,
     ) -> Result<Option<TraceExportJobRecord>, DatabaseError>;
 
+    async fn claim_next_trace_export_job(
+        &self,
+        tenant_id: &str,
+        requested_dataset_kind: Option<&str>,
+        claim_at: DateTime<Utc>,
+        worker_principal_ref: &str,
+    ) -> Result<Option<TraceExportJobRecord>, DatabaseError>;
+
     async fn recover_stale_trace_export_job(
         &self,
         tenant_id: &str,

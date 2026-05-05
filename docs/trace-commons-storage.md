@@ -105,6 +105,9 @@ Export-job control rows preserve `trace_export_job_request.v1` metadata across
 start, completion, and failure. The metadata records safe replayability inputs
 for requested/effective limits, status/privacy/consent filters, and hashes of
 worker external refs without storing raw external ticket or lab references.
+Export workers can atomically claim the oldest unexpired queued job through the
+PostgreSQL control plane, which moves the row to `running` with safe claim
+metadata and leaves expired queued rows untouched for recovery/inspection.
 
 Reconciliation also reports DB audit hash-chain drift as `db_audit_hash_chain_failures` when mirrored audit rows have invalid hash format, a genesis or predecessor mismatch, or a canonical-payload hash mismatch. Those failures are promotion blockers just like canonical projection drift.
 

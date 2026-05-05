@@ -2630,6 +2630,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(worker_replay_export_handler).post(worker_replay_export_body_handler),
         )
         .route(
+            "/v1/workers/export/jobs/claim-next",
+            post(worker_export_job_claim_next_handler),
+        )
+        .route(
             "/v1/ranker/training-candidates",
             get(ranker_training_candidates_handler),
         )
@@ -20207,6 +20211,19 @@ struct TraceExportJobRecoveryRequest {
     reason: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceExportJobClaimNextRequest {
+    #[serde(default)]
+    dataset_kind: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceExportJobClaimNextResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    claimed_job: Option<TraceExportJobSummary>,
+}
+
 async fn export_jobs_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -20246,6 +20263,44 @@ async fn export_jobs_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(summaries))
+}
+
+async fn worker_export_job_claim_next_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceExportJobClaimNextRequest>,
+) -> ApiResult<Json<TraceExportJobClaimNextResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_exporter(&tenant)?;
+    let db = trace_export_control_db(state.as_ref())?;
+    let dataset_kind = body
+        .dataset_kind
+        .as_deref()
+        .map(normalized_export_dataset_kind_filter);
+    let claimed = db
+        .claim_next_trace_export_job(
+            &tenant.tenant_id,
+            dataset_kind.as_deref(),
+            Utc::now(),
+            &tenant.principal_ref,
+        )
+        .await
+        .map_err(internal_error)?;
+    let claimed_count = usize::from(claimed.is_some());
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(&tenant, "export_job_claim_next", claimed_count),
+        StorageTraceAuditAction::Read,
+        trace_read_audit_metadata("export_job_claim_next", claimed_count),
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(TraceExportJobClaimNextResponse {
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        tenant_id: tenant.tenant_id,
+        claimed_job: claimed.map(TraceExportJobSummary::from_storage_record),
+    }))
 }
 
 async fn recover_stale_export_job_handler(
@@ -47200,6 +47255,138 @@ mod tests {
         let job_json = serde_json::to_string(&jobs).expect("jobs serialize");
         assert!(job_json.contains(&sha256_prefixed(raw_external_ref)));
         assert!(!job_json.contains(raw_external_ref));
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn export_worker_claims_oldest_unexpired_queued_job_without_trace_body_reads() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        let now = Utc::now();
+        let expired_job_id = Uuid::new_v4();
+        let eligible_job_id = Uuid::new_v4();
+        for (export_job_id, grant_id, purpose, requested_at, expires_at) in [
+            (
+                expired_job_id,
+                Uuid::new_v4(),
+                "expired_queued_replay",
+                now - Duration::minutes(10),
+                now - Duration::seconds(1),
+            ),
+            (
+                eligible_job_id,
+                Uuid::new_v4(),
+                "eligible_queued_replay",
+                now - Duration::minutes(5),
+                now + Duration::minutes(5),
+            ),
+        ] {
+            backend
+                .upsert_trace_export_access_grant(StorageTraceExportAccessGrantWrite {
+                    tenant_id: "tenant-a".to_string(),
+                    export_job_id,
+                    grant_id,
+                    caller_principal_ref: principal_storage_ref("review-token-a"),
+                    requested_dataset_kind: "replay_dataset".to_string(),
+                    purpose: purpose.to_string(),
+                    max_item_cap: Some(10),
+                    status: StorageTraceExportAccessGrantStatus::Active,
+                    requested_at,
+                    expires_at,
+                    metadata: BTreeMap::from([(
+                        "grant_type".to_string(),
+                        "queued_worker_test".to_string(),
+                    )]),
+                })
+                .await
+                .expect("export grant writes");
+            backend
+                .upsert_trace_export_job(StorageTraceExportJobWrite {
+                    tenant_id: "tenant-a".to_string(),
+                    export_job_id,
+                    grant_id,
+                    caller_principal_ref: principal_storage_ref("review-token-a"),
+                    requested_dataset_kind: "replay_dataset".to_string(),
+                    purpose: purpose.to_string(),
+                    max_item_cap: Some(10),
+                    status: StorageTraceExportJobStatus::Queued,
+                    requested_at,
+                    started_at: None,
+                    finished_at: None,
+                    expires_at,
+                    result_manifest_id: None,
+                    item_count: None,
+                    last_error: None,
+                    metadata: BTreeMap::from([
+                        (
+                            "request_schema_version".to_string(),
+                            "trace_export_job_request.v1".to_string(),
+                        ),
+                        ("state".to_string(), "queued".to_string()),
+                    ]),
+                })
+                .await
+                .expect("queued export job writes");
+        }
+
+        let Json(response) = worker_export_job_claim_next_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Json(TraceExportJobClaimNextRequest {
+                dataset_kind: Some("replay-dataset".to_string()),
+            }),
+        )
+        .await
+        .expect("export worker claims queued job");
+        let claimed = response.claimed_job.expect("one job claimed");
+        assert_eq!(claimed.export_job_id, eligible_job_id);
+        assert_eq!(claimed.status, StorageTraceExportJobStatus::Running);
+        assert!(claimed.started_at.is_some());
+        assert_eq!(claimed.finished_at, None);
+        assert_eq!(
+            claimed.metadata.get("state").map(String::as_str),
+            Some("running")
+        );
+        assert_eq!(
+            claimed
+                .metadata
+                .get("claimed_by_principal_ref")
+                .map(String::as_str),
+            Some(principal_storage_ref("export-worker-token-a").as_str())
+        );
+
+        let jobs = backend
+            .list_trace_export_jobs("tenant-a")
+            .await
+            .expect("export jobs read");
+        let expired_job = jobs
+            .iter()
+            .find(|job| job.export_job_id == expired_job_id)
+            .expect("expired queued job remains");
+        assert_eq!(expired_job.status, StorageTraceExportJobStatus::Queued);
+        let audit_json = serde_json::to_string(
+            &backend
+                .list_trace_audit_events("tenant-a")
+                .await
+                .expect("audit reads"),
+        )
+        .expect("audit serializes");
+        assert!(!audit_json.contains("trace_content_read"));
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
