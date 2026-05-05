@@ -251,14 +251,15 @@ for a Prometheus-text snapshot of the same safe promotion, per-gate,
 worker-skip, rollout-smoke, submission, review SLA, export, retention, vector,
 benchmark, and delayed-credit gauges. The same summary response includes a
 `rollout_smoke` preflight block with the required canary smoke-check names
-including PostgreSQL RLS readiness and audit-chain verification, along with
-promotion-gate readiness, recorded evidence counts, passed evidence counts,
-failed evidence counts, stale evidence counts, and explicit missing
-rehearsal-evidence counts so operators do not mistake a clean gate snapshot for
-an up-to-date rehearsed rollout. Latest per-check smoke evidence older than 24
-hours is reported as stale and blocks rollout-smoke readiness until a fresh
-pass or fail is recorded. Admins can list or append hash-only smoke rehearsal
-evidence through `GET` and `POST` `/v1/admin/rollout-smoke/evidence`; `GET`
+including `db_reconciliation_clean`, PostgreSQL RLS readiness, and audit-chain
+verification, along with promotion-gate readiness, recorded evidence counts,
+passed evidence counts, failed evidence counts, stale evidence counts, and
+explicit missing rehearsal-evidence counts so operators do not mistake a clean
+gate snapshot for an up-to-date rehearsed rollout. Latest per-check smoke
+evidence older than 24 hours is reported as stale and blocks rollout-smoke
+readiness until a fresh pass or fail is recorded. Admins can list or append
+hash-only smoke rehearsal evidence through `GET` and `POST`
+`/v1/admin/rollout-smoke/evidence`; `GET`
 accepts `latest_only=true` when operators only need current per-check state. The
 server stores the evidence hash and a hash of any external reference in the
 tenant audit chain, then clears the matching required-check gap only after a
