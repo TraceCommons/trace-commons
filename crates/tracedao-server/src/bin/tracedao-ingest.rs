@@ -8537,6 +8537,7 @@ fn credit_cycle_scheduler_candidate_skip_reason(
         },
         evidence.predictions,
         evidence.labels,
+        evidence.preference_labels,
     );
     if current.joined_label_prediction_count == 0 {
         return Some("missing_joined_label_evidence".to_string());
@@ -12335,10 +12336,16 @@ async fn latest_promotable_ranking_calibration_run(
         return Err(api_error(StatusCode::CONFLICT, context.missing_message()));
     };
     if !run.promotable {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            context.nonpromotable_message(),
-        ));
+        let message = if run.reason_codes.is_empty() {
+            context.nonpromotable_message().to_string()
+        } else {
+            format!(
+                "{}; reason_codes={}",
+                context.nonpromotable_message(),
+                run.reason_codes.join(",")
+            )
+        };
+        return Err(api_error(StatusCode::CONFLICT, message));
     }
     ensure_ranking_calibration_label_source_diversity(state, &run, context)?;
     ensure_ranking_calibration_fresh(state, &run, context)?;
@@ -12356,6 +12363,9 @@ async fn ensure_ranking_promotion_current_evidence_matches_calibration(
         .await
         .map_err(internal_error)?;
     let labels = read_ranking_labels_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
+    let preference_labels = read_ranking_preference_labels_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
     let thresholds = effective_ranking_calibration_thresholds(state, Some(run));
@@ -12377,6 +12387,7 @@ async fn ensure_ranking_promotion_current_evidence_matches_calibration(
         },
         &predictions,
         &labels,
+        &preference_labels,
     );
     current.report_hash = ranking_calibration_run_report_hash(&current);
     if current.joined_evidence_hash != run.joined_evidence_hash {
@@ -13963,6 +13974,9 @@ async fn ranking_dataset_readiness_report_handler(
     let labels = read_ranking_labels_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    let preference_labels = read_ranking_preference_labels_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     let calibration_dataset_read =
         read_ranking_calibration_datasets_for_admin_reconciliation(state.as_ref(), &tenant)
             .await
@@ -13980,6 +13994,7 @@ async fn ranking_dataset_readiness_report_handler(
             model_versions: &model_versions,
             predictions: &predictions,
             labels: &labels,
+            preference_labels: &preference_labels,
             calibration_datasets: &calibration_datasets,
             calibration_dataset_manifest_conflict_count,
             calibration_runs: &calibration_runs,
@@ -14128,6 +14143,9 @@ async fn create_ranking_calibration_run(
     let labels = read_ranking_labels_for_admin(state, tenant)
         .await
         .map_err(internal_error)?;
+    let preference_labels = read_ranking_preference_labels_for_admin(state, tenant)
+        .await
+        .map_err(internal_error)?;
     let mut record = ranking_calibration_run_record(
         tenant,
         RankingCalibrationRunInputs {
@@ -14146,6 +14164,7 @@ async fn create_ranking_calibration_run(
         },
         &predictions,
         &labels,
+        &preference_labels,
     );
     record.report_hash = ranking_calibration_run_report_hash(&record);
     if persist {
@@ -16565,6 +16584,7 @@ struct RankingModelRiskEvidence<'a> {
 struct RankingDatasetReadinessEvidence<'a> {
     predictions: &'a [TraceRankingPredictionRecord],
     labels: &'a [TraceRankingLabelRecord],
+    preference_labels: &'a [TraceRankingPreferenceLabelRecord],
     calibration_datasets: &'a [TraceRankingCalibrationDatasetRecord],
     calibration_runs: &'a [TraceRankingCalibrationRunRecord],
 }
@@ -16599,6 +16619,7 @@ fn ranking_model_risk_record(
         },
         evidence.predictions,
         evidence.labels,
+        evidence.preference_labels,
     );
 
     let predictions_since_calibration_count = latest_calibration.map_or(0, |run| {
@@ -16746,6 +16767,7 @@ struct RankingDatasetReadinessReportInputs<'a> {
     model_versions: &'a [TraceRankingModelVersionRecord],
     predictions: &'a [TraceRankingPredictionRecord],
     labels: &'a [TraceRankingLabelRecord],
+    preference_labels: &'a [TraceRankingPreferenceLabelRecord],
     calibration_datasets: &'a [TraceRankingCalibrationDatasetRecord],
     calibration_dataset_manifest_conflict_count: usize,
     calibration_runs: &'a [TraceRankingCalibrationRunRecord],
@@ -16760,6 +16782,7 @@ fn ranking_dataset_readiness_report(
         model_versions,
         predictions,
         labels,
+        preference_labels,
         calibration_datasets,
         calibration_dataset_manifest_conflict_count,
         calibration_runs,
@@ -16784,6 +16807,7 @@ fn ranking_dataset_readiness_report(
     let evidence = RankingDatasetReadinessEvidence {
         predictions,
         labels,
+        preference_labels,
         calibration_datasets,
         calibration_runs,
     };
@@ -16930,6 +16954,7 @@ fn ranking_dataset_target_readiness_record(
         },
         evidence.predictions,
         evidence.labels,
+        evidence.preference_labels,
     );
     current.report_hash = ranking_calibration_run_report_hash(&current);
 
@@ -17338,6 +17363,7 @@ fn ranking_calibration_run_record(
     inputs: RankingCalibrationRunInputs,
     predictions: &[TraceRankingPredictionRecord],
     labels: &[TraceRankingLabelRecord],
+    preference_labels: &[TraceRankingPreferenceLabelRecord],
 ) -> TraceRankingCalibrationRunRecord {
     let matching_predictions = predictions
         .iter()
@@ -17432,6 +17458,10 @@ fn ranking_calibration_run_record(
         .any(|prediction| prediction.confidence < inputs.confidence_threshold)
     {
         reason_codes.push("low_confidence_predictions_present".to_string());
+    }
+    let adjudication = ranking_adjudication_report(&tenant.tenant_id, labels, preference_labels);
+    if ranking_adjudication_issue_count_for_target(&adjudication, inputs.target_use) > 0 {
+        reason_codes.push(RANKING_ADJUDICATION_ISSUES_REASON.to_string());
     }
     reason_codes.sort();
     reason_codes.dedup();
@@ -56952,8 +56982,13 @@ mod tests {
             }),
         )
         .await
-        .expect("utility worker can persist promotable calibration");
-        assert!(calibration.promotable);
+        .expect("utility worker can persist adjudication-blocked calibration");
+        assert!(!calibration.promotable);
+        assert!(
+            calibration
+                .reason_codes
+                .contains(&RANKING_ADJUDICATION_ISSUES_REASON.to_string())
+        );
 
         let error = ranking_model_promotion_handler(
             State(state.clone()),
@@ -57710,6 +57745,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ranking_calibration_run_blocks_unresolved_adjudication_issues() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let (candidate, prediction) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-calibration-adj-v1")
+                .await;
+        let _ = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: prediction.submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Rejected,
+                utility_delta_micros: 1_250_000,
+                evidence_hash: "sha256:calibration-adjudication-reviewer-conflict".to_string(),
+                external_ref: "private-calibration-adjudication-conflict".to_string(),
+            }),
+        )
+        .await
+        .expect("reviewer can write conflicting label");
+
+        let Json(run) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist adjudication-blocked calibration");
+
+        assert_eq!(run.joined_label_prediction_count, 2);
+        assert_eq!(run.average_absolute_error_micros, Some(0));
+        assert!(!run.promotable);
+        assert!(
+            run.reason_codes
+                .contains(&RANKING_ADJUDICATION_ISSUES_REASON.to_string())
+        );
+        let run_text = serde_json::to_string(&run).expect("calibration run serializes");
+        assert!(!run_text.contains("private-calibration-adjudication-conflict"));
+    }
+
+    #[tokio::test]
     async fn ranking_calibration_run_applies_server_min_label_count_floor() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
@@ -58078,7 +58164,8 @@ mod tests {
             vec![
                 "average_error_above_threshold",
                 "insufficient_label_source_diversity",
-                "insufficient_labels"
+                "insufficient_labels",
+                RANKING_ADJUDICATION_ISSUES_REASON
             ]
         );
     }

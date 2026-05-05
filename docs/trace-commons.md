@@ -659,8 +659,11 @@ model-risk, readiness, and settlement gates as other ranking labels.
 `GET /v1/admin/ranking/adjudication-report` groups the latest absolute labels
 and pairwise preferences into unresolved issue buckets for disputed labels,
 cross-source absolute-label outcome conflicts, and reversed pairwise
-preferences. `GET /v1/admin/ranking/labeler-reliability-report` projects the
-same issue participation into source-level and hashed-actor rows, including
+preferences. Calibration runs record `ranking_adjudication_issues_present` and
+remain non-promotable while any unresolved issue exists for the target use, so
+stored model-quality evidence cannot advance credit issuance ahead of label
+review. `GET /v1/admin/ranking/labeler-reliability-report` projects the same
+issue participation into source-level and hashed-actor rows, including
 absolute-label, preference-label, dispute, conflict, and total issue counts
 without exposing raw actor principals or external refs.
 
