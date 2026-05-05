@@ -27218,6 +27218,16 @@ impl TraceMaintenanceRequest {
             && self.max_export_age_hours.is_none()
             && self.purge_expired_before.is_none()
     }
+
+    fn is_db_mirror_backfill_only_request(&self) -> bool {
+        self.backfill_db_mirror
+            && !self.index_vectors
+            && !self.reconcile_db_mirror
+            && !self.verify_audit_chain
+            && !self.prune_export_cache
+            && self.max_export_age_hours.is_none()
+            && self.purge_expired_before.is_none()
+    }
 }
 
 fn default_true() -> bool {
@@ -34013,6 +34023,92 @@ fn read_all_submission_records(
     Ok(records)
 }
 
+#[derive(Debug)]
+struct TraceBackfillFileRead<T> {
+    records: Vec<T>,
+    failures: Vec<TraceBackfillFailure>,
+}
+
+impl<T> Default for TraceBackfillFileRead<T> {
+    fn default() -> Self {
+        Self {
+            records: Vec::new(),
+            failures: Vec::new(),
+        }
+    }
+}
+
+fn read_all_submission_records_for_backfill(
+    root: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<TraceBackfillFileRead<TraceCommonsSubmissionRecord>> {
+    let tenant_key = tenant_storage_key(tenant_id);
+    let dir = root.join("tenants").join(tenant_key).join("metadata");
+    if !dir.exists() {
+        return Ok(TraceBackfillFileRead::default());
+    }
+
+    let mut read = TraceBackfillFileRead::default();
+    for entry in std::fs::read_dir(&dir)
+        .with_context(|| format!("failed to read trace metadata dir {}", dir.display()))?
+    {
+        let entry = entry.context("failed to read trace metadata entry")?;
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        let item_ref = trace_backfill_file_item_ref(&path);
+        let body = match std::fs::read_to_string(&path) {
+            Ok(body) => body,
+            Err(error) => {
+                read.failures.push(TraceBackfillFailure {
+                    item_kind: "submission_metadata".to_string(),
+                    item_ref,
+                    reason: format!("failed to read trace metadata: {error}"),
+                });
+                continue;
+            }
+        };
+        let record: TraceCommonsSubmissionRecord = match serde_json::from_str(&body) {
+            Ok(record) => record,
+            Err(error) => {
+                read.failures.push(TraceBackfillFailure {
+                    item_kind: "submission_metadata".to_string(),
+                    item_ref,
+                    reason: format!("failed to parse trace metadata: {error}"),
+                });
+                continue;
+            }
+        };
+        if let Err(error) = ensure_submission_record_tenant(&record, tenant_id) {
+            read.failures.push(TraceBackfillFailure {
+                item_kind: "submission_metadata".to_string(),
+                item_ref,
+                reason: error.to_string(),
+            });
+            continue;
+        }
+        read.records.push(record);
+    }
+    read.records.sort_by_key(|record| record.received_at);
+    Ok(read)
+}
+
+fn trace_backfill_file_item_ref(path: &Path) -> String {
+    let Some(file_stem) = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+    else {
+        return "unknown".to_string();
+    };
+    if Uuid::parse_str(file_stem).is_ok() {
+        file_stem.to_string()
+    } else {
+        format!("file_name_hash:{}", sha256_prefixed(file_stem))
+    }
+}
+
 const TRACE_SIMILARITY_NEIGHBOR_THRESHOLD: f32 = 0.25;
 const TRACE_SIMILARITY_MAX_NEIGHBORS: usize = 5;
 
@@ -34473,6 +34569,62 @@ fn read_all_derived_records(
     }
     records.sort_by_key(|record| record.created_at);
     Ok(records)
+}
+
+fn read_all_derived_records_for_backfill(
+    root: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<TraceBackfillFileRead<TraceCommonsDerivedRecord>> {
+    let tenant_key = tenant_storage_key(tenant_id);
+    let dir = root.join("tenants").join(tenant_key).join("derived");
+    if !dir.exists() {
+        return Ok(TraceBackfillFileRead::default());
+    }
+
+    let mut read = TraceBackfillFileRead::default();
+    for entry in std::fs::read_dir(&dir)
+        .with_context(|| format!("failed to read trace derived dir {}", dir.display()))?
+    {
+        let entry = entry.context("failed to read trace derived entry")?;
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        let item_ref = trace_backfill_file_item_ref(&path);
+        let body = match std::fs::read_to_string(&path) {
+            Ok(body) => body,
+            Err(error) => {
+                read.failures.push(TraceBackfillFailure {
+                    item_kind: "derived_record".to_string(),
+                    item_ref,
+                    reason: format!("failed to read trace derived record: {error}"),
+                });
+                continue;
+            }
+        };
+        let record: TraceCommonsDerivedRecord = match serde_json::from_str(&body) {
+            Ok(record) => record,
+            Err(error) => {
+                read.failures.push(TraceBackfillFailure {
+                    item_kind: "derived_record".to_string(),
+                    item_ref,
+                    reason: format!("failed to parse trace derived record: {error}"),
+                });
+                continue;
+            }
+        };
+        if let Err(error) = ensure_derived_record_tenant(&record, tenant_id) {
+            read.failures.push(TraceBackfillFailure {
+                item_kind: "derived_record".to_string(),
+                item_ref,
+                reason: error.to_string(),
+            });
+            continue;
+        }
+        read.records.push(record);
+    }
+    read.records.sort_by_key(|record| record.created_at);
+    Ok(read)
 }
 
 fn append_credit_event(
@@ -36507,8 +36659,16 @@ async fn run_maintenance(
     let mut expired_submission_ids = BTreeSet::new();
     let mut retention_ledger = TraceMaintenanceLedgerAccumulator::default();
     let maintenance_started_at = Utc::now();
+    let backfill_only_request = request.is_db_mirror_backfill_only_request();
+    let mut db_mirror_backfill_input_failures = Vec::new();
 
-    let mut records = read_all_submission_records(&state.root, &tenant.tenant_id)?;
+    let mut records = if backfill_only_request {
+        let read = read_all_submission_records_for_backfill(&state.root, &tenant.tenant_id)?;
+        db_mirror_backfill_input_failures.extend(read.failures);
+        read.records
+    } else {
+        read_all_submission_records(&state.root, &tenant.tenant_id)?
+    };
     let mut records_marked_revoked = 0usize;
     let mut records_marked_expired = 0usize;
     let now = Utc::now();
@@ -36579,7 +36739,13 @@ async fn run_maintenance(
         }
     }
 
-    let mut derived = read_all_derived_records(&state.root, &tenant.tenant_id)?;
+    let mut derived = if backfill_only_request {
+        let read = read_all_derived_records_for_backfill(&state.root, &tenant.tenant_id)?;
+        db_mirror_backfill_input_failures.extend(read.failures);
+        read.records
+    } else {
+        read_all_derived_records(&state.root, &tenant.tenant_id)?
+    };
     let mut derived_marked_revoked = 0usize;
     let mut derived_marked_expired = 0usize;
     for record in &mut derived {
@@ -36678,7 +36844,7 @@ async fn run_maintenance(
         } else {
             0
         };
-    let db_mirror_backfill = backfill_db_mirror_from_files(
+    let mut db_mirror_backfill = backfill_db_mirror_from_files(
         state,
         tenant,
         &records,
@@ -36687,6 +36853,9 @@ async fn run_maintenance(
         request.dry_run,
     )
     .await?;
+    for failure in db_mirror_backfill_input_failures {
+        db_mirror_backfill.record_existing_failure(failure);
+    }
     let db_mirror_backfilled = db_mirror_backfill.backfilled;
     let db_mirror_backfill_failed = db_mirror_backfill.failed;
     let vector_entries_indexed = index_vector_metadata_from_db(
@@ -39410,6 +39579,15 @@ impl TraceBackfillReport {
                 reason,
             });
         }
+    }
+
+    fn record_existing_failure(&mut self, failure: TraceBackfillFailure) {
+        let TraceBackfillFailure {
+            item_kind,
+            item_ref,
+            reason,
+        } = failure;
+        self.record_failure(&item_kind, item_ref, reason);
     }
 }
 
@@ -58827,6 +59005,66 @@ mod tests {
         }
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn maintenance_backfill_reports_malformed_submission_metadata() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut valid = sample_envelope().await;
+        make_metadata_only_low_risk(&mut valid);
+        let valid_id = valid.submission_id;
+        let mut malformed = sample_envelope().await;
+        make_metadata_only_low_risk(&mut malformed);
+        let malformed_id = malformed.submission_id;
+
+        let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(valid))
+            .await
+            .expect("valid submission writes file metadata");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(malformed),
+        )
+        .await
+        .expect("submission to corrupt writes file metadata");
+        std::fs::write(
+            submission_metadata_path(temp.path(), "tenant-a", malformed_id),
+            "{not-json",
+        )
+        .expect("metadata corruption writes");
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("malformed_metadata_backfill_dry_run".to_string()),
+                dry_run: true,
+                backfill_db_mirror: true,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("backfill-only maintenance reports malformed metadata as an item failure");
+
+        assert!(response.db_mirror_backfilled >= 1);
+        assert_eq!(response.db_mirror_backfill_failed, 1);
+        assert!(response.db_mirror_backfill_failures.iter().any(|failure| {
+            failure.item_kind == "submission_metadata"
+                && failure.item_ref == malformed_id.to_string()
+                && failure.reason.contains("failed to parse trace metadata")
+        }));
+        assert!(
+            !response
+                .db_mirror_backfill_failures
+                .iter()
+                .any(|failure| failure.item_ref == valid_id.to_string())
+        );
     }
 
     #[tokio::test]
