@@ -19795,6 +19795,7 @@ async fn run_dataset_replay_export_with_grant(
         .collect::<BTreeMap<_, _>>();
     let limit = job.max_item_cap;
     let mut items = Vec::new();
+    let mut candidate_records = Vec::new();
     for record in records
         .into_iter()
         .filter(|record| query.status.is_none_or(|status| record.status == status))
@@ -19812,9 +19813,21 @@ async fn run_dataset_replay_export_with_grant(
                 TraceAllowedUse::Evaluation,
             )
         })
-        .filter(TraceCommonsSubmissionRecord::is_export_eligible)
-        .take(limit)
     {
+        if let Err(error) = ensure_retention_metadata_within_server_policy(&record) {
+            return fail_export_job_with_internal_error(
+                state,
+                &job,
+                "replay export job failure",
+                error,
+            )
+            .await;
+        }
+        if record.is_export_eligible() {
+            candidate_records.push(record);
+        }
+    }
+    for record in candidate_records.into_iter().take(limit) {
         let body_read = match read_envelope_for_replay_export(
             state,
             tenant,
@@ -21627,9 +21640,9 @@ async fn run_benchmark_conversion_with_grant(
         read_reviewer_metadata_view(state, tenant).await,
     )
     .await?;
-    let accepted_by_submission = records
+    let mut accepted_by_submission = BTreeMap::new();
+    for record in records
         .into_iter()
-        .filter(TraceCommonsSubmissionRecord::is_benchmark_eligible)
         .filter(|record| body.status.is_none_or(|status| record.status == status))
         .filter(|record| {
             body.privacy_risk
@@ -21644,8 +21657,20 @@ async fn run_benchmark_conversion_with_grant(
                 TraceAllowedUse::BenchmarkGeneration,
             )
         })
-        .map(|record| (record.submission_id, record))
-        .collect::<BTreeMap<_, _>>();
+    {
+        if let Err(error) = ensure_retention_metadata_within_server_policy(&record) {
+            return fail_export_job_with_internal_error(
+                state,
+                &job,
+                "benchmark export job failure",
+                error,
+            )
+            .await;
+        }
+        if record.is_benchmark_eligible() {
+            accepted_by_submission.insert(record.submission_id, record);
+        }
+    }
     let limit = job.max_item_cap;
 
     let mut candidates = Vec::new();
@@ -23104,7 +23129,8 @@ async fn collect_ranker_training_candidates(
         .limit
         .unwrap_or(DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST);
     let requested_status = query.status.unwrap_or(TraceCorpusStatus::Accepted);
-    let mut candidates = records
+    let mut candidates = Vec::new();
+    for record in records
         .into_iter()
         .filter(|record| record.status == requested_status)
         .filter(|record| matches!(record.status, TraceCorpusStatus::Accepted))
@@ -23123,12 +23149,12 @@ async fn collect_ranker_training_candidates(
                 TraceAllowedUse::RankingModelTraining,
             )
         })
-        .filter_map(|record| {
-            derived_by_submission
-                .get(&record.submission_id)
-                .map(|derived| TraceRankerTrainingCandidate::from_records(&record, derived))
-        })
-        .collect::<Vec<_>>();
+    {
+        ensure_retention_metadata_within_server_policy(&record)?;
+        if let Some(derived) = derived_by_submission.get(&record.submission_id) {
+            candidates.push(TraceRankerTrainingCandidate::from_records(&record, derived));
+        }
+    }
     candidates.sort_by(|left, right| {
         right
             .ranker_score
@@ -46251,6 +46277,157 @@ mod tests {
         .expect("fully filtered ranker pairs export is allowed");
         assert_eq!(pairs.item_count, 0);
         assert_eq!(pairs.purpose, "guarded_ranker_pairs");
+    }
+
+    #[tokio::test]
+    async fn replay_export_rejects_extended_retention_expiration_before_body_read() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let server_policy = retention_policy_for_submission_record(&record);
+        let server_max_age_days = server_policy.max_age_days.expect("policy expires");
+        record.expires_at =
+            Some(record.received_at + Duration::days(i64::from(server_max_age_days + 1)));
+        write_submission_record(&state.root, &record).expect("extended retention record writes");
+
+        let error = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("extended_retention_replay".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: None,
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect_err("extended retention metadata blocks replay export");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit events read");
+        assert!(audit_events.iter().all(|event| {
+            event.submission_id != submission_id
+                || !matches!(event.kind.as_str(), "trace_content_read" | "dataset_export")
+        }));
+    }
+
+    #[tokio::test]
+    async fn benchmark_convert_rejects_extended_retention_expiration_before_artifact_side_effects()
+    {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::BenchmarkOnly];
+        envelope.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::BenchmarkGeneration];
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let server_policy = retention_policy_for_submission_record(&record);
+        let server_max_age_days = server_policy.max_age_days.expect("policy expires");
+        record.expires_at =
+            Some(record.received_at + Duration::days(i64::from(server_max_age_days + 1)));
+        write_submission_record(&state.root, &record).expect("extended retention record writes");
+
+        let error = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("extended_retention_benchmark".to_string()),
+                consent_scope: Some("benchmark_only".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: None,
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect_err("extended retention metadata blocks benchmark conversion");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            !read_all_audit_events(temp.path(), "tenant-a")
+                .expect("audit reads")
+                .iter()
+                .any(|event| event.submission_id == submission_id
+                    && event.kind == "benchmark_conversion")
+        );
+    }
+
+    #[tokio::test]
+    async fn ranker_candidates_reject_extended_retention_expiration_before_export_side_effects() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let server_policy = retention_policy_for_submission_record(&record);
+        let server_max_age_days = server_policy.max_age_days.expect("policy expires");
+        record.expires_at =
+            Some(record.received_at + Duration::days(i64::from(server_max_age_days + 1)));
+        write_submission_record(&state.root, &record).expect("extended retention record writes");
+
+        let error = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("extended_retention_ranker".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect_err("extended retention metadata blocks ranker candidate export");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            !read_all_audit_events(temp.path(), "tenant-a")
+                .expect("audit reads")
+                .iter()
+                .any(|event| event.kind == "ranker_training_candidates_export")
+        );
+        assert!(
+            !read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit reads")
+                .iter()
+                .any(|event| event.submission_id == submission_id
+                    && event.event_type == TraceCreditLedgerEventType::TrainingUtility)
+        );
     }
 
     #[tokio::test]
