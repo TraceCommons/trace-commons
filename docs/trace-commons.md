@@ -618,6 +618,7 @@ The service exposes:
 - `POST /v1/workers/export/jobs/claim-next`
 - `POST /v1/workers/export/jobs/claim-and-run`
 - `POST /v1/workers/export/jobs/run-queued`
+- `POST /v1/workers/export/jobs/retry-failed`
 - `GET /v1/admin/config-status`
 - `POST /v1/admin/maintenance`
 - `POST /v1/workers/retention-maintenance`
@@ -646,7 +647,11 @@ failed instead of creating a second job. `POST /v1/workers/export/jobs/run-queue
 is the bounded scheduler route: it claims up to `max_jobs` queued rows,
 optionally filtered by dataset kind, continues after per-job execution failures
 by terminalizing failed rows, and returns safe completed/failed/pending counts
-plus job summaries without embedding exported trace bodies.
+plus job summaries without embedding exported trace bodies. The
+`/v1/workers/export/jobs/retry-failed` worker route is the bounded retry pass: it
+scans failed unexpired jobs with replayable request metadata, applies retry-count
+and exponential-delay bounds, requeues due rows with hash-only retry metadata,
+and reports retried/not-due/ineligible/remaining-failed counts.
 
 Stale export-job recovery is intentionally narrow. If a `running` export job is
 still open after its grant expiry, an admin can call
