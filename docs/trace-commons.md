@@ -429,6 +429,10 @@ requires production-shaped managed EdDSA enforcement with at least two active
 managed keys, issuer/audience/JTI/TTL policy, and a fresh guarded refresh
 window, and can append `key_rotation_drill` evidence without exposing key ids,
 PEMs, hosts, URLs, or bearer fetch credentials.
+`POST /v1/admin/postgres-rls-drill` runs the PostgreSQL RLS readiness smoke
+check from the same safe diagnostics exposed by config status. It returns only
+aggregate policy/RLS/FORCE RLS counts, role-bypass state, and compact blocker
+codes, and can append `postgres_rls_readiness` evidence.
 `POST /v1/admin/audit-chain-drill` runs audit-chain verification without
 maintenance side effects and can append `audit_chain_verification` evidence;
 responses expose counts, last hashes, blocker codes, and hashes of verifier
@@ -643,6 +647,7 @@ The service exposes:
 - `POST /v1/admin/db-reconciliation-drill`
 - `POST /v1/admin/rollback-drill`
 - `POST /v1/admin/key-rotation-drill`
+- `POST /v1/admin/postgres-rls-drill`
 - `POST /v1/admin/audit-chain-drill`
 - `POST /v1/admin/maintenance`
 - `POST /v1/workers/retention-maintenance`

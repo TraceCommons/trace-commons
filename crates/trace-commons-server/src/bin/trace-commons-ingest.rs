@@ -3002,6 +3002,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(db_reconciliation_drill_handler),
         )
         .route(
+            "/v1/admin/postgres-rls-drill",
+            post(postgres_rls_drill_handler),
+        )
+        .route(
             "/v1/admin/operational-metrics",
             get(operational_metrics_handler),
         )
@@ -21873,6 +21877,19 @@ async fn db_reconciliation_drill_handler(
     Ok(Json(response))
 }
 
+async fn postgres_rls_drill_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TracePostgresRlsDrillRequest>,
+) -> ApiResult<Json<TracePostgresRlsDrillResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let response = run_postgres_rls_drill(state.as_ref(), tenant.auth(), request)
+        .await
+        .map_err(maintenance_error)?;
+    Ok(Json(response))
+}
+
 #[derive(Debug, Deserialize)]
 struct TraceRollbackDrillRequest {
     #[serde(default)]
@@ -21953,6 +21970,14 @@ struct TraceDbReconciliationDrillRequest {
     record_evidence: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct TracePostgresRlsDrillRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    record_evidence: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct TraceAuditChainDrillResponse {
     tenant_id: String,
@@ -21985,6 +22010,108 @@ struct TraceAuditChainDrillResponse {
     failure_hashes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct TracePostgresRlsDrillResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose: String,
+    ready: bool,
+    evidence_hash: String,
+    rls_ready: bool,
+    force_rls_ready: bool,
+    production_ready: bool,
+    expected_table_count: usize,
+    policy_installed_count: usize,
+    rls_enabled_count: usize,
+    force_rls_enabled_count: usize,
+    missing_policy_table_count: usize,
+    rls_disabled_table_count: usize,
+    force_rls_disabled_table_count: usize,
+    policy_expression_mismatch_table_count: usize,
+    current_role_bypasses_rls: bool,
+    blocking_gaps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+async fn run_postgres_rls_drill(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TracePostgresRlsDrillRequest,
+) -> anyhow::Result<TracePostgresRlsDrillResponse> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| anyhow::Error::new(TraceDbDualWriteRequiredForReconciliation))?;
+    let generated_at = Utc::now();
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_postgres_rls_drill")
+        .to_string();
+    let diagnostics = db
+        .trace_corpus_rls_diagnostics()
+        .await
+        .context("failed to read Trace Commons PostgreSQL RLS diagnostics")?
+        .ok_or_else(|| anyhow::Error::new(TracePostgresRlsDiagnosticsUnavailable))?;
+    let blocking_gaps = postgres_rls_readiness_blocking_gaps(&diagnostics);
+    let evidence_hash = postgres_rls_drill_evidence_hash(tenant, &diagnostics, &blocking_gaps);
+    let mut response = TracePostgresRlsDrillResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at,
+        purpose: purpose.clone(),
+        ready: diagnostics.production_ready() && blocking_gaps.is_empty(),
+        evidence_hash,
+        rls_ready: diagnostics.rls_ready(),
+        force_rls_ready: diagnostics.force_rls_ready(),
+        production_ready: diagnostics.production_ready(),
+        expected_table_count: diagnostics.expected_table_count,
+        policy_installed_count: diagnostics.policy_installed_count,
+        rls_enabled_count: diagnostics.rls_enabled_count,
+        force_rls_enabled_count: diagnostics.force_rls_enabled_count,
+        missing_policy_table_count: diagnostics.missing_policy_tables.len(),
+        rls_disabled_table_count: diagnostics.rls_disabled_tables.len(),
+        force_rls_disabled_table_count: diagnostics.force_rls_disabled_tables.len(),
+        policy_expression_mismatch_table_count: diagnostics.policy_expression_mismatch_tables.len(),
+        current_role_bypasses_rls: diagnostics.current_role_bypasses_rls,
+        blocking_gaps,
+        recorded_evidence: None,
+    };
+
+    if request.record_evidence {
+        let evidence = TraceRolloutSmokeEvidenceResponse {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            check_name: "postgres_rls_readiness".to_string(),
+            status: if response.ready {
+                TraceRolloutSmokeEvidenceStatus::Passed
+            } else {
+                TraceRolloutSmokeEvidenceStatus::Failed
+            },
+            evidence_hash: response.evidence_hash.clone(),
+            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            recorded_at: Utc::now(),
+        };
+        append_audit_event_with_db_mirror(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+            StorageTraceAuditAction::Read,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .await?;
+        response.recorded_evidence = Some(evidence);
+    }
+
+    Ok(response)
 }
 
 #[derive(Debug, Serialize)]
@@ -22884,6 +23011,64 @@ fn db_reconciliation_drill_evidence_hash(
         format!("trace_commons_db_reconciliation_drill.v1:serialization_error={error}")
     });
     sha256_prefixed(&json)
+}
+
+fn postgres_rls_readiness_blocking_gaps(diagnostics: &TraceCorpusRlsDiagnostics) -> Vec<String> {
+    let mut gaps = Vec::new();
+    push_rollback_gap_count(
+        &mut gaps,
+        "missing_policy_tables",
+        diagnostics.missing_policy_tables.len(),
+    );
+    push_rollback_gap_count(
+        &mut gaps,
+        "rls_disabled_tables",
+        diagnostics.rls_disabled_tables.len(),
+    );
+    push_rollback_gap_count(
+        &mut gaps,
+        "force_rls_disabled_tables",
+        diagnostics.force_rls_disabled_tables.len(),
+    );
+    push_rollback_gap_count(
+        &mut gaps,
+        "policy_expression_mismatch_tables",
+        diagnostics.policy_expression_mismatch_tables.len(),
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "current_role_bypasses_rls",
+        diagnostics.current_role_bypasses_rls,
+    );
+    gaps
+}
+
+fn postgres_rls_drill_evidence_hash(
+    tenant: &TenantAuth,
+    diagnostics: &TraceCorpusRlsDiagnostics,
+    blocking_gaps: &[String],
+) -> String {
+    sha256_prefixed(
+        &serde_json::json!({
+            "schema": "trace_commons_postgres_rls_drill.v1",
+            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+            "actor_principal_ref": tenant.principal_ref,
+            "rls_ready": diagnostics.rls_ready(),
+            "force_rls_ready": diagnostics.force_rls_ready(),
+            "production_ready": diagnostics.production_ready(),
+            "expected_table_count": diagnostics.expected_table_count,
+            "policy_installed_count": diagnostics.policy_installed_count,
+            "rls_enabled_count": diagnostics.rls_enabled_count,
+            "force_rls_enabled_count": diagnostics.force_rls_enabled_count,
+            "missing_policy_table_count": diagnostics.missing_policy_tables.len(),
+            "rls_disabled_table_count": diagnostics.rls_disabled_tables.len(),
+            "force_rls_disabled_table_count": diagnostics.force_rls_disabled_tables.len(),
+            "policy_expression_mismatch_table_count": diagnostics.policy_expression_mismatch_tables.len(),
+            "current_role_bypasses_rls": diagnostics.current_role_bypasses_rls,
+            "blocking_gaps": blocking_gaps,
+        })
+        .to_string(),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -38216,6 +38401,9 @@ fn maintenance_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
     if let Some(error) = error.downcast_ref::<TraceDbDualWriteRequiredForReconciliation>() {
         return api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string());
     }
+    if let Some(error) = error.downcast_ref::<TracePostgresRlsDiagnosticsUnavailable>() {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string());
+    }
     internal_error(error)
 }
 
@@ -38271,6 +38459,20 @@ impl std::fmt::Display for TraceDbDualWriteRequiredForReconciliation {
 }
 
 impl std::error::Error for TraceDbDualWriteRequiredForReconciliation {}
+
+#[derive(Debug)]
+struct TracePostgresRlsDiagnosticsUnavailable;
+
+impl std::fmt::Display for TracePostgresRlsDiagnosticsUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Trace Commons PostgreSQL RLS readiness requires TRACE_COMMONS_DB_DUAL_WRITE with PostgreSQL RLS diagnostics"
+        )
+    }
+}
+
+impl std::error::Error for TracePostgresRlsDiagnosticsUnavailable {}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -54458,6 +54660,135 @@ mod tests {
                     event.kind == "rollout_smoke_evidence"
                         && event.reason.as_deref().is_some_and(|reason| {
                             reason.contains("check_name=db_reconciliation_clean")
+                                && reason.contains("status=passed")
+                        })
+                })
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn postgres_rls_drill_without_db_mirror_returns_operator_error() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/postgres-rls-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator PostgreSQL RLS drill",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("PostgreSQL RLS drill response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response parses");
+        assert!(
+            value["error"]
+                .as_str()
+                .expect("error is string")
+                .contains("TRACE_COMMONS_DB_DUAL_WRITE")
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_rls_drill_records_readiness_smoke_evidence() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/postgres-rls-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator PostgreSQL RLS drill",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("PostgreSQL RLS drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("PostgreSQL RLS drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(true));
+        assert_eq!(value["production_ready"], serde_json::json!(true));
+        assert_eq!(value["rls_ready"], serde_json::json!(true));
+        assert_eq!(value["force_rls_ready"], serde_json::json!(true));
+        assert!(
+            value["expected_table_count"]
+                .as_u64()
+                .expect("expected table count is numeric")
+                > 0
+        );
+        assert_eq!(value["blocking_gaps"], serde_json::json!([]));
+        assert_eq!(
+            value["recorded_evidence"]["check_name"],
+            serde_json::json!("postgres_rls_readiness")
+        );
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("passed")
+        );
+        assert!(
+            value["evidence_hash"]
+                .as_str()
+                .expect("evidence hash is string")
+                .starts_with("sha256:")
+        );
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(
+            read_all_audit_events(temp.path(), "tenant-a")
+                .expect("file audit events remain after drill")
+                .iter()
+                .any(|event| {
+                    event.kind == "rollout_smoke_evidence"
+                        && event.reason.as_deref().is_some_and(|reason| {
+                            reason.contains("check_name=postgres_rls_readiness")
                                 && reason.contains("status=passed")
                         })
                 })
