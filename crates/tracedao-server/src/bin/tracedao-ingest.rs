@@ -8,7 +8,7 @@ use std::time::Duration as StdDuration;
 
 use anyhow::Context;
 use axum::extract::{DefaultBodyLimit, Query};
-use axum::http::header::AUTHORIZATION;
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
@@ -2664,6 +2664,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/operational-summary",
             get(operational_summary_handler),
+        )
+        .route(
+            "/v1/admin/operational-metrics",
+            get(operational_metrics_handler),
         )
         .route("/v1/admin/config-status", get(config_status_handler))
         .route("/v1/admin/maintenance", post(maintenance_handler))
@@ -20141,44 +20145,9 @@ async fn operational_summary_handler(
     let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(tenant.auth())?;
     let generated_at = Utc::now();
-    let TraceCommonsMetadataView { records, derived } =
-        read_reviewer_metadata_view(state.as_ref(), tenant.auth())
-            .await
-            .map_err(internal_error)?;
-    let credit_events = read_operational_credit_events(state.as_ref(), tenant.auth(), &records)
+    let response = read_trace_operational_summary(state.as_ref(), &tenant, generated_at)
         .await
         .map_err(internal_error)?;
-    let db_summary = read_operational_db_summary(state.as_ref(), tenant.auth())
-        .await
-        .map_err(internal_error)?;
-    let ranking = read_operational_ranking_summary(
-        state.as_ref(),
-        tenant.auth(),
-        &credit_events,
-        generated_at,
-    )
-    .await
-    .map_err(internal_error)?;
-    let benchmark_artifacts =
-        list_benchmark_conversion_artifacts_for_worker(state.as_ref(), tenant.auth())
-            .await
-            .map_err(internal_error)?;
-    let benchmark_registry_outbox =
-        read_benchmark_registry_outbox_items_for_admin(state.as_ref(), tenant.auth())
-            .await
-            .map_err(internal_error)?;
-    let response = TraceOperationalSummaryResponse::from_parts(TraceOperationalSummaryInputs {
-        state: state.as_ref(),
-        tenant_id: tenant.tenant_id().to_string(),
-        records,
-        derived,
-        credit_events,
-        db_summary,
-        benchmark_artifacts,
-        benchmark_registry_outbox,
-        ranking,
-        generated_at,
-    });
     log_operational_summary_promotion_gates(&response);
     append_audit_event_with_db_mirror(
         state.as_ref(),
@@ -20190,6 +20159,167 @@ async fn operational_summary_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(response))
+}
+
+async fn read_trace_operational_summary(
+    state: &AppState,
+    tenant: &TenantCtx,
+    generated_at: DateTime<Utc>,
+) -> anyhow::Result<TraceOperationalSummaryResponse> {
+    let TraceCommonsMetadataView { records, derived } =
+        read_reviewer_metadata_view(state, tenant.auth()).await?;
+    let credit_events = read_operational_credit_events(state, tenant.auth(), &records).await?;
+    let db_summary = read_operational_db_summary(state, tenant.auth()).await?;
+    let ranking =
+        read_operational_ranking_summary(state, tenant.auth(), &credit_events, generated_at)
+            .await?;
+    let benchmark_artifacts =
+        list_benchmark_conversion_artifacts_for_worker(state, tenant.auth()).await?;
+    let benchmark_registry_outbox =
+        read_benchmark_registry_outbox_items_for_admin(state, tenant.auth()).await?;
+    Ok(TraceOperationalSummaryResponse::from_parts(
+        TraceOperationalSummaryInputs {
+            state,
+            tenant_id: tenant.tenant_id().to_string(),
+            records,
+            derived,
+            credit_events,
+            db_summary,
+            benchmark_artifacts,
+            benchmark_registry_outbox,
+            ranking,
+            generated_at,
+        },
+    ))
+}
+
+const TRACE_OPERATIONAL_METRICS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
+
+async fn operational_metrics_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<impl IntoResponse> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let response = read_trace_operational_summary(state.as_ref(), &tenant, Utc::now())
+        .await
+        .map_err(internal_error)?;
+    let (metrics, metric_count) = trace_operational_metrics_body(&response);
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        tenant.auth(),
+        TraceCommonsAuditEvent::read(tenant.auth(), "operational_metrics", metric_count),
+        StorageTraceAuditAction::Read,
+        trace_read_audit_metadata("operational_metrics", metric_count),
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok((
+        [(CONTENT_TYPE, TRACE_OPERATIONAL_METRICS_CONTENT_TYPE)],
+        metrics,
+    ))
+}
+
+fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) -> (String, usize) {
+    let mut body = String::new();
+    let mut metric_count = 0usize;
+    body.push_str("# HELP tracedao_operational_promotion_ready Whether operational promotion gates have no blockers.\n");
+    body.push_str("# TYPE tracedao_operational_promotion_ready gauge\n");
+    push_prometheus_gauge(
+        &mut body,
+        &mut metric_count,
+        "tracedao_operational_promotion_ready",
+        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        usize::from(response.promotion_gates.ready),
+    );
+    body.push_str("# HELP tracedao_operational_promotion_blocking_gates Count of blocking operational promotion gates.\n");
+    body.push_str("# TYPE tracedao_operational_promotion_blocking_gates gauge\n");
+    push_prometheus_gauge(
+        &mut body,
+        &mut metric_count,
+        "tracedao_operational_promotion_blocking_gates",
+        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        response.promotion_gates.blocking_count,
+    );
+    body.push_str("# HELP tracedao_operational_promotion_warning_gates Count of warning operational promotion gates.\n");
+    body.push_str("# TYPE tracedao_operational_promotion_warning_gates gauge\n");
+    push_prometheus_gauge(
+        &mut body,
+        &mut metric_count,
+        "tracedao_operational_promotion_warning_gates",
+        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        response.promotion_gates.warning_count,
+    );
+    body.push_str("# HELP tracedao_operational_promotion_gate Individual operational promotion gate values by severity and gate name.\n");
+    body.push_str("# TYPE tracedao_operational_promotion_gate gauge\n");
+    for gate in operational_summary_promotion_gate_metric_fields(response) {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "tracedao_operational_promotion_gate",
+            &[
+                ("tenant_storage_ref", &gate.tenant_storage_ref),
+                ("severity", gate.gate_severity),
+                ("gate", &gate.gate_name),
+            ],
+            gate.gate_value,
+        );
+    }
+    body.push_str("# HELP tracedao_operational_ranking_worker_actionable_skips Count of ranking worker risk or ineligible skips that need operator review.\n");
+    body.push_str("# TYPE tracedao_operational_ranking_worker_actionable_skips gauge\n");
+    push_prometheus_gauge(
+        &mut body,
+        &mut metric_count,
+        "tracedao_operational_ranking_worker_actionable_skips",
+        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        response
+            .promotion_gates
+            .ranking_worker_run_actionable_skip_count,
+    );
+    body.push_str("# HELP tracedao_operational_rollout_smoke_missing_evidence Count of required rollout smoke checks without captured rehearsal evidence.\n");
+    body.push_str("# TYPE tracedao_operational_rollout_smoke_missing_evidence gauge\n");
+    push_prometheus_gauge(
+        &mut body,
+        &mut metric_count,
+        "tracedao_operational_rollout_smoke_missing_evidence",
+        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        response.rollout_smoke.missing_evidence_count,
+    );
+    (body, metric_count)
+}
+
+fn push_prometheus_gauge(
+    body: &mut String,
+    metric_count: &mut usize,
+    name: &str,
+    labels: &[(&str, &str)],
+    value: usize,
+) {
+    body.push_str(name);
+    if !labels.is_empty() {
+        body.push('{');
+        for (index, (label, label_value)) in labels.iter().enumerate() {
+            if index > 0 {
+                body.push(',');
+            }
+            body.push_str(label);
+            body.push_str("=\"");
+            body.push_str(&prometheus_label_value(label_value));
+            body.push('"');
+        }
+        body.push('}');
+    }
+    body.push(' ');
+    body.push_str(&value.to_string());
+    body.push('\n');
+    *metric_count += 1;
+}
+
+fn prometheus_label_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 fn operational_summary_read_audit_event(
@@ -63105,6 +63235,104 @@ mod tests {
                 .blocker_reasons
                 .contains(&"smoke_rehearsal_evidence_missing=10".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn admin_operational_metrics_route_exports_safe_promotion_gauges() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        append_ranking_worker_run(
+            temp.path(),
+            "tenant-a",
+            &TraceRankingWorkerRunRecord {
+                ranking_worker_run_id: Uuid::new_v4(),
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                run_kind: TraceRankingWorkerRunKind::CreditCycle,
+                status: TraceRankingWorkerRunStatus::Failed,
+                dry_run: false,
+                reason_hash: sha256_prefixed("metrics route failed worker reason"),
+                model_version: Some("trace-ranker-metrics-route-v1".to_string()),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                policy_version: Some("trace-credit-policy-v1".to_string()),
+                limit: 100,
+                checked_count: 0,
+                succeeded_count: 0,
+                skipped_existing_count: 0,
+                skipped_model_risk_count: 0,
+                skipped_ineligible_count: 0,
+                pending_after_count: 0,
+                result_refs: Vec::new(),
+                reason_counts: BTreeMap::new(),
+                actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+                created_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+                last_error_hash: Some(sha256_prefixed("metrics route worker failed")),
+            },
+        )
+        .expect("failed worker run writes");
+
+        let contributor_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-metrics")
+                    .header(AUTHORIZATION, "Bearer token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("contributor response");
+        assert_eq!(contributor_response.status(), StatusCode::FORBIDDEN);
+
+        let admin_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-metrics")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("admin response");
+        assert_eq!(admin_response.status(), StatusCode::OK);
+        assert_eq!(
+            admin_response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/plain; version=0.0.4; charset=utf-8")
+        );
+        let body = axum::body::to_bytes(admin_response.into_body(), 8192)
+            .await
+            .expect("body reads");
+        let body_text = std::str::from_utf8(&body).expect("metrics body is utf8");
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(body_text.contains("# TYPE tracedao_operational_promotion_ready gauge"));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_promotion_ready{{tenant_storage_ref=\"{tenant_ref}\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"failed_ranking_worker_runs\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 10"
+        )));
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("metrics route failed worker reason"));
+
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "read"
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("surface=operational_metrics;"))
+        }));
     }
 
     #[test]
