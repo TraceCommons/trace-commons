@@ -48185,6 +48185,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn maintenance_reconciliation_reports_submitted_audit_metadata_drift() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let canonical_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id,
+            kind: "submitted".to_string(),
+            created_at: Utc::now(),
+            status: Some(TraceCorpusStatus::Accepted),
+            actor_role: Some(TokenRole::Contributor),
+            actor_principal_ref: Some(principal_storage_ref("token-a")),
+            reason: Some("auth_method=static_token".to_string()),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+        backend
+            .append_trace_audit_event(StorageTraceAuditEventWrite {
+                audit_event_id: canonical_event.event_id,
+                tenant_id: canonical_event.tenant_id.clone(),
+                actor_principal_ref: canonical_event.actor_principal_ref.clone().unwrap(),
+                actor_role: "contributor".to_string(),
+                action: StorageTraceAuditAction::Submit,
+                reason: canonical_event.reason.clone(),
+                request_id: None,
+                submission_id: Some(submission_id),
+                object_ref_id: None,
+                export_manifest_id: None,
+                decision_inputs_hash: None,
+                previous_event_hash: None,
+                event_hash: None,
+                canonical_event_json: Some(
+                    serde_json::to_string(&canonical_event).expect("canonical audit serializes"),
+                ),
+                metadata: StorageTraceAuditSafeMetadata::Submission {
+                    status: StorageTraceCorpusStatus::Accepted,
+                    privacy_risk: "unknown".to_string(),
+                },
+            })
+            .await
+            .expect("drifted submitted audit row writes");
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("submitted_audit_metadata_drift_reconcile".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: true,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("maintenance reports submitted audit metadata drift");
+
+        let report = response
+            .db_reconciliation
+            .expect("reconciliation report exists");
+        assert_eq!(report.db_audit_submission_metadata_mismatches.len(), 1);
+        let mismatch = &report.db_audit_submission_metadata_mismatches[0];
+        assert_eq!(mismatch.audit_event_id, canonical_event.event_id);
+        assert_eq!(mismatch.submission_id, submission_id);
+        assert_eq!(mismatch.metadata_privacy_risk, "unknown");
+        assert_eq!(mismatch.db_privacy_risk, "low");
+        assert!(
+            report
+                .blocking_gaps
+                .iter()
+                .any(|gap| gap == "db_audit_submission_metadata_mismatches=1")
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
     async fn maintenance_reconciliation_samples_audit_reader_projection_drift() {
         let Some(backend) = postgres_backend_for_ingest_test().await else {
             return;
