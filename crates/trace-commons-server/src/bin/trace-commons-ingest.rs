@@ -38734,11 +38734,14 @@ impl TraceOperationalSummaryResponse {
 
 const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "submit_status",
+    "tenant_canary_isolation",
     "contributor_credit",
     "reviewer_metadata",
     "replay_export_selection",
     "audit_reads",
     "db_reconciliation_clean",
+    "rollback_flag_drill",
+    "key_rotation_drill",
     "audit_chain_verification",
     "revocation_propagation",
     "retention_dry_run",
@@ -63919,11 +63922,11 @@ mod tests {
         );
         assert_eq!(
             operational_json["rollout_smoke"]["required_check_count"],
-            serde_json::json!(13)
+            serde_json::json!(16)
         );
         assert_eq!(
             operational_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(13)
+            serde_json::json!(16)
         );
         assert!(
             operational
@@ -63947,13 +63950,31 @@ mod tests {
             operational
                 .rollout_smoke
                 .required_checks
+                .contains(&"tenant_canary_isolation".to_string())
+        );
+        assert!(
+            operational
+                .rollout_smoke
+                .required_checks
+                .contains(&"rollback_flag_drill".to_string())
+        );
+        assert!(
+            operational
+                .rollout_smoke
+                .required_checks
+                .contains(&"key_rotation_drill".to_string())
+        );
+        assert!(
+            operational
+                .rollout_smoke
+                .required_checks
                 .contains(&"audit_chain_verification".to_string())
         );
         assert!(
             operational
                 .rollout_smoke
                 .blocker_reasons
-                .contains(&"smoke_rehearsal_evidence_missing=13".to_string())
+                .contains(&"smoke_rehearsal_evidence_missing=16".to_string())
         );
     }
 
@@ -64033,7 +64054,7 @@ mod tests {
         );
         assert_eq!(
             operational_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(12)
+            serde_json::json!(15)
         );
         assert!(
             !operational
@@ -64468,7 +64489,7 @@ mod tests {
             "trace_commons_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"failed_ranking_worker_runs\"}} 1"
         )));
         assert!(body_text.contains(&format!(
-            "trace_commons_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 13"
+            "trace_commons_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 16"
         )));
         assert!(body_text.contains(&format!(
             "trace_commons_operational_rollout_smoke_recorded_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 0"
