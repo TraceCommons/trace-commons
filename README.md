@@ -251,12 +251,13 @@ same safe promotion, per-gate, worker-skip, rollout-smoke, submission, review
 SLA, export, retention, vector, benchmark, and delayed-credit gauges. The same
 summary response includes a `rollout_smoke` preflight block with the required
 canary smoke-check names, promotion-gate readiness, recorded evidence counts,
-and explicit missing rehearsal-evidence counts so operators do not mistake a
-clean gate snapshot for a rehearsed rollout. Admins can list or append
-hash-only smoke rehearsal evidence through `GET` and `POST`
+failed evidence counts, and explicit missing rehearsal-evidence counts so
+operators do not mistake a clean gate snapshot for a rehearsed rollout. Admins
+can list or append hash-only smoke rehearsal evidence through `GET` and `POST`
 `/v1/admin/rollout-smoke/evidence`; the server stores the evidence hash and a
 hash of any external reference in the tenant audit chain, then clears the
-matching required-check gap only after a latest `passed` evidence event exists.
+matching required-check gap only after a latest `passed` evidence event exists
+and reports latest failed checks separately from never-passed checks.
 With the DB mirror configured, ranking dataset registry rows, evidence,
 calibration runs, and ranking worker runs are dual-written to PostgreSQL.
 Maintenance backfill mirrors file-backed ranking model versions, calibration
