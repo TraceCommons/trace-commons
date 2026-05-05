@@ -20182,13 +20182,32 @@ async fn operational_summary_handler(
     append_audit_event_with_db_mirror(
         state.as_ref(),
         tenant.auth(),
-        tenant.read_audit_event("operational_summary", response.submissions.total),
+        operational_summary_read_audit_event(tenant.auth(), &response),
         StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Empty,
+        trace_read_audit_metadata("operational_summary", response.submissions.total),
     )
     .await
     .map_err(internal_error)?;
     Ok(Json(response))
+}
+
+fn operational_summary_read_audit_event(
+    tenant: &TenantAuth,
+    response: &TraceOperationalSummaryResponse,
+) -> TraceCommonsAuditEvent {
+    let mut event =
+        TraceCommonsAuditEvent::read(tenant, "operational_summary", response.submissions.total);
+    event.reason = Some(format!(
+        "{};ready={};blocking_count={};warning_count={};ranking_worker_run_actionable_skip_count={}",
+        trace_read_audit_reason("operational_summary", response.submissions.total),
+        response.promotion_gates.ready,
+        response.promotion_gates.blocking_count,
+        response.promotion_gates.warning_count,
+        response
+            .promotion_gates
+            .ranking_worker_run_actionable_skip_count
+    ));
+    event
 }
 
 fn normalized_export_dataset_kind_filter(value: &str) -> String {
@@ -62807,6 +62826,64 @@ mod tests {
             operational.promotion_gates.ready,
             "worker skips warn operators but should not block promotion readiness"
         );
+    }
+
+    #[tokio::test]
+    async fn operational_summary_audit_reason_records_safe_gate_counts() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        append_ranking_worker_run(
+            temp.path(),
+            "tenant-a",
+            &TraceRankingWorkerRunRecord {
+                ranking_worker_run_id: Uuid::new_v4(),
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                run_kind: TraceRankingWorkerRunKind::PredictionCredit,
+                status: TraceRankingWorkerRunStatus::Completed,
+                dry_run: false,
+                reason_hash: sha256_prefixed("worker audit gate telemetry reason"),
+                model_version: Some("trace-ranker-audit-gate-v1".to_string()),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                policy_version: Some("trace-credit-policy-v1".to_string()),
+                limit: 100,
+                checked_count: 4,
+                succeeded_count: 1,
+                skipped_existing_count: 0,
+                skipped_model_risk_count: 2,
+                skipped_ineligible_count: 1,
+                pending_after_count: 1,
+                result_refs: Vec::new(),
+                reason_counts: BTreeMap::from([("calibration_stale".to_string(), 3)]),
+                actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+                created_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+                last_error_hash: None,
+            },
+        )
+        .expect("worker run writes");
+
+        let Json(_) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary");
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        let reason = audit_events
+            .iter()
+            .find(|event| {
+                event.kind == "read"
+                    && event
+                        .reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.starts_with("surface=operational_summary;"))
+            })
+            .and_then(|event| event.reason.as_deref())
+            .expect("operational summary read audit exists");
+        assert!(reason.contains("item_count=0"));
+        assert!(reason.contains("ready=true"));
+        assert!(reason.contains("blocking_count=0"));
+        assert!(reason.contains("warning_count=1"));
+        assert!(reason.contains("ranking_worker_run_actionable_skip_count=3"));
     }
 
     #[tokio::test]
