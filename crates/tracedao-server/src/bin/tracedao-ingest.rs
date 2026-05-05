@@ -3293,6 +3293,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(retention_dry_run_drill_handler),
         )
         .route(
+            "/v1/admin/vector-index-drill",
+            post(vector_index_drill_handler),
+        )
+        .route(
             "/v1/admin/revocation-propagation-drill",
             post(revocation_propagation_drill_handler),
         )
@@ -22889,6 +22893,34 @@ async fn retention_dry_run_drill_handler(
     Ok(Json(response))
 }
 
+async fn vector_index_drill_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceVectorIndexDrillRequest>,
+) -> ApiResult<Json<TraceVectorIndexDrillResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let limit = validate_vector_index_worker_limit(request.limit)?;
+    if state.db_mirror.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace vector-index drill requires configured DB mirror",
+        ));
+    }
+    let vector_tenant_policy =
+        tenant_vector_policy_for_request(state.as_ref(), tenant.auth()).await?;
+    let response = run_vector_index_drill(
+        state.as_ref(),
+        tenant.auth(),
+        request,
+        limit,
+        vector_tenant_policy.as_ref(),
+    )
+    .await
+    .map_err(maintenance_error)?;
+    Ok(Json(response))
+}
+
 async fn revocation_propagation_drill_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -23062,6 +23094,18 @@ struct TraceRetentionDryRunDrillRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct TraceVectorIndexDrillRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    record_evidence: bool,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default = "default_true")]
+    require_candidates: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct TraceRevocationPropagationDrillRequest {
     #[serde(default)]
     purpose: Option<String>,
@@ -23186,6 +23230,32 @@ struct TraceRetentionDryRunDrillResponse {
     db_mirror_backfilled: usize,
     db_mirror_backfill_failed: usize,
     vector_entries_indexed: usize,
+    blocking_gaps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceVectorIndexDrillResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose: String,
+    ready: bool,
+    evidence_hash: String,
+    dry_run: bool,
+    audit_event_id: Uuid,
+    limit: usize,
+    require_candidates: bool,
+    private_embedder_configured: bool,
+    private_embedder_required: bool,
+    private_searcher_configured: bool,
+    scheduler_enabled: bool,
+    checked_count: usize,
+    vector_entries_indexed: usize,
+    skipped_existing_count: usize,
+    pending_after_count: usize,
+    candidate_count: usize,
     blocking_gaps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
@@ -23957,6 +24027,106 @@ async fn run_retention_dry_run_drill(
     Ok(response)
 }
 
+async fn run_vector_index_drill(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceVectorIndexDrillRequest,
+    limit: usize,
+    tenant_policy: Option<&TenantSubmissionPolicy>,
+) -> anyhow::Result<TraceVectorIndexDrillResponse> {
+    let generated_at = Utc::now();
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_vector_index_drill")
+        .to_string();
+    let worker = run_vector_index_worker(
+        state,
+        tenant,
+        TraceVectorIndexRequest {
+            purpose: Some(purpose.clone()),
+            dry_run: true,
+            limit: Some(limit),
+        },
+        limit,
+        tenant_policy,
+    )
+    .await?;
+    let candidate_count = worker
+        .checked_count
+        .saturating_add(worker.skipped_existing_count)
+        .saturating_add(worker.pending_after_count);
+    let blocking_gaps = vector_index_drill_blocking_gaps(
+        state,
+        candidate_count,
+        worker.pending_after_count,
+        &request,
+    );
+    let evidence_hash = vector_index_drill_evidence_hash(
+        tenant,
+        &worker,
+        candidate_count,
+        limit,
+        request.require_candidates,
+        &blocking_gaps,
+        state,
+    );
+    let mut response = TraceVectorIndexDrillResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at,
+        purpose: worker.purpose,
+        ready: blocking_gaps.is_empty(),
+        evidence_hash,
+        dry_run: worker.dry_run,
+        audit_event_id: worker.audit_event_id,
+        limit,
+        require_candidates: request.require_candidates,
+        private_embedder_configured: state.vector_embedder.is_some(),
+        private_embedder_required: state.require_external_vector_embedder,
+        private_searcher_configured: state.vector_searcher.is_some(),
+        scheduler_enabled: state.vector_index_scheduler.is_some(),
+        checked_count: worker.checked_count,
+        vector_entries_indexed: worker.vector_entries_indexed,
+        skipped_existing_count: worker.skipped_existing_count,
+        pending_after_count: worker.pending_after_count,
+        candidate_count,
+        blocking_gaps,
+        recorded_evidence: None,
+    };
+
+    if request.record_evidence {
+        let evidence = TraceRolloutSmokeEvidenceResponse {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            check_name: "vector_index".to_string(),
+            status: if response.ready {
+                TraceRolloutSmokeEvidenceStatus::Passed
+            } else {
+                TraceRolloutSmokeEvidenceStatus::Failed
+            },
+            evidence_hash: response.evidence_hash.clone(),
+            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            recorded_at: Utc::now(),
+        };
+        append_audit_event_with_db_mirror(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+            StorageTraceAuditAction::Read,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .await?;
+        response.recorded_evidence = Some(evidence);
+    }
+
+    Ok(response)
+}
+
 async fn run_postgres_rls_drill(
     state: &AppState,
     tenant: &TenantAuth,
@@ -24699,6 +24869,31 @@ fn retention_dry_run_blocking_gaps(response: &TraceMaintenanceResponse) -> Vec<S
     gaps
 }
 
+fn vector_index_drill_blocking_gaps(
+    state: &AppState,
+    candidate_count: usize,
+    pending_after_count: usize,
+    request: &TraceVectorIndexDrillRequest,
+) -> Vec<String> {
+    let mut gaps = Vec::new();
+    push_key_rotation_gap(
+        &mut gaps,
+        "external_vector_embedder_required_without_adapter",
+        state.require_external_vector_embedder && state.vector_embedder.is_none(),
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "vector_index_no_candidates",
+        request.require_candidates && candidate_count == 0,
+    );
+    push_rollback_gap_count(
+        &mut gaps,
+        "vector_index_pending_after_limit",
+        pending_after_count,
+    );
+    gaps
+}
+
 fn revocation_propagation_drill_blocking_gaps(
     response: &TraceRevocationPropagationWorkerResponse,
 ) -> Vec<String> {
@@ -25283,6 +25478,38 @@ fn retention_dry_run_drill_evidence_hash(
             "db_mirror_backfilled": response.db_mirror_backfilled,
             "db_mirror_backfill_failed": response.db_mirror_backfill_failed,
             "vector_entries_indexed": response.vector_entries_indexed,
+            "blocking_gaps": blocking_gaps,
+        })
+        .to_string(),
+    )
+}
+
+fn vector_index_drill_evidence_hash(
+    tenant: &TenantAuth,
+    response: &TraceVectorIndexResponse,
+    candidate_count: usize,
+    limit: usize,
+    require_candidates: bool,
+    blocking_gaps: &[String],
+    state: &AppState,
+) -> String {
+    sha256_prefixed(
+        &serde_json::json!({
+            "schema": "trace_commons_vector_index_drill.v1",
+            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+            "actor_principal_ref": tenant.principal_ref,
+            "dry_run": response.dry_run,
+            "limit": limit,
+            "require_candidates": require_candidates,
+            "private_embedder_configured": state.vector_embedder.is_some(),
+            "private_embedder_required": state.require_external_vector_embedder,
+            "private_searcher_configured": state.vector_searcher.is_some(),
+            "scheduler_enabled": state.vector_index_scheduler.is_some(),
+            "checked_count": response.checked_count,
+            "vector_entries_indexed": response.vector_entries_indexed,
+            "skipped_existing_count": response.skipped_existing_count,
+            "pending_after_count": response.pending_after_count,
+            "candidate_count": candidate_count,
             "blocking_gaps": blocking_gaps,
         })
         .to_string(),
@@ -45858,6 +46085,7 @@ const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "audit_chain_verification",
     "revocation_propagation",
     "retention_dry_run",
+    "vector_index",
     "object_primary_reads",
     "postgres_rls_readiness",
     "delayed_credit_reversal",
@@ -58887,6 +59115,118 @@ mod tests {
                         && reason.contains("status=passed")
                 })
         }));
+    }
+
+    #[tokio::test]
+    async fn vector_index_drill_records_smoke_evidence_without_writing_vectors() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("vector drill source mirrors into DB");
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/vector-index-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator vector-index drill",
+                            "record_evidence": true,
+                            "limit": 10
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("vector-index drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("vector-index drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(true));
+        assert_eq!(value["dry_run"], serde_json::json!(true));
+        assert_eq!(value["checked_count"], serde_json::json!(1));
+        assert_eq!(value["vector_entries_indexed"], serde_json::json!(1));
+        assert_eq!(value["candidate_count"], serde_json::json!(1));
+        assert_eq!(value["pending_after_count"], serde_json::json!(0));
+        assert_eq!(value["blocking_gaps"], serde_json::json!([]));
+        assert_eq!(
+            value["recorded_evidence"]["check_name"],
+            serde_json::json!("vector_index")
+        );
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("passed")
+        );
+        assert!(
+            value["evidence_hash"]
+                .as_str()
+                .expect("evidence hash is string")
+                .starts_with("sha256:")
+        );
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("operator vector-index drill"));
+
+        let vector_entries = backend
+            .list_trace_vector_entries("tenant-a")
+            .await
+            .expect("vector entries list after dry-run drill");
+        assert!(
+            vector_entries.is_empty(),
+            "vector-index drill must not write vector entries"
+        );
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("file audit events read");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "vector_index"
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("dry_run=true"))
+        }));
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "rollout_smoke_evidence"
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("check_name=vector_index") && reason.contains("status=passed")
+                })
+        }));
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
 
     #[tokio::test]
@@ -77262,11 +77602,11 @@ mod tests {
         );
         assert_eq!(
             operational_json["rollout_smoke"]["required_check_count"],
-            serde_json::json!(16)
+            serde_json::json!(17)
         );
         assert_eq!(
             operational_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(16)
+            serde_json::json!(17)
         );
         assert!(
             operational
@@ -77308,13 +77648,19 @@ mod tests {
             operational
                 .rollout_smoke
                 .required_checks
+                .contains(&"vector_index".to_string())
+        );
+        assert!(
+            operational
+                .rollout_smoke
+                .required_checks
                 .contains(&"audit_chain_verification".to_string())
         );
         assert!(
             operational
                 .rollout_smoke
                 .blocker_reasons
-                .contains(&"smoke_rehearsal_evidence_missing=16".to_string())
+                .contains(&"smoke_rehearsal_evidence_missing=17".to_string())
         );
     }
 
@@ -77394,7 +77740,7 @@ mod tests {
         );
         assert_eq!(
             operational_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(15)
+            serde_json::json!(16)
         );
         assert!(
             !operational
@@ -77829,7 +78175,7 @@ mod tests {
             "tracedao_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"failed_ranking_worker_runs\"}} 1"
         )));
         assert!(body_text.contains(&format!(
-            "tracedao_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 16"
+            "tracedao_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 17"
         )));
         assert!(body_text.contains(&format!(
             "tracedao_operational_rollout_smoke_recorded_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 0"

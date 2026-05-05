@@ -407,9 +407,10 @@ label-adjudication issue counts, and reason-code totals into the ranking block
 and promotion gates, and it includes a `rollout_smoke` preflight block that
 lists required canary smoke checks, including `tenant_canary_isolation`,
 `db_reconciliation_clean`, `rollback_flag_drill`, `key_rotation_drill`,
-revocation propagation, retention dry-run, PostgreSQL RLS readiness, and
-audit-chain verification, while reporting recorded, passed, failed, stale, and
-missing rehearsal evidence separately from promotion-gate readiness.
+revocation propagation, retention dry-run, vector indexing, PostgreSQL RLS
+readiness, and audit-chain verification, while reporting recorded, passed,
+failed, stale, and missing rehearsal evidence separately from promotion-gate
+readiness.
 Operators inspect and capture that evidence with admin-only `GET` and `POST`
 `/v1/admin/rollout-smoke/evidence`; `GET` can collapse history to the latest
 record per check with `latest_only=true`, and writes name one required check, a
@@ -454,6 +455,12 @@ indexing, reconciliation, and audit-chain verification disabled. It returns
 tenant-scoped aggregate candidate counts, dry-run deletion guards, compact
 blocker codes, and can append `retention_dry_run` evidence without changing
 trace status or deleting objects.
+`POST /v1/admin/vector-index-drill` runs the vector-index smoke check through
+the real vector worker selector in dry-run mode. It requires a DB mirror,
+returns safe candidate/index coverage counts plus private vector infrastructure
+readiness booleans, blocks readiness when candidate coverage is absent or the
+limit leaves pending candidates, and can append `vector_index` evidence without
+writing vector entries or exposing scheduler tokens/purposes.
 `POST /v1/admin/revocation-propagation-drill` runs the revocation-propagation
 smoke check through the real worker dry-run path. It requires a DB mirror,
 returns only aggregate due/completed/failed/skipped/pending counts plus compact
@@ -702,6 +709,7 @@ The service exposes:
 - `POST /v1/admin/key-rotation-drill`
 - `POST /v1/admin/postgres-rls-drill`
 - `POST /v1/admin/retention-dry-run-drill`
+- `POST /v1/admin/vector-index-drill`
 - `POST /v1/admin/revocation-propagation-drill`
 - `POST /v1/admin/revocation-effects-drill`
 - `POST /v1/admin/audit-chain-drill`
