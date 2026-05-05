@@ -28187,13 +28187,13 @@ async fn vector_index_handler(
 ) -> ApiResult<Json<TraceVectorIndexResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_vector_operator(&tenant)?;
+    let limit = validate_vector_index_worker_limit(body.limit)?;
     if state.db_mirror.is_none() {
         return Err(api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "trace vector index worker requires configured DB mirror",
         ));
     }
-    let limit = validate_vector_index_worker_limit(body.limit)?;
     let vector_tenant_policy = tenant_vector_policy_for_request(state.as_ref(), &tenant).await?;
     let response = run_vector_index_worker(
         state.as_ref(),
@@ -60902,6 +60902,25 @@ mod tests {
             .expect("submission metadata still exists");
         assert_eq!(record_after.status, TraceCorpusStatus::Accepted);
         assert!(record_after.expires_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn vector_index_worker_rejects_invalid_limit_before_db_check() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = vector_index_handler(
+            State(state),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceVectorIndexRequest {
+                purpose: Some("invalid vector worker limit".to_string()),
+                dry_run: true,
+                limit: Some(0),
+            }),
+        )
+        .await
+        .expect_err("invalid vector worker limit is rejected before DB checks");
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
