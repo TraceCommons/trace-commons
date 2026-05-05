@@ -640,7 +640,11 @@ replay, benchmark-conversion, ranker-candidate, and ranker-pair jobs: it claims
 the next queued job for that dataset kind, reconstructs
 status/privacy/consent/limit filters from the safe metadata snapshot, runs the
 existing export/artifact/provenance path, and marks the same job row complete or
-failed instead of creating a second job.
+failed instead of creating a second job. `POST /v1/workers/export/jobs/run-queued`
+is the bounded scheduler route: it claims up to `max_jobs` queued rows,
+optionally filtered by dataset kind, continues after per-job execution failures
+by terminalizing failed rows, and returns safe completed/failed/pending counts
+plus job summaries without embedding exported trace bodies.
 
 Stale export-job recovery is intentionally narrow. If a `running` export job is
 still open after its grant expiry, an admin can call

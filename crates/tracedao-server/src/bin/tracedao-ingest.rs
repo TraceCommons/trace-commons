@@ -2638,6 +2638,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(worker_export_job_claim_and_run_handler),
         )
         .route(
+            "/v1/workers/export/jobs/run-queued",
+            post(worker_export_jobs_run_queued_handler),
+        )
+        .route(
             "/v1/ranker/training-candidates",
             get(ranker_training_candidates_handler),
         )
@@ -20258,6 +20262,14 @@ struct TraceExportJobClaimAndRunRequest {
     dataset_kind: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceExportJobsRunQueuedRequest {
+    #[serde(default)]
+    dataset_kind: Option<String>,
+    #[serde(default)]
+    max_jobs: Option<usize>,
+}
+
 #[derive(Debug, Serialize)]
 struct TraceExportJobClaimNextResponse {
     tenant_id: String,
@@ -20274,6 +20286,20 @@ struct TraceExportJobClaimAndRunResponse {
     benchmark_artifact: Option<TraceBenchmarkConversionArtifact>,
     ranker_candidate_export: Option<TraceRankerTrainingCandidateExport>,
     ranker_pair_export: Option<TraceRankerTrainingPairExport>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceExportJobsRunQueuedResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    requested_dataset_kind: Option<String>,
+    max_jobs: usize,
+    claimed_count: usize,
+    completed_count: usize,
+    failed_count: usize,
+    pending_after_count: usize,
+    completed_jobs: Vec<TraceExportJobSummary>,
+    failed_jobs: Vec<TraceExportJobSummary>,
 }
 
 async fn export_jobs_handler(
@@ -20412,13 +20438,7 @@ async fn worker_export_job_claim_and_run_handler(
             return Err(error);
         }
     };
-    let executed_job = db
-        .list_trace_export_jobs(&tenant.tenant_id)
-        .await
-        .map_err(internal_error)?
-        .into_iter()
-        .find(|job| job.export_job_id == claimed.export_job_id)
-        .unwrap_or(claimed);
+    let executed_job = current_trace_export_job_or_claimed(&db, claimed).await?;
     Ok(Json(TraceExportJobClaimAndRunResponse {
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         tenant_id: tenant.tenant_id,
@@ -20428,6 +20448,127 @@ async fn worker_export_job_claim_and_run_handler(
         ranker_candidate_export: execution.ranker_candidate_export,
         ranker_pair_export: execution.ranker_pair_export,
     }))
+}
+
+async fn worker_export_jobs_run_queued_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceExportJobsRunQueuedRequest>,
+) -> ApiResult<Json<TraceExportJobsRunQueuedResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_exporter(&tenant)?;
+    let requested_dataset_kind = body
+        .dataset_kind
+        .as_deref()
+        .map(trace_export_dataset_kind_from_storage_name)
+        .transpose()?;
+    let requested_dataset_kind_storage =
+        requested_dataset_kind.map(|dataset_kind| dataset_kind.storage_name().to_string());
+    let max_jobs = body.max_jobs.unwrap_or(10).clamp(1, 50);
+    let db = trace_export_control_db(state.as_ref())?;
+    let mut completed_jobs = Vec::new();
+    let mut failed_jobs = Vec::new();
+
+    for _ in 0..max_jobs {
+        let claimed = db
+            .claim_next_trace_export_job(
+                &tenant.tenant_id,
+                requested_dataset_kind_storage.as_deref(),
+                Utc::now(),
+                &tenant.principal_ref,
+            )
+            .await
+            .map_err(internal_error)?;
+        let Some(claimed) = claimed else {
+            break;
+        };
+
+        match execute_claimed_export_job(state.as_ref(), &tenant, claimed.clone()).await {
+            Ok(_execution) => {
+                completed_jobs.push(TraceExportJobSummary::from_storage_record(
+                    current_trace_export_job_or_claimed(&db, claimed).await?,
+                ));
+            }
+            Err(error) => {
+                let error_message = error.1.0.error.clone();
+                mark_claimed_export_job_failed(state.as_ref(), &claimed, &error_message)
+                    .await
+                    .map_err(internal_error)?;
+                failed_jobs.push(TraceExportJobSummary::from_storage_record(
+                    current_trace_export_job_or_claimed(&db, claimed).await?,
+                ));
+            }
+        }
+    }
+
+    let claimed_count = completed_jobs.len() + failed_jobs.len();
+    let pending_after_count = count_pending_export_jobs(
+        &db,
+        &tenant.tenant_id,
+        requested_dataset_kind_storage.as_deref(),
+        Utc::now(),
+    )
+    .await?;
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(&tenant, "export_jobs_run_queued", claimed_count),
+        StorageTraceAuditAction::Read,
+        trace_read_audit_metadata("export_jobs_run_queued", claimed_count),
+    )
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(TraceExportJobsRunQueuedResponse {
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        tenant_id: tenant.tenant_id,
+        requested_dataset_kind: requested_dataset_kind_storage,
+        max_jobs,
+        claimed_count,
+        completed_count: completed_jobs.len(),
+        failed_count: failed_jobs.len(),
+        pending_after_count,
+        completed_jobs,
+        failed_jobs,
+    }))
+}
+
+async fn current_trace_export_job_or_claimed(
+    db: &Arc<dyn Database>,
+    claimed: StorageTraceExportJobRecord,
+) -> ApiResult<StorageTraceExportJobRecord> {
+    let tenant_id = claimed.tenant_id.clone();
+    let export_job_id = claimed.export_job_id;
+    let current = db
+        .list_trace_export_jobs(&tenant_id)
+        .await
+        .map_err(internal_error)?
+        .into_iter()
+        .find(|job| job.export_job_id == export_job_id);
+    Ok(match current {
+        Some(record) => record,
+        None => claimed,
+    })
+}
+
+async fn count_pending_export_jobs(
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    requested_dataset_kind: Option<&str>,
+    now: DateTime<Utc>,
+) -> ApiResult<usize> {
+    let jobs = db
+        .list_trace_export_jobs(tenant_id)
+        .await
+        .map_err(internal_error)?;
+    Ok(jobs
+        .into_iter()
+        .filter(|job| job.status == StorageTraceExportJobStatus::Queued && job.expires_at > now)
+        .filter(|job| {
+            requested_dataset_kind
+                .is_none_or(|dataset_kind| job.requested_dataset_kind == dataset_kind)
+        })
+        .count())
 }
 
 struct ClaimedExportJobExecution {
@@ -48494,6 +48635,161 @@ mod tests {
                 .count(),
             2
         );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn export_worker_run_queued_jobs_makes_bounded_progress_after_job_failure() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        let now = Utc::now();
+        let bad_job_id = Uuid::new_v4();
+        let benchmark_job_id = Uuid::new_v4();
+        let ranker_job_id = Uuid::new_v4();
+        for (export_job_id, dataset_kind, purpose, requested_at, metadata) in [
+            (
+                bad_job_id,
+                TraceExportDatasetKind::ReplayDataset,
+                "bad queued replay scheduler job",
+                now - Duration::minutes(6),
+                BTreeMap::from([("state".to_string(), "queued".to_string())]),
+            ),
+            (
+                benchmark_job_id,
+                TraceExportDatasetKind::BenchmarkConversion,
+                "queued benchmark scheduler job",
+                now - Duration::minutes(5),
+                export_job_request_metadata(
+                    Some(5),
+                    Some(TraceCorpusStatus::Accepted),
+                    Some(ResidualPiiRisk::Low),
+                    Some(ConsentScope::BenchmarkOnly),
+                    None,
+                ),
+            ),
+            (
+                ranker_job_id,
+                TraceExportDatasetKind::RankerTrainingCandidates,
+                "queued ranker scheduler job",
+                now - Duration::minutes(4),
+                export_job_request_metadata(
+                    Some(5),
+                    Some(TraceCorpusStatus::Accepted),
+                    Some(ResidualPiiRisk::Low),
+                    Some(ConsentScope::RankingTraining),
+                    None,
+                ),
+            ),
+        ] {
+            let grant_id = Uuid::new_v4();
+            backend
+                .upsert_trace_export_access_grant(StorageTraceExportAccessGrantWrite {
+                    tenant_id: "tenant-a".to_string(),
+                    export_job_id,
+                    grant_id,
+                    caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+                    requested_dataset_kind: dataset_kind.storage_name().to_string(),
+                    purpose: purpose.to_string(),
+                    max_item_cap: Some(5),
+                    status: StorageTraceExportAccessGrantStatus::Active,
+                    requested_at,
+                    expires_at: now + Duration::minutes(30),
+                    metadata: BTreeMap::from([("grant_type".to_string(), "queued".to_string())]),
+                })
+                .await
+                .expect("export grant writes");
+            backend
+                .upsert_trace_export_job(StorageTraceExportJobWrite {
+                    tenant_id: "tenant-a".to_string(),
+                    export_job_id,
+                    grant_id,
+                    caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+                    requested_dataset_kind: dataset_kind.storage_name().to_string(),
+                    purpose: purpose.to_string(),
+                    max_item_cap: Some(5),
+                    status: StorageTraceExportJobStatus::Queued,
+                    requested_at,
+                    started_at: None,
+                    finished_at: None,
+                    expires_at: now + Duration::minutes(30),
+                    result_manifest_id: None,
+                    item_count: None,
+                    last_error: None,
+                    metadata,
+                })
+                .await
+                .expect("queued export job writes");
+        }
+
+        let Json(response) = worker_export_jobs_run_queued_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Json(TraceExportJobsRunQueuedRequest {
+                dataset_kind: None,
+                max_jobs: Some(3),
+            }),
+        )
+        .await
+        .expect("export worker scheduler makes bounded progress");
+        assert_eq!(response.max_jobs, 3);
+        assert_eq!(response.claimed_count, 3);
+        assert_eq!(response.completed_count, 2);
+        assert_eq!(response.failed_count, 1);
+        assert_eq!(response.pending_after_count, 0);
+        assert_eq!(
+            response.failed_jobs[0].export_job_id, bad_job_id,
+            "bad oldest job should fail without blocking later jobs"
+        );
+        assert_eq!(
+            response
+                .completed_jobs
+                .iter()
+                .map(|job| job.export_job_id)
+                .collect::<Vec<_>>(),
+            vec![benchmark_job_id, ranker_job_id]
+        );
+
+        let jobs = backend
+            .list_trace_export_jobs("tenant-a")
+            .await
+            .expect("jobs list");
+        let bad_job = jobs
+            .iter()
+            .find(|job| job.export_job_id == bad_job_id)
+            .expect("bad job exists");
+        assert_eq!(bad_job.status, StorageTraceExportJobStatus::Failed);
+        assert!(
+            bad_job
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("queued_export_job_execution_failed"))
+        );
+        for export_job_id in [benchmark_job_id, ranker_job_id] {
+            let completed = jobs
+                .iter()
+                .find(|job| job.export_job_id == export_job_id)
+                .expect("completed job exists");
+            assert_eq!(completed.status, StorageTraceExportJobStatus::Complete);
+            assert_eq!(
+                completed.metadata.get("state").map(String::as_str),
+                Some("completed")
+            );
+        }
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }

@@ -112,7 +112,11 @@ executor path uses that claimed row for replay, benchmark-conversion,
 ranker-candidate, and ranker-pair exports: it reconstructs filters from the
 safe metadata snapshot, publishes the export through the existing
 manifest/artifact/provenance/audit paths, and terminalizes the same row as
-`complete` or `failed` instead of creating a second job.
+`complete` or `failed` instead of creating a second job. A bounded scheduler
+route can drain up to `max_jobs` queued rows across all supported dataset kinds,
+or one requested kind, and keeps making progress after per-job failures by
+marking those claimed rows `failed` with hash-only failure metadata before
+claiming the next row.
 
 Reconciliation also reports DB audit hash-chain drift as `db_audit_hash_chain_failures` when mirrored audit rows have invalid hash format, a genesis or predecessor mismatch, or a canonical-payload hash mismatch. Those failures are promotion blockers just like canonical projection drift.
 
