@@ -415,8 +415,11 @@ lists required canary smoke checks, including `tenant_canary_isolation`,
 revocation propagation, retention dry-run, vector indexing, analytics release,
 PostgreSQL RLS readiness, and audit-chain verification, while reporting
 recorded, passed, failed, stale, and missing rehearsal evidence separately from
-promotion-gate readiness.
-Operators inspect and capture that evidence with admin-only `GET` and `POST`
+promotion-gate readiness. Admin-only `GET /v1/admin/rollout-smoke/preflight`
+returns that `rollout_smoke` block together with the latest hash-only evidence
+record for each required check, so operators can review promotion readiness
+without stitching together operational-summary and evidence-list reads.
+Operators inspect and capture evidence history with admin-only `GET` and `POST`
 `/v1/admin/rollout-smoke/evidence`; `GET` can collapse history to the latest
 record per check with `latest_only=true`, and writes name one required check, a
 `passed` or `failed` status, a sha256-prefixed evidence hash, and an optional
@@ -718,6 +721,7 @@ The service exposes:
 - `GET /v1/admin/config-status`
 - `GET /v1/admin/vector-entries`
 - `GET|POST /v1/admin/rollout-smoke/evidence`
+- `GET /v1/admin/rollout-smoke/preflight`
 - `POST /v1/admin/canary-read-drill`
 - `POST /v1/admin/object-primary-read-drill`
 - `POST /v1/admin/db-reconciliation-drill`
