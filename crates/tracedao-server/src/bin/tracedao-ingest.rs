@@ -1510,6 +1510,14 @@ impl AppState {
         )
     }
 
+    fn object_primary_replay_export_for_tenant(&self, tenant_id: &str) -> bool {
+        self.tenant_rollout_gates.enabled_for(
+            TraceTenantRolloutFeature::ObjectPrimaryReplayExport,
+            self.object_primary_replay_export,
+            tenant_id,
+        )
+    }
+
     fn object_primary_derived_exports_for_tenant(&self, tenant_id: &str) -> bool {
         self.tenant_rollout_gates.enabled_for(
             TraceTenantRolloutFeature::ObjectPrimaryDerivedExports,
@@ -3016,6 +3024,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/canary-read-drill",
             post(canary_read_drill_handler),
+        )
+        .route(
+            "/v1/admin/object-primary-read-drill",
+            post(object_primary_read_drill_handler),
         )
         .route(
             "/v1/admin/operational-metrics",
@@ -21963,6 +21975,25 @@ async fn canary_read_drill_handler(
     Ok(Json(response))
 }
 
+async fn object_primary_read_drill_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceObjectPrimaryReadDrillRequest>,
+) -> ApiResult<Json<TraceObjectPrimaryReadDrillResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    if state.db_mirror.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace object-primary read drill requires configured DB mirror",
+        ));
+    }
+    let response = run_object_primary_read_drill(state.as_ref(), tenant.auth(), request)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(response))
+}
+
 #[derive(Debug, Deserialize)]
 struct TraceRollbackDrillRequest {
     #[serde(default)]
@@ -22080,6 +22111,17 @@ struct TraceCanaryReadDrillRequest {
     submission_id: Uuid,
     #[serde(default)]
     isolation_tenant_id: Option<String>,
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    record_evidence: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceObjectPrimaryReadDrillRequest {
+    submission_id: Uuid,
+    #[serde(default)]
+    fallback_tenant_id: Option<String>,
     #[serde(default)]
     purpose: Option<String>,
     #[serde(default)]
@@ -22218,6 +22260,33 @@ struct TraceCanaryReadDrillResponse {
     recorded_evidence: Vec<TraceRolloutSmokeEvidenceResponse>,
 }
 
+#[derive(Debug, Serialize)]
+struct TraceObjectPrimaryReadDrillResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose: String,
+    ready: bool,
+    evidence_hash: String,
+    submission_ref_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fallback_tenant_storage_ref: Option<String>,
+    canary_submission_found: bool,
+    object_store_eligible: bool,
+    object_primary_submit_review_enabled: bool,
+    object_primary_replay_export_enabled: bool,
+    submitted_object_ref_present: bool,
+    submitted_object_ref_service_owned: bool,
+    submitted_object_ref_readable: bool,
+    review_body_object_ref_readable: bool,
+    replay_body_object_ref_readable: bool,
+    plaintext_submitted_body_absent: bool,
+    fallback_tenant_object_primary_disabled: bool,
+    blocking_gaps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
 async fn run_canary_read_drill(
     state: &AppState,
     tenant: &TenantAuth,
@@ -22349,6 +22418,160 @@ async fn run_canary_read_drill(
             .await?;
             response.recorded_evidence.push(evidence);
         }
+    }
+
+    Ok(response)
+}
+
+async fn run_object_primary_read_drill(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceObjectPrimaryReadDrillRequest,
+) -> anyhow::Result<TraceObjectPrimaryReadDrillResponse> {
+    let generated_at = Utc::now();
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_object_primary_read_drill")
+        .to_string();
+    let submission_ref_hash = sha256_prefixed(&request.submission_id.to_string());
+    let fallback_tenant_id = request
+        .fallback_tenant_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|tenant_id| !tenant_id.is_empty());
+    let fallback_tenant_storage_ref = fallback_tenant_id.map(tenant_storage_ref);
+    let record = read_submission_record(&state.root, &tenant.tenant_id, request.submission_id)
+        .with_context(|| {
+            format!(
+                "failed to read Trace Commons object-primary drill submission {}",
+                request.submission_id
+            )
+        })?;
+
+    let object_store_eligible = state
+        .artifact_store
+        .as_ref()
+        .is_some_and(|store| store.object_primary_eligible());
+    let object_primary_submit_review_enabled =
+        state.object_primary_submit_review_for_tenant(&tenant.tenant_id);
+    let object_primary_replay_export_enabled =
+        state.object_primary_replay_export_for_tenant(&tenant.tenant_id);
+    let fallback_tenant_object_primary_disabled = fallback_tenant_id.is_some_and(|tenant_id| {
+        !state.object_primary_submit_review_for_tenant(tenant_id)
+            && !state.object_primary_replay_export_for_tenant(tenant_id)
+            && !state.object_primary_derived_exports_for_tenant(tenant_id)
+    });
+
+    let mut submitted_object_ref_present = false;
+    let mut submitted_object_ref_service_owned = false;
+    let mut submitted_object_ref_readable = false;
+    let mut review_body_object_ref_readable = false;
+    let mut replay_body_object_ref_readable = false;
+    let mut plaintext_submitted_body_absent = false;
+
+    if let Some(record) = record.as_ref() {
+        ensure_retention_metadata_within_server_policy(record)?;
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("trace object-primary read drill requires configured DB mirror")?;
+        let active_object_ref = db
+            .get_latest_active_trace_object_ref(
+                &tenant.tenant_id,
+                request.submission_id,
+                StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to read active submitted-envelope object ref for object-primary drill {}",
+                    request.submission_id
+                )
+            })?;
+        submitted_object_ref_present = active_object_ref.is_some();
+        if let Some(object_ref) = active_object_ref.as_ref() {
+            submitted_object_ref_service_owned =
+                is_service_owned_trace_object_store(&object_ref.object_store);
+            submitted_object_ref_readable =
+                read_envelope_from_object_ref(state, &tenant.tenant_id, object_ref)
+                    .is_ok_and(|envelope| envelope.submission_id == request.submission_id);
+        }
+        if object_primary_submit_review_enabled {
+            review_body_object_ref_readable =
+                read_envelope_body_for_review_decision(state, tenant, record, false)
+                    .await
+                    .is_ok_and(|body| {
+                        body.object_ref_id.is_some()
+                            && body.envelope.submission_id == request.submission_id
+                    });
+            plaintext_submitted_body_absent = !state.root.join(&record.object_key).exists();
+        }
+        if object_primary_replay_export_enabled && record.is_export_eligible() {
+            replay_body_object_ref_readable =
+                read_envelope_body_for_replay_export(state, tenant, record)
+                    .await
+                    .is_ok_and(|body| {
+                        body.object_ref_id.is_some()
+                            && body.envelope.submission_id == request.submission_id
+                    });
+        }
+    }
+
+    let mut response = TraceObjectPrimaryReadDrillResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at,
+        purpose: purpose.clone(),
+        ready: false,
+        evidence_hash: String::new(),
+        submission_ref_hash,
+        fallback_tenant_storage_ref,
+        canary_submission_found: record.is_some(),
+        object_store_eligible,
+        object_primary_submit_review_enabled,
+        object_primary_replay_export_enabled,
+        submitted_object_ref_present,
+        submitted_object_ref_service_owned,
+        submitted_object_ref_readable,
+        review_body_object_ref_readable,
+        replay_body_object_ref_readable,
+        plaintext_submitted_body_absent,
+        fallback_tenant_object_primary_disabled,
+        blocking_gaps: Vec::new(),
+        recorded_evidence: None,
+    };
+    response.blocking_gaps = object_primary_read_drill_blocking_gaps(&response);
+    response.ready = response.blocking_gaps.is_empty();
+    response.evidence_hash = object_primary_read_drill_evidence_hash(tenant, &response);
+
+    if request.record_evidence {
+        let evidence = TraceRolloutSmokeEvidenceResponse {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            check_name: "object_primary_reads".to_string(),
+            status: if response.ready {
+                TraceRolloutSmokeEvidenceStatus::Passed
+            } else {
+                TraceRolloutSmokeEvidenceStatus::Failed
+            },
+            evidence_hash: object_primary_read_drill_evidence_hash(tenant, &response),
+            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            recorded_at: Utc::now(),
+        };
+        append_audit_event_with_db_mirror(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+            StorageTraceAuditAction::Read,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .await?;
+        response.recorded_evidence = Some(evidence);
     }
 
     Ok(response)
@@ -23399,6 +23622,68 @@ fn canary_read_drill_check_statuses(
     ]
 }
 
+fn object_primary_read_drill_blocking_gaps(
+    response: &TraceObjectPrimaryReadDrillResponse,
+) -> Vec<String> {
+    let mut gaps = Vec::new();
+    push_key_rotation_gap(
+        &mut gaps,
+        "canary_submission_missing",
+        !response.canary_submission_found,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "object_primary_object_store_not_eligible",
+        !response.object_store_eligible,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "object_primary_submit_review_not_enabled",
+        !response.object_primary_submit_review_enabled,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "object_primary_replay_export_not_enabled",
+        !response.object_primary_replay_export_enabled,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "submitted_object_ref_missing",
+        !response.submitted_object_ref_present,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "submitted_object_ref_not_service_owned",
+        !response.submitted_object_ref_service_owned,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "submitted_object_ref_unreadable",
+        !response.submitted_object_ref_readable,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "review_body_object_ref_unreadable",
+        !response.review_body_object_ref_readable,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "replay_body_object_ref_unreadable",
+        !response.replay_body_object_ref_readable,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "plaintext_submitted_body_present",
+        !response.plaintext_submitted_body_absent,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "fallback_tenant_object_primary_enabled_or_missing",
+        !response.fallback_tenant_object_primary_disabled,
+    );
+    gaps
+}
+
 fn active_rollout_flags_for_rollback_drill(state: &AppState, tenant_id: &str) -> Vec<String> {
     TraceTenantRolloutFeature::ALL
         .into_iter()
@@ -23794,6 +24079,34 @@ fn canary_read_drill_evidence_hash(
             "reviewer_metadata_visible": response.reviewer_metadata_visible,
             "replay_export_selection_visible": response.replay_export_selection_visible,
             "audit_read_count": response.audit_read_count,
+            "blocking_gaps": response.blocking_gaps,
+        })
+        .to_string(),
+    )
+}
+
+fn object_primary_read_drill_evidence_hash(
+    tenant: &TenantAuth,
+    response: &TraceObjectPrimaryReadDrillResponse,
+) -> String {
+    sha256_prefixed(
+        &serde_json::json!({
+            "schema": "trace_commons_object_primary_read_drill.v1",
+            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+            "actor_principal_ref": tenant.principal_ref,
+            "submission_ref_hash": response.submission_ref_hash,
+            "fallback_tenant_storage_ref": response.fallback_tenant_storage_ref,
+            "canary_submission_found": response.canary_submission_found,
+            "object_store_eligible": response.object_store_eligible,
+            "object_primary_submit_review_enabled": response.object_primary_submit_review_enabled,
+            "object_primary_replay_export_enabled": response.object_primary_replay_export_enabled,
+            "submitted_object_ref_present": response.submitted_object_ref_present,
+            "submitted_object_ref_service_owned": response.submitted_object_ref_service_owned,
+            "submitted_object_ref_readable": response.submitted_object_ref_readable,
+            "review_body_object_ref_readable": response.review_body_object_ref_readable,
+            "replay_body_object_ref_readable": response.replay_body_object_ref_readable,
+            "plaintext_submitted_body_absent": response.plaintext_submitted_body_absent,
+            "fallback_tenant_object_primary_disabled": response.fallback_tenant_object_primary_disabled,
             "blocking_gaps": response.blocking_gaps,
         })
         .to_string(),
@@ -55958,6 +56271,191 @@ mod tests {
                 "{check_name} evidence audit exists"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn object_primary_read_drill_without_db_mirror_returns_operator_error() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/object-primary-read-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "submission_id": Uuid::new_v4(),
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("object-primary drill error response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response parses");
+        assert_eq!(
+            value["error"],
+            serde_json::json!("trace object-primary read drill requires configured DB mirror")
+        );
+    }
+
+    #[tokio::test]
+    async fn object_primary_read_drill_records_smoke_evidence() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let artifact_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            test_artifact_store(artifact_temp.path()),
+        );
+        let mut state =
+            test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
+                temp.path().to_path_buf(),
+                Some(backend.clone()),
+                Some(artifact_store),
+                false,
+                true,
+                true,
+                true,
+                false,
+                false,
+                BTreeMap::new(),
+                false,
+                true,
+                true,
+                false,
+            );
+        {
+            let state_mut = Arc::make_mut(&mut state);
+            state_mut.db_reviewer_require_object_refs = true;
+            let mut tenant_rollout_gates = BTreeMap::new();
+            for feature in [
+                TraceTenantRolloutFeature::ObjectPrimarySubmitReview,
+                TraceTenantRolloutFeature::ObjectPrimaryReplayExport,
+            ] {
+                tenant_rollout_gates.insert(feature, BTreeSet::from(["tenant-a".to_string()]));
+            }
+            state_mut.tenant_rollout_gates = TraceTenantRolloutGates {
+                tenant_ids_by_feature: Arc::new(tenant_rollout_gates),
+            };
+        }
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("object-primary submission succeeds");
+
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        assert!(
+            !temp.path().join(&record.object_key).exists(),
+            "object-primary submit should not write a plaintext envelope body"
+        );
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/object-primary-read-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator object-primary read drill",
+                            "submission_id": submission_id,
+                            "fallback_tenant_id": "tenant-b",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("object-primary drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("object-primary drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(true));
+        assert_eq!(
+            value["submitted_object_ref_service_owned"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["submitted_object_ref_readable"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["review_body_object_ref_readable"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["replay_body_object_ref_readable"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["plaintext_submitted_body_absent"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["fallback_tenant_object_primary_disabled"],
+            serde_json::json!(true)
+        );
+        assert_eq!(value["blocking_gaps"], serde_json::json!([]));
+        let evidence = value["recorded_evidence"]
+            .as_object()
+            .expect("recorded evidence object");
+        assert_eq!(
+            evidence["check_name"],
+            serde_json::json!("object_primary_reads")
+        );
+        assert_eq!(evidence["status"], serde_json::json!("passed"));
+
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("token-a"));
+        assert!(!body_text.contains("Please inspect the workspace"));
+
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("file audit events read");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "rollout_smoke_evidence"
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("check_name=object_primary_reads")
+                        && reason.contains("status=passed")
+                })
+        }));
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
     }
 
     #[tokio::test]
