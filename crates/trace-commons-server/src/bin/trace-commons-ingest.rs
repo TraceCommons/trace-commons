@@ -28881,18 +28881,42 @@ fn read_envelope_by_record(
     state: &AppState,
     record: &TraceCommonsSubmissionRecord,
 ) -> anyhow::Result<TraceContributionEnvelope> {
-    if let (Some(store), Some(receipt)) = (
+    let envelope = if let (Some(store), Some(receipt)) = (
         state.artifact_store.as_ref(),
         record.artifact_receipt.as_ref(),
     ) {
-        return store.get_json(&record.tenant_storage_ref, receipt);
-    }
+        store.get_json(&record.tenant_storage_ref, receipt)?
+    } else {
+        let path = state.root.join(&record.object_key);
+        let body = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read trace object {}", path.display()))?;
+        serde_json::from_str(&body)
+            .with_context(|| format!("failed to parse trace object {}", path.display()))?
+    };
+    ensure_envelope_tenant_scope(&envelope, &record.tenant_id)?;
+    Ok(envelope)
+}
 
-    let path = state.root.join(&record.object_key);
-    let body = std::fs::read_to_string(&path)
-        .with_context(|| format!("failed to read trace object {}", path.display()))?;
-    serde_json::from_str(&body)
-        .with_context(|| format!("failed to parse trace object {}", path.display()))
+fn ensure_envelope_tenant_scope(
+    envelope: &TraceContributionEnvelope,
+    tenant_id: &str,
+) -> anyhow::Result<()> {
+    if let Some(scope_ref) = envelope.contributor.tenant_scope_ref.as_deref()
+        && looks_like_server_tenant_storage_ref(scope_ref)
+    {
+        anyhow::ensure!(
+            scope_ref == tenant_storage_ref(tenant_id),
+            "trace envelope tenant scope mismatch"
+        );
+    }
+    Ok(())
+}
+
+fn looks_like_server_tenant_storage_ref(value: &str) -> bool {
+    let Some(hex_ref) = value.strip_prefix("tenant_sha256:") else {
+        return false;
+    };
+    hex_ref.len() == 32 && hex_ref.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 struct TraceEnvelopeBodyRead {
@@ -29114,7 +29138,7 @@ fn read_envelope_from_object_ref(
     );
     ensure_local_trace_object_ref_key_ref(object_ref, tenant_id)?;
 
-    match object_ref.object_store.as_str() {
+    let envelope = match object_ref.object_store.as_str() {
         object_store if is_encrypted_trace_object_store(object_store) => {
             let store = state
                 .artifact_store
@@ -29126,12 +29150,14 @@ fn read_envelope_from_object_ref(
                 &object_ref.object_key,
                 &object_ref.content_sha256,
             )
-        }
+        }?,
         TRACE_COMMONS_FILE_OBJECT_STORE => {
-            read_file_store_envelope_from_object_ref(state, object_ref)
+            read_file_store_envelope_from_object_ref(state, object_ref)?
         }
         other => anyhow::bail!("unsupported trace object store: {other}"),
-    }
+    };
+    ensure_envelope_tenant_scope(&envelope, tenant_id)?;
+    Ok(envelope)
 }
 
 fn ensure_local_trace_object_ref_key_ref(
@@ -41183,6 +41209,62 @@ mod tests {
         assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(!submission_metadata_path(temp.path(), "tenant-b", submission_id).exists());
         assert!(!audit_log_path(temp.path(), "tenant-b").exists());
+    }
+
+    #[tokio::test]
+    async fn review_rejects_mismatched_envelope_tenant_scope_before_side_effects() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("tenant-a submission succeeds");
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("tenant-a record reads")
+            .expect("tenant-a record exists");
+        let object_path = temp.path().join(&record.object_key);
+        let mut envelope_json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&object_path).expect("stored envelope reads"),
+        )
+        .expect("stored envelope json parses");
+        envelope_json["contributor"]["tenant_scope_ref"] =
+            serde_json::json!(tenant_storage_ref("tenant-b"));
+        write_json_file(
+            &object_path,
+            &envelope_json,
+            "mismatched tenant envelope fixture",
+        )
+        .expect("corrupt envelope writes");
+
+        let error = review_decision_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some("envelope tenant mismatch should fail closed".to_string()),
+                credit_points_pending: Some(1.0),
+            }),
+        )
+        .await
+        .expect_err("mismatched envelope tenant scope fails closed");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        let record_after = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("tenant-a record still reads")
+            .expect("tenant-a record still exists");
+        assert_eq!(record_after.status, TraceCorpusStatus::Quarantined);
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        assert!(
+            !audit_events
+                .iter()
+                .any(|event| event.kind == "review_decision")
+        );
     }
 
     #[tokio::test]
