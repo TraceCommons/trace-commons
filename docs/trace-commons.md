@@ -949,9 +949,10 @@ deletion and receipt recording.
 
 Vector workers should use `POST /v1/workers/vector-index` for scheduled
 indexing. The worker route requires the DB mirror before it starts, accepts
-`purpose`, `dry_run`, and an optional `limit` from 1 to 500, and returns
-`checked_count`, `vector_entries_indexed`, `skipped_existing_count`, and
-`pending_after_count`. Unlike broad admin maintenance, this route does not mark
+`purpose`, `dry_run`, and an optional `limit` from 1 to 500, rejects invalid
+explicit limits with a client error, and returns `checked_count`,
+`vector_entries_indexed`, `skipped_existing_count`, and `pending_after_count`.
+Unlike broad admin maintenance, this route does not mark
 expired/revoked records, prune export caches, write retention ledgers, or run
 DB reconciliation; it only indexes eligible DB-mirrored derived summaries and
 audits the vector-index pass. Deployments can use
@@ -971,7 +972,8 @@ Shared reviewer/admin list-style reads use the same operator page limit policy:
 omitted `limit` defaults to 100, and explicit limits outside 1..=500 are rejected
 with a client error instead of being silently clamped.
 Outbox submit/confirm workers and the revocation-propagation worker apply the
-same explicit rejection policy to their batch limits.
+same explicit rejection policy to their batch limits, and the vector-index
+worker validates its limit before DB mirror configuration checks.
 
 `POST /v1/admin/maintenance` can also be used by reviewers/admins to bridge file-backed pilot data into the optional DB mirror. It marks submissions expired when their retention-policy `expires_at` has passed, mirrors expiration status plus artifact/export-manifest invalidation to the DB mirror when configured, writes a durable DB retention job row plus per-submission lifecycle item rows for mirrored expire/purge/revoke actions, repairs DB revocation/artifact invalidation for submissions that are already file-marked revoked, lifecycle-revokes published benchmark artifacts whose sources are revoked or expired and enqueues matching registry revoke outbox rows, prunes cached export payloads whose manifest references revoked or expired sources, and keeps expired traces out of replay, benchmark, and ranker exports.
 
