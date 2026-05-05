@@ -279,6 +279,18 @@ const TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_MAX_DELAY_SECONDS: &str =
     "TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_MAX_DELAY_SECONDS";
 const TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_REASON: &str =
     "TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_REASON";
+const TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_ENABLED: &str =
+    "TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_ENABLED";
+const TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_TOKEN: &str =
+    "TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_TOKEN";
+const TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_INTERVAL_SECONDS";
+const TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_LIMIT: &str =
+    "TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_LIMIT";
+const TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_DRY_RUN: &str =
+    "TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_DRY_RUN";
+const TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_PURPOSE: &str =
+    "TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_PURPOSE";
 const TRACE_COMMONS_PROCESS_EVALUATOR_URL: &str = "TRACE_COMMONS_PROCESS_EVALUATOR_URL";
 const TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN: &str =
     "TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN";
@@ -348,6 +360,8 @@ const TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_RETRY_COUNT: u32 = 3;
 const TRACE_EXPORT_JOB_RETRY_DEFAULT_BASE_DELAY_SECONDS: i64 = 60;
 const TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_DELAY_SECONDS: i64 = 3600;
 const TRACE_EXPORT_JOB_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 60;
+const TRACE_VECTOR_INDEX_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 60;
+const TRACE_VECTOR_INDEX_SCHEDULER_DEFAULT_PURPOSE: &str = "scheduled trace vector index";
 const TRACE_RANKING_DEFAULT_MIN_LABEL_COUNT: usize = 25;
 const TRACE_RANKING_DEFAULT_CONFIDENCE_THRESHOLD: f32 = 0.5;
 const TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS: i64 = 1_000_000;
@@ -381,8 +395,14 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState::from_env().await?);
     validate_trace_export_job_scheduler_config(state.as_ref(), state.export_job_scheduler.as_ref())
         .await?;
+    validate_trace_vector_index_scheduler_config(
+        state.as_ref(),
+        state.vector_index_scheduler.as_ref(),
+    )
+    .await?;
     spawn_managed_eddsa_keyset_refresh_task(&state);
     spawn_trace_export_job_scheduler_task(&state, state.export_job_scheduler.clone());
+    spawn_trace_vector_index_scheduler_task(&state, state.vector_index_scheduler.clone());
     let bind = std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
     let addr = bind
         .parse::<SocketAddr>()
@@ -441,6 +461,7 @@ struct AppState {
     process_evaluator: Option<Arc<dyn TraceProcessEvaluator>>,
     process_evaluator_timeout_ms: Option<u64>,
     export_job_scheduler: Option<TraceExportJobSchedulerConfig>,
+    vector_index_scheduler: Option<TraceVectorIndexSchedulerConfig>,
     ranking_calibration_max_age: Option<Duration>,
     ranking_require_calibration_dataset_registry: bool,
     ranking_require_server_feature_provenance: bool,
@@ -469,6 +490,15 @@ struct TraceExportJobSchedulerConfig {
 struct TraceExportJobSchedulerTickSummary {
     retry_failed: TraceExportJobsRetryFailedResponse,
     run_queued: TraceExportJobsRunQueuedResponse,
+}
+
+#[derive(Clone)]
+struct TraceVectorIndexSchedulerConfig {
+    worker_token: SecretString,
+    interval: StdDuration,
+    limit: usize,
+    dry_run: bool,
+    purpose: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1707,6 +1737,7 @@ impl AppState {
             .map(|config| config.timeout_ms);
         let process_evaluator = process_evaluator_config.map(|config| config.evaluator);
         let export_job_scheduler = parse_trace_export_job_scheduler_config_from_env()?;
+        let vector_index_scheduler = parse_trace_vector_index_scheduler_config_from_env()?;
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
         let ranking_require_calibration_dataset_registry =
             env_truthy(TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY);
@@ -1874,6 +1905,7 @@ impl AppState {
             process_evaluator,
             process_evaluator_timeout_ms,
             export_job_scheduler,
+            vector_index_scheduler,
             ranking_calibration_max_age,
             ranking_require_calibration_dataset_registry,
             ranking_require_server_feature_provenance,
@@ -2671,6 +2703,43 @@ fn parse_trace_export_job_scheduler_config_from_env()
         retry_failed_base_delay_seconds,
         retry_failed_max_delay_seconds,
         retry_failed_reason,
+    }))
+}
+
+fn parse_trace_vector_index_scheduler_config_from_env()
+-> anyhow::Result<Option<TraceVectorIndexSchedulerConfig>> {
+    let enabled = env_truthy(TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_ENABLED);
+    let worker_token = optional_trimmed_env(TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_TOKEN)?;
+    if !enabled && worker_token.is_none() {
+        return Ok(None);
+    }
+    let Some(worker_token) = worker_token else {
+        anyhow::bail!(
+            "{TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_TOKEN}"
+        );
+    };
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_INTERVAL_SECONDS,
+        TRACE_VECTOR_INDEX_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
+        5,
+        86_400,
+    )?;
+    let limit = parse_optional_scheduler_usize_env(
+        TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_LIMIT,
+        TRACE_VECTOR_INDEX_WORKER_DEFAULT_LIMIT,
+        1,
+        TRACE_VECTOR_INDEX_WORKER_MAX_LIMIT,
+    )?;
+    let purpose = optional_trimmed_env(TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_PURPOSE)?
+        .unwrap_or_else(|| TRACE_VECTOR_INDEX_SCHEDULER_DEFAULT_PURPOSE.to_string());
+    let purpose = validate_vector_index_scheduler_purpose(&purpose)
+        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    Ok(Some(TraceVectorIndexSchedulerConfig {
+        worker_token: SecretString::from(worker_token),
+        interval: StdDuration::from_secs(interval_seconds),
+        limit,
+        dry_run: env_truthy(TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_DRY_RUN),
+        purpose,
     }))
 }
 
@@ -4387,6 +4456,47 @@ fn spawn_trace_export_job_scheduler_task(
     });
 }
 
+fn spawn_trace_vector_index_scheduler_task(
+    state: &Arc<AppState>,
+    config: Option<TraceVectorIndexSchedulerConfig>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    let state = state.clone();
+    tracing::info!(
+        interval_seconds = config.interval.as_secs(),
+        limit = config.limit,
+        dry_run = config.dry_run,
+        "Trace Commons vector index scheduler enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(config.interval).await;
+            match run_trace_vector_index_scheduler_tick(state.clone(), &config).await {
+                Ok(summary) => {
+                    tracing::info!(
+                        tenant_storage_ref = %summary.tenant_storage_ref,
+                        checked_count = summary.checked_count,
+                        vector_entries_indexed = summary.vector_entries_indexed,
+                        skipped_existing_count = summary.skipped_existing_count,
+                        pending_after_count = summary.pending_after_count,
+                        dry_run = summary.dry_run,
+                        "Trace Commons vector index scheduler tick completed"
+                    );
+                }
+                Err((status, Json(error))) => {
+                    tracing::warn!(
+                        status = %status,
+                        error = %error.error,
+                        "Trace Commons vector index scheduler tick failed"
+                    );
+                }
+            }
+        }
+    });
+}
+
 async fn validate_trace_export_job_scheduler_config(
     state: &AppState,
     config: Option<&TraceExportJobSchedulerConfig>,
@@ -4405,6 +4515,34 @@ async fn validate_trace_export_job_scheduler_config(
 fn trace_export_scheduler_config_error(error: (StatusCode, Json<ApiError>)) -> anyhow::Error {
     anyhow::anyhow!(
         "invalid Trace Commons export job scheduler configuration: status={}, error={}",
+        error.0,
+        error.1.0.error
+    )
+}
+
+async fn validate_trace_vector_index_scheduler_config(
+    state: &AppState,
+    config: Option<&TraceVectorIndexSchedulerConfig>,
+) -> anyhow::Result<()> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
+        .map_err(trace_vector_index_scheduler_config_error)?;
+    let auth = authenticate_with_tenant_access_grant(state, &headers)
+        .await
+        .map_err(trace_vector_index_scheduler_config_error)?;
+    require_vector_operator(&auth).map_err(trace_vector_index_scheduler_config_error)?;
+    anyhow::ensure!(
+        state.db_mirror.is_some(),
+        "invalid Trace Commons vector index scheduler configuration: TRACE_COMMONS_DB_DUAL_WRITE is required"
+    );
+    Ok(())
+}
+
+fn trace_vector_index_scheduler_config_error(error: (StatusCode, Json<ApiError>)) -> anyhow::Error {
+    anyhow::anyhow!(
+        "invalid Trace Commons vector index scheduler configuration: status={}, error={}",
         error.0,
         error.1.0.error
     )
@@ -4965,6 +5103,12 @@ struct TraceCommonsConfigStatusResponse {
     export_job_scheduler_retry_failed_max_retry_count: Option<u32>,
     export_job_scheduler_retry_base_delay_seconds: Option<i64>,
     export_job_scheduler_retry_max_delay_seconds: Option<i64>,
+    vector_index_worker_default_limit: usize,
+    vector_index_worker_max_limit: usize,
+    vector_index_scheduler_configured: bool,
+    vector_index_scheduler_interval_seconds: Option<u64>,
+    vector_index_scheduler_limit: Option<usize>,
+    vector_index_scheduler_dry_run: Option<bool>,
     credit_cycle_worker_step_count: usize,
     credit_cycle_scheduler_default_limit: usize,
     credit_cycle_scheduler_max_limit: usize,
@@ -5151,6 +5295,21 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .export_job_scheduler
             .as_ref()
             .map(|config| config.retry_failed_max_delay_seconds),
+        vector_index_worker_default_limit: TRACE_VECTOR_INDEX_WORKER_DEFAULT_LIMIT,
+        vector_index_worker_max_limit: TRACE_VECTOR_INDEX_WORKER_MAX_LIMIT,
+        vector_index_scheduler_configured: state.vector_index_scheduler.is_some(),
+        vector_index_scheduler_interval_seconds: state
+            .vector_index_scheduler
+            .as_ref()
+            .map(|config| config.interval.as_secs()),
+        vector_index_scheduler_limit: state
+            .vector_index_scheduler
+            .as_ref()
+            .map(|config| config.limit),
+        vector_index_scheduler_dry_run: state
+            .vector_index_scheduler
+            .as_ref()
+            .map(|config| config.dry_run),
         credit_cycle_worker_step_count: TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT,
         credit_cycle_scheduler_default_limit: TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_LIMIT,
         credit_cycle_scheduler_max_limit: TRACE_CREDIT_CYCLE_SCHEDULER_MAX_LIMIT,
@@ -15212,6 +15371,23 @@ fn validate_export_job_retry_reason(reason: &str) -> ApiResult<String> {
     Ok(reason)
 }
 
+fn validate_vector_index_scheduler_purpose(purpose: &str) -> ApiResult<String> {
+    let purpose = purpose.trim().to_string();
+    if purpose.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "vector index scheduler requires a non-empty purpose",
+        ));
+    }
+    if purpose.len() > 1024 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "vector index scheduler purpose is too long",
+        ));
+    }
+    Ok(purpose)
+}
+
 async fn append_ranking_model_version_with_db_mirror(
     state: &AppState,
     tenant: &TenantAuth,
@@ -21214,6 +21390,24 @@ async fn run_trace_export_job_scheduler_tick(
         retry_failed,
         run_queued,
     })
+}
+
+async fn run_trace_vector_index_scheduler_tick(
+    state: Arc<AppState>,
+    config: &TraceVectorIndexSchedulerConfig,
+) -> ApiResult<TraceVectorIndexResponse> {
+    let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())?;
+    let Json(response) = vector_index_handler(
+        State(state),
+        headers,
+        Json(TraceVectorIndexRequest {
+            purpose: Some(config.purpose.clone()),
+            dry_run: config.dry_run,
+            limit: Some(config.limit),
+        }),
+    )
+    .await?;
+    Ok(response)
 }
 
 async fn current_trace_export_job_or_claimed(
@@ -45788,6 +45982,7 @@ mod tests {
             process_evaluator: None,
             process_evaluator_timeout_ms: None,
             export_job_scheduler: None,
+            vector_index_scheduler: None,
             ranking_calibration_max_age: None,
             ranking_require_calibration_dataset_registry: false,
             ranking_require_server_feature_provenance: false,
@@ -48059,7 +48254,7 @@ mod tests {
             .await
             .expect("admin response");
         assert_eq!(admin_response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(admin_response.into_body(), 4096)
+        let body = axum::body::to_bytes(admin_response.into_body(), 16 * 1024)
             .await
             .expect("body reads");
         let value: serde_json::Value = serde_json::from_slice(&body).expect("status json parses");
@@ -48389,7 +48584,7 @@ mod tests {
             .await
             .expect("admin response");
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 4096)
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
             .await
             .expect("body reads");
         let value: serde_json::Value = serde_json::from_slice(&body).expect("status json parses");
@@ -48446,7 +48641,7 @@ mod tests {
             .await
             .expect("admin response");
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 4096)
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
             .await
             .expect("body reads");
         let value: serde_json::Value = serde_json::from_slice(&body).expect("status json parses");
@@ -48499,7 +48694,7 @@ mod tests {
             .await
             .expect("admin response");
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 4096)
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
             .await
             .expect("body reads");
         let value: serde_json::Value = serde_json::from_slice(&body).expect("status json parses");
@@ -48552,7 +48747,7 @@ mod tests {
             .await
             .expect("admin response");
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 4096)
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
             .await
             .expect("body reads");
         let value: serde_json::Value = serde_json::from_slice(&body).expect("status json parses");
@@ -48607,7 +48802,7 @@ mod tests {
             .await
             .expect("admin response");
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 4096)
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
             .await
             .expect("body reads");
         let value: serde_json::Value = serde_json::from_slice(&body).expect("status json parses");
@@ -48679,7 +48874,7 @@ mod tests {
             .await
             .expect("config status response");
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 4096)
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
             .await
             .expect("body bytes");
         let body_text = std::str::from_utf8(&body).expect("body is utf8");
@@ -48724,6 +48919,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_config_status_reports_vector_index_scheduler_without_token_or_purpose() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).vector_index_scheduler = Some(TraceVectorIndexSchedulerConfig {
+            worker_token: SecretString::from("config-status-vector-token".to_string()),
+            interval: StdDuration::from_secs(75),
+            limit: 17,
+            dry_run: true,
+            purpose: "do not expose raw vector scheduler note".to_string(),
+        });
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/config-status")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("config status response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body bytes");
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(
+            value["vector_index_worker_default_limit"],
+            serde_json::json!(TRACE_VECTOR_INDEX_WORKER_DEFAULT_LIMIT)
+        );
+        assert_eq!(
+            value["vector_index_worker_max_limit"],
+            serde_json::json!(TRACE_VECTOR_INDEX_WORKER_MAX_LIMIT)
+        );
+        assert_eq!(
+            value["vector_index_scheduler_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["vector_index_scheduler_interval_seconds"],
+            serde_json::json!(75)
+        );
+        assert_eq!(value["vector_index_scheduler_limit"], serde_json::json!(17));
+        assert_eq!(
+            value["vector_index_scheduler_dry_run"],
+            serde_json::json!(true)
+        );
+        assert!(!body_text.contains("config-status-vector-token"));
+        assert!(!body_text.contains("do not expose raw vector scheduler note"));
+        let object = value.as_object().expect("config status is object");
+        assert!(!object.contains_key("vector_index_scheduler_token"));
+        assert!(!object.contains_key("vector_index_scheduler_purpose"));
+    }
+
+    #[tokio::test]
     async fn admin_config_status_reports_remote_artifact_alias_without_remote_secrets() {
         use axum::body::Body;
         use tower::ServiceExt;
@@ -48763,7 +49018,7 @@ mod tests {
             .await
             .expect("admin response");
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 4096)
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
             .await
             .expect("body reads");
         let value: serde_json::Value = serde_json::from_slice(&body).expect("status json parses");
@@ -48847,7 +49102,7 @@ mod tests {
             .await
             .expect("EdDSA admin response");
         assert_eq!(admin_response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(admin_response.into_body(), 4096)
+        let body = axum::body::to_bytes(admin_response.into_body(), 16 * 1024)
             .await
             .expect("body reads");
         let value: serde_json::Value = serde_json::from_slice(&body).expect("status json parses");
@@ -48896,7 +49151,7 @@ mod tests {
             .await
             .expect("managed EdDSA admin response");
         assert_eq!(admin_response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(admin_response.into_body(), 4096)
+        let body = axum::body::to_bytes(admin_response.into_body(), 16 * 1024)
             .await
             .expect("body reads");
         let value: serde_json::Value = serde_json::from_slice(&body).expect("status json parses");
@@ -53405,6 +53660,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn vector_index_scheduler_config_requires_vector_worker_auth_at_startup() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = validate_trace_vector_index_scheduler_config(
+            state.as_ref(),
+            Some(&TraceVectorIndexSchedulerConfig {
+                worker_token: SecretString::from("token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                limit: 5,
+                dry_run: false,
+                purpose: "scheduled vector index".to_string(),
+            }),
+        )
+        .await
+        .expect_err("contributor token must not start vector index scheduler");
+
+        assert!(
+            error
+                .to_string()
+                .contains("reviewer, admin, or vector worker token required")
+        );
+    }
+
     #[test]
     fn export_job_slice_keeps_safe_request_metadata_for_status_updates() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -56204,6 +56484,7 @@ mod tests {
             process_evaluator: None,
             process_evaluator_timeout_ms: None,
             export_job_scheduler: None,
+            vector_index_scheduler: None,
             ranking_calibration_max_age: None,
             ranking_require_calibration_dataset_registry: false,
             ranking_require_server_feature_provenance: false,

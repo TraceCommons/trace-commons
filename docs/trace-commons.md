@@ -731,6 +731,19 @@ the same optional dataset-kind narrowing and bounded controls through
 `TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_MAX_DELAY_SECONDS`; the raw token and
 retry note are never logged, and retry audit rows keep only reason hashes.
 
+Deployments that want the server to own vector-index catch-up can configure
+`TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_TOKEN` with a vector-worker bearer token.
+Startup validates that the token can call the vector worker route and that the
+DB mirror is configured, then the in-process scheduler sleeps for
+`TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_INTERVAL_SECONDS` (default 60) before
+calling `POST /v1/workers/vector-index` with the same bounded worker semantics.
+`TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_LIMIT` caps each pass from 1 to 500,
+`TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_DRY_RUN=true` keeps the scheduler in
+count-only mode, and `TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_PURPOSE` sets the
+audited worker purpose. Config status exposes only scheduler enablement,
+interval, limit, and dry-run status; it never returns the worker token or raw
+purpose text.
+
 Stale export-job recovery is intentionally narrow. If a `running` export job is
 still open after its grant expiry, an admin can call
 `POST /v1/admin/export/jobs/{export_job_id}/recover-stale` with a non-empty
@@ -911,7 +924,10 @@ indexing. The worker route requires the DB mirror before it starts, accepts
 `pending_after_count`. Unlike broad admin maintenance, this route does not mark
 expired/revoked records, prune export caches, write retention ledgers, or run
 DB reconciliation; it only indexes eligible DB-mirrored derived summaries and
-audits the vector-index pass.
+audits the vector-index pass. Deployments can use
+`TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_TOKEN` to run that same bounded worker
+route in-process on an interval without granting the scheduler generic
+maintenance authority.
 
 `POST /v1/admin/maintenance` can also be used by reviewers/admins to bridge file-backed pilot data into the optional DB mirror. It marks submissions expired when their retention-policy `expires_at` has passed, mirrors expiration status plus artifact/export-manifest invalidation to the DB mirror when configured, writes a durable DB retention job row plus per-submission lifecycle item rows for mirrored expire/purge/revoke actions, repairs DB revocation/artifact invalidation for submissions that are already file-marked revoked, lifecycle-revokes published benchmark artifacts whose sources are revoked or expired and enqueues matching registry revoke outbox rows, prunes cached export payloads whose manifest references revoked or expired sources, and keeps expired traces out of replay, benchmark, and ranker exports.
 
