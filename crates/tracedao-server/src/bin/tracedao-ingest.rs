@@ -2994,6 +2994,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(key_rotation_drill_handler),
         )
         .route(
+            "/v1/admin/audit-chain-drill",
+            post(audit_chain_drill_handler),
+        )
+        .route(
             "/v1/admin/operational-metrics",
             get(operational_metrics_handler),
         )
@@ -21839,6 +21843,19 @@ async fn key_rotation_drill_handler(
     Ok(Json(response))
 }
 
+async fn audit_chain_drill_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceAuditChainDrillRequest>,
+) -> ApiResult<Json<TraceAuditChainDrillResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let response = run_audit_chain_drill(state.as_ref(), tenant.auth(), request)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(response))
+}
+
 #[derive(Debug, Deserialize)]
 struct TraceRollbackDrillRequest {
     #[serde(default)]
@@ -21901,6 +21918,166 @@ struct TraceKeyRotationDrillResponse {
     blocking_gaps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceAuditChainDrillRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    record_evidence: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceAuditChainDrillResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose: String,
+    ready: bool,
+    evidence_hash: String,
+    file_verified: bool,
+    file_event_count: usize,
+    file_legacy_event_count: usize,
+    file_mismatch_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_last_event_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    db_verified: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    db_event_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    db_legacy_event_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    db_payload_verified_event_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    db_payload_unverified_event_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    db_mismatch_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    db_last_event_hash: Option<String>,
+    blocking_gaps: Vec<String>,
+    failure_hashes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+async fn run_audit_chain_drill(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceAuditChainDrillRequest,
+) -> anyhow::Result<TraceAuditChainDrillResponse> {
+    let generated_at = Utc::now();
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_audit_chain_drill")
+        .to_string();
+    let report = verify_audit_chain(state, &tenant.tenant_id).await?;
+    let db_report = report.db_mirror.as_ref();
+    let mut blocking_gaps = Vec::new();
+    push_rollback_gap_count(
+        &mut blocking_gaps,
+        "file_audit_chain_mismatch_count",
+        usize::from(!report.verified) * report.mismatch_count.max(1),
+    );
+    if let Some(db_report) = db_report {
+        push_rollback_gap_count(
+            &mut blocking_gaps,
+            "db_audit_chain_mismatch_count",
+            usize::from(!db_report.verified) * db_report.mismatch_count.max(1),
+        );
+    }
+    let failure_hashes = report
+        .failures
+        .iter()
+        .chain(
+            db_report
+                .into_iter()
+                .flat_map(|report| report.failures.iter()),
+        )
+        .map(|failure| sha256_prefixed(failure))
+        .collect::<Vec<_>>();
+    let db_verified = db_report.map(|report| report.verified);
+    let db_event_count = db_report.map(|report| report.event_count);
+    let db_legacy_event_count = db_report.map(|report| report.legacy_event_count);
+    let db_payload_verified_event_count =
+        db_report.map(|report| report.payload_verified_event_count);
+    let db_payload_unverified_event_count =
+        db_report.map(|report| report.payload_unverified_event_count);
+    let db_mismatch_count = db_report.map(|report| report.mismatch_count);
+    let db_last_event_hash = db_report.and_then(|report| report.last_event_hash.clone());
+    let evidence_hash = audit_chain_drill_evidence_hash(
+        tenant,
+        report.verified,
+        report.event_count,
+        report.legacy_event_count,
+        report.mismatch_count,
+        report.last_event_hash.as_deref(),
+        db_verified,
+        db_event_count,
+        db_legacy_event_count,
+        db_payload_verified_event_count,
+        db_payload_unverified_event_count,
+        db_mismatch_count,
+        db_last_event_hash.as_deref(),
+        &blocking_gaps,
+        &failure_hashes,
+    );
+    let mut response = TraceAuditChainDrillResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at,
+        purpose: purpose.clone(),
+        ready: blocking_gaps.is_empty(),
+        evidence_hash,
+        file_verified: report.verified,
+        file_event_count: report.event_count,
+        file_legacy_event_count: report.legacy_event_count,
+        file_mismatch_count: report.mismatch_count,
+        file_last_event_hash: report.last_event_hash,
+        db_verified,
+        db_event_count,
+        db_legacy_event_count,
+        db_payload_verified_event_count,
+        db_payload_unverified_event_count,
+        db_mismatch_count,
+        db_last_event_hash,
+        blocking_gaps,
+        failure_hashes,
+        recorded_evidence: None,
+    };
+
+    if request.record_evidence {
+        let evidence = TraceRolloutSmokeEvidenceResponse {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            check_name: "audit_chain_verification".to_string(),
+            status: if response.ready {
+                TraceRolloutSmokeEvidenceStatus::Passed
+            } else {
+                TraceRolloutSmokeEvidenceStatus::Failed
+            },
+            evidence_hash: response.evidence_hash.clone(),
+            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            recorded_at: Utc::now(),
+        };
+        append_audit_event_with_db_mirror(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+            StorageTraceAuditAction::Read,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .await?;
+        response.recorded_evidence = Some(evidence);
+    }
+
+    Ok(response)
 }
 
 async fn run_key_rotation_drill(
@@ -22326,6 +22503,48 @@ fn rollback_drill_evidence_hash(
             "file_tombstone_count": file_tombstone_count,
             "db_tombstone_count": db_tombstone_count,
             "blocking_gaps": blocking_gaps,
+        })
+        .to_string(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn audit_chain_drill_evidence_hash(
+    tenant: &TenantAuth,
+    file_verified: bool,
+    file_event_count: usize,
+    file_legacy_event_count: usize,
+    file_mismatch_count: usize,
+    file_last_event_hash: Option<&str>,
+    db_verified: Option<bool>,
+    db_event_count: Option<usize>,
+    db_legacy_event_count: Option<usize>,
+    db_payload_verified_event_count: Option<usize>,
+    db_payload_unverified_event_count: Option<usize>,
+    db_mismatch_count: Option<usize>,
+    db_last_event_hash: Option<&str>,
+    blocking_gaps: &[String],
+    failure_hashes: &[String],
+) -> String {
+    sha256_prefixed(
+        &serde_json::json!({
+            "schema": "trace_commons_audit_chain_drill.v1",
+            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+            "actor_principal_ref": tenant.principal_ref,
+            "file_verified": file_verified,
+            "file_event_count": file_event_count,
+            "file_legacy_event_count": file_legacy_event_count,
+            "file_mismatch_count": file_mismatch_count,
+            "file_last_event_hash": file_last_event_hash,
+            "db_verified": db_verified,
+            "db_event_count": db_event_count,
+            "db_legacy_event_count": db_legacy_event_count,
+            "db_payload_verified_event_count": db_payload_verified_event_count,
+            "db_payload_unverified_event_count": db_payload_unverified_event_count,
+            "db_mismatch_count": db_mismatch_count,
+            "db_last_event_hash": db_last_event_hash,
+            "blocking_gaps": blocking_gaps,
+            "failure_hashes": failure_hashes,
         })
         .to_string(),
     )
@@ -54107,6 +54326,164 @@ mod tests {
                         && event.reason.as_deref().is_some_and(|reason| {
                             reason.contains("check_name=key_rotation_drill")
                                 && reason.contains("status=passed")
+                        })
+                })
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_chain_drill_records_passed_evidence_without_raw_failures() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let envelope = sample_envelope().await;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/audit-chain-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator audit chain drill",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("audit chain drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("audit chain drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(true));
+        assert_eq!(value["file_verified"], serde_json::json!(true));
+        assert_eq!(value["file_event_count"], serde_json::json!(1));
+        assert_eq!(value["file_mismatch_count"], serde_json::json!(0));
+        assert_eq!(value["blocking_gaps"], serde_json::json!([]));
+        assert_eq!(value["failure_hashes"], serde_json::json!([]));
+        assert_eq!(
+            value["recorded_evidence"]["check_name"],
+            serde_json::json!("audit_chain_verification")
+        );
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("passed")
+        );
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("event_hash mismatch"));
+        assert!(
+            read_all_audit_events(temp.path(), "tenant-a")
+                .expect("file audit events remain after drill")
+                .iter()
+                .any(|event| {
+                    event.kind == "rollout_smoke_evidence"
+                        && event.reason.as_deref().is_some_and(|reason| {
+                            reason.contains("check_name=audit_chain_verification")
+                                && reason.contains("status=passed")
+                        })
+                })
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_chain_drill_records_failed_evidence_with_failure_hashes() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let envelope = sample_envelope().await;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let path = audit_log_path(temp.path(), "tenant-a");
+        let body = std::fs::read_to_string(&path).expect("audit log reads");
+        std::fs::write(
+            &path,
+            body.replacen("\"submitted\"", "\"submitted_tampered\"", 1),
+        )
+        .expect("tamper audit log");
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/audit-chain-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator audit chain drill after tamper",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("audit chain drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("audit chain drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(false));
+        assert_eq!(value["file_verified"], serde_json::json!(false));
+        assert!(
+            value["blocking_gaps"]
+                .as_array()
+                .expect("blocking gaps is array")
+                .iter()
+                .any(|gap| {
+                    gap.as_str()
+                        .is_some_and(|gap| gap.starts_with("file_audit_chain_mismatch_count="))
+                })
+        );
+        let failure_hashes = value["failure_hashes"]
+            .as_array()
+            .expect("failure hashes is array");
+        assert!(!failure_hashes.is_empty());
+        assert!(failure_hashes.iter().all(|hash| {
+            hash.as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        }));
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("failed")
+        );
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("event_hash mismatch"));
+        assert!(!body_text.contains("previous_event_hash mismatch"));
+        assert!(
+            read_all_audit_events(temp.path(), "tenant-a")
+                .expect("file audit events remain after drill")
+                .iter()
+                .any(|event| {
+                    event.kind == "rollout_smoke_evidence"
+                        && event.reason.as_deref().is_some_and(|reason| {
+                            reason.contains("check_name=audit_chain_verification")
+                                && reason.contains("status=failed")
                         })
                 })
         );
