@@ -250,9 +250,9 @@ are blocked or warning. Admins can also scrape `/v1/admin/operational-metrics`
 for a Prometheus-text snapshot of the same safe promotion, per-gate,
 worker-skip, rollout-smoke, submission, review SLA, export, retention, vector,
 benchmark, and delayed-credit gauges. The same summary response includes a
-`rollout_smoke` preflight block with the required
-canary smoke-check names, promotion-gate readiness, recorded evidence counts,
-passed evidence counts, failed evidence counts, and explicit missing
+`rollout_smoke` preflight block with the required canary smoke-check names
+including PostgreSQL RLS readiness, promotion-gate readiness, recorded evidence
+counts, passed evidence counts, failed evidence counts, and explicit missing
 rehearsal-evidence counts so operators do not mistake a clean gate snapshot for
 a rehearsed rollout. Admins can list or append hash-only smoke rehearsal
 evidence through `GET` and `POST` `/v1/admin/rollout-smoke/evidence`; `GET`

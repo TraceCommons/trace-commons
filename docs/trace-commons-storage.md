@@ -920,7 +920,7 @@ Per-tenant rollout:
 
 - Promote one tenant and one surface family at a time. Prefer the tenant allowlist flags for DB contributor, reviewer, replay export, audit, tenant-policy, object-ref-required, and object-primary gates before enabling global flags.
 - Read cutover order should be DB reader flags first, then object-ref-required modes, then object-primary submit/review, replay export, and derived export modes. Keep file-backed reads available for the rollback window.
-- Each promoted tenant needs a smoke pass for submit/status, contributor credit/events, reviewer queue/list/review mutation with required reasons, replay export selection, audit reads, tenant access grant enforcement, and one negative cross-tenant same-id read.
+- Each promoted tenant needs a smoke pass for submit/status, contributor credit/events, reviewer queue/list/review mutation with required reasons, replay export selection, audit reads, PostgreSQL RLS readiness, tenant access grant enforcement, and one negative cross-tenant same-id read.
 - Keep a fallback tenant on file-backed behavior during the canary so operator smoke checks prove rollout gates are actually scoped.
 
 Rollback:
