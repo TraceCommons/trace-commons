@@ -3310,6 +3310,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(vector_index_drill_handler),
         )
         .route(
+            "/v1/admin/analytics-release-drill",
+            post(analytics_release_drill_handler),
+        )
+        .route(
             "/v1/admin/revocation-propagation-drill",
             post(revocation_propagation_drill_handler),
         )
@@ -22980,6 +22984,19 @@ async fn vector_index_drill_handler(
     Ok(Json(response))
 }
 
+async fn analytics_release_drill_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceAnalyticsReleaseDrillRequest>,
+) -> ApiResult<Json<TraceAnalyticsReleaseDrillResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let response = run_analytics_release_drill(state.as_ref(), tenant.auth(), request)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(response))
+}
+
 async fn revocation_propagation_drill_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -23165,6 +23182,14 @@ struct TraceVectorIndexDrillRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct TraceAnalyticsReleaseDrillRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    record_evidence: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct TraceRevocationPropagationDrillRequest {
     #[serde(default)]
     purpose: Option<String>,
@@ -23315,6 +23340,31 @@ struct TraceVectorIndexDrillResponse {
     skipped_existing_count: usize,
     pending_after_count: usize,
     candidate_count: usize,
+    blocking_gaps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceAnalyticsReleaseDrillResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose: String,
+    ready: bool,
+    evidence_hash: String,
+    min_cell_count: usize,
+    min_cell_count_configured: bool,
+    broad_release_noise_configured: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    broad_release_noise_max_delta: Option<usize>,
+    released_cell_count: usize,
+    suppressed_cell_count: usize,
+    suppression_applied: bool,
+    noise_applied: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    noise_max_delta: Option<usize>,
+    noisy_cell_count: usize,
     blocking_gaps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
@@ -24162,6 +24212,96 @@ async fn run_vector_index_drill(
             tenant_id: tenant.tenant_id.clone(),
             tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
             check_name: "vector_index".to_string(),
+            status: if response.ready {
+                TraceRolloutSmokeEvidenceStatus::Passed
+            } else {
+                TraceRolloutSmokeEvidenceStatus::Failed
+            },
+            evidence_hash: response.evidence_hash.clone(),
+            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            recorded_at: Utc::now(),
+        };
+        append_audit_event_with_db_mirror(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+            StorageTraceAuditAction::Read,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .await?;
+        response.recorded_evidence = Some(evidence);
+    }
+
+    Ok(response)
+}
+
+async fn run_analytics_release_drill(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceAnalyticsReleaseDrillRequest,
+) -> anyhow::Result<TraceAnalyticsReleaseDrillResponse> {
+    let generated_at = Utc::now();
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_analytics_release_drill")
+        .to_string();
+    let TraceCommonsMetadataView { records, derived } =
+        read_reviewer_metadata_view(state, tenant).await?;
+    let mut analytics =
+        TraceCommonsAnalyticsResponse::from_records(tenant.tenant_id.clone(), records, derived);
+    analytics.apply_min_cell_count(state.analytics_min_cell_count);
+    if state.analytics_broad_release_noise.is_none() {
+        analytics
+            .privacy_budget
+            .block_broad_release("noise_not_configured");
+    }
+    if let Some(config) = state.analytics_broad_release_noise.as_ref() {
+        analytics.apply_broad_release_noise(config);
+    }
+
+    let budget = analytics.privacy_budget.clone();
+    let blocking_gaps = budget.broad_release_blocking_reasons.clone();
+    let evidence_hash = analytics_release_drill_evidence_hash(
+        tenant,
+        state,
+        &budget,
+        analytics.min_cell_count,
+        &blocking_gaps,
+    );
+    let mut response = TraceAnalyticsReleaseDrillResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at,
+        purpose: purpose.clone(),
+        ready: blocking_gaps.is_empty(),
+        evidence_hash,
+        min_cell_count: state.analytics_min_cell_count,
+        min_cell_count_configured: analytics.min_cell_count.is_some(),
+        broad_release_noise_configured: state.analytics_broad_release_noise.is_some(),
+        broad_release_noise_max_delta: state
+            .analytics_broad_release_noise
+            .as_ref()
+            .map(|config| config.max_delta),
+        released_cell_count: budget.released_cell_count,
+        suppressed_cell_count: budget.suppressed_cell_count,
+        suppression_applied: budget.suppression_applied,
+        noise_applied: budget.noise_applied,
+        noise_max_delta: budget.noise_max_delta,
+        noisy_cell_count: budget.noisy_cell_count,
+        blocking_gaps,
+        recorded_evidence: None,
+    };
+
+    if request.record_evidence {
+        let evidence = TraceRolloutSmokeEvidenceResponse {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            check_name: "analytics_release".to_string(),
             status: if response.ready {
                 TraceRolloutSmokeEvidenceStatus::Passed
             } else {
@@ -25569,6 +25709,37 @@ fn vector_index_drill_evidence_hash(
             "skipped_existing_count": response.skipped_existing_count,
             "pending_after_count": response.pending_after_count,
             "candidate_count": candidate_count,
+            "blocking_gaps": blocking_gaps,
+        })
+        .to_string(),
+    )
+}
+
+fn analytics_release_drill_evidence_hash(
+    tenant: &TenantAuth,
+    state: &AppState,
+    budget: &TraceAnalyticsPrivacyBudget,
+    min_cell_count: Option<usize>,
+    blocking_gaps: &[String],
+) -> String {
+    sha256_prefixed(
+        &serde_json::json!({
+            "schema": "trace_commons_analytics_release_drill.v1",
+            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+            "actor_principal_ref": tenant.principal_ref,
+            "min_cell_count": state.analytics_min_cell_count,
+            "min_cell_count_configured": min_cell_count.is_some(),
+            "broad_release_noise_configured": state.analytics_broad_release_noise.is_some(),
+            "broad_release_noise_max_delta": state
+                .analytics_broad_release_noise
+                .as_ref()
+                .map(|config| config.max_delta),
+            "released_cell_count": budget.released_cell_count,
+            "suppressed_cell_count": budget.suppressed_cell_count,
+            "suppression_applied": budget.suppression_applied,
+            "noise_applied": budget.noise_applied,
+            "noise_max_delta": budget.noise_max_delta,
+            "noisy_cell_count": budget.noisy_cell_count,
             "blocking_gaps": blocking_gaps,
         })
         .to_string(),
@@ -52367,6 +52538,94 @@ mod tests {
         );
         let body_text = std::str::from_utf8(&body).expect("body is utf8");
         assert!(!body_text.contains("broad-release-analytics-secret"));
+    }
+
+    #[tokio::test]
+    async fn analytics_release_drill_records_smoke_evidence_without_leaking_noise_key() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        {
+            let state = Arc::make_mut(&mut state);
+            state.analytics_min_cell_count = 2;
+            state.analytics_broad_release_noise = Some(TraceAnalyticsNoiseConfig {
+                key: SecretString::from("analytics-release-drill-secret".to_string()),
+                max_delta: 2,
+            });
+        }
+        for _ in 0..2 {
+            let envelope = sample_envelope().await;
+            let _ = submit_trace_handler(
+                State(state.clone()),
+                auth_headers("token-a"),
+                Json(envelope),
+            )
+            .await
+            .expect("submission succeeds");
+        }
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/analytics-release-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator analytics release drill",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("analytics release drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("analytics release drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(true));
+        assert_eq!(value["min_cell_count"], serde_json::json!(2));
+        assert_eq!(
+            value["broad_release_noise_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(value["broad_release_noise_max_delta"], serde_json::json!(2));
+        assert_eq!(value["noise_applied"], serde_json::json!(true));
+        assert_eq!(value["blocking_gaps"], serde_json::json!([]));
+        assert_eq!(
+            value["recorded_evidence"]["check_name"],
+            serde_json::json!("analytics_release")
+        );
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("passed")
+        );
+        assert!(
+            value["evidence_hash"]
+                .as_str()
+                .expect("evidence hash is string")
+                .starts_with("sha256:")
+        );
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("analytics-release-drill-secret"));
+        assert!(!body_text.contains("admin-token-a"));
+
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("file audit events read");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "rollout_smoke_evidence"
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("check_name=analytics_release")
+                        && reason.contains("status=passed")
+                })
+        }));
     }
 
     #[tokio::test]
