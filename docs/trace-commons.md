@@ -635,11 +635,12 @@ status/privacy/consent filters, and only hashed external refs for later
 replayable worker execution. `POST /v1/workers/export/jobs/claim-next` lets an
 export worker atomically claim the oldest unexpired queued job for the current
 tenant and optional dataset-kind filter, marking it `running` without reading
-trace bodies. `POST /v1/workers/export/jobs/claim-and-run` currently narrows
-that worker loop to replay exports: it claims the next queued replay job,
-reconstructs status/privacy/consent/limit filters from the safe metadata
-snapshot, runs the replay export path, and marks the same job row complete or
-failed instead of creating a second job.
+trace bodies. `POST /v1/workers/export/jobs/claim-and-run` currently supports
+queued replay and benchmark-conversion jobs: it claims the next queued job for
+that dataset kind, reconstructs status/privacy/consent/limit filters from the
+safe metadata snapshot, runs the existing export/artifact path, and marks the
+same job row complete or failed instead of creating a second job. Ranker
+candidate/pair queued execution remains a later extension.
 
 Stale export-job recovery is intentionally narrow. If a `running` export job is
 still open after its grant expiry, an admin can call
