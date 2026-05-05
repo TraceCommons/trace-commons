@@ -156,7 +156,10 @@ direction/outcome conflicts, and exposes only safe counts, source/actor totals,
 submission IDs, and reason codes. `/v1/admin/ranking/labeler-reliability-report`
 rolls the same evidence up by label source and hashed actor principal so
 operators can spot noisy sources or reviewers without exposing raw external
-refs.
+refs. Calibration runs also record `ranking_adjudication_issues_present` and
+remain non-promotable while unresolved adjudication issues exist for the target
+use, so stored calibration evidence cannot look credit-ready before review
+settles.
 Registered calibration datasets marked `deprecated` or `archived` are retired
 and cannot feed new calibration runs for that target use and policy; promotion,
 dataset-readiness, and active-model risk surfaces also report retired registered
