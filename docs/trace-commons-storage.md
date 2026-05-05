@@ -101,6 +101,11 @@ This first production-storage slice is now owned by the TraceDAO server repo. It
 
 Submitted audit-event backfill enriches typed `Submission` metadata from the matching file submission record when available, preserving the stored status and privacy risk instead of falling back to `unknown`. Reconciliation also reports `db_audit_submission_metadata_mismatches` when submitted-audit metadata carries a stale privacy-risk projection for the DB submission row, and treats it as a promotion blocker.
 
+Export-job control rows preserve `trace_export_job_request.v1` metadata across
+start, completion, and failure. The metadata records safe replayability inputs
+for requested/effective limits, status/privacy/consent filters, and hashes of
+worker external refs without storing raw external ticket or lab references.
+
 Reconciliation also reports DB audit hash-chain drift as `db_audit_hash_chain_failures` when mirrored audit rows have invalid hash format, a genesis or predecessor mismatch, or a canonical-payload hash mismatch. Those failures are promotion blockers just like canonical projection drift.
 
 Reconciliation also samples the latest bounded audit-reader page from files and the DB mirror and compares their public reader projections. Drift is reported as `audit_reader_sample_parity=failed` with hashed diagnostics in `audit_reader_sample_failures`, so legacy DB rows with matching ids and counts but stale action/reason projection still block reader promotion without exposing raw audit reasons.

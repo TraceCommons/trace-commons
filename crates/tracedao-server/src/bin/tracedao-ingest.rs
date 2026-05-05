@@ -669,6 +669,16 @@ struct TraceExportJobSlice {
     requested_at: DateTime<Utc>,
     started_at: Option<DateTime<Utc>>,
     finished_at: Option<DateTime<Utc>>,
+    metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+struct TraceExportJobRequest {
+    requested_dataset_kind: TraceExportDatasetKind,
+    purpose: String,
+    requested_limit: Option<usize>,
+    grant: TraceExportAccessGrant,
+    metadata: BTreeMap<String, String>,
 }
 
 impl TraceExportAccessGrant {
@@ -19825,10 +19835,19 @@ async fn run_dataset_replay_export_with_grant(
     let job = create_validated_export_job_slice(
         state,
         tenant,
-        TraceExportDatasetKind::ReplayDataset,
-        &purpose,
-        query.limit,
-        grant.clone(),
+        TraceExportJobRequest {
+            requested_dataset_kind: TraceExportDatasetKind::ReplayDataset,
+            purpose: purpose.clone(),
+            requested_limit: query.limit,
+            grant: grant.clone(),
+            metadata: export_job_request_metadata(
+                query.limit,
+                query.status,
+                query.privacy_risk,
+                consent_scope,
+                None,
+            ),
+        },
         now,
     )?;
     enforce_export_job_mirror_result(
@@ -21751,10 +21770,19 @@ async fn run_benchmark_conversion_with_grant(
     let job = create_validated_export_job_slice(
         state,
         tenant,
-        TraceExportDatasetKind::BenchmarkConversion,
-        &purpose,
-        body.limit,
-        grant.clone(),
+        TraceExportJobRequest {
+            requested_dataset_kind: TraceExportDatasetKind::BenchmarkConversion,
+            purpose: purpose.clone(),
+            requested_limit: body.limit,
+            grant: grant.clone(),
+            metadata: export_job_request_metadata(
+                body.limit,
+                body.status,
+                body.privacy_risk,
+                consent_scope,
+                body.external_ref.as_deref(),
+            ),
+        },
         now,
     )?;
     enforce_export_job_mirror_result(
@@ -22285,10 +22313,19 @@ async fn run_ranker_training_candidates_export_with_grant(
     let job = create_validated_export_job_slice(
         state,
         tenant,
-        TraceExportDatasetKind::RankerTrainingCandidates,
-        &purpose,
-        query.limit,
-        grant.clone(),
+        TraceExportJobRequest {
+            requested_dataset_kind: TraceExportDatasetKind::RankerTrainingCandidates,
+            purpose: purpose.clone(),
+            requested_limit: query.limit,
+            grant: grant.clone(),
+            metadata: export_job_request_metadata(
+                query.limit,
+                query.status,
+                query.privacy_risk,
+                consent_scope,
+                None,
+            ),
+        },
         now,
     )?;
     enforce_export_job_mirror_result(
@@ -22605,10 +22642,19 @@ async fn run_ranker_training_pairs_export_with_grant(
     let job = create_validated_export_job_slice(
         state,
         tenant,
-        TraceExportDatasetKind::RankerTrainingPairs,
-        &purpose,
-        query.limit,
-        grant.clone(),
+        TraceExportJobRequest {
+            requested_dataset_kind: TraceExportDatasetKind::RankerTrainingPairs,
+            purpose: purpose.clone(),
+            requested_limit: query.limit,
+            grant: grant.clone(),
+            metadata: export_job_request_metadata(
+                query.limit,
+                query.status,
+                query.privacy_risk,
+                consent_scope,
+                None,
+            ),
+        },
         now,
     )?;
     enforce_export_job_mirror_result(
@@ -23472,27 +23518,122 @@ fn create_one_shot_export_grant(
 fn create_validated_export_job_slice(
     state: &AppState,
     tenant: &TenantAuth,
-    requested_dataset_kind: TraceExportDatasetKind,
-    purpose: &str,
-    requested_limit: Option<usize>,
-    grant: TraceExportAccessGrant,
+    request: TraceExportJobRequest,
     now: DateTime<Utc>,
 ) -> ApiResult<TraceExportJobSlice> {
-    validate_export_access_grant(&grant, tenant, requested_dataset_kind, purpose, now)?;
+    let TraceExportJobRequest {
+        requested_dataset_kind,
+        purpose,
+        requested_limit,
+        grant,
+        mut metadata,
+    } = request;
+    validate_export_access_grant(&grant, tenant, requested_dataset_kind, &purpose, now)?;
+    let max_item_cap = resolve_export_limit(state, requested_limit).min(grant.max_item_cap);
+    metadata.insert(
+        "request_schema_version".to_string(),
+        "trace_export_job_request.v1".to_string(),
+    );
+    metadata.insert(
+        "dataset_kind".to_string(),
+        requested_dataset_kind.storage_name().to_string(),
+    );
+    metadata
+        .entry("requested_limit".to_string())
+        .or_insert_with(|| requested_limit_label(requested_limit));
+    metadata.insert("effective_limit".to_string(), max_item_cap.to_string());
     Ok(TraceExportJobSlice {
         job_id: Uuid::new_v4(),
         grant_id: grant.grant_id,
         tenant_id: tenant.tenant_id.clone(),
         caller_principal_ref: tenant.principal_ref.clone(),
         requested_dataset_kind,
-        purpose: purpose.to_string(),
+        purpose,
         expires_at: grant.expires_at,
-        max_item_cap: resolve_export_limit(state, requested_limit).min(grant.max_item_cap),
+        max_item_cap,
         status: TraceExportJobStatus::InProgress,
         requested_at: now,
         started_at: Some(now),
         finished_at: None,
+        metadata,
     })
+}
+
+fn export_job_request_metadata(
+    requested_limit: Option<usize>,
+    status: Option<TraceCorpusStatus>,
+    privacy_risk: Option<ResidualPiiRisk>,
+    consent_scope: Option<ConsentScope>,
+    external_ref: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut metadata = BTreeMap::new();
+    metadata.insert(
+        "requested_limit".to_string(),
+        requested_limit_label(requested_limit),
+    );
+    metadata.insert(
+        "filter_status".to_string(),
+        status
+            .map(TraceCorpusStatus::as_str)
+            .unwrap_or("any")
+            .to_string(),
+    );
+    metadata.insert(
+        "filter_privacy_risk".to_string(),
+        privacy_risk
+            .map(residual_pii_risk_name)
+            .unwrap_or("any")
+            .to_string(),
+    );
+    metadata.insert(
+        "filter_consent_scope".to_string(),
+        consent_scope
+            .map(consent_scope_name)
+            .unwrap_or("any")
+            .to_string(),
+    );
+    if let Some(external_ref) = external_ref
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        metadata.insert(
+            "external_ref_hash".to_string(),
+            sha256_prefixed(external_ref),
+        );
+    }
+    metadata
+}
+
+fn requested_limit_label(requested_limit: Option<usize>) -> String {
+    requested_limit
+        .map(|limit| limit.to_string())
+        .unwrap_or_else(|| "default".to_string())
+}
+
+fn residual_pii_risk_name(privacy_risk: ResidualPiiRisk) -> &'static str {
+    match privacy_risk {
+        ResidualPiiRisk::Low => "low",
+        ResidualPiiRisk::Medium => "medium",
+        ResidualPiiRisk::High => "high",
+    }
+}
+
+fn consent_scope_name(consent_scope: ConsentScope) -> &'static str {
+    match consent_scope {
+        ConsentScope::DebuggingEvaluation => "debugging_evaluation",
+        ConsentScope::BenchmarkOnly => "benchmark_only",
+        ConsentScope::RankingTraining => "ranking_training",
+        ConsentScope::ModelTraining => "model_training",
+    }
+}
+
+fn export_job_status_metadata(
+    job: &TraceExportJobSlice,
+    state: impl Into<String>,
+) -> BTreeMap<String, String> {
+    let mut metadata = job.metadata.clone();
+    metadata.insert("state".to_string(), state.into());
+    metadata
 }
 
 async fn mirror_export_job_started_to_db(
@@ -23526,8 +23667,6 @@ async fn mirror_export_job_started_to_db(
     .await
     .context("failed to mirror trace export access grant")?;
 
-    let mut job_metadata = BTreeMap::new();
-    job_metadata.insert("state".to_string(), "started".to_string());
     db.upsert_trace_export_job(StorageTraceExportJobWrite {
         tenant_id: job.tenant_id.clone(),
         export_job_id: job.job_id,
@@ -23544,7 +23683,7 @@ async fn mirror_export_job_started_to_db(
         result_manifest_id: None,
         item_count: None,
         last_error: None,
-        metadata: job_metadata,
+        metadata: export_job_status_metadata(job, "started"),
     })
     .await
     .context("failed to mirror trace export job start")?;
@@ -23560,8 +23699,6 @@ async fn mirror_export_job_finished_to_db(
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
     };
-    let mut metadata = BTreeMap::new();
-    metadata.insert("state".to_string(), "completed".to_string());
     let updated = db
         .update_trace_export_job_status(
             &job.tenant_id,
@@ -23573,7 +23710,7 @@ async fn mirror_export_job_finished_to_db(
                 result_manifest_id: Some(result_manifest_id),
                 item_count: Some(item_count.min(u32::MAX as usize) as u32),
                 last_error: None,
-                metadata,
+                metadata: export_job_status_metadata(job, "completed"),
             },
         )
         .await
@@ -23595,8 +23732,6 @@ async fn mirror_export_job_failed_to_db(
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
     };
-    let mut metadata = BTreeMap::new();
-    metadata.insert("state".to_string(), "failed".to_string());
     let updated = db
         .update_trace_export_job_status(
             &job.tenant_id,
@@ -23608,7 +23743,7 @@ async fn mirror_export_job_failed_to_db(
                 result_manifest_id: None,
                 item_count: None,
                 last_error: Some(safe_worker_error(error)),
-                metadata,
+                metadata: export_job_status_metadata(job, "failed"),
             },
         )
         .await
@@ -46941,6 +47076,207 @@ mod tests {
         .await
         .expect("valid ranker pair grant preserves export behavior");
         assert_eq!(pairs.item_count, 1);
+    }
+
+    #[tokio::test]
+    async fn export_job_metadata_persists_safe_request_filters_for_replayability() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+
+        let Json(replay) = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(7),
+                purpose: Some("metadata_replay".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: Some("debugging-evaluation".to_string()),
+            }),
+        )
+        .await
+        .expect("replay export records safe request metadata");
+        assert_eq!(replay.item_count, 0);
+
+        let raw_external_ref = "frontier-lab:job-42-private-ticket";
+        let Json(benchmark) = benchmark_worker_convert_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(3),
+                purpose: Some("metadata_benchmark".to_string()),
+                consent_scope: Some("benchmark-only".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: Some(raw_external_ref.to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark export records safe request metadata");
+        assert_eq!(benchmark.item_count, 0);
+
+        let jobs = backend
+            .list_trace_export_jobs("tenant-a")
+            .await
+            .expect("export jobs read");
+        let replay_job = jobs
+            .iter()
+            .find(|job| job.purpose == "metadata_replay")
+            .expect("replay job persisted");
+        assert_eq!(replay_job.status, StorageTraceExportJobStatus::Complete);
+        assert_eq!(
+            replay_job
+                .metadata
+                .get("request_schema_version")
+                .map(String::as_str),
+            Some("trace_export_job_request.v1")
+        );
+        assert_eq!(
+            replay_job
+                .metadata
+                .get("requested_limit")
+                .map(String::as_str),
+            Some("7")
+        );
+        assert_eq!(
+            replay_job
+                .metadata
+                .get("effective_limit")
+                .map(String::as_str),
+            Some("7")
+        );
+        assert_eq!(
+            replay_job.metadata.get("filter_status").map(String::as_str),
+            Some("accepted")
+        );
+        assert_eq!(
+            replay_job
+                .metadata
+                .get("filter_privacy_risk")
+                .map(String::as_str),
+            Some("low")
+        );
+        assert_eq!(
+            replay_job
+                .metadata
+                .get("filter_consent_scope")
+                .map(String::as_str),
+            Some("debugging_evaluation")
+        );
+
+        let benchmark_job = jobs
+            .iter()
+            .find(|job| job.purpose == "metadata_benchmark")
+            .expect("benchmark job persisted");
+        assert_eq!(benchmark_job.status, StorageTraceExportJobStatus::Complete);
+        assert_eq!(
+            benchmark_job
+                .metadata
+                .get("filter_consent_scope")
+                .map(String::as_str),
+            Some("benchmark_only")
+        );
+        assert_eq!(
+            benchmark_job
+                .metadata
+                .get("external_ref_hash")
+                .map(String::as_str),
+            Some(sha256_prefixed(raw_external_ref).as_str())
+        );
+        let job_json = serde_json::to_string(&jobs).expect("jobs serialize");
+        assert!(job_json.contains(&sha256_prefixed(raw_external_ref)));
+        assert!(!job_json.contains(raw_external_ref));
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[test]
+    fn export_job_slice_keeps_safe_request_metadata_for_status_updates() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let tenant =
+            authenticate(state.as_ref(), &auth_headers("review-token-a")).expect("reviewer auth");
+        let now = Utc::now();
+        let grant = TraceExportAccessGrant {
+            grant_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            caller_principal_ref: tenant.principal_ref.clone(),
+            requested_dataset_kind: TraceExportDatasetKind::BenchmarkConversion,
+            purpose: "metadata_unit".to_string(),
+            expires_at: now + Duration::minutes(5),
+            max_item_cap: 10,
+            status: TraceExportGrantStatus::Active,
+        };
+        let raw_external_ref = "frontier-lab:request-ticket-99";
+        let job = create_validated_export_job_slice(
+            state.as_ref(),
+            &tenant,
+            TraceExportJobRequest {
+                requested_dataset_kind: TraceExportDatasetKind::BenchmarkConversion,
+                purpose: "metadata_unit".to_string(),
+                requested_limit: Some(4),
+                grant,
+                metadata: export_job_request_metadata(
+                    Some(4),
+                    Some(TraceCorpusStatus::Accepted),
+                    Some(ResidualPiiRisk::Low),
+                    Some(ConsentScope::BenchmarkOnly),
+                    Some(raw_external_ref),
+                ),
+            },
+            now,
+        )
+        .expect("job slice validates");
+
+        assert_eq!(
+            job.metadata
+                .get("request_schema_version")
+                .map(String::as_str),
+            Some("trace_export_job_request.v1")
+        );
+        assert_eq!(
+            job.metadata.get("filter_consent_scope").map(String::as_str),
+            Some("benchmark_only")
+        );
+        assert_eq!(
+            job.metadata.get("external_ref_hash").map(String::as_str),
+            Some(sha256_prefixed(raw_external_ref).as_str())
+        );
+        let completed_metadata = export_job_status_metadata(&job, "completed");
+        assert_eq!(
+            completed_metadata.get("state").map(String::as_str),
+            Some("completed")
+        );
+        assert_eq!(
+            completed_metadata
+                .get("filter_consent_scope")
+                .map(String::as_str),
+            Some("benchmark_only")
+        );
+        assert_eq!(
+            completed_metadata
+                .get("external_ref_hash")
+                .map(String::as_str),
+            Some(sha256_prefixed(raw_external_ref).as_str())
+        );
+        let completed_json =
+            serde_json::to_string(&completed_metadata).expect("metadata serializes");
+        assert!(completed_json.contains(&sha256_prefixed(raw_external_ref)));
+        assert!(!completed_json.contains(raw_external_ref));
     }
 
     #[tokio::test]

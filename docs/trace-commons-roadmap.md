@@ -40,7 +40,7 @@ These are the next independent production slices that can be staffed in parallel
 ### Datasets
 
 - [ ] Replace deterministic vector similarity with a private embedding worker that reads only approved redacted projections, writes tenant-scoped vector metadata, and invalidates entries on revocation/retention.
-- [ ] Promote benchmark conversion and ranker training exports into durable worker jobs with source-list hashes, artifact object refs, lifecycle state, replayability checks, and idempotent delayed utility credit. Export call sites now mirror one-shot durable grant rows and running/complete job rows; background worker execution remains.
+- [ ] Promote benchmark conversion and ranker training exports into durable worker jobs with source-list hashes, artifact object refs, lifecycle state, replayability checks, and idempotent delayed utility credit. Export call sites now mirror one-shot durable grant rows and running/complete job rows with safe request metadata for requested/effective limits, status/privacy/consent filters, and hashed external refs; background worker execution remains.
 - [ ] Add export governance for replay, benchmark, ranker, and training slices: explicit purpose, consent/use filters, item caps, source object refs, manifest invalidation, and time-limited controlled job access. Replay, benchmark, ranker-candidate, and ranker-pair exports now validate and persist tenant/principal/purpose/dataset-kind grant/job slices.
 
 ### Observability
