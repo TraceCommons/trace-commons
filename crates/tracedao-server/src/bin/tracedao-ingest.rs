@@ -337,6 +337,8 @@ const TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_LIMIT: usize = 1;
 const TRACE_CREDIT_CYCLE_SCHEDULER_MAX_LIMIT: usize = 25;
 const TRACE_CREDIT_SETTLEMENT_WORKER_RUN_DEFAULT_LIMIT: usize = 100;
 const TRACE_CREDIT_SETTLEMENT_WORKER_RUN_MAX_LIMIT: usize = 500;
+const TRACE_CREDIT_RISK_SUMMARY_DEFAULT_ACCOUNT_LIMIT: usize = 100;
+const TRACE_CREDIT_RISK_SUMMARY_MAX_ACCOUNT_LIMIT: usize = 500;
 const TRACE_RANKING_CALIBRATION_RUN_DEFAULT_LIMIT: usize = 25;
 const TRACE_RANKING_CALIBRATION_RUN_MAX_LIMIT: usize = 100;
 const TRACE_RANKING_MODEL_PROMOTION_RUN_DEFAULT_LIMIT: usize = 25;
@@ -7699,6 +7701,11 @@ struct TraceCreditHoldRequest {
     reason_detail: String,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct TraceCreditRiskSummaryQuery {
+    limit: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TraceCreditHoldRecord {
     hold_id: Uuid,
@@ -10239,6 +10246,17 @@ fn validate_credit_settlement_run_limit(limit: Option<usize>) -> ApiResult<Optio
     }
 }
 
+fn validate_credit_risk_summary_account_limit(limit: Option<usize>) -> ApiResult<usize> {
+    let limit = limit.unwrap_or(TRACE_CREDIT_RISK_SUMMARY_DEFAULT_ACCOUNT_LIMIT);
+    if !(1..=TRACE_CREDIT_RISK_SUMMARY_MAX_ACCOUNT_LIMIT).contains(&limit) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit risk summary limit must be between 1 and 500",
+        ));
+    }
+    Ok(limit)
+}
+
 fn apply_credit_settlement_account_cap(
     events: Vec<TraceCommonsCreditLedgerRecord>,
     max_micros_per_account: Option<i64>,
@@ -10439,14 +10457,20 @@ async fn credit_settlements_handler(
 async fn credit_risk_summary_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(query): Query<TraceCreditRiskSummaryQuery>,
 ) -> ApiResult<Json<TraceCreditRiskSummaryResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
-    let response = build_credit_risk_summary(state.as_ref(), &tenant).await?;
+    let account_limit = validate_credit_risk_summary_account_limit(query.limit)?;
+    let response = build_credit_risk_summary(state.as_ref(), &tenant, account_limit).await?;
     append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,
-        TraceCommonsAuditEvent::read(&tenant, "credit_risk_summary", response.accounts.len()),
+        TraceCommonsAuditEvent::read(
+            &tenant,
+            "credit_risk_summary",
+            response.returned_account_count,
+        ),
         StorageTraceAuditAction::Read,
         StorageTraceAuditSafeMetadata::Empty,
     )
@@ -10458,6 +10482,7 @@ async fn credit_risk_summary_handler(
 async fn build_credit_risk_summary(
     state: &AppState,
     tenant: &TenantAuth,
+    account_limit: usize,
 ) -> ApiResult<TraceCreditRiskSummaryResponse> {
     let records = read_reviewer_metadata_view(state, tenant)
         .await
@@ -10511,6 +10536,7 @@ async fn build_credit_risk_summary(
     Ok(TraceCreditRiskSummaryResponse::from_account_summaries(
         tenant,
         state.credit_settlement_max_micros_per_account,
+        account_limit,
         account_summaries,
     ))
 }
@@ -44263,6 +44289,10 @@ struct TraceCreditRiskSummaryResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     settlement_max_credit_micros_per_account: Option<i64>,
+    limit: usize,
+    account_count: usize,
+    returned_account_count: usize,
+    truncated: bool,
     pending_account_count: usize,
     held_account_count: usize,
     over_cap_account_count: usize,
@@ -44287,6 +44317,7 @@ impl TraceCreditRiskSummaryResponse {
     fn from_account_summaries(
         tenant: &TenantAuth,
         settlement_max_credit_micros_per_account: Option<i64>,
+        limit: usize,
         account_summaries: BTreeMap<String, TraceCreditRiskAccountAccumulator>,
     ) -> Self {
         let mut accounts = account_summaries
@@ -44316,6 +44347,7 @@ impl TraceCreditRiskSummaryResponse {
                 .then_with(|| right.held_credit_micros.cmp(&left.held_credit_micros))
                 .then_with(|| left.credit_account_hash.cmp(&right.credit_account_hash))
         });
+        let account_count = accounts.len();
         let pending_account_count = accounts
             .iter()
             .filter(|account| account.pending_credit_micros > 0)
@@ -44335,10 +44367,17 @@ impl TraceCreditRiskSummaryResponse {
             .filter(|account| account.over_cap)
             .map(|account| account.pending_credit_micros)
             .sum();
+        let truncated = account_count > limit;
+        accounts.truncate(limit);
+        let returned_account_count = accounts.len();
         Self {
             tenant_id: tenant.tenant_id.clone(),
             tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
             settlement_max_credit_micros_per_account,
+            limit,
+            account_count,
+            returned_account_count,
+            truncated,
             pending_account_count,
             held_account_count,
             over_cap_account_count,
@@ -70147,7 +70186,7 @@ mod tests {
             .expect("contributor response");
         assert_eq!(contributor_response.status(), StatusCode::FORBIDDEN);
 
-        let response = app(state)
+        let response = app(state.clone())
             .oneshot(
                 axum::http::Request::builder()
                     .method("GET")
@@ -70163,6 +70202,13 @@ mod tests {
             .await
             .expect("body reads");
         let value: serde_json::Value = serde_json::from_slice(&body).expect("json parses");
+        assert_eq!(
+            value["limit"],
+            serde_json::json!(TRACE_CREDIT_RISK_SUMMARY_DEFAULT_ACCOUNT_LIMIT)
+        );
+        assert_eq!(value["account_count"], serde_json::json!(2));
+        assert_eq!(value["returned_account_count"], serde_json::json!(2));
+        assert_eq!(value["truncated"], serde_json::json!(false));
         assert_eq!(value["pending_account_count"], serde_json::json!(1));
         assert_eq!(value["held_account_count"], serde_json::json!(1));
         assert_eq!(value["over_cap_account_count"], serde_json::json!(1));
@@ -70210,6 +70256,57 @@ mod tests {
         assert!(!body_text.contains(&second_event.event_id.to_string()));
         assert!(!body_text.contains("frontier lab high utility"));
         assert!(!body_text.contains("frontier lab ordinary utility"));
+
+        let limited_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/credit-risk-summary?limit=1")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("limited request builds"),
+            )
+            .await
+            .expect("limited admin response");
+        assert_eq!(limited_response.status(), StatusCode::OK);
+        let limited_body = axum::body::to_bytes(limited_response.into_body(), 8192)
+            .await
+            .expect("limited body reads");
+        let limited_value: serde_json::Value =
+            serde_json::from_slice(&limited_body).expect("limited json parses");
+        assert_eq!(limited_value["limit"], serde_json::json!(1));
+        assert_eq!(limited_value["account_count"], serde_json::json!(2));
+        assert_eq!(
+            limited_value["returned_account_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(limited_value["truncated"], serde_json::json!(true));
+        assert_eq!(limited_value["pending_account_count"], serde_json::json!(1));
+        assert_eq!(limited_value["held_account_count"], serde_json::json!(1));
+        let limited_accounts = limited_value["accounts"]
+            .as_array()
+            .expect("limited accounts array");
+        assert_eq!(limited_accounts.len(), 1);
+        assert_eq!(limited_accounts[0]["over_cap"], serde_json::json!(true));
+
+        let invalid_limit_response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/credit-risk-summary?limit=0")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("invalid limit request builds"),
+            )
+            .await
+            .expect("invalid limit response");
+        assert_eq!(invalid_limit_response.status(), StatusCode::BAD_REQUEST);
+        let invalid_limit_body = axum::body::to_bytes(invalid_limit_response.into_body(), 8192)
+            .await
+            .expect("invalid limit body reads");
+        let invalid_limit_text =
+            String::from_utf8(invalid_limit_body.to_vec()).expect("invalid limit body is utf8");
+        assert!(invalid_limit_text.contains("credit risk summary limit must be between 1 and 500"));
     }
 
     #[tokio::test]
@@ -70225,10 +70322,13 @@ mod tests {
             false,
         );
 
-        let risk_error =
-            credit_risk_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
-                .await
-                .expect_err("DB reviewer reads must not silently fall back for risk summaries");
+        let risk_error = credit_risk_summary_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Query(TraceCreditRiskSummaryQuery::default()),
+        )
+        .await
+        .expect_err("DB reviewer reads must not silently fall back for risk summaries");
         assert_eq!(risk_error.0, StatusCode::INTERNAL_SERVER_ERROR);
 
         let error = credit_holds_handler(State(state), auth_headers("admin-token-a"))
