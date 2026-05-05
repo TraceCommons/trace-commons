@@ -403,8 +403,12 @@ operators can hold credit issuance without exposing the underlying manifest
 history. Operational summary also projects ranking backtest pass/fail counts,
 label-adjudication issue counts, and reason-code totals into the ranking block
 and promotion gates, and it includes a `rollout_smoke` preflight block that
-lists required canary smoke checks while reporting missing rehearsal evidence
-separately from promotion-gate readiness.
+lists required canary smoke checks while reporting recorded and missing
+rehearsal evidence separately from promotion-gate readiness. Operators capture
+that evidence with admin-only `POST /v1/admin/rollout-smoke/evidence`; the
+request names one required check, a `passed` or `failed` status, a
+sha256-prefixed evidence hash, and an optional external reference that is stored
+only as a hash in the tenant audit chain.
 `GET /v1/admin/ranking/calibration-dataset-conflicts` provides the
 operator drill-down: exact conflict keys, latest projected hash-only registry
 metadata, whether the latest row still blocks credit issuance, and a remediation

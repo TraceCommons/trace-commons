@@ -2666,6 +2666,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(operational_summary_handler),
         )
         .route(
+            "/v1/admin/rollout-smoke/evidence",
+            post(append_rollout_smoke_evidence_handler),
+        )
+        .route(
             "/v1/admin/operational-metrics",
             get(operational_metrics_handler),
         )
@@ -5817,6 +5821,10 @@ where
         trace_audit_reason_value(reason, key)?.to_string(),
     ))
     .ok()
+}
+
+fn trace_audit_reason_is_rollout_smoke_evidence(reason: Option<&str>) -> bool {
+    trace_audit_reason_value(reason, "surface") == Some("rollout_smoke_evidence")
 }
 
 fn trace_read_audit_reason(surface: &str, item_count: usize) -> String {
@@ -20177,6 +20185,8 @@ async fn read_trace_operational_summary(
         list_benchmark_conversion_artifacts_for_worker(state, tenant.auth()).await?;
     let benchmark_registry_outbox =
         read_benchmark_registry_outbox_items_for_admin(state, tenant.auth()).await?;
+    let rollout_smoke_evidence =
+        read_rollout_smoke_evidence_for_admin(state, tenant.auth()).await?;
     Ok(TraceOperationalSummaryResponse::from_parts(
         TraceOperationalSummaryInputs {
             state,
@@ -20188,9 +20198,30 @@ async fn read_trace_operational_summary(
             benchmark_artifacts,
             benchmark_registry_outbox,
             ranking,
+            rollout_smoke_evidence,
             generated_at,
         },
     ))
+}
+
+async fn append_rollout_smoke_evidence_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceRolloutSmokeEvidenceRequest>,
+) -> ApiResult<Json<TraceRolloutSmokeEvidenceResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let response = TraceRolloutSmokeEvidenceResponse::from_request(tenant.auth(), request)?;
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        tenant.auth(),
+        TraceCommonsAuditEvent::rollout_smoke_evidence(&response),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(response))
 }
 
 const TRACE_OPERATIONAL_METRICS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
@@ -20284,6 +20315,15 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         "trace_commons_operational_rollout_smoke_missing_evidence",
         &[("tenant_storage_ref", &response.tenant_storage_ref)],
         response.rollout_smoke.missing_evidence_count,
+    );
+    body.push_str("# HELP trace_commons_operational_rollout_smoke_recorded_evidence Count of required rollout smoke checks with captured rehearsal evidence.\n");
+    body.push_str("# TYPE trace_commons_operational_rollout_smoke_recorded_evidence gauge\n");
+    push_prometheus_gauge(
+        &mut body,
+        &mut metric_count,
+        "trace_commons_operational_rollout_smoke_recorded_evidence",
+        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        response.rollout_smoke.recorded_evidence_count,
     );
     body.push_str("# HELP trace_commons_operational_submissions_total Total tenant submissions visible to operational summary.\n");
     body.push_str("# TYPE trace_commons_operational_submissions_total gauge\n");
@@ -25398,6 +25438,11 @@ fn trace_commons_audit_event_from_storage(
             .is_some_and(|reason| reason.contains("surface=replay_dataset_export"))
     {
         kind = "trace_content_read".to_string();
+    }
+    if event.action == StorageTraceAuditAction::Read
+        && trace_audit_reason_is_rollout_smoke_evidence(event.reason.as_deref())
+    {
+        kind = "rollout_smoke_evidence".to_string();
     }
     let (status, reason, export_count) = match &event.metadata {
         StorageTraceAuditSafeMetadata::Submission {
@@ -32326,6 +32371,11 @@ fn storage_audit_canonical_kind(event: &StorageTraceAuditEventRecord) -> String 
     {
         return "trace_content_read".to_string();
     }
+    if event.action == StorageTraceAuditAction::Read
+        && trace_audit_reason_is_rollout_smoke_evidence(event.reason.as_deref())
+    {
+        return "rollout_smoke_evidence".to_string();
+    }
     if event.action == StorageTraceAuditAction::Retain
         && matches!(
             &event.metadata,
@@ -37900,6 +37950,35 @@ impl TraceCommonsAuditEvent {
         }
     }
 
+    fn rollout_smoke_evidence(evidence: &TraceRolloutSmokeEvidenceResponse) -> Self {
+        let mut reason = format!(
+            "surface=rollout_smoke_evidence;check_name={};status={};evidence_hash={}",
+            evidence.check_name,
+            evidence.status.storage_name(),
+            evidence.evidence_hash
+        );
+        if let Some(evidence_ref_hash) = evidence.evidence_ref_hash.as_deref() {
+            reason.push_str(";evidence_ref_hash=");
+            reason.push_str(evidence_ref_hash);
+        }
+        Self {
+            event_id: evidence.event_id,
+            tenant_id: evidence.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "rollout_smoke_evidence".to_string(),
+            created_at: evidence.recorded_at,
+            status: None,
+            actor_role: Some(TokenRole::Admin),
+            actor_principal_ref: Some(evidence.actor_principal_ref.clone()),
+            reason: Some(reason),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: Some(evidence.evidence_hash.clone()),
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
     fn trace_content_read(
         auth: &TenantAuth,
         submission_id: Uuid,
@@ -38540,6 +38619,7 @@ struct TraceOperationalSummaryInputs<'a> {
     benchmark_artifacts: Vec<TraceBenchmarkConversionArtifact>,
     benchmark_registry_outbox: Vec<TraceBenchmarkRegistryOutboxItem>,
     ranking: TraceOperationalRankingSummary,
+    rollout_smoke_evidence: Vec<TraceRolloutSmokeEvidenceResponse>,
     generated_at: DateTime<Utc>,
 }
 
@@ -38569,8 +38649,10 @@ impl TraceOperationalSummaryResponse {
             &benchmarks,
             &inputs.ranking,
         );
-        let rollout_smoke =
-            TraceOperationalRolloutSmokeSummary::from_promotion_gates(&promotion_gates);
+        let rollout_smoke = TraceOperationalRolloutSmokeSummary::from_promotion_gates_and_evidence(
+            &promotion_gates,
+            &inputs.rollout_smoke_evidence,
+        );
         Self {
             tenant_storage_ref: tenant_storage_ref(&inputs.tenant_id),
             tenant_id: inputs.tenant_id,
@@ -38602,6 +38684,163 @@ const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "object_deletion_refs",
 ];
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TraceRolloutSmokeEvidenceStatus {
+    Passed,
+    Failed,
+}
+
+impl TraceRolloutSmokeEvidenceStatus {
+    fn storage_name(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn from_storage_name(value: &str) -> Option<Self> {
+        match value {
+            "passed" => Some(Self::Passed),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceRolloutSmokeEvidenceRequest {
+    check_name: String,
+    status: TraceRolloutSmokeEvidenceStatus,
+    evidence_hash: String,
+    #[serde(default)]
+    evidence_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TraceRolloutSmokeEvidenceResponse {
+    event_id: Uuid,
+    tenant_id: String,
+    tenant_storage_ref: String,
+    check_name: String,
+    status: TraceRolloutSmokeEvidenceStatus,
+    evidence_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    evidence_ref_hash: Option<String>,
+    actor_principal_ref: String,
+    recorded_at: DateTime<Utc>,
+}
+
+impl TraceRolloutSmokeEvidenceResponse {
+    fn from_request(
+        tenant: &TenantAuth,
+        request: TraceRolloutSmokeEvidenceRequest,
+    ) -> ApiResult<Self> {
+        let check_name = validate_rollout_smoke_check_name(&request.check_name)?;
+        let evidence_hash = validate_rollout_smoke_evidence_hash(&request.evidence_hash)?;
+        let evidence_ref_hash = request
+            .evidence_ref
+            .as_deref()
+            .map(str::trim)
+            .filter(|evidence_ref| !evidence_ref.is_empty())
+            .map(sha256_prefixed);
+        Ok(Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            check_name,
+            status: request.status,
+            evidence_hash,
+            evidence_ref_hash,
+            actor_principal_ref: tenant.principal_ref.clone(),
+            recorded_at: Utc::now(),
+        })
+    }
+}
+
+fn validate_rollout_smoke_check_name(value: &str) -> ApiResult<String> {
+    let value = value.trim();
+    if TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS.contains(&value) {
+        Ok(value.to_string())
+    } else {
+        Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "rollout smoke evidence check_name is not a required smoke check",
+        ))
+    }
+}
+
+fn validate_rollout_smoke_evidence_hash(value: &str) -> ApiResult<String> {
+    let value = value.trim();
+    if value.starts_with("sha256:") {
+        Ok(value.to_string())
+    } else {
+        Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "rollout smoke evidence_hash must be a sha256-prefixed hash",
+        ))
+    }
+}
+
+async fn read_rollout_smoke_evidence_for_admin(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceRolloutSmokeEvidenceResponse>> {
+    let events = if state.db_audit_reads_for_tenant(&tenant.tenant_id) {
+        read_audit_events_from_db(state, tenant).await?
+    } else {
+        read_all_audit_events(&state.root, &tenant.tenant_id)?
+    };
+    events
+        .iter()
+        .filter_map(trace_rollout_smoke_evidence_from_audit_event)
+        .collect()
+}
+
+fn trace_rollout_smoke_evidence_from_audit_event(
+    event: &TraceCommonsAuditEvent,
+) -> Option<anyhow::Result<TraceRolloutSmokeEvidenceResponse>> {
+    let reason = event.reason.as_deref();
+    if event.kind != "rollout_smoke_evidence"
+        && trace_audit_reason_value(reason, "surface") != Some("rollout_smoke_evidence")
+    {
+        return None;
+    }
+    Some((|| {
+        let check_name = trace_audit_reason_value(reason, "check_name")
+            .context("rollout smoke evidence audit event missing check_name")?
+            .to_string();
+        anyhow::ensure!(
+            TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS.contains(&check_name.as_str()),
+            "rollout smoke evidence audit event has unsupported check_name"
+        );
+        let status = TraceRolloutSmokeEvidenceStatus::from_storage_name(
+            trace_audit_reason_value(reason, "status")
+                .context("rollout smoke evidence audit event missing status")?,
+        )
+        .context("rollout smoke evidence audit event has unsupported status")?;
+        let evidence_hash = trace_audit_reason_value(reason, "evidence_hash")
+            .context("rollout smoke evidence audit event missing evidence_hash")?
+            .to_string();
+        anyhow::ensure!(
+            evidence_hash.starts_with("sha256:"),
+            "rollout smoke evidence audit event has unsupported evidence_hash"
+        );
+        Ok(TraceRolloutSmokeEvidenceResponse {
+            event_id: event.event_id,
+            tenant_id: event.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&event.tenant_id),
+            check_name,
+            status,
+            evidence_hash,
+            evidence_ref_hash: trace_audit_reason_value(reason, "evidence_ref_hash")
+                .map(ToOwned::to_owned),
+            actor_principal_ref: event.actor_principal_ref.clone().unwrap_or_default(),
+            recorded_at: event.created_at,
+        })
+    })())
+}
+
 #[derive(Debug, Default, Serialize)]
 struct TraceOperationalRolloutSmokeSummary {
     ready: bool,
@@ -38611,18 +38850,39 @@ struct TraceOperationalRolloutSmokeSummary {
     promotion_gate_warning_count: usize,
     required_check_count: usize,
     missing_evidence_count: usize,
+    recorded_evidence_count: usize,
     required_checks: Vec<String>,
     missing_evidence_checks: Vec<String>,
     blocker_reasons: Vec<String>,
 }
 
 impl TraceOperationalRolloutSmokeSummary {
-    fn from_promotion_gates(promotion_gates: &TraceOperationalPromotionGateSummary) -> Self {
+    fn from_promotion_gates_and_evidence(
+        promotion_gates: &TraceOperationalPromotionGateSummary,
+        evidence: &[TraceRolloutSmokeEvidenceResponse],
+    ) -> Self {
         let required_checks = TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS
             .iter()
             .map(|check| (*check).to_string())
             .collect::<Vec<_>>();
-        let missing_evidence_checks = required_checks.clone();
+        let mut latest_evidence_by_check = BTreeMap::new();
+        for record in evidence {
+            if TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS.contains(&record.check_name.as_str())
+            {
+                latest_evidence_by_check.insert(record.check_name.clone(), record);
+            }
+        }
+        let passed_evidence_checks = latest_evidence_by_check
+            .iter()
+            .filter_map(|(check, record)| {
+                (record.status == TraceRolloutSmokeEvidenceStatus::Passed).then_some(check)
+            })
+            .collect::<BTreeSet<_>>();
+        let missing_evidence_checks = required_checks
+            .iter()
+            .filter(|check| !passed_evidence_checks.contains(check))
+            .cloned()
+            .collect::<Vec<_>>();
         let mut blocker_reasons = promotion_gates
             .blocking_gates
             .iter()
@@ -38633,10 +38893,12 @@ impl TraceOperationalRolloutSmokeSummary {
             "smoke_rehearsal_evidence_missing",
             missing_evidence_checks.len(),
         );
-        let evidence_status = if promotion_gates.ready {
-            "missing_rehearsal_evidence"
-        } else {
+        let evidence_status = if !promotion_gates.ready {
             "promotion_gates_blocked"
+        } else if missing_evidence_checks.is_empty() {
+            "ready"
+        } else {
+            "missing_rehearsal_evidence"
         };
 
         Self {
@@ -38647,6 +38909,7 @@ impl TraceOperationalRolloutSmokeSummary {
             promotion_gate_warning_count: promotion_gates.warning_count,
             required_check_count: required_checks.len(),
             missing_evidence_count: missing_evidence_checks.len(),
+            recorded_evidence_count: latest_evidence_by_check.len(),
             required_checks,
             missing_evidence_checks,
             blocker_reasons,
@@ -44186,6 +44449,58 @@ mod tests {
         let projected_event = trace_commons_audit_event_from_storage("tenant-a", storage_event)
             .expect("storage audit projects");
         assert_eq!(projected_event.kind, "trace_content_read");
+        assert_eq!(projected_event.reason, audit_event.reason);
+    }
+
+    #[test]
+    fn db_audit_projection_preserves_rollout_smoke_evidence_kind() {
+        let auth = TenantAuth {
+            tenant_id: "tenant-a".to_string(),
+            role: TokenRole::Admin,
+            principal_ref: principal_storage_ref("admin-token-a"),
+            expires_at: None,
+            auth_method: TraceAuthMethod::StaticToken,
+            signed_claim_issuer: None,
+            signed_claim_audiences: BTreeSet::new(),
+            signed_claim_subject: None,
+            allowed_consent_scopes: BTreeSet::new(),
+            allowed_uses: BTreeSet::new(),
+        };
+        let evidence = TraceRolloutSmokeEvidenceResponse::from_request(
+            &auth,
+            TraceRolloutSmokeEvidenceRequest {
+                check_name: "submit_status".to_string(),
+                status: TraceRolloutSmokeEvidenceStatus::Passed,
+                evidence_hash: sha256_prefixed("db smoke evidence projection"),
+                evidence_ref: Some("runbook://smoke/submit-status".to_string()),
+            },
+        )
+        .expect("evidence request is valid");
+        let audit_event = TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence);
+        let storage_event = StorageTraceAuditEventRecord {
+            audit_event_id: audit_event.event_id,
+            tenant_id: audit_event.tenant_id.clone(),
+            audit_sequence: 1,
+            actor_principal_ref: audit_event.actor_principal_ref.clone().unwrap(),
+            actor_role: "admin".to_string(),
+            action: StorageTraceAuditAction::Read,
+            reason: audit_event.reason.clone(),
+            request_id: None,
+            submission_id: None,
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: audit_event.decision_inputs_hash.clone(),
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: None,
+            metadata: StorageTraceAuditSafeMetadata::Empty,
+            occurred_at: audit_event.created_at,
+        };
+
+        let projected_event = trace_commons_audit_event_from_storage("tenant-a", storage_event)
+            .expect("storage audit projects");
+
+        assert_eq!(projected_event.kind, "rollout_smoke_evidence");
         assert_eq!(projected_event.reason, audit_event.reason);
     }
 
@@ -63400,6 +63715,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_rollout_smoke_evidence_records_clear_required_check_gap() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let evidence_body = serde_json::json!({
+            "check_name": "submit_status",
+            "status": "passed",
+            "evidence_hash": sha256_prefixed("submit status smoke rehearsal"),
+            "evidence_ref": "runbook://trace-commons/smoke/submit-status"
+        });
+
+        let contributor_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/rollout-smoke/evidence")
+                    .header(AUTHORIZATION, "Bearer token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(evidence_body.to_string()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("contributor response");
+        assert_eq!(contributor_response.status(), StatusCode::FORBIDDEN);
+
+        let admin_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/rollout-smoke/evidence")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(evidence_body.to_string()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("admin response");
+        assert_eq!(admin_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(admin_response.into_body(), 8192)
+            .await
+            .expect("body reads");
+        let response_json: serde_json::Value =
+            serde_json::from_slice(&body).expect("response json parses");
+        assert_eq!(
+            response_json["tenant_storage_ref"],
+            serde_json::json!(tenant_storage_ref("tenant-a"))
+        );
+        assert_eq!(
+            response_json["check_name"],
+            serde_json::json!("submit_status")
+        );
+        assert_eq!(response_json["status"], serde_json::json!("passed"));
+
+        let Json(operational) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary");
+        let operational_json =
+            serde_json::to_value(&operational).expect("operational summary serializes");
+        assert_eq!(
+            operational_json["rollout_smoke"]["recorded_evidence_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["rollout_smoke"]["missing_evidence_count"],
+            serde_json::json!(9)
+        );
+        assert!(
+            !operational
+                .rollout_smoke
+                .missing_evidence_checks
+                .contains(&"submit_status".to_string())
+        );
+
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        let smoke_event = audit_events
+            .iter()
+            .find(|event| event.kind == "rollout_smoke_evidence")
+            .expect("smoke evidence audit event exists");
+        let reason = smoke_event.reason.as_deref().expect("reason exists");
+        assert!(reason.contains("check_name=submit_status"));
+        assert!(reason.contains("status=passed"));
+        assert!(reason.contains("evidence_hash=sha256:"));
+        assert!(!reason.contains("admin-token-a"));
+    }
+
+    #[tokio::test]
     async fn admin_operational_metrics_route_exports_safe_promotion_gauges() {
         use axum::body::Body;
         use tower::ServiceExt;
@@ -63483,6 +63887,9 @@ mod tests {
         )));
         assert!(body_text.contains(&format!(
             "trace_commons_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 10"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_rollout_smoke_recorded_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 0"
         )));
         assert!(body_text.contains(&format!(
             "trace_commons_operational_submissions_total{{tenant_storage_ref=\"{tenant_ref}\"}} 0"
