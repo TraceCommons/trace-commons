@@ -20285,6 +20285,168 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         &[("tenant_storage_ref", &response.tenant_storage_ref)],
         response.rollout_smoke.missing_evidence_count,
     );
+    body.push_str("# HELP trace_commons_operational_submissions_total Total tenant submissions visible to operational summary.\n");
+    body.push_str("# TYPE trace_commons_operational_submissions_total gauge\n");
+    push_prometheus_gauge(
+        &mut body,
+        &mut metric_count,
+        "trace_commons_operational_submissions_total",
+        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        response.submissions.total,
+    );
+    body.push_str(
+        "# HELP trace_commons_operational_submissions_by_status Submission counts by corpus status.\n",
+    );
+    body.push_str("# TYPE trace_commons_operational_submissions_by_status gauge\n");
+    for (status, value) in [
+        ("accepted", response.submissions.accepted),
+        ("quarantined", response.submissions.quarantined),
+        ("rejected", response.submissions.rejected),
+        ("revoked", response.submissions.revoked),
+        ("expired", response.submissions.expired),
+        ("purged", response.submissions.purged),
+    ] {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "trace_commons_operational_submissions_by_status",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("status", status),
+            ],
+            value,
+        );
+    }
+    body.push_str(
+        "# HELP trace_commons_operational_review_sla Review queue pressure counts by SLA state.\n",
+    );
+    body.push_str("# TYPE trace_commons_operational_review_sla gauge\n");
+    for (state, value) in [
+        ("quarantined_total", response.review_sla.quarantined_total),
+        ("fresh", response.review_sla.fresh),
+        ("due", response.review_sla.due),
+        ("overdue", response.review_sla.overdue),
+        ("urgent", response.review_sla.urgent),
+        ("assigned", response.review_sla.assigned),
+        ("expired_leases", response.review_sla.expired_leases),
+    ] {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "trace_commons_operational_review_sla",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("state", state),
+            ],
+            value,
+        );
+    }
+    body.push_str("# HELP trace_commons_operational_export_jobs_total Export job rows visible to operational summary.\n");
+    body.push_str("# TYPE trace_commons_operational_export_jobs_total gauge\n");
+    push_prometheus_gauge(
+        &mut body,
+        &mut metric_count,
+        "trace_commons_operational_export_jobs_total",
+        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        response.exports.job_count,
+    );
+    body.push_str("# HELP trace_commons_operational_retention_jobs_total Retention job rows visible to operational summary.\n");
+    body.push_str("# TYPE trace_commons_operational_retention_jobs_total gauge\n");
+    push_prometheus_gauge(
+        &mut body,
+        &mut metric_count,
+        "trace_commons_operational_retention_jobs_total",
+        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        response.retention.job_count,
+    );
+    body.push_str(
+        "# HELP trace_commons_operational_vector_entries Vector-entry counts by operational state.\n",
+    );
+    body.push_str("# TYPE trace_commons_operational_vector_entries gauge\n");
+    for (state, value) in [
+        ("total", response.vectors.entry_count),
+        ("active", response.vectors.active_entries),
+        ("invalidated", response.vectors.invalidated_entries),
+        ("deleted", response.vectors.deleted_entries),
+        (
+            "accepted_current_derived",
+            response.vectors.accepted_current_derived,
+        ),
+        (
+            "accepted_current_with_active_vector",
+            response.vectors.accepted_current_derived_with_active_vector,
+        ),
+    ] {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "trace_commons_operational_vector_entries",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("state", state),
+            ],
+            value,
+        );
+    }
+    body.push_str(
+        "# HELP trace_commons_operational_benchmarks Benchmark lifecycle counts by operational state.\n",
+    );
+    body.push_str("# TYPE trace_commons_operational_benchmarks gauge\n");
+    for (state, value) in [
+        ("total", response.benchmarks.total_artifact_count),
+        ("publishable", response.benchmarks.publishable_count),
+        ("published", response.benchmarks.published_count),
+        ("revoked", response.benchmarks.revoked_count),
+        (
+            "external_registry_adapter_gap",
+            response.benchmarks.external_registry_adapter_gap_count,
+        ),
+        (
+            "external_registry_invalidation_gap",
+            response.benchmarks.external_registry_invalidation_gap_count,
+        ),
+    ] {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "trace_commons_operational_benchmarks",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("state", state),
+            ],
+            value,
+        );
+    }
+    body.push_str("# HELP trace_commons_operational_ranking_worker_runs Ranking worker-run counts by operational status.\n");
+    body.push_str("# TYPE trace_commons_operational_ranking_worker_runs gauge\n");
+    for (status, value) in [
+        ("running", response.ranking.running_worker_run_count),
+        (
+            "stale_running",
+            response.ranking.stale_running_worker_run_count,
+        ),
+        ("failed", response.ranking.failed_worker_run_count),
+    ] {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "trace_commons_operational_ranking_worker_runs",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("status", status),
+            ],
+            value,
+        );
+    }
+    body.push_str("# HELP trace_commons_operational_delayed_credit_events_total Delayed credit ledger events visible to operational summary.\n");
+    body.push_str("# TYPE trace_commons_operational_delayed_credit_events_total gauge\n");
+    push_prometheus_gauge(
+        &mut body,
+        &mut metric_count,
+        "trace_commons_operational_delayed_credit_events_total",
+        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        response.delayed_credit.event_count,
+    );
     (body, metric_count)
 }
 
@@ -63321,6 +63483,18 @@ mod tests {
         )));
         assert!(body_text.contains(&format!(
             "trace_commons_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 10"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_submissions_total{{tenant_storage_ref=\"{tenant_ref}\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_review_sla{{tenant_storage_ref=\"{tenant_ref}\",state=\"urgent\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_ranking_worker_runs{{tenant_storage_ref=\"{tenant_ref}\",status=\"failed\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_delayed_credit_events_total{{tenant_storage_ref=\"{tenant_ref}\"}} 0"
         )));
         assert!(!body_text.contains("admin-token-a"));
         assert!(!body_text.contains("metrics route failed worker reason"));
