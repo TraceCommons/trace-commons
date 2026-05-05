@@ -25100,6 +25100,43 @@ fn ensure_db_audit_canonical_projection_matches(
     Ok(())
 }
 
+fn collect_db_audit_canonical_projection_failures(
+    events: &[StorageTraceAuditEventRecord],
+) -> Vec<TraceDbAuditProjectionFailure> {
+    events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            let canonical_event_json = event.canonical_event_json.as_deref()?;
+            let row_number = index + 1;
+            let canonical_event: TraceCommonsAuditEvent =
+                match serde_json::from_str(canonical_event_json) {
+                    Ok(canonical_event) => canonical_event,
+                    Err(_) => {
+                        return Some(TraceDbAuditProjectionFailure {
+                            audit_event_id: event.audit_event_id,
+                            failure_count: 1,
+                            first_failure: format!(
+                                "db row {row_number} event {}: canonical payload parse failed",
+                                event.audit_event_id
+                            ),
+                        });
+                    }
+                };
+            let mut report = TraceDbAuditChainReport::default();
+            verify_db_audit_projection(row_number, event, &canonical_event, &mut report);
+            report
+                .failures
+                .first()
+                .map(|first_failure| TraceDbAuditProjectionFailure {
+                    audit_event_id: event.audit_event_id,
+                    failure_count: report.failures.len(),
+                    first_failure: first_failure.clone(),
+                })
+        })
+        .collect()
+}
+
 fn storage_audit_event_kind(
     action: StorageTraceAuditAction,
     metadata: &StorageTraceAuditSafeMetadata,
@@ -33135,6 +33172,8 @@ async fn reconcile_db_mirror(
         .difference(&file_audit_event_ids)
         .copied()
         .collect::<Vec<_>>();
+    let db_audit_canonical_projection_failures =
+        collect_db_audit_canonical_projection_failures(&db_audit_events);
     let mut db_object_ref_count = 0usize;
     let mut accepted_without_active_envelope_object_ref = Vec::new();
     let mut unreadable_active_envelope_object_refs = Vec::new();
@@ -33343,7 +33382,7 @@ async fn reconcile_db_mirror(
         db_metadata_view.records.clone(),
         db_metadata_view.derived.clone(),
     );
-    let db_audit_events_for_reader = read_audit_events_from_db(state, tenant).await?;
+    let db_audit_events_for_reader = read_audit_events_from_db(state, tenant).await;
     let file_export_manifest_projection = export_manifest_reader_projection(
         file_replay_export_manifests
             .iter()
@@ -33414,15 +33453,29 @@ async fn reconcile_db_mirror(
         )
     };
     let audit_reader_parity_ok = {
+        let (reader_ok, reader_detail) = match db_audit_events_for_reader.as_ref() {
+            Ok(db_events) => (
+                file_audit_events.len() == db_events.len(),
+                format!(
+                    "file_events={} db_events={}",
+                    file_audit_events.len(),
+                    db_events.len()
+                ),
+            ),
+            Err(error) => (
+                false,
+                format!(
+                    "file_events={} db_events=unavailable db_error_hash={}",
+                    file_audit_events.len(),
+                    sha256_prefixed(&error.to_string())
+                ),
+            ),
+        };
         record_reader_parity(
             &mut db_reader_parity_failures,
             "audit",
-            file_audit_events.len() == db_audit_events_for_reader.len(),
-            format!(
-                "file_events={} db_events={}",
-                file_audit_events.len(),
-                db_audit_events_for_reader.len()
-            ),
+            reader_ok,
+            reader_detail,
         )
     };
     let replay_export_manifest_reader_parity_ok = record_reader_parity(
@@ -33518,6 +33571,7 @@ async fn reconcile_db_mirror(
         db_audit_event_count: db_audit_events.len(),
         missing_audit_event_ids_in_db,
         missing_audit_event_ids_in_files,
+        db_audit_canonical_projection_failures,
         db_retention_job_count: db_retention_jobs.len(),
         db_retention_job_item_count,
         missing_current_retention_job_ids_in_db,
@@ -35882,7 +35936,7 @@ struct TraceDbAuditChainReport {
     failures: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 struct TraceDbReconciliationReport {
     file_submission_count: usize,
     db_submission_count: usize,
@@ -35964,6 +36018,7 @@ struct TraceDbReconciliationReport {
     db_audit_event_count: usize,
     missing_audit_event_ids_in_db: Vec<Uuid>,
     missing_audit_event_ids_in_files: Vec<Uuid>,
+    db_audit_canonical_projection_failures: Vec<TraceDbAuditProjectionFailure>,
     db_retention_job_count: usize,
     db_retention_job_item_count: usize,
     missing_current_retention_job_ids_in_db: Vec<Uuid>,
@@ -36232,6 +36287,11 @@ impl TraceDbReconciliationReport {
         );
         push_gap_count(
             &mut gaps,
+            "db_audit_canonical_projection_failures",
+            self.db_audit_canonical_projection_failures.len(),
+        );
+        push_gap_count(
+            &mut gaps,
             "missing_current_retention_job_ids_in_db",
             self.missing_current_retention_job_ids_in_db.len(),
         );
@@ -36335,6 +36395,13 @@ fn push_gap_bool(gaps: &mut Vec<String>, name: &str, ok: bool) {
     if !ok {
         gaps.push(format!("{name}=failed"));
     }
+}
+
+#[derive(Debug, Serialize)]
+struct TraceDbAuditProjectionFailure {
+    audit_event_id: Uuid,
+    failure_count: usize,
+    first_failure: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -42887,7 +42954,7 @@ mod tests {
             tenant_id: audit_event.tenant_id.clone(),
             audit_sequence: 1,
             actor_principal_ref: audit_event.actor_principal_ref.clone().unwrap(),
-            actor_role: "review".to_string(),
+            actor_role: "reviewer".to_string(),
             action,
             reason: audit_event.reason.clone(),
             request_id: None,
@@ -42964,7 +43031,7 @@ mod tests {
             tenant_id: canonical_event.tenant_id.clone(),
             audit_sequence: 1,
             actor_principal_ref: canonical_event.actor_principal_ref.clone().unwrap(),
-            actor_role: "review".to_string(),
+            actor_role: "reviewer".to_string(),
             action: StorageTraceAuditAction::Read,
             reason: Some("surface=review_decision".to_string()),
             request_id: None,
@@ -42991,6 +43058,80 @@ mod tests {
             error
                 .to_string()
                 .contains("DB audit event canonical projection mismatch")
+        );
+    }
+
+    #[test]
+    fn db_reconciliation_projects_canonical_audit_payload_drift_as_blocking_gap() {
+        let canonical_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: Uuid::new_v4(),
+            kind: "trace_content_read".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Reviewer),
+            actor_principal_ref: Some("reviewer-a".to_string()),
+            reason: Some(format!(
+                "surface=review_decision;purpose_hash={}",
+                sha256_prefixed("review reason")
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+        let event = StorageTraceAuditEventRecord {
+            audit_event_id: canonical_event.event_id,
+            tenant_id: canonical_event.tenant_id.clone(),
+            audit_sequence: 1,
+            actor_principal_ref: canonical_event.actor_principal_ref.clone().unwrap(),
+            actor_role: "reviewer".to_string(),
+            action: StorageTraceAuditAction::Read,
+            reason: Some("surface=review_decision".to_string()),
+            request_id: None,
+            submission_id: Some(canonical_event.submission_id),
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: Some(
+                serde_json::to_string(&canonical_event).expect("canonical audit serializes"),
+            ),
+            metadata: StorageTraceAuditSafeMetadata::TraceContentRead {
+                surface: "review_decision".to_string(),
+                purpose_hash: None,
+            },
+            occurred_at: canonical_event.created_at,
+        };
+
+        let failures = collect_db_audit_canonical_projection_failures(&[event]);
+
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].audit_event_id, canonical_event.event_id);
+        assert!(
+            failures[0]
+                .first_failure
+                .contains("canonical reason mismatch"),
+            "{failures:?}"
+        );
+
+        let mut report = TraceDbReconciliationReport {
+            contributor_credit_reader_parity_ok: true,
+            reviewer_metadata_reader_parity_ok: true,
+            analytics_reader_parity_ok: true,
+            audit_reader_parity_ok: true,
+            replay_export_manifest_reader_parity_ok: true,
+            ..TraceDbReconciliationReport::default()
+        };
+        report.db_audit_canonical_projection_failures = failures;
+
+        assert!(
+            report
+                .compute_blocking_gap_summaries()
+                .contains(&"db_audit_canonical_projection_failures=1".to_string())
         );
     }
 
@@ -46673,6 +46814,104 @@ mod tests {
         .expect_err("DB reconciliation requires configured DB mirror");
         assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
         assert!(error.1.0.error.contains("TRACE_COMMONS_DB_DUAL_WRITE"));
+    }
+
+    #[tokio::test]
+    async fn maintenance_reconciliation_reports_db_audit_canonical_projection_drift() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        let canonical_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: Uuid::new_v4(),
+            kind: "trace_content_read".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Reviewer),
+            actor_principal_ref: Some("reviewer-a".to_string()),
+            reason: Some(format!(
+                "surface=review_decision;purpose_hash={}",
+                sha256_prefixed("review reason")
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+        backend
+            .append_trace_audit_event(StorageTraceAuditEventWrite {
+                audit_event_id: canonical_event.event_id,
+                tenant_id: canonical_event.tenant_id.clone(),
+                actor_principal_ref: canonical_event.actor_principal_ref.clone().unwrap(),
+                actor_role: "reviewer".to_string(),
+                action: StorageTraceAuditAction::Read,
+                reason: Some("surface=review_decision".to_string()),
+                request_id: None,
+                submission_id: Some(canonical_event.submission_id),
+                object_ref_id: None,
+                export_manifest_id: None,
+                decision_inputs_hash: None,
+                previous_event_hash: None,
+                event_hash: None,
+                canonical_event_json: Some(
+                    serde_json::to_string(&canonical_event).expect("canonical audit serializes"),
+                ),
+                metadata: StorageTraceAuditSafeMetadata::TraceContentRead {
+                    surface: "review_decision".to_string(),
+                    purpose_hash: None,
+                },
+            })
+            .await
+            .expect("drifted DB audit row writes");
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("audit_projection_drift_reconcile".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: true,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("maintenance reports audit projection drift");
+
+        let report = response
+            .db_reconciliation
+            .expect("reconciliation report exists");
+        assert_eq!(report.db_audit_canonical_projection_failures.len(), 1);
+        assert!(
+            report
+                .blocking_gaps
+                .iter()
+                .any(|gap| { gap == "db_audit_canonical_projection_failures=1" })
+        );
+        assert!(report.db_reader_parity_failures.iter().any(|failure| {
+            failure.contains("audit") && failure.contains("db_error_hash=sha256:")
+        }));
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
 
     #[tokio::test]
