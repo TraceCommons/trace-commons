@@ -5815,6 +5815,32 @@ where
     .ok()
 }
 
+fn trace_read_audit_reason(surface: &str, item_count: usize) -> String {
+    format!("surface={surface};item_count={item_count}")
+}
+
+fn trace_read_audit_metadata(surface: &str, item_count: usize) -> StorageTraceAuditSafeMetadata {
+    StorageTraceAuditSafeMetadata::Read {
+        surface: surface.to_string(),
+        item_count: item_count.min(u32::MAX as usize) as u32,
+    }
+}
+
+fn trace_read_audit_metadata_from_reason(
+    reason: Option<&str>,
+) -> Option<StorageTraceAuditSafeMetadata> {
+    let surface = trace_audit_reason_value(reason, "surface")?
+        .trim()
+        .to_string();
+    if surface.is_empty() {
+        return None;
+    }
+    Some(trace_read_audit_metadata(
+        &surface,
+        trace_audit_reason_u32(reason, "item_count")? as usize,
+    ))
+}
+
 fn trace_content_read_purpose_hash(purpose: Option<&str>) -> Option<String> {
     purpose
         .map(str::trim)
@@ -24983,6 +25009,14 @@ fn trace_commons_audit_event_from_storage(
             )),
             None,
         ),
+        StorageTraceAuditSafeMetadata::Read {
+            surface,
+            item_count,
+        } => (
+            None,
+            Some(trace_read_audit_reason(surface, *item_count as usize)),
+            Some(*item_count as usize),
+        ),
         StorageTraceAuditSafeMetadata::Export {
             artifact_kind: _,
             purpose_code,
@@ -30519,6 +30553,7 @@ async fn mirror_audit_event_to_db_with_object_ref(
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
     };
+    let metadata = normalize_audit_event_metadata(event, action, metadata)?;
     let canonical_event_json = event
         .previous_event_hash
         .as_deref()
@@ -30550,6 +30585,25 @@ async fn mirror_audit_event_to_db_with_object_ref(
     })
     .await
     .context("failed to mirror trace audit event")
+}
+
+fn normalize_audit_event_metadata(
+    event: &TraceCommonsAuditEvent,
+    action: StorageTraceAuditAction,
+    metadata: StorageTraceAuditSafeMetadata,
+) -> anyhow::Result<StorageTraceAuditSafeMetadata> {
+    if action == StorageTraceAuditAction::Read
+        && event.kind == "read"
+        && matches!(metadata, StorageTraceAuditSafeMetadata::Empty)
+    {
+        return trace_read_audit_metadata_from_reason(event.reason.as_deref()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "aggregate read audit event {} requires surface and item_count reason fields",
+                event.event_id
+            )
+        });
+    }
+    Ok(metadata)
 }
 
 fn read_all_audit_events(
@@ -31668,6 +31722,13 @@ fn verify_db_audit_projection(
             "db row {row_number} event {event_ref}: canonical reason mismatch"
         ));
     }
+    if let Some(projected_reason) = storage_audit_canonical_reason(event)
+        && canonical_event.reason.as_deref() != Some(projected_reason.as_str())
+    {
+        report.failures.push(format!(
+            "db row {row_number} event {event_ref}: canonical metadata reason mismatch"
+        ));
+    }
     if canonical_event.export_id != event.export_manifest_id {
         report.failures.push(format!(
             "db row {row_number} event {event_ref}: canonical export_id mismatch"
@@ -31738,7 +31799,18 @@ fn storage_audit_canonical_status(
 
 fn storage_audit_canonical_export_count(event: &StorageTraceAuditEventRecord) -> Option<usize> {
     match &event.metadata {
+        StorageTraceAuditSafeMetadata::Read { item_count, .. } => Some(*item_count as usize),
         StorageTraceAuditSafeMetadata::Export { item_count, .. } => Some(*item_count as usize),
+        _ => None,
+    }
+}
+
+fn storage_audit_canonical_reason(event: &StorageTraceAuditEventRecord) -> Option<String> {
+    match &event.metadata {
+        StorageTraceAuditSafeMetadata::Read {
+            surface,
+            item_count,
+        } => Some(trace_read_audit_reason(surface, *item_count as usize)),
         _ => None,
     }
 }
@@ -32400,6 +32472,8 @@ fn audit_backfill_storage_projection(
                     "review_due_at",
                 ),
             })
+            .unwrap_or(StorageTraceAuditSafeMetadata::Empty),
+        "read" => trace_read_audit_metadata_from_reason(event.reason.as_deref())
             .unwrap_or(StorageTraceAuditSafeMetadata::Empty),
         "trace_content_read" => {
             trace_content_read_audit_metadata_from_reason(event.reason.as_deref())
@@ -37204,7 +37278,7 @@ impl TraceCommonsAuditEvent {
             status: None,
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
-            reason: Some(format!("surface={surface};item_count={item_count}")),
+            reason: Some(trace_read_audit_reason(surface, item_count)),
             export_count: Some(item_count),
             export_id: None,
             decision_inputs_hash: None,
@@ -41820,6 +41894,51 @@ mod tests {
             event.kind == "read"
                 && event.reason.as_deref() == Some("surface=config_status;item_count=1")
         }));
+    }
+
+    #[tokio::test]
+    async fn admin_config_status_audit_mirrors_typed_read_metadata() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+
+        let Json(_) = config_status_handler(State(state), auth_headers("admin-token-a"))
+            .await
+            .expect("admin config status succeeds");
+
+        let events = backend
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("DB audit events read");
+        let event = events
+            .iter()
+            .find(|event| event.action == StorageTraceAuditAction::Read)
+            .expect("config status read audit mirrored");
+        match &event.metadata {
+            StorageTraceAuditSafeMetadata::Read {
+                surface,
+                item_count,
+            } => {
+                assert_eq!(surface, "config_status");
+                assert_eq!(*item_count, 1);
+            }
+            other => panic!("config status read audit metadata was not typed: {other:?}"),
+        }
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
 
     #[tokio::test]

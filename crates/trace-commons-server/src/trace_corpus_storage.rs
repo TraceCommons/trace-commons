@@ -1175,6 +1175,10 @@ pub enum TraceAuditSafeMetadata {
         surface: String,
         purpose_hash: Option<String>,
     },
+    Read {
+        surface: String,
+        item_count: u32,
+    },
     Export {
         artifact_kind: TraceObjectArtifactKind,
         purpose_code: Option<String>,
