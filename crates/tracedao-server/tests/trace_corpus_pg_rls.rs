@@ -2109,6 +2109,79 @@ async fn store_facade_preserves_export_grant_job_scope_and_updates() {
     assert_eq!(beta_jobs[0].item_count, Some(3));
     assert_eq!(beta_jobs[0].result_manifest_id, None);
 
+    let stale_job_id = Uuid::new_v4();
+    let stale_expires_at = requested_at - chrono::Duration::minutes(1);
+    backend
+        .upsert_trace_export_job(TraceExportJobWrite {
+            tenant_id: tenant_alpha.clone(),
+            export_job_id: stale_job_id,
+            grant_id: Uuid::new_v4(),
+            caller_principal_ref: "principal:alpha-exporter".to_string(),
+            requested_dataset_kind: "replay".to_string(),
+            purpose: "alpha-stale-eval".to_string(),
+            max_item_cap: Some(8),
+            status: TraceExportJobStatus::Running,
+            requested_at: requested_at - chrono::Duration::minutes(10),
+            started_at: Some(requested_at - chrono::Duration::minutes(10)),
+            finished_at: None,
+            expires_at: stale_expires_at,
+            result_manifest_id: None,
+            item_count: None,
+            last_error: None,
+            metadata: BTreeMap::from([("state".to_string(), "started".to_string())]),
+        })
+        .await
+        .expect("insert stale alpha export job");
+    let recovered_stale = backend
+        .recover_stale_trace_export_job(
+            &tenant_alpha,
+            stale_job_id,
+            requested_at,
+            TraceExportJobStatusUpdate {
+                status: TraceExportJobStatus::Expired,
+                started_at: Some(requested_at - chrono::Duration::minutes(10)),
+                finished_at: Some(requested_at),
+                result_manifest_id: None,
+                item_count: None,
+                last_error: Some("stale_export_job_expired;reason_hash=sha256:test".to_string()),
+                metadata: BTreeMap::from([
+                    ("state".to_string(), "expired".to_string()),
+                    (
+                        "recovery".to_string(),
+                        "stale_running_export_job".to_string(),
+                    ),
+                ]),
+            },
+        )
+        .await
+        .expect("recover stale alpha export job")
+        .expect("stale alpha export job matches recovery predicate");
+    assert_eq!(recovered_stale.status, TraceExportJobStatus::Expired);
+    assert_eq!(recovered_stale.finished_at, Some(requested_at));
+    assert_eq!(
+        recovered_stale.metadata.get("recovery").map(String::as_str),
+        Some("stale_running_export_job")
+    );
+
+    let fresh_recovery = backend
+        .recover_stale_trace_export_job(
+            &tenant_beta,
+            export_job_id,
+            requested_at,
+            TraceExportJobStatusUpdate {
+                status: TraceExportJobStatus::Expired,
+                started_at: Some(requested_at),
+                finished_at: Some(requested_at),
+                result_manifest_id: None,
+                item_count: Some(3),
+                last_error: Some("should not update fresh rows".to_string()),
+                metadata: BTreeMap::new(),
+            },
+        )
+        .await
+        .expect("fresh beta export job recovery predicate is tenant scoped");
+    assert!(fresh_recovery.is_none());
+
     let missing_tenant_update = backend
         .update_trace_export_job_status(
             "tenant-gamma",

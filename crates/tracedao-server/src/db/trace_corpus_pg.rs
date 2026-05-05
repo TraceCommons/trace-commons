@@ -4555,6 +4555,69 @@ impl TraceCorpusStore for PgBackend {
         Ok(record)
     }
 
+    async fn recover_stale_trace_export_job(
+        &self,
+        tenant_id: &str,
+        export_job_id: Uuid,
+        stale_at: DateTime<Utc>,
+        update: TraceExportJobStatusUpdate,
+    ) -> Result<Option<TraceExportJobRecord>, DatabaseError> {
+        let item_count = update
+            .item_count
+            .map(|value| {
+                i32::try_from(value).map_err(|e| {
+                    DatabaseError::Constraint(format!(
+                        "trace export job item_count is too large: {e}"
+                    ))
+                })
+            })
+            .transpose()?;
+        let status = enum_to_storage(update.status)?;
+        let running_status = enum_to_storage(TraceExportJobStatus::Running)?;
+        let metadata_json = serde_json::to_value(&update.metadata).map_err(|e| {
+            DatabaseError::Serialization(format!("trace export job metadata encode failed: {e}"))
+        })?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                &format!(
+                    "UPDATE trace_export_jobs
+                     SET status = $3,
+                         started_at = $4,
+                         finished_at = $5,
+                         result_manifest_id = $6,
+                         item_count = $7,
+                         last_error = $8,
+                         metadata_json = $9,
+                         updated_at = NOW()
+                     WHERE tenant_id = $1
+                       AND export_job_id = $2
+                       AND status = $10
+                       AND expires_at <= $11
+                     RETURNING {TRACE_EXPORT_JOB_COLUMNS}"
+                ),
+                &[
+                    &tenant_id,
+                    &export_job_id,
+                    &status,
+                    &update.started_at,
+                    &update.finished_at,
+                    &update.result_manifest_id,
+                    &item_count,
+                    &update.last_error,
+                    &metadata_json,
+                    &running_status,
+                    &stale_at,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row.as_ref().map(row_to_export_job).transpose()?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
     async fn upsert_trace_revocation_propagation_item(
         &self,
         item: TraceRevocationPropagationItemWrite,
