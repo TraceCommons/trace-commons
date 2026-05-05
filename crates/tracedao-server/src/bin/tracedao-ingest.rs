@@ -351,6 +351,8 @@ const TRACE_PROCESS_EVALUATION_WORKER_RUN_DEFAULT_LIMIT: usize = 25;
 const TRACE_PROCESS_EVALUATION_WORKER_RUN_MAX_LIMIT: usize = 100;
 const TRACE_VECTOR_INDEX_WORKER_DEFAULT_LIMIT: usize = 100;
 const TRACE_VECTOR_INDEX_WORKER_MAX_LIMIT: usize = 500;
+const TRACE_READ_DEFAULT_LIMIT: usize = 100;
+const TRACE_READ_MAX_LIMIT: usize = 500;
 const TRACE_RANKING_WORKER_RUN_STALE_AFTER_HOURS: i64 = 1;
 const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
 const TRACE_DB_AUDIT_RECONCILIATION_SAMPLE_LIMIT: usize = 16;
@@ -5503,8 +5505,8 @@ async fn tenant_access_grants_handler(
 ) -> ApiResult<Json<Vec<TraceTenantAccessGrantResponse>>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_admin(&tenant)?;
+    let limit = validate_trace_read_limit(query.limit)?;
     let db = trace_tenant_access_grants_db(state.as_ref())?;
-    let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let principal_ref = query
         .principal_ref
         .as_deref()
@@ -6342,7 +6344,7 @@ async fn list_traces_handler(
         .into_iter()
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
-    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let limit = validate_trace_read_limit(query.limit)?;
     let consent_scope = parse_consent_scope_filter(query.consent_scope.as_deref())?;
     let purpose_submission_ids =
         trace_list_purpose_submission_ids(state.as_ref(), tenant.auth(), query.purpose.as_deref())
@@ -10452,6 +10454,17 @@ async fn credit_settlements_handler(
         .await
         .map_err(internal_error)?;
     Ok(Json(batches))
+}
+
+fn validate_trace_read_limit(limit: Option<usize>) -> ApiResult<usize> {
+    let limit = limit.unwrap_or(TRACE_READ_DEFAULT_LIMIT);
+    if !(1..=TRACE_READ_MAX_LIMIT).contains(&limit) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "trace read limit must be between 1 and 500",
+        ));
+    }
+    Ok(limit)
 }
 
 async fn credit_risk_summary_handler(
@@ -21216,8 +21229,8 @@ async fn vector_entries_handler(
 ) -> ApiResult<Json<Vec<TraceVectorEntrySummary>>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
+    let limit = validate_trace_read_limit(query.limit)?;
     let db = trace_vector_metadata_db(state.as_ref())?;
-    let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let entries = db
         .list_trace_vector_entries(&tenant.tenant_id)
         .await
@@ -21258,8 +21271,8 @@ async fn retention_jobs_handler(
 ) -> ApiResult<Json<Vec<TraceRetentionJobSummary>>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
+    let limit = validate_trace_read_limit(query.limit)?;
     let db = trace_retention_ledger_db(state.as_ref())?;
-    let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let jobs = db
         .list_trace_retention_jobs(&tenant.tenant_id)
         .await
@@ -21298,8 +21311,8 @@ async fn retention_job_items_handler(
 ) -> ApiResult<Json<Vec<TraceRetentionJobItemSummary>>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
+    let limit = validate_trace_read_limit(query.limit)?;
     let db = trace_retention_ledger_db(state.as_ref())?;
-    let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let items = db
         .list_trace_retention_job_items(&tenant.tenant_id, retention_job_id)
         .await
@@ -21338,8 +21351,8 @@ async fn export_access_grants_handler(
 ) -> ApiResult<Json<Vec<TraceExportAccessGrantSummary>>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
+    let limit = validate_trace_read_limit(query.limit)?;
     let db = trace_export_control_db(state.as_ref())?;
-    let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let dataset_kind = query
         .dataset_kind
         .as_deref()
@@ -21480,8 +21493,8 @@ async fn export_jobs_handler(
 ) -> ApiResult<Json<Vec<TraceExportJobSummary>>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
+    let limit = validate_trace_read_limit(query.limit)?;
     let db = trace_export_control_db(state.as_ref())?;
-    let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let dataset_kind = query
         .dataset_kind
         .as_deref()
@@ -27768,7 +27781,7 @@ async fn active_learning_review_queue_handler(
         .into_iter()
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
-    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let limit = validate_trace_read_limit(query.limit)?;
     let now = Utc::now();
     let mut items = records
         .into_iter()
@@ -28129,7 +28142,7 @@ async fn audit_events_handler(
 ) -> ApiResult<Json<Vec<TraceCommonsAuditEvent>>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(&tenant)?;
-    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let limit = validate_trace_read_limit(query.limit)?;
     let events = read_recent_audit_events(state.as_ref(), &tenant, limit)
         .await
         .map_err(internal_error)?;
@@ -56891,7 +56904,7 @@ mod tests {
                 .all(|item| item.submission_id != tenant_b_quarantined_id)
         );
 
-        let Json(limited_queue) = active_learning_review_queue_handler(
+        let invalid_low_limit = active_learning_review_queue_handler(
             State(state.clone()),
             auth_headers("review-token-a"),
             Query(ActiveLearningQueueQuery {
@@ -56901,10 +56914,10 @@ mod tests {
             }),
         )
         .await
-        .expect("limit is clamped to at least one item");
-        assert_eq!(limited_queue.item_count, 1);
+        .expect_err("zero read limit is rejected");
+        assert_eq!(invalid_low_limit.0, StatusCode::BAD_REQUEST);
 
-        let Json(clamped_queue) = active_learning_review_queue_handler(
+        let invalid_high_limit = active_learning_review_queue_handler(
             State(state),
             auth_headers("review-token-a"),
             Query(ActiveLearningQueueQuery {
@@ -56914,8 +56927,8 @@ mod tests {
             }),
         )
         .await
-        .expect("limit is clamped to the reviewer page maximum");
-        assert_eq!(clamped_queue.item_count, 2);
+        .expect_err("oversized read limit is rejected");
+        assert_eq!(invalid_high_limit.0, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
