@@ -2940,6 +2940,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(active_learning_review_queue_handler),
         )
         .route(
+            "/v1/review/routing-summary",
+            get(review_routing_summary_handler),
+        )
+        .route(
             "/v1/review/batch-decisions",
             post(review_batch_decision_handler),
         )
@@ -6398,6 +6402,33 @@ async fn review_quarantine_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(queue))
+}
+
+async fn review_routing_summary_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<TraceReviewRoutingSummary>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_reviewer(tenant.auth())?;
+    let TraceCommonsMetadataView { records, .. } =
+        read_reviewer_metadata_view(state.as_ref(), tenant.auth())
+            .await
+            .map_err(internal_error)?;
+    let now = Utc::now();
+    let summary = TraceReviewRoutingSummary::from_records(tenant.auth(), &records, now);
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        tenant.auth(),
+        tenant.read_audit_event("review_routing_summary", summary.queue_count),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Read {
+            surface: "review_routing_summary".to_string(),
+            item_count: summary.queue_count.min(u32::MAX as usize) as u32,
+        },
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(summary))
 }
 
 #[derive(Debug, Deserialize)]
@@ -40959,6 +40990,138 @@ impl TraceReviewQueueItem {
     }
 }
 
+#[derive(Debug, Serialize)]
+struct TraceReviewRoutingSummary {
+    tenant_storage_ref: String,
+    queue_count: usize,
+    available_count: usize,
+    active_lease_count: usize,
+    expired_lease_count: usize,
+    mine_count: usize,
+    unassigned_count: usize,
+    by_privacy_risk: BTreeMap<String, usize>,
+    by_escalation_state: BTreeMap<String, usize>,
+    assignee_loads: Vec<TraceReviewRoutingAssigneeLoad>,
+}
+
+impl TraceReviewRoutingSummary {
+    fn from_records(
+        tenant: &TenantAuth,
+        records: &[TraceCommonsSubmissionRecord],
+        now: DateTime<Utc>,
+    ) -> Self {
+        let mut summary = Self {
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            queue_count: 0,
+            available_count: 0,
+            active_lease_count: 0,
+            expired_lease_count: 0,
+            mine_count: 0,
+            unassigned_count: 0,
+            by_privacy_risk: BTreeMap::new(),
+            by_escalation_state: BTreeMap::new(),
+            assignee_loads: Vec::new(),
+        };
+        let mut assignee_loads = BTreeMap::<String, TraceReviewRoutingAssigneeAccumulator>::new();
+        for record in records
+            .iter()
+            .filter(|record| record.status == TraceCorpusStatus::Quarantined)
+        {
+            summary.queue_count += 1;
+            *summary
+                .by_privacy_risk
+                .entry(residual_pii_risk_name(record.privacy_risk).to_string())
+                .or_insert(0) += 1;
+            let escalation = trace_review_escalation(record, now);
+            *summary
+                .by_escalation_state
+                .entry(trace_operational_review_state_name(escalation.state).to_string())
+                .or_insert(0) += 1;
+            if trace_review_lease_filter_matches(
+                record,
+                &tenant.principal_ref,
+                now,
+                TraceReviewLeaseFilter::Available,
+            ) {
+                summary.available_count += 1;
+            }
+            if trace_review_lease_filter_matches(
+                record,
+                &tenant.principal_ref,
+                now,
+                TraceReviewLeaseFilter::Mine,
+            ) {
+                summary.mine_count += 1;
+            }
+            let assigned_to = record.review_assigned_to_principal_ref.as_deref();
+            let is_expired = record
+                .review_lease_expires_at
+                .is_some_and(|expires_at| expires_at <= now);
+            match assigned_to {
+                Some(principal_ref) => {
+                    if is_expired {
+                        summary.expired_lease_count += 1;
+                    } else {
+                        summary.active_lease_count += 1;
+                    }
+                    let principal_hash = sha256_prefixed(principal_ref);
+                    assignee_loads
+                        .entry(principal_hash)
+                        .or_default()
+                        .record(escalation, is_expired);
+                }
+                None => summary.unassigned_count += 1,
+            }
+        }
+        summary.assignee_loads = assignee_loads
+            .into_iter()
+            .map(|(principal_ref_hash, load)| load.into_summary(principal_ref_hash))
+            .collect();
+        summary
+    }
+}
+
+#[derive(Debug, Default)]
+struct TraceReviewRoutingAssigneeAccumulator {
+    active_lease_count: usize,
+    expired_lease_count: usize,
+    urgent_count: usize,
+    oldest_review_age_hours: i64,
+}
+
+impl TraceReviewRoutingAssigneeAccumulator {
+    fn record(&mut self, escalation: TraceReviewEscalation, is_expired: bool) {
+        if is_expired {
+            self.expired_lease_count += 1;
+        } else {
+            self.active_lease_count += 1;
+        }
+        if escalation.state == TraceReviewEscalationState::Urgent {
+            self.urgent_count += 1;
+        }
+        self.oldest_review_age_hours = self.oldest_review_age_hours.max(escalation.age_hours);
+    }
+
+    fn into_summary(self, reviewer_principal_ref_hash: String) -> TraceReviewRoutingAssigneeLoad {
+        TraceReviewRoutingAssigneeLoad {
+            reviewer_principal_ref_hash,
+            active_lease_count: self.active_lease_count,
+            expired_lease_count: self.expired_lease_count,
+            urgent_count: self.urgent_count,
+            oldest_review_age_hours: self.oldest_review_age_hours,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct TraceReviewRoutingAssigneeLoad {
+    reviewer_principal_ref_hash: String,
+    active_lease_count: usize,
+    expired_lease_count: usize,
+    urgent_count: usize,
+    oldest_review_age_hours: i64,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum TraceReviewEscalationState {
@@ -49966,6 +50129,61 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn review_routing_summary_reports_queue_pressure_without_trace_bodies() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let first = sample_envelope().await;
+        let second = sample_envelope().await;
+
+        let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
+            .await
+            .expect("first submission succeeds");
+        let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(second))
+            .await
+            .expect("second submission succeeds");
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/review/routing-summary")
+                    .header(AUTHORIZATION, "Bearer review-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("routing summary response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("routing summary parses");
+        assert_eq!(
+            value["tenant_storage_ref"],
+            serde_json::json!(tenant_storage_ref("tenant-a"))
+        );
+        assert_eq!(value["queue_count"], serde_json::json!(2));
+        assert_eq!(value["available_count"], serde_json::json!(2));
+        assert_eq!(value["active_lease_count"], serde_json::json!(0));
+        assert_eq!(value["expired_lease_count"], serde_json::json!(0));
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("Please inspect the workspace"));
+
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "read"
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("review_routing_summary"))
+        }));
     }
 
     #[tokio::test]
