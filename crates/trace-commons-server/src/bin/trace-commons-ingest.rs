@@ -38779,6 +38779,12 @@ struct TraceOperationalRankingSummary {
     running_worker_run_count: usize,
     stale_running_worker_run_count: usize,
     failed_worker_run_count: usize,
+    worker_run_checked_total: usize,
+    worker_run_succeeded_total: usize,
+    worker_run_skipped_existing_total: usize,
+    worker_run_skipped_model_risk_total: usize,
+    worker_run_skipped_ineligible_total: usize,
+    worker_run_reason_counts: BTreeMap<String, usize>,
 }
 
 impl TraceOperationalRankingSummary {
@@ -38845,7 +38851,27 @@ impl TraceOperationalRankingSummary {
         let mut running_worker_run_count = 0;
         let mut stale_running_worker_run_count = 0;
         let mut failed_worker_run_count = 0;
+        let mut worker_run_checked_total = 0usize;
+        let mut worker_run_succeeded_total = 0usize;
+        let mut worker_run_skipped_existing_total = 0usize;
+        let mut worker_run_skipped_model_risk_total = 0usize;
+        let mut worker_run_skipped_ineligible_total = 0usize;
+        let mut worker_run_reason_counts: BTreeMap<String, usize> = BTreeMap::new();
         for worker_run in inputs.worker_runs {
+            worker_run_checked_total =
+                worker_run_checked_total.saturating_add(worker_run.checked_count);
+            worker_run_succeeded_total =
+                worker_run_succeeded_total.saturating_add(worker_run.succeeded_count);
+            worker_run_skipped_existing_total =
+                worker_run_skipped_existing_total.saturating_add(worker_run.skipped_existing_count);
+            worker_run_skipped_model_risk_total = worker_run_skipped_model_risk_total
+                .saturating_add(worker_run.skipped_model_risk_count);
+            worker_run_skipped_ineligible_total = worker_run_skipped_ineligible_total
+                .saturating_add(worker_run.skipped_ineligible_count);
+            for (reason, count) in &worker_run.reason_counts {
+                let total = worker_run_reason_counts.entry(reason.clone()).or_insert(0);
+                *total = (*total).saturating_add(*count);
+            }
             match worker_run.status {
                 TraceRankingWorkerRunStatus::Running => {
                     running_worker_run_count += 1;
@@ -38884,6 +38910,12 @@ impl TraceOperationalRankingSummary {
             running_worker_run_count,
             stale_running_worker_run_count,
             failed_worker_run_count,
+            worker_run_checked_total,
+            worker_run_succeeded_total,
+            worker_run_skipped_existing_total,
+            worker_run_skipped_model_risk_total,
+            worker_run_skipped_ineligible_total,
+            worker_run_reason_counts,
         }
     }
 }
@@ -62619,6 +62651,80 @@ mod tests {
                 .promotion_gates
                 .blocking_gates
                 .contains(&"failed_ranking_worker_runs=1".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn operational_summary_reports_ranking_worker_skip_totals() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        append_ranking_worker_run(
+            temp.path(),
+            "tenant-a",
+            &TraceRankingWorkerRunRecord {
+                ranking_worker_run_id: Uuid::new_v4(),
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                run_kind: TraceRankingWorkerRunKind::PredictionCredit,
+                status: TraceRankingWorkerRunStatus::Completed,
+                dry_run: false,
+                reason_hash: sha256_prefixed("worker skip telemetry reason"),
+                model_version: Some("trace-ranker-skip-telemetry-v1".to_string()),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                policy_version: Some("trace-credit-policy-v1".to_string()),
+                limit: 100,
+                checked_count: 9,
+                succeeded_count: 2,
+                skipped_existing_count: 3,
+                skipped_model_risk_count: 2,
+                skipped_ineligible_count: 1,
+                pending_after_count: 4,
+                result_refs: Vec::new(),
+                reason_counts: BTreeMap::from([
+                    ("calibration_stale".to_string(), 1),
+                    ("current_evidence_not_promotable".to_string(), 1),
+                ]),
+                actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+                created_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+                last_error_hash: None,
+            },
+        )
+        .expect("worker run writes");
+
+        let Json(operational) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary");
+        let operational_json =
+            serde_json::to_value(&operational).expect("operational summary serializes");
+        assert_eq!(
+            operational_json["ranking"]["worker_run_checked_total"],
+            serde_json::json!(9)
+        );
+        assert_eq!(
+            operational_json["ranking"]["worker_run_succeeded_total"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            operational_json["ranking"]["worker_run_skipped_existing_total"],
+            serde_json::json!(3)
+        );
+        assert_eq!(
+            operational_json["ranking"]["worker_run_skipped_model_risk_total"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            operational_json["ranking"]["worker_run_skipped_ineligible_total"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["ranking"]["worker_run_reason_counts"]["calibration_stale"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["ranking"]["worker_run_reason_counts"]["current_evidence_not_promotable"],
+            serde_json::json!(1)
         );
     }
 
