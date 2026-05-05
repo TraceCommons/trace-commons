@@ -375,11 +375,10 @@ fn default_trace_ranking_joined_evidence_hash() -> String {
 async fn main() -> anyhow::Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let state = Arc::new(AppState::from_env().await?);
-    let export_job_scheduler = parse_trace_export_job_scheduler_config_from_env()?;
-    validate_trace_export_job_scheduler_config(state.as_ref(), export_job_scheduler.as_ref())
+    validate_trace_export_job_scheduler_config(state.as_ref(), state.export_job_scheduler.as_ref())
         .await?;
     spawn_managed_eddsa_keyset_refresh_task(&state);
-    spawn_trace_export_job_scheduler_task(&state, export_job_scheduler);
+    spawn_trace_export_job_scheduler_task(&state, state.export_job_scheduler.clone());
     let bind = std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
     let addr = bind
         .parse::<SocketAddr>()
@@ -437,6 +436,7 @@ struct AppState {
     benchmark_evaluator_timeout_ms: Option<u64>,
     process_evaluator: Option<Arc<dyn TraceProcessEvaluator>>,
     process_evaluator_timeout_ms: Option<u64>,
+    export_job_scheduler: Option<TraceExportJobSchedulerConfig>,
     ranking_calibration_max_age: Option<Duration>,
     ranking_require_calibration_dataset_registry: bool,
     ranking_require_server_feature_provenance: bool,
@@ -1625,6 +1625,7 @@ impl AppState {
             .as_ref()
             .map(|config| config.timeout_ms);
         let process_evaluator = process_evaluator_config.map(|config| config.evaluator);
+        let export_job_scheduler = parse_trace_export_job_scheduler_config_from_env()?;
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
         let ranking_require_calibration_dataset_registry =
             env_truthy(TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY);
@@ -1791,6 +1792,7 @@ impl AppState {
             benchmark_evaluator_timeout_ms,
             process_evaluator,
             process_evaluator_timeout_ms,
+            export_job_scheduler,
             ranking_calibration_max_age,
             ranking_require_calibration_dataset_registry,
             ranking_require_server_feature_provenance,
@@ -4826,6 +4828,14 @@ struct TraceCommonsConfigStatusResponse {
     process_evaluator_timeout_ms: Option<u64>,
     process_evaluation_worker_run_default_limit: usize,
     process_evaluation_worker_run_max_limit: usize,
+    export_job_scheduler_configured: bool,
+    export_job_scheduler_interval_seconds: Option<u64>,
+    export_job_scheduler_dataset_kind: Option<String>,
+    export_job_scheduler_run_queued_max_jobs: Option<usize>,
+    export_job_scheduler_retry_failed_max_jobs: Option<usize>,
+    export_job_scheduler_retry_failed_max_retry_count: Option<u32>,
+    export_job_scheduler_retry_base_delay_seconds: Option<i64>,
+    export_job_scheduler_retry_max_delay_seconds: Option<i64>,
     credit_cycle_worker_step_count: usize,
     credit_cycle_scheduler_default_limit: usize,
     credit_cycle_scheduler_max_limit: usize,
@@ -4983,6 +4993,35 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         process_evaluation_worker_run_default_limit:
             TRACE_PROCESS_EVALUATION_WORKER_RUN_DEFAULT_LIMIT,
         process_evaluation_worker_run_max_limit: TRACE_PROCESS_EVALUATION_WORKER_RUN_MAX_LIMIT,
+        export_job_scheduler_configured: state.export_job_scheduler.is_some(),
+        export_job_scheduler_interval_seconds: state
+            .export_job_scheduler
+            .as_ref()
+            .map(|config| config.interval.as_secs()),
+        export_job_scheduler_dataset_kind: state
+            .export_job_scheduler
+            .as_ref()
+            .and_then(|config| config.dataset_kind.clone()),
+        export_job_scheduler_run_queued_max_jobs: state
+            .export_job_scheduler
+            .as_ref()
+            .map(|config| config.run_queued_max_jobs),
+        export_job_scheduler_retry_failed_max_jobs: state
+            .export_job_scheduler
+            .as_ref()
+            .map(|config| config.retry_failed_max_jobs),
+        export_job_scheduler_retry_failed_max_retry_count: state
+            .export_job_scheduler
+            .as_ref()
+            .map(|config| config.retry_failed_max_retry_count),
+        export_job_scheduler_retry_base_delay_seconds: state
+            .export_job_scheduler
+            .as_ref()
+            .map(|config| config.retry_failed_base_delay_seconds),
+        export_job_scheduler_retry_max_delay_seconds: state
+            .export_job_scheduler
+            .as_ref()
+            .map(|config| config.retry_failed_max_delay_seconds),
         credit_cycle_worker_step_count: TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT,
         credit_cycle_scheduler_default_limit: TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_LIMIT,
         credit_cycle_scheduler_max_limit: TRACE_CREDIT_CYCLE_SCHEDULER_MAX_LIMIT,
@@ -42517,6 +42556,7 @@ mod tests {
             benchmark_evaluator_timeout_ms: None,
             process_evaluator: None,
             process_evaluator_timeout_ms: None,
+            export_job_scheduler: None,
             ranking_calibration_max_age: None,
             ranking_require_calibration_dataset_registry: false,
             ranking_require_server_feature_provenance: false,
@@ -45317,6 +45357,81 @@ mod tests {
         assert!(!body_text.contains(TRACE_COMMONS_BENCHMARK_EVALUATOR_BEARER_TOKEN));
         assert!(!body_text.contains(TRACE_COMMONS_PROCESS_EVALUATOR_URL));
         assert!(!body_text.contains(TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN));
+    }
+
+    #[tokio::test]
+    async fn admin_config_status_reports_export_scheduler_without_token_or_reason() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).export_job_scheduler = Some(TraceExportJobSchedulerConfig {
+            worker_token: SecretString::from("config-status-scheduler-token".to_string()),
+            interval: StdDuration::from_secs(45),
+            dataset_kind: Some("ranker_training_pairs".to_string()),
+            run_queued_max_jobs: 7,
+            retry_failed_max_jobs: 6,
+            retry_failed_max_retry_count: 4,
+            retry_failed_base_delay_seconds: 30,
+            retry_failed_max_delay_seconds: 300,
+            retry_failed_reason: "do not expose raw scheduler note".to_string(),
+        });
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/config-status")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("config status response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body bytes");
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(
+            value["export_job_scheduler_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["export_job_scheduler_interval_seconds"],
+            serde_json::json!(45)
+        );
+        assert_eq!(
+            value["export_job_scheduler_dataset_kind"],
+            serde_json::json!("ranker_training_pairs")
+        );
+        assert_eq!(
+            value["export_job_scheduler_run_queued_max_jobs"],
+            serde_json::json!(7)
+        );
+        assert_eq!(
+            value["export_job_scheduler_retry_failed_max_jobs"],
+            serde_json::json!(6)
+        );
+        assert_eq!(
+            value["export_job_scheduler_retry_failed_max_retry_count"],
+            serde_json::json!(4)
+        );
+        assert_eq!(
+            value["export_job_scheduler_retry_base_delay_seconds"],
+            serde_json::json!(30)
+        );
+        assert_eq!(
+            value["export_job_scheduler_retry_max_delay_seconds"],
+            serde_json::json!(300)
+        );
+        assert!(!body_text.contains("config-status-scheduler-token"));
+        assert!(!body_text.contains("do not expose raw scheduler note"));
+        let object = value.as_object().expect("config status is object");
+        assert!(!object.contains_key("export_job_scheduler_token"));
+        assert!(!object.contains_key("export_job_scheduler_retry_reason"));
     }
 
     #[tokio::test]
@@ -52669,6 +52784,7 @@ mod tests {
             benchmark_evaluator_timeout_ms: None,
             process_evaluator: None,
             process_evaluator_timeout_ms: None,
+            export_job_scheduler: None,
             ranking_calibration_max_age: None,
             ranking_require_calibration_dataset_registry: false,
             ranking_require_server_feature_provenance: false,
