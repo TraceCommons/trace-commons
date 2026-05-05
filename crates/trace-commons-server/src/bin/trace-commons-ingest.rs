@@ -38197,6 +38197,7 @@ struct TraceOperationalPromotionGateSummary {
     blocked_ranking_credit_event_count: usize,
     ranking_calibration_dataset_manifest_conflict_count: usize,
     stale_ranking_worker_run_count: usize,
+    failed_ranking_worker_run_count: usize,
 }
 
 impl TraceOperationalPromotionGateSummary {
@@ -38231,6 +38232,7 @@ impl TraceOperationalPromotionGateSummary {
         let ranking_calibration_dataset_manifest_conflict_count =
             ranking.calibration_dataset_manifest_conflict_count;
         let stale_ranking_worker_run_count = ranking.stale_running_worker_run_count;
+        let failed_ranking_worker_run_count = ranking.failed_worker_run_count;
         let mut blocking_gates = Vec::new();
         let mut warning_gates = Vec::new();
 
@@ -38299,6 +38301,11 @@ impl TraceOperationalPromotionGateSummary {
             "stale_ranking_worker_runs",
             stale_ranking_worker_run_count,
         );
+        push_gap_count(
+            &mut blocking_gates,
+            "failed_ranking_worker_runs",
+            failed_ranking_worker_run_count,
+        );
 
         push_gap_count(
             &mut warning_gates,
@@ -38350,6 +38357,7 @@ impl TraceOperationalPromotionGateSummary {
             blocked_ranking_credit_event_count,
             ranking_calibration_dataset_manifest_conflict_count,
             stale_ranking_worker_run_count,
+            failed_ranking_worker_run_count,
         }
     }
 }
@@ -62554,6 +62562,63 @@ mod tests {
                 .promotion_gates
                 .blocking_gates
                 .contains(&"stale_ranking_worker_runs=1".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn operational_summary_blocks_failed_ranking_worker_runs() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        append_ranking_worker_run(
+            temp.path(),
+            "tenant-a",
+            &TraceRankingWorkerRunRecord {
+                ranking_worker_run_id: Uuid::new_v4(),
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                run_kind: TraceRankingWorkerRunKind::CreditCycle,
+                status: TraceRankingWorkerRunStatus::Failed,
+                dry_run: false,
+                reason_hash: sha256_prefixed("failed ranking worker reason"),
+                model_version: Some("trace-ranker-failed-worker-v1".to_string()),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                policy_version: Some("trace-credit-policy-v1".to_string()),
+                limit: 100,
+                checked_count: 0,
+                succeeded_count: 0,
+                skipped_existing_count: 0,
+                skipped_model_risk_count: 0,
+                skipped_ineligible_count: 0,
+                pending_after_count: 0,
+                result_refs: Vec::new(),
+                reason_counts: BTreeMap::new(),
+                actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+                created_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+                last_error_hash: Some(sha256_prefixed("worker failed before settlement")),
+            },
+        )
+        .expect("failed worker run writes");
+
+        let Json(operational) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary");
+        let operational_json =
+            serde_json::to_value(&operational).expect("operational summary serializes");
+        assert_eq!(
+            operational_json["ranking"]["failed_worker_run_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["promotion_gates"]["failed_ranking_worker_run_count"],
+            serde_json::json!(1)
+        );
+        assert!(
+            operational
+                .promotion_gates
+                .blocking_gates
+                .contains(&"failed_ranking_worker_runs=1".to_string())
         );
     }
 
