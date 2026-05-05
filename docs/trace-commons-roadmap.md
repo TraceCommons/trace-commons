@@ -146,7 +146,7 @@ Dependencies:
 Verification gates:
 
 - For sampled tenants, DB-backed contributor status/credit, reviewer lists, analytics, replay export selection, and audit event reads match file-backed behavior.
-- Backfill rejects or quarantines malformed pilot records instead of silently accepting them.
+- Backfill-only maintenance reports malformed pilot submission/derived metadata as bounded item failures instead of aborting the whole backfill, and keeps valid records moving.
 - PostgreSQL tests prove duplicate ids/hashes under separate tenants do not cross-read or cross-mutate.
 
 Exit criteria:
