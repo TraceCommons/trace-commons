@@ -56706,6 +56706,172 @@ mod tests {
             !temp.path().join(&record.object_key).exists(),
             "object-primary submit should not write a plaintext envelope body"
         );
+        let derived = read_derived_record(temp.path(), "tenant-a", submission_id)
+            .expect("derived record reads")
+            .expect("derived record exists");
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        let store = state
+            .artifact_store
+            .as_ref()
+            .expect("artifact store configured for object-primary test");
+
+        let review_receipt = store
+            .put_json(
+                &tenant_ref,
+                TraceArtifactKind::ContributionEnvelope,
+                "revocation-effects-review-snapshot",
+                &serde_json::json!({
+                    "tenant_storage_ref": tenant_ref,
+                    "submission_id": submission_id,
+                    "artifact": "review_snapshot"
+                }),
+            )
+            .expect("review snapshot artifact writes");
+        backend
+            .append_trace_object_ref(StorageTraceObjectRefWrite {
+                object_ref_id: deterministic_trace_uuid_for_external_ref(
+                    "revocation-effects-review-object-ref",
+                    "tenant-a",
+                    submission_id,
+                    "review_snapshot",
+                ),
+                tenant_id: "tenant-a".to_string(),
+                submission_id,
+                artifact_kind: StorageTraceObjectArtifactKind::ReviewSnapshot,
+                object_store: store.object_store_name().to_string(),
+                object_key: review_receipt.object_key,
+                content_sha256: format!("sha256:{}", review_receipt.ciphertext_sha256),
+                encryption_key_ref: format!("tenant:{tenant_ref}"),
+                size_bytes: 128,
+                compression: None,
+                created_by_job_id: None,
+            })
+            .await
+            .expect("review snapshot object ref writes");
+
+        let vector_entry_id = Uuid::new_v4();
+        let vector_payload = TraceVectorPayloadArtifact {
+            artifact_schema_version: TRACE_VECTOR_PAYLOAD_SCHEMA_VERSION.to_string(),
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_ref.clone(),
+            submission_id,
+            trace_id: record.trace_id,
+            derived_id: derived
+                .derived_id
+                .unwrap_or_else(|| deterministic_trace_uuid("derived-precheck", &record)),
+            vector_entry_id,
+            source_projection: StorageTraceVectorEntrySourceProjection::CanonicalSummary,
+            source_hash: derived.canonical_summary_hash.clone(),
+            vector_store: "trace_commons_metadata_precheck".to_string(),
+            embedding_model: TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_MODEL.to_string(),
+            embedding_dimension: TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION as i32,
+            embedding_version: TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_VERSION.to_string(),
+            embedding_algorithm: Some(TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_ALGORITHM.to_string()),
+            embedding_input_hash: Some(sha256_prefixed("revocation-effects-vector-input")),
+            embedding_values: vec![0.0; TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION],
+            embedding_sha256: Some(sha256_prefixed("revocation-effects-vector-embedding")),
+            canonical_summary: Some(derived.canonical_summary.clone()),
+            canonical_summary_hash: Some(derived.canonical_summary_hash.clone()),
+            summary_model: derived.summary_model.clone(),
+            worker_kind: StorageTraceWorkerKind::DuplicatePrecheck,
+            worker_version: "trace_commons_ingest_v1".to_string(),
+            tool_sequence: derived.tool_sequence.clone(),
+            tool_categories: derived.tool_categories.clone(),
+            coverage_tags: derived.coverage_tags.clone(),
+            nearest_trace_ids: Vec::new(),
+            cluster_id: None,
+            duplicate_score: Some(derived.duplicate_score),
+            novelty_score: Some(derived.novelty_score),
+            indexed_at: Utc::now(),
+        };
+        let vector_object_ref = trace_vector_payload_object_ref_write(
+            state.as_ref(),
+            "tenant-a",
+            submission_id,
+            vector_entry_id,
+            &vector_payload,
+        )
+        .expect("vector payload object ref builds")
+        .expect("artifact store writes vector payload object ref");
+        backend
+            .append_trace_object_ref(vector_object_ref)
+            .await
+            .expect("vector payload object ref writes");
+
+        let benchmark_source_submission_ids_hash =
+            source_submission_ids_hash("benchmark_conversion", &[submission_id]);
+        let conversion_id = Uuid::new_v4();
+        let benchmark_artifact = TraceBenchmarkConversionArtifact {
+            artifact_schema_version: TRACE_BENCHMARK_CONVERSION_SCHEMA_VERSION.to_string(),
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_ref.clone(),
+            conversion_id,
+            audit_event_id: Uuid::new_v4(),
+            purpose: "revocation effects benchmark artifact".to_string(),
+            registry: TraceBenchmarkRegistryMetadata::default(),
+            evaluation: TraceBenchmarkEvaluationMetadata::default(),
+            filters: TraceBenchmarkConversionFilters {
+                limit: 1,
+                consent_scope: Some(ConsentScope::ModelTraining),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: None,
+                external_ref: None,
+            },
+            source_submission_ids: vec![submission_id],
+            source_submission_ids_hash: benchmark_source_submission_ids_hash.clone(),
+            generated_at: Utc::now(),
+            item_count: 1,
+            candidates: vec![TraceBenchmarkCandidate::from_records(&record, &derived)],
+        };
+        let benchmark_material = trace_export_artifact_object_ref_material(
+            state.as_ref(),
+            "tenant-a",
+            TraceArtifactKind::BenchmarkConversion,
+            conversion_id,
+            temp.path(),
+            &benchmark_artifact,
+        )
+        .expect("benchmark artifact material writes");
+        backend
+            .append_trace_object_ref(trace_export_artifact_object_ref_write(
+                "tenant-a",
+                submission_id,
+                StorageTraceObjectArtifactKind::BenchmarkArtifact,
+                conversion_id,
+                &benchmark_material,
+            ))
+            .await
+            .expect("benchmark artifact object ref writes");
+
+        let export_id = Uuid::new_v4();
+        let provenance = TraceExportProvenanceManifest::new(
+            "tenant-a",
+            export_id,
+            Uuid::new_v4(),
+            TraceExportProvenanceKind::RankerTrainingCandidates,
+            "revocation effects ranker provenance".to_string(),
+            vec![submission_id],
+            source_submission_ids_hash("ranker_training_candidates", &[submission_id]),
+        );
+        let export_material = trace_export_artifact_object_ref_material(
+            state.as_ref(),
+            "tenant-a",
+            TraceArtifactKind::RankerTrainingExport,
+            export_id,
+            temp.path(),
+            &provenance,
+        )
+        .expect("ranker provenance material writes");
+        backend
+            .append_trace_object_ref(trace_export_artifact_object_ref_write(
+                "tenant-a",
+                submission_id,
+                StorageTraceObjectArtifactKind::ExportArtifact,
+                export_id,
+                &export_material,
+            ))
+            .await
+            .expect("ranker provenance object ref writes");
 
         let Json(_event) = append_credit_event_handler(
             State(state.clone()),
@@ -56756,6 +56922,15 @@ mod tests {
         assert!(propagation_items.iter().any(|item| {
             item.action == StorageTraceRevocationPropagationAction::DeleteObjectPayload
         }));
+        assert_eq!(
+            propagation_items
+                .iter()
+                .filter(|item| {
+                    item.action == StorageTraceRevocationPropagationAction::DeleteObjectPayload
+                })
+                .count(),
+            5
+        );
 
         let Json(worker) = revocation_propagation_worker_handler(
             State(state.clone()),
@@ -56768,7 +56943,7 @@ mod tests {
         )
         .await
         .expect("revocation worker applies canary effects");
-        assert!(worker.completed >= 2);
+        assert!(worker.completed >= 6);
         assert_eq!(worker.failed, 0);
 
         let response = app(state.clone())
@@ -56805,8 +56980,10 @@ mod tests {
         assert_eq!(value["blocking_gaps"], serde_json::json!([]));
         assert_eq!(value["reversed_credit_event_count"], serde_json::json!(1));
         assert_eq!(value["near_reversal_outbox_count"], serde_json::json!(1));
-        assert_eq!(value["deleted_object_ref_count"], serde_json::json!(1));
-        assert_eq!(value["physical_delete_receipt_count"], serde_json::json!(1));
+        assert_eq!(value["object_delete_item_count"], serde_json::json!(5));
+        assert_eq!(value["object_delete_done_count"], serde_json::json!(5));
+        assert_eq!(value["deleted_object_ref_count"], serde_json::json!(5));
+        assert_eq!(value["physical_delete_receipt_count"], serde_json::json!(5));
 
         let evidence = value["recorded_evidence"]
             .as_array()
