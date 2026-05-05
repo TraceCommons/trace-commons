@@ -293,6 +293,12 @@ const TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_DRY_RUN: &str =
     "TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_DRY_RUN";
 const TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_PURPOSE: &str =
     "TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_PURPOSE";
+const TRACE_COMMONS_VECTOR_EMBEDDER_URL: &str = "TRACE_COMMONS_VECTOR_EMBEDDER_URL";
+const TRACE_COMMONS_VECTOR_EMBEDDER_BEARER_TOKEN: &str =
+    "TRACE_COMMONS_VECTOR_EMBEDDER_BEARER_TOKEN";
+const TRACE_COMMONS_VECTOR_EMBEDDER_TIMEOUT_MS: &str = "TRACE_COMMONS_VECTOR_EMBEDDER_TIMEOUT_MS";
+const TRACE_COMMONS_VECTOR_EMBEDDER_REQUIRE_EXTERNAL: &str =
+    "TRACE_COMMONS_VECTOR_EMBEDDER_REQUIRE_EXTERNAL";
 const TRACE_COMMONS_PROCESS_EVALUATOR_URL: &str = "TRACE_COMMONS_PROCESS_EVALUATOR_URL";
 const TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN: &str =
     "TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN";
@@ -322,6 +328,7 @@ const DEFAULT_BENCHMARK_REGISTRY_SUBMITTER_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_BENCHMARK_EVALUATOR_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_PROCESS_EVALUATOR_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_VECTOR_EMBEDDER_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_EDDSA_KEYSET_REFRESH_INTERVAL_SECONDS: u64 = 300;
 const MAX_EDDSA_KEYSET_URL_BYTES: usize = 256 * 1024;
 const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT: u32 = 100;
@@ -471,6 +478,9 @@ struct AppState {
     benchmark_evaluator_timeout_ms: Option<u64>,
     process_evaluator: Option<Arc<dyn TraceProcessEvaluator>>,
     process_evaluator_timeout_ms: Option<u64>,
+    vector_embedder: Option<Arc<dyn TraceVectorEmbedder>>,
+    vector_embedder_timeout_ms: Option<u64>,
+    require_external_vector_embedder: bool,
     export_job_scheduler: Option<TraceExportJobSchedulerConfig>,
     vector_index_scheduler: Option<TraceVectorIndexSchedulerConfig>,
     ranking_calibration_max_age: Option<Duration>,
@@ -1749,6 +1759,18 @@ impl AppState {
             .as_ref()
             .map(|config| config.timeout_ms);
         let process_evaluator = process_evaluator_config.map(|config| config.evaluator);
+        let vector_embedder_config = trace_vector_embedder_from_env()?;
+        let vector_embedder_timeout_ms = vector_embedder_config
+            .as_ref()
+            .map(|config| config.timeout_ms);
+        let vector_embedder = vector_embedder_config.map(|config| config.embedder);
+        let require_external_vector_embedder =
+            env_truthy(TRACE_COMMONS_VECTOR_EMBEDDER_REQUIRE_EXTERNAL);
+        if require_external_vector_embedder && vector_embedder.is_none() {
+            anyhow::bail!(
+                "{TRACE_COMMONS_VECTOR_EMBEDDER_REQUIRE_EXTERNAL} requires {TRACE_COMMONS_VECTOR_EMBEDDER_URL}"
+            );
+        }
         let export_job_scheduler = parse_trace_export_job_scheduler_config_from_env()?;
         let vector_index_scheduler = parse_trace_vector_index_scheduler_config_from_env()?;
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
@@ -1918,6 +1940,9 @@ impl AppState {
             benchmark_evaluator_timeout_ms,
             process_evaluator,
             process_evaluator_timeout_ms,
+            vector_embedder,
+            vector_embedder_timeout_ms,
+            require_external_vector_embedder,
             export_job_scheduler,
             vector_index_scheduler,
             ranking_calibration_max_age,
@@ -2214,6 +2239,11 @@ struct ConfiguredTraceProcessEvaluator {
     timeout_ms: u64,
 }
 
+struct ConfiguredTraceVectorEmbedder {
+    embedder: Arc<dyn TraceVectorEmbedder>,
+    timeout_ms: u64,
+}
+
 fn trace_near_credit_submitter_from_env()
 -> anyhow::Result<Option<ConfiguredTraceNearCreditSubmitter>> {
     let Some(url) = optional_trimmed_env(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL)? else {
@@ -2387,6 +2417,33 @@ fn trace_process_evaluator_from_env() -> anyhow::Result<Option<ConfiguredTracePr
     }))
 }
 
+fn trace_vector_embedder_from_env() -> anyhow::Result<Option<ConfiguredTraceVectorEmbedder>> {
+    let Some(url) = optional_trimmed_env(TRACE_COMMONS_VECTOR_EMBEDDER_URL)? else {
+        return Ok(None);
+    };
+    let parsed = reqwest::Url::parse(&url)
+        .with_context(|| format!("invalid {TRACE_COMMONS_VECTOR_EMBEDDER_URL}"))?;
+    validate_trace_vector_embedder_url(&parsed)?;
+    let timeout = parse_trace_vector_embedder_timeout_from_env()?;
+    let timeout_ms = timeout.as_millis() as u64;
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout.min(StdDuration::from_secs(3)))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("trace-commons-vector-embedder/0.1")
+        .build()
+        .context("failed to build vector embedder HTTP client")?;
+    Ok(Some(ConfiguredTraceVectorEmbedder {
+        embedder: Arc::new(HttpTraceVectorEmbedder {
+            client,
+            url,
+            bearer_token: optional_trimmed_env(TRACE_COMMONS_VECTOR_EMBEDDER_BEARER_TOKEN)?
+                .map(SecretString::from),
+        }),
+        timeout_ms,
+    }))
+}
+
 fn validate_trace_near_credit_submitter_url(url: &reqwest::Url) -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(url.scheme(), "https" | "http"),
@@ -2538,6 +2595,32 @@ fn validate_trace_process_evaluator_url(url: &reqwest::Url) -> anyhow::Result<()
     Ok(())
 }
 
+fn validate_trace_vector_embedder_url(url: &reqwest::Url) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        matches!(url.scheme(), "https" | "http"),
+        "{TRACE_COMMONS_VECTOR_EMBEDDER_URL} must use http or https"
+    );
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "{TRACE_COMMONS_VECTOR_EMBEDDER_URL} must not include embedded credentials"
+    );
+    anyhow::ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "{TRACE_COMMONS_VECTOR_EMBEDDER_URL} must not include query strings or fragments"
+    );
+    let host = url
+        .host_str()
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| anyhow::anyhow!("{TRACE_COMMONS_VECTOR_EMBEDDER_URL} requires a host"))?;
+    if url.scheme() == "http" {
+        anyhow::ensure!(
+            is_loopback_or_localhost_host(&host),
+            "{TRACE_COMMONS_VECTOR_EMBEDDER_URL} may use http only for localhost loopback embedders"
+        );
+    }
+    Ok(())
+}
+
 fn is_loopback_or_localhost_host(host: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     if host == "localhost" || host.ends_with(".localhost") {
@@ -2639,6 +2722,20 @@ fn parse_trace_process_evaluator_timeout_from_env() -> anyhow::Result<StdDuratio
     anyhow::ensure!(
         (1..=120_000).contains(&timeout_ms),
         "{TRACE_COMMONS_PROCESS_EVALUATOR_TIMEOUT_MS} must be between 1 and 120000"
+    );
+    Ok(StdDuration::from_millis(timeout_ms))
+}
+
+fn parse_trace_vector_embedder_timeout_from_env() -> anyhow::Result<StdDuration> {
+    let timeout_ms = match optional_trimmed_env(TRACE_COMMONS_VECTOR_EMBEDDER_TIMEOUT_MS)? {
+        Some(configured) => configured.parse::<u64>().with_context(|| {
+            format!("{TRACE_COMMONS_VECTOR_EMBEDDER_TIMEOUT_MS} must be milliseconds")
+        })?,
+        None => DEFAULT_VECTOR_EMBEDDER_TIMEOUT_MS,
+    };
+    anyhow::ensure!(
+        (1..=120_000).contains(&timeout_ms),
+        "{TRACE_COMMONS_VECTOR_EMBEDDER_TIMEOUT_MS} must be between 1 and 120000"
     );
     Ok(StdDuration::from_millis(timeout_ms))
 }
@@ -5145,6 +5242,9 @@ struct TraceCommonsConfigStatusResponse {
     process_evaluator_timeout_ms: Option<u64>,
     process_evaluation_worker_run_default_limit: usize,
     process_evaluation_worker_run_max_limit: usize,
+    vector_embedder_configured: bool,
+    vector_embedder_timeout_ms: Option<u64>,
+    vector_embedder_required: bool,
     export_job_scheduler_configured: bool,
     export_job_scheduler_interval_seconds: Option<u64>,
     export_job_scheduler_dataset_kind: Option<String>,
@@ -5317,6 +5417,9 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         process_evaluation_worker_run_default_limit:
             TRACE_PROCESS_EVALUATION_WORKER_RUN_DEFAULT_LIMIT,
         process_evaluation_worker_run_max_limit: TRACE_PROCESS_EVALUATION_WORKER_RUN_MAX_LIMIT,
+        vector_embedder_configured: state.vector_embedder.is_some(),
+        vector_embedder_timeout_ms: state.vector_embedder_timeout_ms,
+        vector_embedder_required: state.require_external_vector_embedder,
         export_job_scheduler_configured: state.export_job_scheduler.is_some(),
         export_job_scheduler_interval_seconds: state
             .export_job_scheduler
@@ -26110,6 +26213,80 @@ impl TraceProcessEvaluator for HttpTraceProcessEvaluator {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceVectorEmbeddingRequest {
+    tenant_storage_ref: String,
+    vector_entry_id: Uuid,
+    source_projection: StorageTraceVectorEntrySourceProjection,
+    source_hash: String,
+    canonical_summary_hash: Option<String>,
+    summary_model: String,
+    worker_kind: StorageTraceWorkerKind,
+    worker_version: String,
+    purpose_hash: String,
+    embedding_input_hash: String,
+    embedding_input: String,
+    tool_sequence: Vec<String>,
+    tool_categories: Vec<String>,
+    coverage_tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceVectorEmbeddingResponse {
+    embedding_model: String,
+    embedding_version: String,
+    embedding_values: Vec<f32>,
+    #[serde(default)]
+    embedding_algorithm: Option<String>,
+    #[serde(default)]
+    vector_store: Option<String>,
+}
+
+#[async_trait::async_trait]
+trait TraceVectorEmbedder: Send + Sync {
+    async fn embed(
+        &self,
+        request: TraceVectorEmbeddingRequest,
+    ) -> anyhow::Result<TraceVectorEmbeddingResponse>;
+}
+
+#[derive(Clone)]
+struct HttpTraceVectorEmbedder {
+    client: reqwest::Client,
+    url: String,
+    bearer_token: Option<SecretString>,
+}
+
+#[async_trait::async_trait]
+impl TraceVectorEmbedder for HttpTraceVectorEmbedder {
+    async fn embed(
+        &self,
+        request: TraceVectorEmbeddingRequest,
+    ) -> anyhow::Result<TraceVectorEmbeddingResponse> {
+        let mut builder = self
+            .client
+            .post(&self.url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&request);
+        if let Some(bearer_token) = &self.bearer_token {
+            builder = builder.bearer_auth(bearer_token.expose_secret());
+        }
+        let response = builder
+            .send()
+            .await
+            .context("failed to request trace vector embedding")?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!("trace vector embedder returned HTTP {}", status.as_u16());
+        }
+        let response: TraceVectorEmbeddingResponse = response
+            .json()
+            .await
+            .context("failed to decode trace vector embedder response")?;
+        validate_trace_vector_embedding_response(response)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct BenchmarkEvaluationWorkerRunRequest {
     limit: Option<usize>,
@@ -28188,6 +28365,12 @@ async fn vector_index_handler(
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_vector_operator(&tenant)?;
     let limit = validate_vector_index_worker_limit(body.limit)?;
+    if state.require_external_vector_embedder && state.vector_embedder.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace vector index worker requires TRACE_COMMONS_VECTOR_EMBEDDER_URL",
+        ));
+    }
     if state.db_mirror.is_none() {
         return Err(api_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -35032,17 +35215,139 @@ fn trace_summary_embedding_similarity(left: &[f32], right: &[f32]) -> f32 {
 }
 
 fn trace_redacted_summary_embedding_sha256(values: &[f32]) -> String {
-    let mut payload = format!(
-        "{}:{}:{}:{}:",
+    trace_embedding_sha256(
         TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_MODEL,
         TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_ALGORITHM,
         TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_VERSION,
-        TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION
+        values,
+    )
+}
+
+fn trace_embedding_sha256(
+    embedding_model: &str,
+    embedding_algorithm: &str,
+    embedding_version: &str,
+    values: &[f32],
+) -> String {
+    let mut payload = format!(
+        "{}:{}:{}:{}:",
+        embedding_model,
+        embedding_algorithm,
+        embedding_version,
+        values.len()
     );
     for value in values {
         payload.push_str(&format!("{:08x}", value.to_bits()));
     }
     sha256_prefixed(&payload)
+}
+
+#[derive(Debug)]
+struct TraceVectorEmbeddingMaterial {
+    vector_store: String,
+    embedding_model: String,
+    embedding_dimension: i32,
+    embedding_version: String,
+    embedding_algorithm: Option<String>,
+    embedding_input_hash: String,
+    embedding_values: Vec<f32>,
+    embedding_sha256: String,
+}
+
+fn trace_vector_local_embedding_material(
+    embedding_input_hash: String,
+    embedding_input: &str,
+) -> TraceVectorEmbeddingMaterial {
+    let embedding_values = trace_redacted_summary_embedding(embedding_input);
+    let embedding_sha256 = trace_redacted_summary_embedding_sha256(&embedding_values);
+    TraceVectorEmbeddingMaterial {
+        vector_store: "trace_commons_metadata_precheck".to_string(),
+        embedding_model: TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_MODEL.to_string(),
+        embedding_dimension: i32::try_from(TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION)
+            .unwrap_or(i32::MAX),
+        embedding_version: TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_VERSION.to_string(),
+        embedding_algorithm: Some(TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_ALGORITHM.to_string()),
+        embedding_input_hash,
+        embedding_values,
+        embedding_sha256,
+    }
+}
+
+fn validate_trace_vector_embedding_response(
+    response: TraceVectorEmbeddingResponse,
+) -> anyhow::Result<TraceVectorEmbeddingResponse> {
+    let embedding_model = response.embedding_model.trim();
+    anyhow::ensure!(
+        !embedding_model.is_empty() && embedding_model.len() <= 512,
+        "trace vector embedder response requires a bounded embedding_model"
+    );
+    let embedding_version = response.embedding_version.trim();
+    anyhow::ensure!(
+        !embedding_version.is_empty() && embedding_version.len() <= 256,
+        "trace vector embedder response requires a bounded embedding_version"
+    );
+    anyhow::ensure!(
+        !response.embedding_values.is_empty() && response.embedding_values.len() <= 8192,
+        "trace vector embedder response embedding_values must contain 1..=8192 values"
+    );
+    anyhow::ensure!(
+        response
+            .embedding_values
+            .iter()
+            .all(|value| value.is_finite()),
+        "trace vector embedder response embedding_values must be finite"
+    );
+    if let Some(algorithm) = response.embedding_algorithm.as_deref() {
+        anyhow::ensure!(
+            !algorithm.trim().is_empty() && algorithm.len() <= 256,
+            "trace vector embedder response embedding_algorithm is not bounded"
+        );
+    }
+    if let Some(vector_store) = response.vector_store.as_deref() {
+        anyhow::ensure!(
+            !vector_store.trim().is_empty() && vector_store.len() <= 256,
+            "trace vector embedder response vector_store is not bounded"
+        );
+    }
+    Ok(response)
+}
+
+fn trace_vector_external_embedding_material(
+    embedding_input_hash: String,
+    response: TraceVectorEmbeddingResponse,
+) -> anyhow::Result<TraceVectorEmbeddingMaterial> {
+    let response = validate_trace_vector_embedding_response(response)?;
+    let embedding_dimension = i32::try_from(response.embedding_values.len())
+        .context("trace vector embedding dimension does not fit storage schema")?;
+    let embedding_model = response.embedding_model.trim().to_string();
+    let embedding_version = response.embedding_version.trim().to_string();
+    let embedding_algorithm = response
+        .embedding_algorithm
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_string)
+        .unwrap_or_else(|| "external_private_embedding".to_string());
+    let embedding_sha256 = trace_embedding_sha256(
+        &embedding_model,
+        &embedding_algorithm,
+        &embedding_version,
+        &response.embedding_values,
+    );
+    Ok(TraceVectorEmbeddingMaterial {
+        vector_store: response
+            .vector_store
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_string)
+            .unwrap_or_else(|| "trace_commons_private_embedding_adapter".to_string()),
+        embedding_model,
+        embedding_dimension,
+        embedding_version,
+        embedding_algorithm: Some(embedding_algorithm),
+        embedding_input_hash,
+        embedding_values: response.embedding_values,
+        embedding_sha256,
+    })
 }
 
 fn trace_similarity_tokens(input: &str) -> BTreeSet<String> {
@@ -38935,6 +39240,52 @@ struct TraceVectorIndexCandidate<'a> {
     vector_entry_id: Uuid,
 }
 
+struct TraceVectorEmbeddingMaterialRequest<'a> {
+    record: &'a StorageTraceDerivedRecord,
+    vector_entry_id: Uuid,
+    source_projection: StorageTraceVectorEntrySourceProjection,
+    source_hash: &'a str,
+    purpose: &'a str,
+    embedding_input_hash: String,
+    embedding_input: String,
+}
+
+async fn trace_vector_embedding_material_for_record(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceVectorEmbeddingMaterialRequest<'_>,
+) -> anyhow::Result<TraceVectorEmbeddingMaterial> {
+    let Some(embedder) = state.vector_embedder.as_ref() else {
+        anyhow::ensure!(
+            !state.require_external_vector_embedder,
+            "Trace Commons vector embedding requires TRACE_COMMONS_VECTOR_EMBEDDER_URL"
+        );
+        return Ok(trace_vector_local_embedding_material(
+            request.embedding_input_hash,
+            &request.embedding_input,
+        ));
+    };
+    let response = embedder
+        .embed(TraceVectorEmbeddingRequest {
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            vector_entry_id: request.vector_entry_id,
+            source_projection: request.source_projection,
+            source_hash: request.source_hash.to_string(),
+            canonical_summary_hash: request.record.canonical_summary_hash.clone(),
+            summary_model: request.record.summary_model.clone(),
+            worker_kind: request.record.worker_kind,
+            worker_version: request.record.worker_version.clone(),
+            purpose_hash: sha256_prefixed(request.purpose),
+            embedding_input_hash: request.embedding_input_hash.clone(),
+            embedding_input: request.embedding_input,
+            tool_sequence: request.record.tool_sequence.clone(),
+            tool_categories: request.record.tool_categories.clone(),
+            coverage_tags: request.record.coverage_tags.clone(),
+        })
+        .await?;
+    trace_vector_external_embedding_material(request.embedding_input_hash, response)
+}
+
 async fn run_vector_index_worker(
     state: &AppState,
     tenant: &TenantAuth,
@@ -39145,16 +39496,24 @@ async fn index_vector_metadata_from_db(
             (1.0 - duplicate_score).clamp(0.05, 0.95)
         };
         let indexed_at = Utc::now();
-        let vector_store = "trace_commons_metadata_precheck".to_string();
         let embedding_input = trace_vector_embedding_input(record);
         let embedding_input_hash = sha256_prefixed(&embedding_input);
-        let embedding_values = trace_redacted_summary_embedding(&embedding_input);
-        let embedding_sha256 = trace_redacted_summary_embedding_sha256(&embedding_values);
-        let embedding_model = TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_MODEL.to_string();
-        let embedding_dimension =
-            i32::try_from(TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION).unwrap_or(i32::MAX);
-        let embedding_version = TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_VERSION.to_string();
         let source_projection = StorageTraceVectorEntrySourceProjection::CanonicalSummary;
+        let embedding_material = trace_vector_embedding_material_for_record(
+            state,
+            tenant,
+            TraceVectorEmbeddingMaterialRequest {
+                record,
+                vector_entry_id,
+                source_projection,
+                source_hash,
+                purpose,
+                embedding_input_hash,
+                embedding_input,
+            },
+        )
+        .await
+        .context("failed to resolve trace vector embedding material")?;
         let cluster_id = record.cluster_id.clone().or_else(|| {
             let cluster_hash = neighbors
                 .first()
@@ -39168,10 +39527,10 @@ async fn index_vector_metadata_from_db(
             submission_id: record.submission_id,
             derived_id: record.derived_id,
             vector_entry_id,
-            vector_store: vector_store.clone(),
-            embedding_model: embedding_model.clone(),
-            embedding_dimension,
-            embedding_version: embedding_version.clone(),
+            vector_store: embedding_material.vector_store.clone(),
+            embedding_model: embedding_material.embedding_model.clone(),
+            embedding_dimension: embedding_material.embedding_dimension,
+            embedding_version: embedding_material.embedding_version.clone(),
             source_projection,
             source_hash: source_hash.to_string(),
             status: StorageTraceVectorEntryStatus::Active,
@@ -39195,14 +39554,14 @@ async fn index_vector_metadata_from_db(
             vector_entry_id,
             source_projection,
             source_hash: source_hash.to_string(),
-            vector_store,
-            embedding_model,
-            embedding_dimension,
-            embedding_version,
-            embedding_algorithm: Some(TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_ALGORITHM.to_string()),
-            embedding_input_hash: Some(embedding_input_hash),
-            embedding_values,
-            embedding_sha256: Some(embedding_sha256),
+            vector_store: embedding_material.vector_store,
+            embedding_model: embedding_material.embedding_model,
+            embedding_dimension: embedding_material.embedding_dimension,
+            embedding_version: embedding_material.embedding_version,
+            embedding_algorithm: embedding_material.embedding_algorithm,
+            embedding_input_hash: Some(embedding_material.embedding_input_hash),
+            embedding_values: embedding_material.embedding_values,
+            embedding_sha256: Some(embedding_material.embedding_sha256),
             canonical_summary: record.canonical_summary.clone(),
             canonical_summary_hash: record.canonical_summary_hash.clone(),
             summary_model: record.summary_model.clone(),
@@ -46929,6 +47288,9 @@ mod tests {
             benchmark_evaluator_timeout_ms: None,
             process_evaluator: None,
             process_evaluator_timeout_ms: None,
+            vector_embedder: None,
+            vector_embedder_timeout_ms: None,
+            require_external_vector_embedder: false,
             export_job_scheduler: None,
             vector_index_scheduler: None,
             ranking_calibration_max_age: None,
@@ -49389,6 +49751,12 @@ mod tests {
             serde_json::Value::Null
         );
         assert_eq!(
+            value["vector_embedder_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(value["vector_embedder_timeout_ms"], serde_json::Value::Null);
+        assert_eq!(value["vector_embedder_required"], serde_json::json!(false));
+        assert_eq!(
             value["credit_cycle_worker_step_count"],
             serde_json::json!(TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT)
         );
@@ -49455,6 +49823,8 @@ mod tests {
             "benchmark_registry_confirmation_bearer_token",
             "benchmark_evaluator_url",
             "benchmark_evaluator_bearer_token",
+            "vector_embedder_url",
+            "vector_embedder_bearer_token",
         ] {
             assert!(
                 !object.contains_key(forbidden_key),
@@ -49757,6 +50127,9 @@ mod tests {
         Arc::make_mut(&mut state).process_evaluator =
             Some(Arc::new(FakeProcessEvaluator::default()));
         Arc::make_mut(&mut state).process_evaluator_timeout_ms = Some(6_789);
+        Arc::make_mut(&mut state).vector_embedder = Some(Arc::new(FakeVectorEmbedder::default()));
+        Arc::make_mut(&mut state).vector_embedder_timeout_ms = Some(8_901);
+        Arc::make_mut(&mut state).require_external_vector_embedder = true;
 
         let response = app(state)
             .oneshot(
@@ -49798,17 +50171,27 @@ mod tests {
             value["process_evaluation_worker_run_max_limit"],
             serde_json::json!(TRACE_PROCESS_EVALUATION_WORKER_RUN_MAX_LIMIT)
         );
+        assert_eq!(value["vector_embedder_configured"], serde_json::json!(true));
+        assert_eq!(
+            value["vector_embedder_timeout_ms"],
+            serde_json::json!(8_901)
+        );
+        assert_eq!(value["vector_embedder_required"], serde_json::json!(true));
 
         let object = value.as_object().expect("status response is object");
         assert!(!object.contains_key("benchmark_evaluator_url"));
         assert!(!object.contains_key("benchmark_evaluator_bearer_token"));
         assert!(!object.contains_key("process_evaluator_url"));
         assert!(!object.contains_key("process_evaluator_bearer_token"));
+        assert!(!object.contains_key("vector_embedder_url"));
+        assert!(!object.contains_key("vector_embedder_bearer_token"));
         let body_text = std::str::from_utf8(&body).expect("body is utf8");
         assert!(!body_text.contains(TRACE_COMMONS_BENCHMARK_EVALUATOR_URL));
         assert!(!body_text.contains(TRACE_COMMONS_BENCHMARK_EVALUATOR_BEARER_TOKEN));
         assert!(!body_text.contains(TRACE_COMMONS_PROCESS_EVALUATOR_URL));
         assert!(!body_text.contains(TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN));
+        assert!(!body_text.contains(TRACE_COMMONS_VECTOR_EMBEDDER_URL));
+        assert!(!body_text.contains(TRACE_COMMONS_VECTOR_EMBEDDER_BEARER_TOKEN));
     }
 
     #[tokio::test]
@@ -57733,6 +58116,9 @@ mod tests {
             benchmark_evaluator_timeout_ms: None,
             process_evaluator: None,
             process_evaluator_timeout_ms: None,
+            vector_embedder: None,
+            vector_embedder_timeout_ms: None,
+            require_external_vector_embedder: false,
             export_job_scheduler: None,
             vector_index_scheduler: None,
             ranking_calibration_max_age: None,
@@ -60862,6 +61248,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vector_index_worker_uses_configured_external_embedder() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        Arc::make_mut(&mut state).vector_embedder = Some(Arc::new(FakeVectorEmbedder {
+            calls: calls.clone(),
+            ..FakeVectorEmbedder::default()
+        }));
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("vector source submission mirrors into DB");
+
+        let Json(response) = vector_index_handler(
+            State(state.clone()),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceVectorIndexRequest {
+                purpose: Some("external vector embedding smoke".to_string()),
+                dry_run: false,
+                limit: Some(1),
+            }),
+        )
+        .await
+        .expect("vector worker uses configured embedder");
+        assert_eq!(response.vector_entries_indexed, 1);
+
+        {
+            let calls = calls.lock().expect("fake vector embedder calls lock");
+            assert_eq!(calls.len(), 1);
+            let call = calls.first().expect("vector embedder call exists");
+            assert_eq!(call.tenant_storage_ref, tenant_storage_ref("tenant-a"));
+            assert_eq!(
+                call.source_projection,
+                StorageTraceVectorEntrySourceProjection::CanonicalSummary
+            );
+            assert_eq!(
+                call.purpose_hash,
+                sha256_prefixed("external vector embedding smoke")
+            );
+            assert!(call.embedding_input.contains("canonical_summary:"));
+            let call_json = serde_json::to_string(call).expect("vector embedder call serializes");
+            assert!(!call_json.contains("submission_id"));
+            assert!(!call_json.contains("trace_id"));
+        }
+
+        let vector_entries = backend
+            .list_trace_vector_entries("tenant-a")
+            .await
+            .expect("DB vector entries read");
+        assert_eq!(vector_entries.len(), 1);
+        assert_eq!(
+            vector_entries[0].vector_store,
+            "private-vector-adapter".to_string()
+        );
+        assert_eq!(
+            vector_entries[0].embedding_model,
+            "private-redacted-summary-embedder-v1"
+        );
+        assert_eq!(vector_entries[0].embedding_dimension, 4);
+        assert_eq!(vector_entries[0].embedding_version, "2026-05-05");
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn vector_index_worker_requires_configured_external_embedder() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).require_external_vector_embedder = true;
+
+        let error = vector_index_handler(
+            State(state),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceVectorIndexRequest {
+                purpose: Some("external vector embedding required".to_string()),
+                dry_run: true,
+                limit: Some(1),
+            }),
+        )
+        .await
+        .expect_err("external vector embedder requirement fails closed");
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(error.1.0.error.contains(TRACE_COMMONS_VECTOR_EMBEDDER_URL));
+    }
+
+    #[tokio::test]
     async fn vector_index_worker_missing_db_fails_before_retention_side_effects() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -63756,6 +64251,46 @@ mod tests {
             self.calls
                 .lock()
                 .expect("fake process evaluator calls lock")
+                .push(request);
+            Ok(self.response.clone())
+        }
+    }
+
+    #[derive(Clone)]
+    struct FakeVectorEmbedder {
+        calls: Arc<std::sync::Mutex<Vec<TraceVectorEmbeddingRequest>>>,
+        response: TraceVectorEmbeddingResponse,
+        failure: Option<String>,
+    }
+
+    impl Default for FakeVectorEmbedder {
+        fn default() -> Self {
+            Self {
+                calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+                response: TraceVectorEmbeddingResponse {
+                    embedding_model: "private-redacted-summary-embedder-v1".to_string(),
+                    embedding_version: "2026-05-05".to_string(),
+                    embedding_values: vec![1.0, 0.0, 0.0, 0.0],
+                    embedding_algorithm: Some("private-test-embedding".to_string()),
+                    vector_store: Some("private-vector-adapter".to_string()),
+                },
+                failure: None,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TraceVectorEmbedder for FakeVectorEmbedder {
+        async fn embed(
+            &self,
+            request: TraceVectorEmbeddingRequest,
+        ) -> anyhow::Result<TraceVectorEmbeddingResponse> {
+            if let Some(failure) = &self.failure {
+                anyhow::bail!("{failure}");
+            }
+            self.calls
+                .lock()
+                .expect("fake vector embedder calls lock")
                 .push(request);
             Ok(self.response.clone())
         }
