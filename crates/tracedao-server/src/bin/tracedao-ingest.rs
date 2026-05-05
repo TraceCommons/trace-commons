@@ -2940,6 +2940,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(active_learning_review_queue_handler),
         )
         .route(
+            "/v1/review/batch-decisions",
+            post(review_batch_decision_handler),
+        )
+        .route(
             "/v1/review/{submission_id}/decision",
             post(review_decision_handler),
         )
@@ -6406,6 +6410,16 @@ struct TraceReviewDecisionRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct TraceReviewBatchDecisionRequest {
+    submission_ids: Vec<Uuid>,
+    decision: TraceReviewDecision,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    credit_points_pending: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
 struct TraceReviewLeaseRequest {
     #[serde(default)]
     lease_ttl_seconds: Option<i64>,
@@ -6712,6 +6726,64 @@ impl TraceReviewLeaseBatchResponse {
             requested_limit,
             claim_count: claimed.len(),
             claimed,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct TraceReviewBatchDecisionResponse {
+    requested_count: usize,
+    decision_count: usize,
+    failed_count: usize,
+    decisions: Vec<TraceReviewBatchDecisionItem>,
+}
+
+impl TraceReviewBatchDecisionResponse {
+    fn new(decisions: Vec<TraceReviewBatchDecisionItem>) -> Self {
+        let decision_count = decisions
+            .iter()
+            .filter(|decision| decision.status == "decided")
+            .count();
+        let failed_count = decisions.len().saturating_sub(decision_count);
+        Self {
+            requested_count: decisions.len(),
+            decision_count,
+            failed_count,
+            decisions,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct TraceReviewBatchDecisionItem {
+    submission_id: Uuid,
+    status: &'static str,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    receipt: Option<TraceSubmissionReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error_status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl TraceReviewBatchDecisionItem {
+    fn decided(submission_id: Uuid, receipt: TraceSubmissionReceipt) -> Self {
+        Self {
+            submission_id,
+            status: "decided",
+            receipt: Some(receipt),
+            error_status: None,
+            error: None,
+        }
+    }
+
+    fn failed(submission_id: Uuid, status: StatusCode, error: String) -> Self {
+        Self {
+            submission_id,
+            status: "failed",
+            receipt: None,
+            error_status: Some(status.as_u16()),
+            error: Some(error),
         }
     }
 }
@@ -19871,9 +19943,49 @@ async fn review_decision_handler(
 ) -> ApiResult<Json<TraceSubmissionReceipt>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(&tenant)?;
-    let reason = body
-        .reason
-        .as_deref()
+    let reason = validate_review_decision_reason(body.reason.as_deref())?;
+    let receipt =
+        apply_review_decision(state.as_ref(), &tenant, submission_id, &body, &reason).await?;
+    Ok(Json(receipt))
+}
+
+async fn review_batch_decision_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceReviewBatchDecisionRequest>,
+) -> ApiResult<Json<TraceReviewBatchDecisionResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_reviewer(&tenant)?;
+    validate_review_batch_decision_submission_ids(&body.submission_ids)?;
+    let reason = validate_review_decision_reason(body.reason.as_deref())?;
+    let decision = TraceReviewDecisionRequest {
+        decision: body.decision,
+        reason: Some(reason.clone()),
+        credit_points_pending: body.credit_points_pending,
+    };
+    let mut decisions = Vec::with_capacity(body.submission_ids.len());
+    for submission_id in body.submission_ids {
+        match apply_review_decision(state.as_ref(), &tenant, submission_id, &decision, &reason)
+            .await
+        {
+            Ok(receipt) => decisions.push(TraceReviewBatchDecisionItem::decided(
+                submission_id,
+                receipt,
+            )),
+            Err((status, Json(error))) => {
+                decisions.push(TraceReviewBatchDecisionItem::failed(
+                    submission_id,
+                    status,
+                    error.error,
+                ));
+            }
+        }
+    }
+    Ok(Json(TraceReviewBatchDecisionResponse::new(decisions)))
+}
+
+fn validate_review_decision_reason(reason: Option<&str>) -> ApiResult<String> {
+    let reason = reason
         .map(str::trim)
         .filter(|reason| !reason.is_empty())
         .ok_or_else(|| {
@@ -19883,38 +19995,67 @@ async fn review_decision_handler(
             )
         })?
         .to_string();
+    Ok(reason)
+}
+
+fn validate_review_batch_decision_submission_ids(submission_ids: &[Uuid]) -> ApiResult<()> {
+    if submission_ids.is_empty() || submission_ids.len() > 50 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "review batch decisions require between 1 and 50 submission ids",
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    if submission_ids
+        .iter()
+        .any(|submission_id| !seen.insert(*submission_id))
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "review batch decisions require unique submission ids",
+        ));
+    }
+    Ok(())
+}
+
+async fn apply_review_decision(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+    body: &TraceReviewDecisionRequest,
+    reason: &str,
+) -> ApiResult<TraceSubmissionReceipt> {
     let ReviewDecisionRecord {
         mut record,
         mut canonical_summary_hash,
         file_record_available,
         allow_file_body_fallback,
-    } = read_review_decision_record(state.as_ref(), &tenant, submission_id)
+    } = read_review_decision_record(state, tenant, submission_id)
         .await
         .map_err(internal_error)?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
     let now = Utc::now();
-    ensure_review_decision_eligible(state.as_ref(), &record, body.decision, now)?;
-    if review_lease_held_by_other(&record, &tenant, now) {
+    ensure_review_decision_eligible(state, &record, body.decision, now)?;
+    if review_lease_held_by_other(&record, tenant, now) {
         return Err(api_error(
             StatusCode::CONFLICT,
             "trace review lease is held by another reviewer",
         ));
     }
     let privileged_policy =
-        tenant_privileged_action_policy_for_request(state.as_ref(), &tenant, "review decision")
-            .await?;
+        tenant_privileged_action_policy_for_request(state, tenant, "review decision").await?;
     ensure_record_matches_privileged_action_policy_abac(
         &record,
-        &tenant,
+        tenant,
         privileged_policy.as_ref(),
         "review decision",
     )?;
     let mut envelope = read_envelope_for_review_decision(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         &record,
         allow_file_body_fallback,
-        Some(&reason),
+        Some(reason),
     )
     .await
     .map_err(internal_error)?
@@ -19933,7 +20074,7 @@ async fn review_decision_handler(
                 vec!["Approved after privacy review for the private redacted corpus.".to_string()];
             envelope.value_card.user_visible_explanation = envelope.value.explanation.clone();
             let stored = store_envelope(
-                &state,
+                state,
                 &tenant.tenant_id,
                 TraceCorpusStatus::Accepted,
                 "reviewed-envelope",
@@ -19953,7 +20094,7 @@ async fn review_decision_handler(
                 vec!["Rejected during privacy or quality review; no credit awarded.".to_string()];
             envelope.value_card.user_visible_explanation = envelope.value.explanation.clone();
             let stored = store_envelope(
-                &state,
+                state,
                 &tenant.tenant_id,
                 TraceCorpusStatus::Rejected,
                 "reviewed-envelope",
@@ -19979,24 +20120,19 @@ async fn review_decision_handler(
     append_audit_event(
         &state.root,
         &tenant.tenant_id,
-        TraceCommonsAuditEvent::review_decision(
-            &tenant,
-            submission_id,
-            record.status,
-            Some(reason.as_str()),
-        ),
+        TraceCommonsAuditEvent::review_decision(tenant, submission_id, record.status, Some(reason)),
     )
     .map_err(internal_error)?;
     let mirror_result =
-        mirror_review_decision_to_db(&state, &tenant, &record, &envelope, canonical_summary_hash)
+        mirror_review_decision_to_db(state, tenant, &record, &envelope, canonical_summary_hash)
             .await;
     if let Err(error) = &mirror_result {
         tracing::warn!(%error, %submission_id, "Trace Commons DB dual-write review mirror failed");
     }
-    enforce_db_mirror_write_result(state.as_ref(), "review decision", mirror_result)
+    enforce_db_mirror_write_result(state, "review decision", mirror_result)
         .map_err(internal_error)?;
 
-    Ok(Json(receipt_from_record(&record)))
+    Ok(receipt_from_record(&record))
 }
 
 fn ensure_review_decision_eligible(
@@ -49751,6 +49887,85 @@ mod tests {
         .await
         .expect_err("contributor cannot export datasets");
         assert_eq!(contributor_export_error.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn reviewer_batch_decision_route_applies_bounded_common_decision() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let first = sample_envelope().await;
+        let first_id = first.submission_id;
+        let second = sample_envelope().await;
+        let second_id = second.submission_id;
+
+        let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
+            .await
+            .expect("first submission succeeds");
+        let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(second))
+            .await
+            .expect("second submission succeeds");
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/review/batch-decisions")
+                    .header(AUTHORIZATION, "Bearer review-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "submission_ids": [first_id, second_id],
+                            "decision": "approve",
+                            "reason": "batch redaction review",
+                            "credit_points_pending": 1.5
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("batch review response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("batch review response parses");
+        assert_eq!(value["requested_count"], serde_json::json!(2));
+        assert_eq!(value["decision_count"], serde_json::json!(2));
+        assert_eq!(value["failed_count"], serde_json::json!(0));
+        let decisions = value["decisions"].as_array().expect("decisions array");
+        assert_eq!(decisions.len(), 2);
+        assert_eq!(decisions[0]["status"], serde_json::json!("decided"));
+        assert_eq!(decisions[1]["status"], serde_json::json!("decided"));
+        assert_eq!(
+            decisions[0]["receipt"]["credit_points_pending"],
+            serde_json::json!(1.5)
+        );
+        assert_eq!(
+            decisions[1]["receipt"]["credit_points_pending"],
+            serde_json::json!(1.5)
+        );
+
+        let first_record = read_submission_record(temp.path(), "tenant-a", first_id)
+            .expect("first record reads")
+            .expect("first record exists");
+        let second_record = read_submission_record(temp.path(), "tenant-a", second_id)
+            .expect("second record reads")
+            .expect("second record exists");
+        assert_eq!(first_record.status, TraceCorpusStatus::Accepted);
+        assert_eq!(second_record.status, TraceCorpusStatus::Accepted);
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        assert_eq!(
+            audit_events
+                .iter()
+                .filter(|event| event.kind == "review_decision")
+                .count(),
+            2
+        );
     }
 
     #[tokio::test]
