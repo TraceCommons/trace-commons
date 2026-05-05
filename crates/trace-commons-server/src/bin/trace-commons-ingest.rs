@@ -6249,6 +6249,7 @@ async fn submission_status_handler(
 
 async fn analytics_handler(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<TraceAnalyticsQuery>,
     headers: HeaderMap,
 ) -> ApiResult<Json<TraceCommonsAnalyticsResponse>> {
     let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
@@ -6263,6 +6264,18 @@ async fn analytics_handler(
         derived,
     );
     response.apply_min_cell_count(state.analytics_min_cell_count);
+    if query.requests_broad_release()? && !response.privacy_budget.broad_release_ready {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            format!(
+                "analytics broad release is blocked by privacy budget: {}",
+                response
+                    .privacy_budget
+                    .broad_release_blocking_reasons
+                    .join(",")
+            ),
+        ));
+    }
     append_audit_event_with_db_mirror(
         state.as_ref(),
         tenant.auth(),
@@ -6273,6 +6286,28 @@ async fn analytics_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TraceAnalyticsQuery {
+    #[serde(default)]
+    release_scope: Option<String>,
+}
+
+impl TraceAnalyticsQuery {
+    fn requests_broad_release(&self) -> ApiResult<bool> {
+        let Some(release_scope) = self.release_scope.as_deref() else {
+            return Ok(false);
+        };
+        match release_scope.trim().to_ascii_lowercase().as_str() {
+            "" | "operator" | "reviewer" | "admin" => Ok(false),
+            "broad" | "public" => Ok(true),
+            _ => Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "analytics release_scope must be operator or broad",
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -50008,25 +50043,34 @@ mod tests {
             .expect("stored envelope reads");
         assert!(stored.contains("\"duplicate_score\": 1.0"));
 
-        let contributor_analytics_error =
-            analytics_handler(State(state.clone()), auth_headers("token-a"))
-                .await
-                .expect_err("contributor cannot access tenant-wide analytics");
+        let contributor_analytics_error = analytics_handler(
+            State(state.clone()),
+            Query(TraceAnalyticsQuery::default()),
+            auth_headers("token-a"),
+        )
+        .await
+        .expect_err("contributor cannot access tenant-wide analytics");
         assert_eq!(contributor_analytics_error.0, StatusCode::FORBIDDEN);
 
-        let Json(analytics) =
-            analytics_handler(State(state.clone()), auth_headers("review-token-a"))
-                .await
-                .expect("analytics succeeds");
+        let Json(analytics) = analytics_handler(
+            State(state.clone()),
+            Query(TraceAnalyticsQuery::default()),
+            auth_headers("review-token-a"),
+        )
+        .await
+        .expect("analytics succeeds");
         assert_eq!(analytics.submissions_total, 3);
         assert_eq!(analytics.duplicate_groups, 1);
         assert_eq!(analytics.by_privacy_risk.get("medium"), Some(&3));
         let mut suppressed_state = test_state(temp.path().to_path_buf());
         Arc::make_mut(&mut suppressed_state).analytics_min_cell_count = 4;
-        let Json(suppressed_analytics) =
-            analytics_handler(State(suppressed_state), auth_headers("review-token-a"))
-                .await
-                .expect("analytics suppression succeeds");
+        let Json(suppressed_analytics) = analytics_handler(
+            State(suppressed_state),
+            Query(TraceAnalyticsQuery::default()),
+            auth_headers("review-token-a"),
+        )
+        .await
+        .expect("analytics suppression succeeds");
         assert_eq!(suppressed_analytics.submissions_total, 3);
         assert_eq!(suppressed_analytics.min_cell_count, Some(4));
         assert!(suppressed_analytics.suppressed_cell_count > 0);
@@ -50059,6 +50103,56 @@ mod tests {
                     .is_some_and(|reason| reason.contains("surface=analytics_summary"))
                 && event.export_count == Some(3)
         }));
+    }
+
+    #[tokio::test]
+    async fn analytics_broad_release_query_fails_closed_when_privacy_budget_blocks() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).analytics_min_cell_count = 4;
+        let envelope = sample_envelope().await;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/analytics/summary?release_scope=broad")
+                    .header(AUTHORIZATION, "Bearer review-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("analytics response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json parses");
+        assert!(
+            value["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("analytics broad release is blocked"))
+        );
+        assert!(
+            value["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("small_cells_suppressed"))
+        );
+        assert!(
+            !value["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("Please inspect"))
+        );
     }
 
     #[tokio::test]
@@ -50896,10 +50990,13 @@ mod tests {
                 .any(|tag| tag == "process_verification:pass")
         );
 
-        let Json(analytics) =
-            analytics_handler(State(state.clone()), auth_headers("review-token-a"))
-                .await
-                .expect("reviewer analytics reads process evaluation aggregates");
+        let Json(analytics) = analytics_handler(
+            State(state.clone()),
+            Query(TraceAnalyticsQuery::default()),
+            auth_headers("review-token-a"),
+        )
+        .await
+        .expect("reviewer analytics reads process evaluation aggregates");
         assert_eq!(analytics.process_evaluation.evaluated_traces, 1);
         assert_eq!(
             analytics
