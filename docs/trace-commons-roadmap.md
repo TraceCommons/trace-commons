@@ -250,7 +250,7 @@ Exit criteria:
 
 ### Phase 5: Production Retention and Revocation Propagation
 
-Status: partial metadata invalidation exists; full worker/object/vector/export propagation remains future work.
+Status: partial metadata invalidation, exact delayed-credit reversal, vector/export row invalidation, and service-owned local artifact deletion now exist; cloud remote payload deletion, broader benchmark-settlement coverage, and production hardening remain future work.
 
 Scope:
 
