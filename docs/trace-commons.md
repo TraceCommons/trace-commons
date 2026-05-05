@@ -777,6 +777,8 @@ deletion and receipt recording.
 
 DB audit hash-chain drift is reported separately in `db_audit_hash_chain_failures` for invalid hash format, genesis/predecessor mismatch, and canonical-payload hash mismatch. It is also included in `blocking_gaps`, so clean reconciliation cannot pass when DB audit rows have matching IDs but broken hash continuity or payload hashes.
 
+Reconciliation also compares a latest bounded audit-reader sample from the file log and DB mirror. Projection drift is reported as `audit_reader_sample_parity=failed` with only counts, event ids, and projection/error hashes in `audit_reader_sample_failures`, so operators can catch legacy DB audit rows whose ids and counts line up but whose reader-visible kind, status, actor, reason hash, export, or hash-chain fields do not.
+
 For credit settlement and benchmark registry cutover, the same maintenance run also backfills and reconciles utility attestations, credit settlement batches, credit holds, NEAR credit outbox rows/status, and benchmark registry outbox rows/status. Dirty gaps or status/release/receipt drift in any of those families are promotion blockers when `TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN=true` is enabled.
 
 Retention legal holds are service-configured by policy ID, not by trace submitters. A trace envelope can suggest a retention policy, but only the authenticated service configuration decides whether that policy is under legal hold.

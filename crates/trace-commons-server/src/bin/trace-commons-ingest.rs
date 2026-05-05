@@ -314,6 +314,7 @@ const TRACE_PROCESS_EVALUATION_WORKER_RUN_DEFAULT_LIMIT: usize = 25;
 const TRACE_PROCESS_EVALUATION_WORKER_RUN_MAX_LIMIT: usize = 100;
 const TRACE_RANKING_WORKER_RUN_STALE_AFTER_HOURS: i64 = 1;
 const TRACE_BACKFILL_FAILURE_DETAIL_LIMIT: usize = 20;
+const TRACE_DB_AUDIT_RECONCILIATION_SAMPLE_LIMIT: usize = 16;
 const TRACE_REVIEW_DUE_AFTER_HOURS: i64 = 24;
 const TRACE_REVIEW_OVERDUE_AFTER_HOURS: i64 = 72;
 const TRACE_REVIEW_HIGH_RISK_URGENT_AFTER_HOURS: i64 = 4;
@@ -33492,6 +33493,56 @@ async fn reconcile_db_mirror(
         db_metadata_view.derived.clone(),
     );
     let db_audit_events_for_reader = read_audit_events_from_db(state, tenant).await;
+    let file_audit_sample = read_recent_audit_events_from_file(
+        &state.root,
+        &tenant.tenant_id,
+        TRACE_DB_AUDIT_RECONCILIATION_SAMPLE_LIMIT,
+    )?;
+    let file_audit_sample_projection = audit_event_reader_projection(&file_audit_sample);
+    let mut audit_reader_sample_failures = Vec::new();
+    let audit_reader_sample_parity_ok = match db
+        .list_recent_trace_audit_events(
+            &tenant.tenant_id,
+            TRACE_DB_AUDIT_RECONCILIATION_SAMPLE_LIMIT,
+        )
+        .await
+    {
+        Ok(db_sample) => {
+            let db_sample_row_count = db_sample.len();
+            let (db_audit_sample_projection, db_projection_error_hashes) =
+                storage_audit_event_reader_projection(&tenant.tenant_id, db_sample);
+            if !db_projection_error_hashes.is_empty() {
+                audit_reader_sample_failures.push(format!(
+                    "file_sample={} db_sample={} db_projection_error_hashes={}",
+                    file_audit_sample_projection.len(),
+                    db_sample_row_count,
+                    db_projection_error_hashes.join(",")
+                ));
+                false
+            } else if file_audit_sample_projection == db_audit_sample_projection {
+                true
+            } else {
+                audit_reader_sample_failures.push(format!(
+                    "file_sample={} db_sample={} file_latest_event_id={} db_latest_event_id={} file_projection_hash={} db_projection_hash={}",
+                    file_audit_sample_projection.len(),
+                    db_audit_sample_projection.len(),
+                    latest_audit_projection_event_id(&file_audit_sample_projection),
+                    latest_audit_projection_event_id(&db_audit_sample_projection),
+                    audit_reader_projection_digest(&file_audit_sample_projection),
+                    audit_reader_projection_digest(&db_audit_sample_projection)
+                ));
+                false
+            }
+        }
+        Err(error) => {
+            audit_reader_sample_failures.push(format!(
+                "file_sample={} db_sample=unavailable db_error_hash={}",
+                file_audit_sample_projection.len(),
+                sha256_prefixed(&error.to_string())
+            ));
+            false
+        }
+    };
     let file_export_manifest_projection = export_manifest_reader_projection(
         file_replay_export_manifests
             .iter()
@@ -33719,6 +33770,8 @@ async fn reconcile_db_mirror(
         reviewer_metadata_reader_parity_ok,
         analytics_reader_parity_ok,
         audit_reader_parity_ok,
+        audit_reader_sample_parity_ok,
+        audit_reader_sample_failures,
         replay_export_manifest_reader_parity_ok,
         db_reader_parity_failures,
         active_vector_entries,
@@ -36158,6 +36211,8 @@ struct TraceDbReconciliationReport {
     reviewer_metadata_reader_parity_ok: bool,
     analytics_reader_parity_ok: bool,
     audit_reader_parity_ok: bool,
+    audit_reader_sample_parity_ok: bool,
+    audit_reader_sample_failures: Vec<String>,
     replay_export_manifest_reader_parity_ok: bool,
     db_reader_parity_failures: Vec<String>,
     active_vector_entries: usize,
@@ -36478,6 +36533,16 @@ impl TraceDbReconciliationReport {
         );
         push_gap_bool(
             &mut gaps,
+            "audit_reader_sample_parity",
+            self.audit_reader_sample_parity_ok,
+        );
+        push_gap_count(
+            &mut gaps,
+            "audit_reader_sample_failures",
+            self.audit_reader_sample_failures.len(),
+        );
+        push_gap_bool(
+            &mut gaps,
             "replay_export_manifest_reader_parity",
             self.replay_export_manifest_reader_parity_ok,
         );
@@ -36639,6 +36704,22 @@ struct TraceReaderExportManifestProjection {
     deleted_at_millis: Option<i64>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct TraceReaderAuditEventProjection {
+    event_id: Uuid,
+    kind: String,
+    submission_id: Uuid,
+    status: Option<TraceCorpusStatus>,
+    actor_role: Option<TokenRole>,
+    actor_principal_hash: Option<String>,
+    reason_hash: Option<String>,
+    export_count: Option<usize>,
+    export_id: Option<Uuid>,
+    decision_inputs_hash: Option<String>,
+    previous_event_hash: Option<String>,
+    event_hash: Option<String>,
+}
+
 fn contributor_credit_view_from_file_records(
     tenant: &TenantAuth,
     records: &[TraceCommonsSubmissionRecord],
@@ -36791,6 +36872,55 @@ fn export_manifest_reader_projection(
             )
         })
         .collect()
+}
+
+fn audit_event_reader_projection(
+    events: &[TraceCommonsAuditEvent],
+) -> Vec<TraceReaderAuditEventProjection> {
+    events.iter().map(audit_event_projection).collect()
+}
+
+fn storage_audit_event_reader_projection(
+    expected_tenant_id: &str,
+    events: Vec<StorageTraceAuditEventRecord>,
+) -> (Vec<TraceReaderAuditEventProjection>, Vec<String>) {
+    let mut projections = Vec::with_capacity(events.len());
+    let mut error_hashes = Vec::new();
+    for event in events {
+        match trace_commons_audit_event_from_storage(expected_tenant_id, event) {
+            Ok(event) => projections.push(audit_event_projection(&event)),
+            Err(error) => error_hashes.push(sha256_prefixed(&error.to_string())),
+        }
+    }
+    (projections, error_hashes)
+}
+
+fn audit_event_projection(event: &TraceCommonsAuditEvent) -> TraceReaderAuditEventProjection {
+    TraceReaderAuditEventProjection {
+        event_id: event.event_id,
+        kind: event.kind.clone(),
+        submission_id: event.submission_id,
+        status: event.status,
+        actor_role: event.actor_role,
+        actor_principal_hash: event.actor_principal_ref.as_deref().map(sha256_prefixed),
+        reason_hash: event.reason.as_deref().map(sha256_prefixed),
+        export_count: event.export_count,
+        export_id: event.export_id,
+        decision_inputs_hash: event.decision_inputs_hash.clone(),
+        previous_event_hash: event.previous_event_hash.clone(),
+        event_hash: event.event_hash.clone(),
+    }
+}
+
+fn latest_audit_projection_event_id(projection: &[TraceReaderAuditEventProjection]) -> String {
+    projection
+        .first()
+        .map(|event| event.event_id.to_string())
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn audit_reader_projection_digest(projection: &[TraceReaderAuditEventProjection]) -> String {
+    sha256_prefixed(&format!("{projection:?}"))
 }
 
 fn record_reader_parity(
@@ -43304,6 +43434,7 @@ mod tests {
             reviewer_metadata_reader_parity_ok: true,
             analytics_reader_parity_ok: true,
             audit_reader_parity_ok: true,
+            audit_reader_sample_parity_ok: true,
             replay_export_manifest_reader_parity_ok: true,
             ..TraceDbReconciliationReport::default()
         };
@@ -43389,6 +43520,7 @@ mod tests {
             reviewer_metadata_reader_parity_ok: true,
             analytics_reader_parity_ok: true,
             audit_reader_parity_ok: true,
+            audit_reader_sample_parity_ok: true,
             replay_export_manifest_reader_parity_ok: true,
             ..TraceDbReconciliationReport::default()
         };
@@ -47270,6 +47402,91 @@ mod tests {
                 .blocking_gaps
                 .iter()
                 .any(|gap| { gap == "db_audit_hash_chain_failures=1" })
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn maintenance_reconciliation_samples_audit_reader_projection_drift() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        let mut auth = test_reviewer_auth("tenant-a");
+        auth.principal_ref = principal_storage_ref("review-token-a");
+        let file_event = append_audit_event(
+            temp.path(),
+            "tenant-a",
+            TraceCommonsAuditEvent::read(&auth, "audit_events", 1),
+        )
+        .expect("file audit event writes");
+        backend
+            .append_trace_audit_event(StorageTraceAuditEventWrite {
+                audit_event_id: file_event.event_id,
+                tenant_id: "tenant-a".to_string(),
+                actor_principal_ref: file_event
+                    .actor_principal_ref
+                    .clone()
+                    .expect("file event actor exists"),
+                actor_role: "reviewer".to_string(),
+                action: StorageTraceAuditAction::Revoke,
+                reason: Some("db legacy mismatched audit projection".to_string()),
+                request_id: None,
+                submission_id: None,
+                object_ref_id: None,
+                export_manifest_id: None,
+                decision_inputs_hash: None,
+                previous_event_hash: file_event.previous_event_hash.clone(),
+                event_hash: file_event.event_hash.clone(),
+                canonical_event_json: None,
+                metadata: StorageTraceAuditSafeMetadata::Empty,
+            })
+            .await
+            .expect("legacy DB audit row writes");
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("audit_sample_reconciliation".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: true,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("maintenance reports audit sample projection drift");
+
+        let report = response
+            .db_reconciliation
+            .expect("reconciliation report exists");
+        assert!(!report.audit_reader_sample_parity_ok);
+        assert!(report.audit_reader_sample_failures.iter().any(|failure| {
+            failure.contains("file_sample=2") && failure.contains("db_sample=2")
+        }));
+        assert!(
+            report
+                .blocking_gaps
+                .iter()
+                .any(|gap| { gap == "audit_reader_sample_parity=failed" })
         );
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
