@@ -1916,6 +1916,12 @@ pub trait TraceCorpusStore: Send + Sync {
         tenant_id: &str,
     ) -> Result<Vec<TraceAuditEventRecord>, DatabaseError>;
 
+    async fn list_recent_trace_audit_events(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+    ) -> Result<Vec<TraceAuditEventRecord>, DatabaseError>;
+
     async fn append_trace_credit_event(
         &self,
         credit_event: TraceCreditEventWrite,
