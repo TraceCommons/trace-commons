@@ -3372,6 +3372,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(credit_holds_handler).post(credit_hold_handler),
         )
         .route(
+            "/v1/admin/credit-holds/{hold_id}/release",
+            post(credit_hold_release_handler),
+        )
+        .route(
             "/v1/admin/credit-attestations",
             get(credit_attestations_handler),
         )
@@ -8003,6 +8007,11 @@ struct TraceCreditHoldRequest {
     reason_detail: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceCreditHoldReleaseRequest {
+    reason_detail: String,
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct TraceCreditRiskSummaryQuery {
     limit: Option<usize>,
@@ -11171,6 +11180,37 @@ async fn credit_holds_handler(
         .await
         .map_err(internal_error)?;
     Ok(Json(holds))
+}
+
+async fn credit_hold_release_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(hold_id): AxumPath<Uuid>,
+    Json(body): Json<TraceCreditHoldReleaseRequest>,
+) -> ApiResult<Json<TraceCreditHoldRecord>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let reason_detail = body.reason_detail.trim();
+    if reason_detail.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit hold release requires reason_detail",
+        ));
+    }
+    let mut hold = read_credit_holds_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?
+        .into_iter()
+        .find(|hold| hold.hold_id == hold_id)
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "credit hold not found"))?;
+    if hold.released_at.is_some() {
+        return Ok(Json(hold));
+    }
+    hold.released_at = Some(Utc::now());
+    append_credit_hold_with_db_mirror(state.as_ref(), &tenant, &hold)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(hold))
 }
 
 async fn credit_attestations_handler(
@@ -37671,12 +37711,36 @@ fn read_all_credit_holds(
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let mut holds: Vec<TraceCreditHoldRecord> = read_jsonl_records(&path, "credit hold")?;
+    let holds: Vec<TraceCreditHoldRecord> = read_jsonl_records(&path, "credit hold")?;
+    let mut latest_holds = BTreeMap::<Uuid, TraceCreditHoldRecord>::new();
     for hold in &holds {
         ensure_credit_hold_tenant(hold, tenant_id)?;
+        latest_holds
+            .entry(hold.hold_id)
+            .and_modify(|current| {
+                if credit_hold_record_is_newer(hold, current) {
+                    *current = hold.clone();
+                }
+            })
+            .or_insert_with(|| hold.clone());
     }
+    let mut holds = latest_holds.into_values().collect::<Vec<_>>();
     holds.sort_by_key(|hold| hold.created_at);
     Ok(holds)
+}
+
+fn credit_hold_record_is_newer(
+    candidate: &TraceCreditHoldRecord,
+    current: &TraceCreditHoldRecord,
+) -> bool {
+    match (candidate.released_at, current.released_at) {
+        (Some(candidate_released_at), Some(current_released_at)) => {
+            candidate_released_at >= current_released_at
+        }
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (None, None) => candidate.created_at >= current.created_at,
+    }
 }
 
 fn ensure_credit_hold_tenant(hold: &TraceCreditHoldRecord, tenant_id: &str) -> anyhow::Result<()> {
@@ -74608,6 +74672,141 @@ mod tests {
         assert_eq!(credit.credit_points_held, 1.25);
         assert_eq!(credit.credit_points_settled, 0.0);
         assert_eq!(credit.credit_points_total, 0.0);
+    }
+
+    #[tokio::test]
+    async fn admin_credit_hold_release_unblocks_settlement() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.25,
+                reason: Some("training utility hold cleared later".to_string()),
+                external_ref: Some("lab-attestation:release-ready".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+
+        let Json(hold) = credit_hold_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditHoldRequest {
+                credit_account_ref: event.auth_principal_ref.clone(),
+                reason: StorageTraceCreditHoldReason::AttestationDispute,
+                reason_detail: "lab attestation release investigation".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can place credit hold");
+
+        let contributor_release_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/admin/credit-holds/{}/release", hold.hold_id))
+                    .header(AUTHORIZATION, "Bearer token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "reason_detail": "contributor cannot release this hold"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("contributor release request builds"),
+            )
+            .await
+            .expect("contributor release response");
+        assert_eq!(contributor_release_response.status(), StatusCode::FORBIDDEN);
+
+        let release_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/admin/credit-holds/{}/release", hold.hold_id))
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "reason_detail": "frontier lab attestation was verified"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("admin release request builds"),
+            )
+            .await
+            .expect("admin release response");
+        assert_eq!(release_response.status(), StatusCode::OK);
+        let release_body = axum::body::to_bytes(release_response.into_body(), 8192)
+            .await
+            .expect("release body reads");
+        let released_hold: TraceCreditHoldRecord =
+            serde_json::from_slice(&release_body).expect("released hold json parses");
+        assert_eq!(released_hold.hold_id, hold.hold_id);
+        assert!(released_hold.released_at.is_some());
+        let release_body_text = std::str::from_utf8(&release_body).expect("release body is utf8");
+        assert!(!release_body_text.contains("frontier lab attestation was verified"));
+        assert!(!release_body_text.contains("admin-token-a"));
+
+        let Json(holds) = credit_holds_handler(State(state.clone()), auth_headers("admin-token-a"))
+            .await
+            .expect("admin can list current credit holds");
+        assert_eq!(holds.len(), 1);
+        assert_eq!(holds[0].hold_id, hold.hold_id);
+        assert!(holds[0].released_at.is_some());
+
+        let Json(settlement) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "settle released hold account".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("released hold no longer blocks settlement");
+        assert_eq!(settlement.settled_source_event_count, 1);
+        assert_eq!(settlement.settled_account_count, 1);
+        assert_eq!(settlement.settled_credit_points, 1.25);
+        assert_eq!(settlement.near_outbox_item_count, 1);
+
+        let outbox_items = read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+            .expect("near outbox items read");
+        assert_eq!(outbox_items.len(), 1);
+
+        let Json(credit) = credit_handler(State(state), auth_headers("token-a"))
+            .await
+            .expect("credit summary succeeds");
+        assert_eq!(credit.credit_points_pending_ledger, 0.0);
+        assert_eq!(credit.credit_points_held, 0.0);
+        assert_eq!(credit.credit_points_settled, 1.25);
+        assert_eq!(credit.credit_points_total, 1.25);
     }
 
     #[tokio::test]
