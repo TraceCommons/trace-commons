@@ -61,7 +61,8 @@ revoked sources. Reviewer/admin credit summaries report tenant-wide settled line
 items while contributor summaries stay principal-scoped. Admins can place and
 release credit holds around fraud/review investigations; active holds block
 settlement, and released holds project current state so later settlement resumes
-without exposing raw hold/release reason text. With the DB mirror configured,
+without exposing raw hold/release reason text. Hold placement and release also
+append hash-only credit-mutation audit rows. With the DB mirror configured,
 utility attestations, settlement batches, credit holds, and NEAR receipt outbox
 rows are dual-written to PostgreSQL;
 `TRACE_COMMONS_DB_REVIEWER_READS=true` serves the admin credit control-plane

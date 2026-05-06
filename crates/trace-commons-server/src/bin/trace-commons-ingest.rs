@@ -11167,6 +11167,15 @@ async fn credit_hold_handler(
     append_credit_hold_with_db_mirror(state.as_ref(), &tenant, &hold)
         .await
         .map_err(internal_error)?;
+    append_credit_hold_audit_event(
+        state.as_ref(),
+        &tenant,
+        &hold,
+        "credit_hold",
+        &hold.reason_hash,
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(hold))
 }
 
@@ -11207,10 +11216,37 @@ async fn credit_hold_release_handler(
         return Ok(Json(hold));
     }
     hold.released_at = Some(Utc::now());
+    let release_reason_hash = sha256_prefixed(reason_detail);
     append_credit_hold_with_db_mirror(state.as_ref(), &tenant, &hold)
         .await
         .map_err(internal_error)?;
+    append_credit_hold_audit_event(
+        state.as_ref(),
+        &tenant,
+        &hold,
+        "credit_hold_release",
+        &release_reason_hash,
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(hold))
+}
+
+async fn append_credit_hold_audit_event(
+    state: &AppState,
+    tenant: &TenantAuth,
+    hold: &TraceCreditHoldRecord,
+    kind: &str,
+    reason_hash: &str,
+) -> anyhow::Result<()> {
+    append_audit_event_with_db_mirror(
+        state,
+        tenant,
+        TraceCommonsAuditEvent::credit_hold(tenant, hold, kind, reason_hash),
+        StorageTraceAuditAction::CreditMutate,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
 }
 
 async fn credit_attestations_handler(
@@ -46302,6 +46338,33 @@ impl TraceCommonsAuditEvent {
         }
     }
 
+    fn credit_hold(
+        auth: &TenantAuth,
+        hold: &TraceCreditHoldRecord,
+        kind: &str,
+        reason_hash: &str,
+    ) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: kind.to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(format!(
+                "hold_id={};credit_account_hash={};hold_reason={:?};reason_hash={}",
+                hold.hold_id, hold.credit_account_hash, hold.reason, reason_hash
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
     fn read(auth: &TenantAuth, surface: &str, item_count: usize) -> Self {
         Self {
             event_id: Uuid::new_v4(),
@@ -74721,6 +74784,7 @@ mod tests {
         )
         .await
         .expect("admin can place credit hold");
+        let hold_reason_hash = hold.reason_hash.clone();
 
         let contributor_release_response = app(state.clone())
             .oneshot(
@@ -74769,6 +74833,31 @@ mod tests {
         let release_body_text = std::str::from_utf8(&release_body).expect("release body is utf8");
         assert!(!release_body_text.contains("frontier lab attestation was verified"));
         assert!(!release_body_text.contains("admin-token-a"));
+        let release_reason_hash = sha256_prefixed("frontier lab attestation was verified");
+
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        let hold_audit = audit_events
+            .iter()
+            .find(|event| event.kind == "credit_hold")
+            .expect("hold placement audit event exists");
+        let hold_audit_reason = hold_audit.reason.as_deref().expect("hold audit reason");
+        assert!(hold_audit_reason.contains(&hold.hold_id.to_string()));
+        assert!(hold_audit_reason.contains(&hold.credit_account_hash));
+        assert!(hold_audit_reason.contains(&hold_reason_hash));
+        assert!(!hold_audit_reason.contains("lab attestation release investigation"));
+        let release_audit = audit_events
+            .iter()
+            .find(|event| event.kind == "credit_hold_release")
+            .expect("hold release audit event exists");
+        let release_audit_reason = release_audit
+            .reason
+            .as_deref()
+            .expect("release audit reason");
+        assert!(release_audit_reason.contains(&hold.hold_id.to_string()));
+        assert!(release_audit_reason.contains(&hold.credit_account_hash));
+        assert!(release_audit_reason.contains(&release_reason_hash));
+        assert!(!release_audit_reason.contains("frontier lab attestation was verified"));
+        assert!(!release_audit_reason.contains("admin-token-a"));
 
         let Json(holds) = credit_holds_handler(State(state.clone()), auth_headers("admin-token-a"))
             .await
