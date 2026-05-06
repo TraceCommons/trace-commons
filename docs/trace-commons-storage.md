@@ -488,7 +488,7 @@ CREATE POLICY trace_submissions_tenant_isolation ON trace_submissions
     WITH CHECK (tenant_id = current_setting('tracedao.trace_tenant_id', true));
 ```
 
-The later server-owned `V6__trace_force_rls.sql` migration applies `FORCE ROW LEVEL SECURITY` to every Trace Commons RLS table, so table-owner roles no longer bypass policies for normal runtime access. Before production cutover, every PG-backed Trace Commons store path should set `SELECT set_config('tracedao.trace_tenant_id', $1, true)` inside the operation transaction, and runtime/worker roles should be non-superuser roles without `BYPASSRLS`; any explicit worker policy variants should stay narrow rather than becoming blanket bypass.
+The later server-owned `V6__trace_force_rls.sql` migration applies `FORCE ROW LEVEL SECURITY` to every Trace Commons RLS table, so table-owner roles no longer bypass policies for normal runtime access. The PostgreSQL readiness diagnostics probe `SELECT set_config('tracedao.trace_tenant_id', $1, true)` inside a transaction and verify the tenant context clears after commit; the fail-closed startup gate and `POST /v1/admin/postgres-rls-drill` require that transaction-local behavior along with policy/RLS/FORCE-RLS coverage and a non-bypassing role. Runtime/worker roles should be non-superuser roles without `BYPASSRLS`; any explicit worker policy variants should stay narrow rather than becoming blanket bypass.
 
 ### Rust Store Contract Shape
 
@@ -979,8 +979,8 @@ Key rotation:
 
 PostgreSQL RLS readiness:
 
-- Run `POST /v1/admin/postgres-rls-drill` with `record_evidence: true` before enabling DB reader promotion. A green response has `ready: true`, complete policy/RLS/FORCE RLS coverage, a non-bypassing runtime role, no `blocking_gaps`, and a recorded `postgres_rls_readiness` evidence row. A service without a DB mirror returns a `TRACE_COMMONS_DB_DUAL_WRITE` operator error instead of pretending RLS evidence exists.
-- Treat missing policies, disabled RLS, disabled FORCE RLS, policy-expression drift, or a bypassing runtime role as blockers, even if ordinary DB reads appear to work during a canary.
+- Run `POST /v1/admin/postgres-rls-drill` with `record_evidence: true` before enabling DB reader promotion. A green response has `ready: true`, complete policy/RLS/FORCE RLS coverage, transaction-local tenant context, a non-bypassing runtime role, no `blocking_gaps`, and a recorded `postgres_rls_readiness` evidence row. A service without a DB mirror returns a `TRACE_COMMONS_DB_DUAL_WRITE` operator error instead of pretending RLS evidence exists.
+- Treat missing policies, disabled RLS, disabled FORCE RLS, policy-expression drift, sticky tenant context, or a bypassing runtime role as blockers, even if ordinary DB reads appear to work during a canary.
 
 Object-store migration:
 

@@ -3074,7 +3074,7 @@ fn validate_required_postgres_trace_rls_diagnostics(
         return Ok(());
     }
     anyhow::bail!(
-        "{TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY} requires complete Trace Commons RLS policy coverage, enabled RLS, FORCE ROW LEVEL SECURITY on every Trace Commons table, and a non-bypassing runtime role; expected_tables={}, policies={}, rls_enabled={}, force_rls_enabled={}, missing_policies={}, rls_disabled={}, force_rls_disabled={}, expression_mismatches={}, bypass_role={}",
+        "{TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY} requires complete Trace Commons RLS policy coverage, enabled RLS, FORCE ROW LEVEL SECURITY on every Trace Commons table, a non-bypassing runtime role, and transaction-local tenant context; expected_tables={}, policies={}, rls_enabled={}, force_rls_enabled={}, missing_policies={}, rls_disabled={}, force_rls_disabled={}, expression_mismatches={}, bypass_role={}, tenant_context_transaction_local={}",
         diagnostics.expected_table_count,
         diagnostics.policy_installed_count,
         diagnostics.rls_enabled_count,
@@ -3084,6 +3084,7 @@ fn validate_required_postgres_trace_rls_diagnostics(
         diagnostics.force_rls_disabled_tables.len(),
         diagnostics.policy_expression_mismatch_tables.len(),
         diagnostics.current_role_bypasses_rls,
+        diagnostics.tenant_context_transaction_local,
     )
 }
 
@@ -5298,6 +5299,7 @@ struct TraceCommonsRlsConfigStatus {
     force_rls_disabled_tables: Vec<String>,
     policy_expression_mismatch_tables: Vec<String>,
     current_role_bypasses_rls: bool,
+    tenant_context_transaction_local: bool,
 }
 
 impl From<TraceCorpusRlsDiagnostics> for TraceCommonsRlsConfigStatus {
@@ -5315,6 +5317,7 @@ impl From<TraceCorpusRlsDiagnostics> for TraceCommonsRlsConfigStatus {
             force_rls_disabled_tables: diagnostics.force_rls_disabled_tables,
             policy_expression_mismatch_tables: diagnostics.policy_expression_mismatch_tables,
             current_role_bypasses_rls: diagnostics.current_role_bypasses_rls,
+            tenant_context_transaction_local: diagnostics.tenant_context_transaction_local,
         }
     }
 }
@@ -23747,6 +23750,7 @@ struct TracePostgresRlsDrillResponse {
     force_rls_disabled_table_count: usize,
     policy_expression_mismatch_table_count: usize,
     current_role_bypasses_rls: bool,
+    tenant_context_transaction_local: bool,
     blocking_gaps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
@@ -25161,6 +25165,7 @@ async fn run_postgres_rls_drill(
         force_rls_disabled_table_count: diagnostics.force_rls_disabled_tables.len(),
         policy_expression_mismatch_table_count: diagnostics.policy_expression_mismatch_tables.len(),
         current_role_bypasses_rls: diagnostics.current_role_bypasses_rls,
+        tenant_context_transaction_local: diagnostics.tenant_context_transaction_local,
         blocking_gaps,
         recorded_evidence: None,
     };
@@ -26490,6 +26495,11 @@ fn postgres_rls_readiness_blocking_gaps(diagnostics: &TraceCorpusRlsDiagnostics)
         "current_role_bypasses_rls",
         diagnostics.current_role_bypasses_rls,
     );
+    push_key_rotation_gap(
+        &mut gaps,
+        "tenant_context_not_transaction_local",
+        !diagnostics.tenant_context_transaction_local,
+    );
     gaps
 }
 
@@ -26515,6 +26525,7 @@ fn postgres_rls_drill_evidence_hash(
             "force_rls_disabled_table_count": diagnostics.force_rls_disabled_tables.len(),
             "policy_expression_mismatch_table_count": diagnostics.policy_expression_mismatch_tables.len(),
             "current_role_bypasses_rls": diagnostics.current_role_bypasses_rls,
+            "tenant_context_transaction_local": diagnostics.tenant_context_transaction_local,
             "blocking_gaps": blocking_gaps,
         })
         .to_string(),
@@ -47892,6 +47903,7 @@ struct TraceOperationalPromotionGateSummary {
     force_rls_disabled_table_count: usize,
     trace_corpus_rls_expression_mismatch_table_count: usize,
     current_role_bypasses_rls: bool,
+    tenant_context_transaction_local: bool,
     tenant_rollout_gate_count: usize,
     tenant_rollout_gate_counts: BTreeMap<String, usize>,
     open_review_count: usize,
@@ -47992,6 +48004,10 @@ impl TraceOperationalPromotionGateSummary {
             .trace_corpus_rls
             .as_ref()
             .is_some_and(|diagnostics| diagnostics.current_role_bypasses_rls);
+        let tenant_context_transaction_local = db_summary
+            .trace_corpus_rls
+            .as_ref()
+            .is_some_and(|diagnostics| diagnostics.tenant_context_transaction_local);
         let mut blocking_gates = Vec::new();
         let mut warning_gates = Vec::new();
 
@@ -48129,6 +48145,7 @@ impl TraceOperationalPromotionGateSummary {
             force_rls_disabled_table_count,
             trace_corpus_rls_expression_mismatch_table_count,
             current_role_bypasses_rls,
+            tenant_context_transaction_local,
             tenant_rollout_gate_count,
             tenant_rollout_gate_counts,
             open_review_count,
@@ -52004,6 +52021,7 @@ mod tests {
             force_rls_disabled_tables: Vec::new(),
             policy_expression_mismatch_tables: Vec::new(),
             current_role_bypasses_rls: false,
+            tenant_context_transaction_local: true,
         }
     }
 
@@ -52028,6 +52046,16 @@ mod tests {
         let error = validate_required_postgres_trace_rls_diagnostics(&bypassing_role)
             .expect_err("bypassing role blocks production gate");
         assert!(error.to_string().contains("bypass_role=true"));
+
+        let mut sticky_tenant_context = production_ready_rls_diagnostics_for_tests();
+        sticky_tenant_context.tenant_context_transaction_local = false;
+        let error = validate_required_postgres_trace_rls_diagnostics(&sticky_tenant_context)
+            .expect_err("non-transaction-local tenant context blocks production gate");
+        assert!(
+            error
+                .to_string()
+                .contains("tenant_context_transaction_local=false")
+        );
     }
 
     #[tokio::test]
@@ -61672,6 +61700,10 @@ mod tests {
         assert_eq!(value["production_ready"], serde_json::json!(true));
         assert_eq!(value["rls_ready"], serde_json::json!(true));
         assert_eq!(value["force_rls_ready"], serde_json::json!(true));
+        assert_eq!(
+            value["tenant_context_transaction_local"],
+            serde_json::json!(true)
+        );
         assert!(
             value["expected_table_count"]
                 .as_u64()
