@@ -7205,6 +7205,7 @@ enum TraceCreditLedgerEventType {
 
 const MAX_DELAYED_CREDIT_POINTS_DELTA: f32 = 100.0;
 const BENCHMARK_CONVERSION_CREDIT_POINTS_DELTA: f32 = 2.0;
+const REVOCATION_CREDIT_REVERSAL_EXTERNAL_REF_PREFIX: &str = "revocation_credit_reversal:";
 const RANKER_TRAINING_CANDIDATE_CREDIT_POINTS_DELTA: f32 = 0.5;
 const RANKER_TRAINING_PAIR_CREDIT_POINTS_DELTA: f32 = 0.75;
 const RANKER_TRAINING_CANDIDATES_EXPORT_PURPOSE_CODE: &str = "ranker_training_candidates_export";
@@ -19584,6 +19585,13 @@ fn parse_ranking_prediction_external_ref(external_ref: Option<&str>) -> Option<U
     let external_ref = external_ref?.trim();
     let prediction_id = external_ref.strip_prefix(RANKING_PREDICTION_EXTERNAL_REF_PREFIX)?;
     Uuid::parse_str(prediction_id).ok()
+}
+
+fn parse_revocation_credit_reversal_external_ref(external_ref: Option<&str>) -> Option<Uuid> {
+    let external_ref = external_ref?.trim();
+    let credit_event_id =
+        external_ref.strip_prefix(REVOCATION_CREDIT_REVERSAL_EXTERNAL_REF_PREFIX)?;
+    Uuid::parse_str(credit_event_id).ok()
 }
 
 fn ranking_credit_event_exclusion_reason_codes(
@@ -34467,7 +34475,9 @@ async fn reverse_credit_settlement_for_revocation_propagation(
             reason: Some(format!(
                 "Credit settlement reversed for revoked trace event {credit_event_id}."
             )),
-            external_ref: Some(format!("revocation_credit_reversal:{credit_event_id}")),
+            external_ref: Some(format!(
+                "{REVOCATION_CREDIT_REVERSAL_EXTERNAL_REF_PREFIX}{credit_event_id}"
+            )),
             actor_role: tenant.role,
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
@@ -46954,10 +46964,27 @@ impl TraceCommonsTenantCreditResponse {
             .iter()
             .flat_map(|(_, item)| item.source_credit_event_ids.iter().copied())
             .collect::<BTreeSet<_>>();
-        response.credit_points_settled = visible_settlements
+        let gross_credit_points_settled: f32 = visible_settlements
             .iter()
             .map(|(_, item)| item.settled_credit_delta_micros as f32 / 1_000_000.0)
             .sum();
+        response.credit_points_reversed = credit_events
+            .iter()
+            .filter(|event| {
+                tenant_wide_credit_view
+                    || event.auth_principal_ref == principal_ref
+                    || event.auth_principal_ref == legacy_principal_ref
+            })
+            .filter_map(|event| {
+                let source_credit_event_id =
+                    parse_revocation_credit_reversal_external_ref(event.external_ref.as_deref())?;
+                (settled_credit_event_ids.contains(&source_credit_event_id)
+                    && event.credit_points_delta < 0.0)
+                    .then_some(-event.credit_points_delta)
+            })
+            .sum::<f32>();
+        response.credit_points_settled =
+            (gross_credit_points_settled - response.credit_points_reversed).max(0.0);
         response.last_settlement_batch_id = visible_settlements
             .iter()
             .map(|(batch_id, _)| *batch_id)
@@ -46976,6 +47003,10 @@ impl TraceCommonsTenantCreditResponse {
             .iter()
             .filter(|event| delayed_credit_eligible_submission_ids.contains(&event.submission_id))
             .filter(|event| !settled_credit_event_ids.contains(&event.event_id))
+            .filter(|event| {
+                parse_revocation_credit_reversal_external_ref(event.external_ref.as_deref())
+                    .is_none()
+            })
             .filter(|event| held_account_refs.contains(event.auth_principal_ref.as_str()))
             .map(|event| event.credit_points_delta)
             .sum();
@@ -46983,6 +47014,10 @@ impl TraceCommonsTenantCreditResponse {
             .iter()
             .filter(|event| delayed_credit_eligible_submission_ids.contains(&event.submission_id))
             .filter(|event| !settled_credit_event_ids.contains(&event.event_id))
+            .filter(|event| {
+                parse_revocation_credit_reversal_external_ref(event.external_ref.as_deref())
+                    .is_none()
+            })
             .filter(|event| !held_account_refs.contains(event.auth_principal_ref.as_str()))
             .map(|event| event.credit_points_delta)
             .sum();
@@ -66912,6 +66947,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn contributor_credit_summary_nets_revocation_reversal_against_settled_balance() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::BenchmarkOnly];
+        envelope.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::BenchmarkGeneration];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("benchmark source submission succeeds");
+
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::BenchmarkConversion,
+                credit_points_delta: 2.5,
+                reason: Some("converted into benchmark for reversal accounting".to_string()),
+                external_ref: Some("benchmark:summary-reversal".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append benchmark utility credit");
+
+        let Json(finalized) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "finalize benchmark utility credit".to_string(),
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("admin can settle benchmark utility credit");
+        assert_eq!(finalized.settled_credit_points, 2.5);
+
+        append_credit_event(
+            temp.path(),
+            "tenant-a",
+            &TraceCommonsCreditLedgerRecord {
+                event_id: deterministic_trace_uuid_for_external_ref(
+                    "revocation-credit-reversal",
+                    "tenant-a",
+                    submission_id,
+                    &event.event_id.to_string(),
+                ),
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                submission_id,
+                trace_id: event.trace_id,
+                auth_principal_ref: principal_storage_ref("token-a"),
+                event_type: TraceCreditLedgerEventType::BenchmarkConversion,
+                credit_points_delta: -2.5,
+                reason: Some(format!(
+                    "Credit settlement reversed for revoked trace event {}.",
+                    event.event_id
+                )),
+                external_ref: Some(format!(
+                    "{REVOCATION_CREDIT_REVERSAL_EXTERNAL_REF_PREFIX}{}",
+                    event.event_id
+                )),
+                actor_role: TokenRole::RevocationWorker,
+                actor_principal_ref: principal_storage_ref("revocation-worker-token-a"),
+                created_at: Utc::now(),
+            },
+        )
+        .expect("reversal credit event writes");
+
+        let Json(credit) = credit_handler(State(state), auth_headers("token-a"))
+            .await
+            .expect("credit summary succeeds");
+        assert_eq!(credit.credit_points_pending_ledger, 0.0);
+        assert_eq!(credit.credit_points_settled, 0.0);
+        assert_eq!(credit.credit_points_reversed, 2.5);
+        assert_eq!(credit.credit_points_total, 0.0);
+    }
+
+    #[tokio::test]
     async fn credit_settlement_rejects_malformed_near_contract_before_outbox_side_effects() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -75514,6 +75639,196 @@ mod tests {
             reverse_items[0].near_call.args["amount_micros"],
             serde_json::json!(1_250_000)
         );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn revocation_propagation_reverses_settled_benchmark_conversion_credit_and_near_receipt()
+    {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            true,
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::BenchmarkOnly];
+        envelope.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::BenchmarkGeneration];
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("benchmark source submission mirrors to DB");
+
+        let Json(benchmark) = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("benchmark_credit_revocation_settlement".to_string()),
+                consent_scope: None,
+                status: None,
+                privacy_risk: None,
+                external_ref: Some("benchmark:settlement-revocation".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark conversion mirrors utility credit to DB");
+        assert_eq!(benchmark.item_count, 1);
+        assert_eq!(benchmark.source_submission_ids, vec![submission_id]);
+
+        let db_credit_events = backend
+            .list_trace_credit_events("tenant-a")
+            .await
+            .expect("DB credit events read after benchmark conversion");
+        let benchmark_event = db_credit_events
+            .iter()
+            .find(|event| {
+                event.submission_id == submission_id
+                    && event.event_type == StorageTraceCreditEventType::BenchmarkConversion
+                    && event.external_ref.as_deref() == Some("benchmark:settlement-revocation")
+            })
+            .expect("benchmark conversion credit event is mirrored");
+        let benchmark_credit_event_id = benchmark_event.credit_event_id;
+        assert_eq!(benchmark_event.points_delta, "2.0000");
+
+        let Json(finalized) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "settle benchmark conversion credit before revocation".to_string(),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("benchmark conversion credit settles");
+        assert_eq!(finalized.settled_source_event_count, 1);
+        assert_eq!(finalized.settled_credit_points, 2.0);
+        assert_eq!(finalized.near_outbox_item_count, 1);
+
+        revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(submission_id),
+        )
+        .await
+        .expect("contributor can revoke settled benchmark source");
+
+        let propagation_items = backend
+            .list_trace_revocation_propagation_items("tenant-a", submission_id)
+            .await
+            .expect("revocation propagation items read");
+        let reversal_items = propagation_items
+            .iter()
+            .filter(|item| {
+                item.action == StorageTraceRevocationPropagationAction::ReverseCreditSettlement
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reversal_items.len(), 1);
+        assert_eq!(
+            reversal_items[0].target,
+            StorageTraceRevocationPropagationTarget::CreditSettlement {
+                credit_event_id: benchmark_credit_event_id,
+                credit_account_ref: principal_storage_ref("token-a"),
+                settlement_state_at_selection: StorageTraceCreditSettlementState::Final,
+            }
+        );
+
+        let Json(response) = revocation_propagation_worker_handler(
+            State(state.clone()),
+            auth_headers("revocation-worker-token-a"),
+            Json(TraceRevocationPropagationWorkerRequest {
+                purpose: Some("reverse_benchmark_credit_for_revocation".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("revocation worker reverses settled benchmark credit");
+        assert_eq!(response.completed, 1);
+        assert_eq!(response.failed, 0);
+
+        let db_credit_events = backend
+            .list_trace_credit_events("tenant-a")
+            .await
+            .expect("DB credit events read after benchmark credit reversal");
+        let reversal_event = db_credit_events
+            .iter()
+            .find(|record| {
+                record.external_ref.as_deref()
+                    == Some(&format!(
+                        "revocation_credit_reversal:{benchmark_credit_event_id}"
+                    ))
+            })
+            .expect("benchmark conversion reversal credit event is mirrored");
+        assert_eq!(reversal_event.submission_id, submission_id);
+        assert_eq!(
+            reversal_event.event_type,
+            StorageTraceCreditEventType::BenchmarkConversion
+        );
+        assert_eq!(
+            reversal_event.settlement_state,
+            StorageTraceCreditSettlementState::Reversed
+        );
+        assert_eq!(reversal_event.points_delta, "-2.0000");
+
+        let db_outbox = backend
+            .list_trace_near_credit_outbox_items("tenant-a")
+            .await
+            .expect("DB NEAR outbox reads")
+            .into_iter()
+            .map(near_credit_outbox_item_from_storage)
+            .collect::<anyhow::Result<Vec<_>>>()
+            .expect("DB NEAR outbox records convert");
+        let reverse_items = db_outbox
+            .iter()
+            .filter(|item| item.near_call.method_name == "reverse_credit_receipt")
+            .collect::<Vec<_>>();
+        assert_eq!(reverse_items.len(), 1);
+        assert_eq!(
+            reverse_items[0].settlement_batch_id,
+            finalized.settlement_batch_id
+        );
+        assert_eq!(
+            reverse_items[0].near_call.args["amount_micros"],
+            serde_json::json!(2_000_000)
+        );
+        assert_eq!(
+            reverse_items[0].near_call.args["source_list_hash"],
+            serde_json::json!(source_credit_event_ids_hash(
+                "trace-credit-policy-v1",
+                &[benchmark_credit_event_id],
+            ))
+        );
+
+        let Json(credit) = credit_handler(State(state), auth_headers("token-a"))
+            .await
+            .expect("credit summary reflects benchmark reversal");
+        assert_eq!(credit.credit_points_settled, 0.0);
+        assert_eq!(credit.credit_points_reversed, 2.0);
+        assert_eq!(credit.credit_points_total, 0.0);
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
