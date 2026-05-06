@@ -428,7 +428,7 @@ impl Database for PgBackend {
     async fn trace_corpus_rls_diagnostics(
         &self,
     ) -> Result<Option<TraceCorpusRlsDiagnostics>, DatabaseError> {
-        let client = self
+        let mut client = self
             .pool()
             .get()
             .await
@@ -544,6 +544,8 @@ impl Database for PgBackend {
 
         let owns_unforced_trace_tables: bool = current_role.get("owns_unforced_trace_tables");
         let bypass_role: bool = current_role.get("bypass_role");
+        let tenant_context_transaction_local =
+            trace_tenant_context_is_transaction_local(&mut client).await?;
         Ok(Some(TraceCorpusRlsDiagnostics {
             expected_table_count: expected_tables.len(),
             rls_enabled_count,
@@ -554,6 +556,35 @@ impl Database for PgBackend {
             force_rls_disabled_tables,
             policy_expression_mismatch_tables,
             current_role_bypasses_rls: owns_unforced_trace_tables || bypass_role,
+            tenant_context_transaction_local,
         }))
     }
+}
+
+async fn trace_tenant_context_is_transaction_local(
+    client: &mut deadpool_postgres::Client,
+) -> Result<bool, DatabaseError> {
+    let tx = client.transaction().await?;
+    let probe_tenant = "__trace_rls_probe_tenant__";
+    tx.execute(
+        "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+        &[&probe_tenant],
+    )
+    .await?;
+    let inside = tx
+        .query_one(
+            "SELECT current_setting('trace-commons.trace_tenant_id', true) AS tenant_context",
+            &[],
+        )
+        .await?
+        .get::<_, Option<String>>("tenant_context");
+    tx.commit().await?;
+    let after = client
+        .query_one(
+            "SELECT current_setting('trace-commons.trace_tenant_id', true) AS tenant_context",
+            &[],
+        )
+        .await?
+        .get::<_, Option<String>>("tenant_context");
+    Ok(inside.as_deref() == Some(probe_tenant) && after.as_deref().is_none_or(str::is_empty))
 }

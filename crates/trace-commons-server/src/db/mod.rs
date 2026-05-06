@@ -25,6 +25,7 @@ pub struct TraceCorpusRlsDiagnostics {
     pub force_rls_disabled_tables: Vec<String>,
     pub policy_expression_mismatch_tables: Vec<String>,
     pub current_role_bypasses_rls: bool,
+    pub tenant_context_transaction_local: bool,
 }
 
 impl TraceCorpusRlsDiagnostics {
@@ -35,6 +36,7 @@ impl TraceCorpusRlsDiagnostics {
             && self.policy_installed_count == self.expected_table_count
             && self.rls_enabled_count == self.expected_table_count
             && !self.current_role_bypasses_rls
+            && self.tenant_context_transaction_local
     }
 
     pub fn force_rls_ready(&self) -> bool {

@@ -107,6 +107,7 @@ fn ready_rls_diagnostics() -> TraceCorpusRlsDiagnostics {
         force_rls_disabled_tables: Vec::new(),
         policy_expression_mismatch_tables: Vec::new(),
         current_role_bypasses_rls: false,
+        tenant_context_transaction_local: true,
     }
 }
 

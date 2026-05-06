@@ -16,7 +16,7 @@ These are the next independent production slices that can be staffed in parallel
 - [x] Finish live issuer-managed EdDSA/Ed25519 key refresh/sync so long-running deployments can rotate issuer-owned key records after startup without restart: URL keysets refresh in-process on a bounded interval, failures preserve the last good active keyset, managed-required deployments can configure a max-stale fail-closed window, and config-status exposes safe refresh health without URLs, hosts, key ids, PEMs, or bearer fetch credentials.
 - [x] Add durable tenant access grant storage for issuer-authorized hosted-agent principals, roles, consent scopes, allowed uses, issuer/audience/subject attribution, expiry, revocation metadata, and safe metadata across PostgreSQL, plus admin create/list/revoke APIs, CLI helpers, and enforcement gates for trace submission, autonomous contributor credit/status readback, reviewer/export/worker/audit/admin read surfaces that require an active exact-role grant, bind signed EdDSA/Ed25519 grants to configured issuer/audience/JWT `sub`, and intersect grant scopes/uses with static or EdDSA claim allow-lists.
 - [ ] Promote auth-derived `TenantCtx` into every ingest, review, export, worker, maintenance, and contributor-status path so envelope tenant fields remain attribution only. First guards now fail closed when file-backed metadata, stored envelope bodies with a conflicting server tenant ref, derived rows, credit ledger rows, audit rows, revocation tombstones, replay export manifests, export provenance, or benchmark artifacts are read from an authenticated tenant directory but contain a different embedded tenant id/storage ref; service-local object-ref reads/deletes also verify the tenant key ref, stored envelope body tenant scope when it uses a server tenant ref, encrypted benchmark artifact reads verify the decrypted body tenant, and vector payload deletes verify the encrypted payload body's tenant storage ref before physical deletion.
-- [ ] Harden PostgreSQL tenant isolation with production roles, transaction-local tenant context coverage, and same-id cross-tenant tests; server migrations now force RLS on Trace Commons tables, Admin config-status exposes safe PostgreSQL RLS readiness diagnostics for policy coverage, expression drift, disabled RLS, force-RLS count, and role bypass state, and operational-summary promotion gates now block on unsafe PostgreSQL RLS diagnostics without exposing table names.
+- [ ] Harden PostgreSQL tenant isolation with production roles, transaction-local tenant context coverage, and same-id cross-tenant tests; server migrations now force RLS on Trace Commons tables, Admin config-status exposes safe PostgreSQL RLS readiness diagnostics for policy coverage, expression drift, disabled RLS, force-RLS count, transaction-local tenant-context probing, and role bypass state, and operational-summary promotion gates now block on unsafe PostgreSQL RLS diagnostics without exposing table names.
 
 ### Autonomous Client
 
@@ -192,10 +192,11 @@ export, retention, vector, and benchmark route gates; fuller RBAC/ABAC remains
 future work.
 The PostgreSQL store now sets `trace-commons.trace_tenant_id` transaction-locally around
 tenant-scoped Trace Commons operations while retaining explicit `tenant_id`
-predicates, and server migrations force RLS for the Trace Commons tables. This is
-still an incremental guardrail until every DB-backed runtime path runs under a
-non-bypassing production role; superusers and roles with `BYPASSRLS` can still
-bypass the server-owned policies.
+predicates, and server migrations force RLS for the Trace Commons tables. The RLS
+readiness drill and fail-closed startup gate also probe that tenant context is
+transaction-local and clears after commit. This is still an incremental guardrail
+until every DB-backed runtime path runs under a non-bypassing production role;
+superusers and roles with `BYPASSRLS` can still bypass the server-owned policies.
 
 Scope:
 
