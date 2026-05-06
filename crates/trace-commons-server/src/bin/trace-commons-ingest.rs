@@ -27232,6 +27232,15 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         &[("tenant_storage_ref", &response.tenant_storage_ref)],
         response.delayed_credit.event_count,
     );
+    body.push_str("# HELP trace_commons_operational_delayed_credit_reversal_events_total Delayed credit reversal ledger events visible to operational summary.\n");
+    body.push_str("# TYPE trace_commons_operational_delayed_credit_reversal_events_total gauge\n");
+    push_prometheus_gauge(
+        &mut body,
+        &mut metric_count,
+        "trace_commons_operational_delayed_credit_reversal_events_total",
+        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        response.delayed_credit.reversal_event_count,
+    );
     (body, metric_count)
 }
 
@@ -48758,9 +48767,11 @@ impl TraceOperationalRankingSummary {
 #[derive(Debug, Default, Serialize)]
 struct TraceOperationalDelayedCreditSummary {
     event_count: usize,
+    reversal_event_count: usize,
     by_event_type: BTreeMap<String, usize>,
     points_positive: f32,
     points_negative: f32,
+    points_reversed: f32,
     points_total: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_event_at: Option<DateTime<Utc>>,
@@ -48781,6 +48792,13 @@ impl TraceOperationalDelayedCreditSummary {
                 summary.points_positive += event.credit_points_delta;
             } else {
                 summary.points_negative += event.credit_points_delta;
+            }
+            if parse_revocation_credit_reversal_external_ref(event.external_ref.as_deref())
+                .is_some()
+                && event.credit_points_delta < 0.0
+            {
+                summary.reversal_event_count += 1;
+                summary.points_reversed += -event.credit_points_delta;
             }
             summary.points_total += event.credit_points_delta;
             summary.last_event_at = Some(
@@ -67034,6 +67052,89 @@ mod tests {
         assert_eq!(credit.credit_points_settled, 0.0);
         assert_eq!(credit.credit_points_reversed, 2.5);
         assert_eq!(credit.credit_points_total, 0.0);
+    }
+
+    #[tokio::test]
+    async fn operational_summary_counts_revocation_reversal_credit_events() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::BenchmarkOnly];
+        envelope.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::BenchmarkGeneration];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("benchmark source submission succeeds");
+
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::BenchmarkConversion,
+                credit_points_delta: 2.5,
+                reason: Some("converted into benchmark for operational reversal".to_string()),
+                external_ref: Some("benchmark:operational-reversal".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append benchmark utility credit");
+
+        append_credit_event(
+            temp.path(),
+            "tenant-a",
+            &TraceCommonsCreditLedgerRecord {
+                event_id: deterministic_trace_uuid_for_external_ref(
+                    "revocation-credit-reversal",
+                    "tenant-a",
+                    submission_id,
+                    &event.event_id.to_string(),
+                ),
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                submission_id,
+                trace_id: event.trace_id,
+                auth_principal_ref: principal_storage_ref("token-a"),
+                event_type: TraceCreditLedgerEventType::BenchmarkConversion,
+                credit_points_delta: -2.5,
+                reason: Some(format!(
+                    "Credit settlement reversed for revoked trace event {}.",
+                    event.event_id
+                )),
+                external_ref: Some(format!(
+                    "{REVOCATION_CREDIT_REVERSAL_EXTERNAL_REF_PREFIX}{}",
+                    event.event_id
+                )),
+                actor_role: TokenRole::RevocationWorker,
+                actor_principal_ref: principal_storage_ref("revocation-worker-token-a"),
+                created_at: Utc::now(),
+            },
+        )
+        .expect("reversal credit event writes");
+
+        let Json(operational) =
+            operational_summary_handler(State(state), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect delayed credit reversal summary");
+        assert_eq!(operational.delayed_credit.event_count, 2);
+        assert_eq!(operational.delayed_credit.reversal_event_count, 1);
+        assert_eq!(operational.delayed_credit.points_positive, 2.5);
+        assert_eq!(operational.delayed_credit.points_negative, -2.5);
+        assert_eq!(operational.delayed_credit.points_reversed, 2.5);
+        assert_eq!(operational.delayed_credit.points_total, 0.0);
+
+        let (metrics, _) = trace_operational_metrics_body(&operational);
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_delayed_credit_reversal_events_total{{tenant_storage_ref=\"{tenant_ref}\"}} 1"
+        )));
     }
 
     #[tokio::test]
