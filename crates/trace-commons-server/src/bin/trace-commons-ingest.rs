@@ -28403,6 +28403,18 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             value,
         );
     }
+    body.push_str("# HELP trace_commons_operational_ranking_evaluator_readiness Ranking evaluator adapter readiness flags.\n");
+    body.push_str("# TYPE trace_commons_operational_ranking_evaluator_readiness gauge\n");
+    push_prometheus_gauge(
+        &mut body,
+        &mut metric_count,
+        "trace_commons_operational_ranking_evaluator_readiness",
+        &[
+            ("tenant_storage_ref", &response.tenant_storage_ref),
+            ("state", "process_evaluator_configured"),
+        ],
+        usize::from(response.ranking.process_evaluator_configured),
+    );
     body.push_str("# HELP trace_commons_operational_ranking_calibration_dataset_manifest_conflicts Active ranking calibration dataset manifest conflict count.\n");
     body.push_str(
         "# TYPE trace_commons_operational_ranking_calibration_dataset_manifest_conflicts gauge\n",
@@ -50557,6 +50569,7 @@ struct TraceOperationalRankingInputs<'a> {
 
 #[derive(Debug, Default, Serialize)]
 struct TraceOperationalRankingSummary {
+    process_evaluator_configured: bool,
     active_model_count: usize,
     monitored_model_count: usize,
     at_risk_model_count: usize,
@@ -50689,6 +50702,7 @@ impl TraceOperationalRankingSummary {
             }
         }
         Self {
+            process_evaluator_configured: inputs.state.process_evaluator.is_some(),
             active_model_count: risk.active_model_count,
             monitored_model_count: risk.monitored_model_count,
             at_risk_model_count: risk.at_risk_model_count,
@@ -62816,6 +62830,36 @@ mod tests {
         )));
         assert!(!metrics.contains("operational-summary-vector-token"));
         assert!(!metrics.contains("do not expose raw vector ops purpose"));
+    }
+
+    #[tokio::test]
+    async fn operational_summary_reports_process_evaluator_readiness() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        {
+            let state = Arc::make_mut(&mut state);
+            state.process_evaluator = Some(Arc::new(FakeProcessEvaluator::default()));
+            state.process_evaluator_timeout_ms = Some(6_789);
+        }
+
+        let Json(response) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect process evaluator readiness");
+        let response_json = serde_json::to_value(&response).expect("response serializes");
+        assert_eq!(
+            response_json["ranking"]["process_evaluator_configured"],
+            serde_json::json!(true)
+        );
+        let response_text = serde_json::to_string(&response).expect("response serializes");
+        assert!(!response_text.contains("6789"));
+
+        let (metrics, _) = trace_operational_metrics_body(&response);
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_ranking_evaluator_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"process_evaluator_configured\"}} 1"
+        )));
+        assert!(!metrics.contains("6789"));
     }
 
     #[tokio::test]
