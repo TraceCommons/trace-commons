@@ -842,6 +842,8 @@ struct ConfiguredTraceArtifactStore {
     store: Arc<dyn TraceArtifactStore>,
     object_io_enabled: bool,
     plaintext_compatibility_allowed: bool,
+    object_versioning_supported: bool,
+    restore_after_delete_supported: bool,
 }
 
 impl ConfiguredTraceArtifactStore {
@@ -851,6 +853,8 @@ impl ConfiguredTraceArtifactStore {
             store,
             object_io_enabled: true,
             plaintext_compatibility_allowed: true,
+            object_versioning_supported: false,
+            restore_after_delete_supported: false,
         }
     }
 
@@ -865,6 +869,8 @@ impl ConfiguredTraceArtifactStore {
             store: Arc::new(DisabledRemoteTraceArtifactStore::new(config)),
             object_io_enabled: false,
             plaintext_compatibility_allowed: false,
+            object_versioning_supported: false,
+            restore_after_delete_supported: false,
         }
     }
 
@@ -896,6 +902,8 @@ impl ConfiguredTraceArtifactStore {
             )),
             object_io_enabled: true,
             plaintext_compatibility_allowed: false,
+            object_versioning_supported: false,
+            restore_after_delete_supported: false,
         })
     }
 
@@ -909,6 +917,14 @@ impl ConfiguredTraceArtifactStore {
 
     fn object_io_enabled(&self) -> bool {
         self.object_io_enabled
+    }
+
+    fn object_versioning_supported(&self) -> bool {
+        self.object_versioning_supported
+    }
+
+    fn restore_after_delete_supported(&self) -> bool {
+        self.restore_after_delete_supported
     }
 
     fn object_primary_eligible(&self) -> bool {
@@ -23937,6 +23953,8 @@ struct TraceObjectStoreMigrationDrillRequest {
     #[serde(default = "default_true")]
     require_delete: bool,
     #[serde(default)]
+    require_versioning: bool,
+    #[serde(default)]
     record_evidence: bool,
 }
 
@@ -24270,6 +24288,9 @@ struct TraceObjectStoreMigrationDrillResponse {
     object_io_enabled: bool,
     plaintext_compatibility_allowed: bool,
     require_delete: bool,
+    require_versioning: bool,
+    object_versioning_supported: bool,
+    restore_after_delete_supported: bool,
     write_succeeded: bool,
     read_succeeded: bool,
     delete_succeeded: bool,
@@ -24603,6 +24624,14 @@ async fn run_object_store_migration_drill(
         .artifact_store
         .as_ref()
         .is_some_and(|store| store.plaintext_compatibility_allowed());
+    let object_versioning_supported = state
+        .artifact_store
+        .as_ref()
+        .is_some_and(|store| store.object_versioning_supported());
+    let restore_after_delete_supported = state
+        .artifact_store
+        .as_ref()
+        .is_some_and(|store| store.restore_after_delete_supported());
     let mut write_succeeded = false;
     let mut read_succeeded = false;
     let mut delete_succeeded = false;
@@ -24674,6 +24703,9 @@ async fn run_object_store_migration_drill(
         object_io_enabled,
         plaintext_compatibility_allowed,
         require_delete: request.require_delete,
+        require_versioning: request.require_versioning,
+        object_versioning_supported,
+        restore_after_delete_supported,
         write_succeeded,
         read_succeeded,
         delete_succeeded,
@@ -26663,6 +26695,16 @@ fn object_store_migration_drill_blocking_gaps(
         "probe_delete_failed",
         response.require_delete && !response.delete_succeeded,
     );
+    push_key_rotation_gap(
+        &mut gaps,
+        "object_versioning_unsupported",
+        response.require_versioning && !response.object_versioning_supported,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "restore_after_delete_unsupported",
+        response.require_versioning && !response.restore_after_delete_supported,
+    );
     gaps
 }
 
@@ -27316,6 +27358,9 @@ fn object_store_migration_manifest_hash(
             "object_io_enabled": response.object_io_enabled,
             "plaintext_compatibility_allowed": response.plaintext_compatibility_allowed,
             "require_delete": response.require_delete,
+            "require_versioning": response.require_versioning,
+            "object_versioning_supported": response.object_versioning_supported,
+            "restore_after_delete_supported": response.restore_after_delete_supported,
             "write_succeeded": response.write_succeeded,
             "read_succeeded": response.read_succeeded,
             "delete_succeeded": response.delete_succeeded,
@@ -27343,6 +27388,9 @@ fn object_store_migration_drill_evidence_hash(
             "object_io_enabled": response.object_io_enabled,
             "plaintext_compatibility_allowed": response.plaintext_compatibility_allowed,
             "require_delete": response.require_delete,
+            "require_versioning": response.require_versioning,
+            "object_versioning_supported": response.object_versioning_supported,
+            "restore_after_delete_supported": response.restore_after_delete_supported,
             "write_succeeded": response.write_succeeded,
             "read_succeeded": response.read_succeeded,
             "delete_succeeded": response.delete_succeeded,
@@ -65160,6 +65208,93 @@ mod tests {
             lingering_remote_objects, 0,
             "migration drill must delete the remote probe artifact"
         );
+    }
+
+    #[tokio::test]
+    async fn object_store_migration_drill_blocks_when_versioning_required_without_support() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let artifact_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            test_artifact_store(artifact_temp.path()),
+        );
+        let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            None,
+            Some(artifact_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/object-store-migration-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator object-store versioning drill",
+                            "require_versioning": true,
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("admin request builds"),
+            )
+            .await
+            .expect("versioning migration drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("migration drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(false));
+        assert_eq!(value["require_versioning"], serde_json::json!(true));
+        assert_eq!(
+            value["object_versioning_supported"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["restore_after_delete_supported"],
+            serde_json::json!(false)
+        );
+        assert!(
+            value["blocking_gaps"]
+                .as_array()
+                .expect("blocking gaps")
+                .contains(&serde_json::json!("object_versioning_unsupported"))
+        );
+        assert!(
+            value["blocking_gaps"]
+                .as_array()
+                .expect("blocking gaps")
+                .contains(&serde_json::json!("restore_after_delete_unsupported"))
+        );
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("failed")
+        );
+        assert_eq!(
+            value["recorded_evidence"]["evidence_ref_hash"],
+            value["migration_manifest_hash"]
+        );
+
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("token-a"));
     }
 
     #[tokio::test]
