@@ -957,10 +957,11 @@ actor principals; otherwise the run records
 Process-evaluation-derived ranking labels are intended as auxiliary evaluator
 evidence, not direct credit authority. They participate in the same calibration,
 model-risk, readiness, and settlement gates as other ranking labels. Batch
-process-evaluation runs also write durable ranking worker-run lifecycle rows
-with hash-only evaluated-submission refs, giving operators the same
-running/completed/failed accounting they use for calibration, model-promotion,
-prediction-credit, and credit-cycle automation.
+process-evaluation runs return the durable `ranking_worker_run_id` and also
+write ranking worker-run lifecycle rows with hash-only evaluated-submission
+refs, giving operators the same running/completed/failed accounting they use
+for calibration, model-promotion, prediction-credit, and credit-cycle
+automation.
 
 `GET /v1/admin/ranking/adjudication-report` groups the latest absolute labels
 and pairwise preferences into unresolved issue buckets for disputed labels,
