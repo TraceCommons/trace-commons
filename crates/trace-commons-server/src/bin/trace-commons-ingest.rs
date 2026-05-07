@@ -48488,12 +48488,12 @@ impl TraceOperationalPromotionGateSummary {
             tenant_rollout_gate_count,
         );
         push_gap_count(
-            &mut warning_gates,
+            &mut blocking_gates,
             "published_benchmarks_waiting_for_external_registry_adapter",
             published_benchmark_external_registry_gap_count,
         );
         push_gap_count(
-            &mut warning_gates,
+            &mut blocking_gates,
             "revoked_benchmarks_waiting_for_external_registry_invalidation",
             revoked_benchmark_external_registry_invalidation_gap_count,
         );
@@ -59057,6 +59057,14 @@ mod tests {
                 .blocker_reasons
                 .contains(&"external_benchmark_registry_invalidation_gap=1".to_string())
         );
+        assert!(
+            after_revoke_summary
+                .promotion_gates
+                .blocking_gates
+                .contains(
+                    &"revoked_benchmarks_waiting_for_external_registry_invalidation=1".to_string()
+                )
+        );
 
         let registry_outbox = read_all_benchmark_registry_outbox_items(temp.path(), "tenant-a")
             .expect("benchmark registry outbox reads after source revocation");
@@ -60006,6 +60014,11 @@ mod tests {
             after_publish.benchmarks.external_registry_adapter_gap_count,
             1
         );
+        assert!(
+            after_publish.promotion_gates.blocking_gates.contains(
+                &"published_benchmarks_waiting_for_external_registry_adapter=1".to_string()
+            )
+        );
 
         let Json(submitted) = mark_benchmark_registry_outbox_status_handler(
             State(state.clone()),
@@ -60050,6 +60063,11 @@ mod tests {
         assert_eq!(
             after_confirm.benchmarks.external_registry_adapter_gap_count,
             0
+        );
+        assert!(
+            !after_confirm.promotion_gates.blocking_gates.contains(
+                &"published_benchmarks_waiting_for_external_registry_adapter=1".to_string()
+            )
         );
     }
 
@@ -60161,6 +60179,11 @@ mod tests {
                 .benchmarks
                 .blocker_reasons
                 .contains(&"external_benchmark_registry_adapter_gap=1".to_string())
+        );
+        assert!(
+            after_publish.promotion_gates.blocking_gates.contains(
+                &"published_benchmarks_waiting_for_external_registry_adapter=1".to_string()
+            )
         );
 
         let persisted: TraceBenchmarkConversionArtifact = serde_json::from_str(
