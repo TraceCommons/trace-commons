@@ -26956,6 +26956,124 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             gate.gate_value,
         );
     }
+    let postgres_rls_diagnostics_available =
+        response.promotion_gates.trace_corpus_rls_ready.is_some();
+    body.push_str("# HELP tracedao_operational_postgres_rls_readiness Safe PostgreSQL RLS readiness flags by subcheck.\n");
+    body.push_str("# TYPE tracedao_operational_postgres_rls_readiness gauge\n");
+    for (state, value) in [
+        (
+            "diagnostics_available",
+            usize::from(postgres_rls_diagnostics_available),
+        ),
+        (
+            "ready",
+            usize::from(
+                response
+                    .promotion_gates
+                    .trace_corpus_rls_ready
+                    .unwrap_or(false),
+            ),
+        ),
+        (
+            "policy_coverage",
+            usize::from(
+                postgres_rls_diagnostics_available
+                    && response
+                        .promotion_gates
+                        .trace_corpus_rls_missing_policy_table_count
+                        == 0,
+            ),
+        ),
+        (
+            "rls_enabled",
+            usize::from(
+                postgres_rls_diagnostics_available
+                    && response
+                        .promotion_gates
+                        .trace_corpus_rls_disabled_table_count
+                        == 0,
+            ),
+        ),
+        (
+            "force_rls_enabled",
+            usize::from(
+                postgres_rls_diagnostics_available
+                    && response.promotion_gates.force_rls_disabled_table_count == 0,
+            ),
+        ),
+        (
+            "policy_expression_current",
+            usize::from(
+                postgres_rls_diagnostics_available
+                    && response
+                        .promotion_gates
+                        .trace_corpus_rls_expression_mismatch_table_count
+                        == 0,
+            ),
+        ),
+        (
+            "runtime_role_non_bypassing",
+            usize::from(
+                postgres_rls_diagnostics_available
+                    && !response.promotion_gates.current_role_bypasses_rls,
+            ),
+        ),
+        (
+            "tenant_context_transaction_local",
+            usize::from(
+                postgres_rls_diagnostics_available
+                    && response.promotion_gates.tenant_context_transaction_local,
+            ),
+        ),
+    ] {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "tracedao_operational_postgres_rls_readiness",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("state", state),
+            ],
+            value,
+        );
+    }
+    body.push_str("# HELP tracedao_operational_postgres_rls_gap_tables Safe aggregate PostgreSQL RLS table-gap counts by gap kind.\n");
+    body.push_str("# TYPE tracedao_operational_postgres_rls_gap_tables gauge\n");
+    for (gap, value) in [
+        (
+            "missing_policy_tables",
+            response
+                .promotion_gates
+                .trace_corpus_rls_missing_policy_table_count,
+        ),
+        (
+            "rls_disabled_tables",
+            response
+                .promotion_gates
+                .trace_corpus_rls_disabled_table_count,
+        ),
+        (
+            "force_rls_disabled_tables",
+            response.promotion_gates.force_rls_disabled_table_count,
+        ),
+        (
+            "policy_expression_mismatch_tables",
+            response
+                .promotion_gates
+                .trace_corpus_rls_expression_mismatch_table_count,
+        ),
+    ] {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "tracedao_operational_postgres_rls_gap_tables",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("gap", gap),
+            ],
+            value,
+        );
+    }
     body.push_str("# HELP tracedao_operational_ranking_worker_actionable_skips Count of ranking worker risk or ineligible skips that need operator review.\n");
     body.push_str("# TYPE tracedao_operational_ranking_worker_actionable_skips gauge\n");
     push_prometheus_gauge(
@@ -81245,6 +81363,12 @@ mod tests {
             "tracedao_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"failed_ranking_worker_runs\"}} 1"
         )));
         assert!(body_text.contains(&format!(
+            "tracedao_operational_postgres_rls_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"diagnostics_available\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_postgres_rls_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"tenant_context_transaction_local\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
             "tracedao_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 21"
         )));
         assert!(body_text.contains(&format!(
@@ -81403,6 +81527,7 @@ mod tests {
             .force_rls_disabled_tables
             .push("trace_object_refs".to_string());
         unsafe_rls.current_role_bypasses_rls = true;
+        unsafe_rls.tenant_context_transaction_local = false;
 
         let response = TraceOperationalSummaryResponse::from_parts(TraceOperationalSummaryInputs {
             state: state.as_ref(),
@@ -81426,6 +81551,7 @@ mod tests {
         assert_eq!(response.promotion_gates.trace_corpus_rls_ready, Some(false));
         assert_eq!(response.promotion_gates.force_rls_disabled_table_count, 1);
         assert!(response.promotion_gates.current_role_bypasses_rls);
+        assert!(!response.promotion_gates.tenant_context_transaction_local);
         assert!(
             response
                 .promotion_gates
@@ -81434,13 +81560,27 @@ mod tests {
         );
 
         let (metrics, _) = trace_operational_metrics_body(&response);
+        let tenant_ref = tenant_storage_ref("tenant-a");
         assert!(metrics.contains("gate=\"postgres_trace_rls_not_ready\""));
+        assert!(metrics.contains(&format!(
+            "tracedao_operational_postgres_rls_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"runtime_role_non_bypassing\"}} 0"
+        )));
+        assert!(metrics.contains(&format!(
+            "tracedao_operational_postgres_rls_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"tenant_context_transaction_local\"}} 0"
+        )));
+        assert!(metrics.contains(&format!(
+            "tracedao_operational_postgres_rls_gap_tables{{tenant_storage_ref=\"{tenant_ref}\",gap=\"force_rls_disabled_tables\"}} 1"
+        )));
         assert!(!metrics.contains("trace_object_refs"));
         let response_json =
             serde_json::to_value(&response).expect("operational summary serializes");
         assert_eq!(
             response_json["promotion_gates"]["force_rls_disabled_table_count"],
             serde_json::json!(1)
+        );
+        assert_eq!(
+            response_json["promotion_gates"]["tenant_context_transaction_local"],
+            serde_json::json!(false)
         );
         assert!(!response_json.to_string().contains("trace_object_refs"));
     }
