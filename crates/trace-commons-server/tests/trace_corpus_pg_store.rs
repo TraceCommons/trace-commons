@@ -290,6 +290,219 @@ async fn pg_store_rolls_back_export_manifest_mirror_when_item_ref_is_invalid() {
 }
 
 #[tokio::test]
+async fn pg_store_export_manifest_mirror_is_tenant_scoped_with_overlapping_ids() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_alpha = format!("pg-export-mirror-alpha-{}", Uuid::new_v4());
+    let tenant_beta = format!("pg-export-mirror-beta-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    let trace_id = Uuid::new_v4();
+    let export_manifest_id = Uuid::new_v4();
+    let object_ref_id = Uuid::new_v4();
+    let derived_id = Uuid::new_v4();
+
+    for (tenant_id, label, source_hash) in [
+        (&tenant_alpha, "alpha", "sha256:export-alpha-source"),
+        (&tenant_beta, "beta", "sha256:export-beta-source"),
+    ] {
+        let mut submission = sample_submission(tenant_id, submission_id);
+        submission.trace_id = trace_id;
+        submission.canonical_summary_hash = Some(format!("sha256:{label}-canonical"));
+        backend
+            .upsert_trace_submission(submission)
+            .await
+            .expect("insert tenant export source submission");
+
+        backend
+            .append_trace_derived_record(TraceDerivedRecordWrite {
+                tenant_id: tenant_id.clone(),
+                derived_id,
+                submission_id,
+                trace_id,
+                status: TraceDerivedStatus::Current,
+                worker_kind: TraceWorkerKind::Summary,
+                worker_version: "summary-worker-v1".to_string(),
+                input_object_ref: None,
+                input_hash: format!("sha256:{label}-input"),
+                output_object_ref: None,
+                canonical_summary: Some(format!("{label} export summary")),
+                canonical_summary_hash: Some(format!("sha256:{label}-summary")),
+                summary_model: "summary-model-v1".to_string(),
+                task_success: Some("success".to_string()),
+                privacy_risk: Some("low".to_string()),
+                event_count: Some(3),
+                tool_sequence: vec!["terminal".to_string()],
+                tool_categories: vec!["shell".to_string()],
+                coverage_tags: vec![format!("tenant:{label}")],
+                duplicate_score: Some(0.01),
+                novelty_score: Some(0.9),
+                cluster_id: Some(format!("cluster:{label}")),
+            })
+            .await
+            .expect("insert tenant export derived record");
+
+        let manifest = backend
+            .upsert_trace_export_manifest_mirror(TraceExportManifestMirrorWrite {
+                manifest: TraceExportManifestWrite {
+                    tenant_id: tenant_id.clone(),
+                    export_manifest_id,
+                    artifact_kind: TraceObjectArtifactKind::ExportArtifact,
+                    purpose_code: Some(format!("tenant_scoped_export_{label}")),
+                    audit_event_id: Some(Uuid::new_v4()),
+                    source_submission_ids: vec![submission_id],
+                    source_submission_ids_hash: format!("sha256:{label}-source-list"),
+                    item_count: 1,
+                    generated_at: Utc::now(),
+                },
+                object_refs: vec![TraceObjectRefWrite {
+                    tenant_id: tenant_id.clone(),
+                    object_ref_id,
+                    submission_id,
+                    artifact_kind: TraceObjectArtifactKind::ExportArtifact,
+                    object_store: "trace_commons_file_store".to_string(),
+                    object_key: format!("{tenant_id}/ranker/export/provenance.json"),
+                    content_sha256: format!("sha256:{label}-artifact"),
+                    encryption_key_ref: format!("tenant:{tenant_id}"),
+                    size_bytes: 256,
+                    compression: None,
+                    created_by_job_id: Some(export_manifest_id),
+                }],
+                items: vec![TraceExportManifestItemWrite {
+                    tenant_id: tenant_id.clone(),
+                    export_manifest_id,
+                    submission_id,
+                    trace_id,
+                    derived_id: Some(derived_id),
+                    object_ref_id: Some(object_ref_id),
+                    vector_entry_id: None,
+                    source_status_at_export: TraceCorpusStatus::Accepted,
+                    source_hash_at_export: source_hash.to_string(),
+                }],
+            })
+            .await
+            .expect("upsert tenant export mirror");
+        assert_eq!(manifest.tenant_id, *tenant_id);
+        assert_eq!(manifest.export_manifest_id, export_manifest_id);
+        assert_eq!(
+            manifest.source_submission_ids_hash,
+            format!("sha256:{label}-source-list")
+        );
+    }
+
+    let alpha_manifests = backend
+        .list_trace_export_manifests(&tenant_alpha)
+        .await
+        .expect("list alpha export manifests");
+    assert_eq!(alpha_manifests.len(), 1);
+    assert_eq!(alpha_manifests[0].tenant_id, tenant_alpha);
+    assert_eq!(alpha_manifests[0].export_manifest_id, export_manifest_id);
+    assert_eq!(
+        alpha_manifests[0].source_submission_ids_hash,
+        "sha256:alpha-source-list"
+    );
+
+    let beta_manifests = backend
+        .list_trace_export_manifests(&tenant_beta)
+        .await
+        .expect("list beta export manifests");
+    assert_eq!(beta_manifests.len(), 1);
+    assert_eq!(beta_manifests[0].tenant_id, tenant_beta);
+    assert_eq!(beta_manifests[0].export_manifest_id, export_manifest_id);
+    assert_eq!(
+        beta_manifests[0].source_submission_ids_hash,
+        "sha256:beta-source-list"
+    );
+
+    let alpha_items = backend
+        .list_trace_export_manifest_items(&tenant_alpha, export_manifest_id)
+        .await
+        .expect("list alpha export items");
+    assert_eq!(alpha_items.len(), 1);
+    assert_eq!(alpha_items[0].tenant_id, tenant_alpha);
+    assert_eq!(alpha_items[0].export_manifest_id, export_manifest_id);
+    assert_eq!(
+        alpha_items[0].source_hash_at_export,
+        "sha256:export-alpha-source"
+    );
+
+    let beta_items = backend
+        .list_trace_export_manifest_items(&tenant_beta, export_manifest_id)
+        .await
+        .expect("list beta export items");
+    assert_eq!(beta_items.len(), 1);
+    assert_eq!(beta_items[0].tenant_id, tenant_beta);
+    assert_eq!(beta_items[0].export_manifest_id, export_manifest_id);
+    assert_eq!(
+        beta_items[0].source_hash_at_export,
+        "sha256:export-beta-source"
+    );
+
+    let alpha_object_refs = backend
+        .list_trace_object_refs(&tenant_alpha, submission_id)
+        .await
+        .expect("list alpha object refs");
+    assert_eq!(alpha_object_refs.len(), 1);
+    assert_eq!(alpha_object_refs[0].tenant_id, tenant_alpha);
+    assert_eq!(alpha_object_refs[0].object_ref_id, object_ref_id);
+    assert_eq!(alpha_object_refs[0].content_sha256, "sha256:alpha-artifact");
+
+    let beta_object_refs = backend
+        .list_trace_object_refs(&tenant_beta, submission_id)
+        .await
+        .expect("list beta object refs");
+    assert_eq!(beta_object_refs.len(), 1);
+    assert_eq!(beta_object_refs[0].tenant_id, tenant_beta);
+    assert_eq!(beta_object_refs[0].object_ref_id, object_ref_id);
+    assert_eq!(beta_object_refs[0].content_sha256, "sha256:beta-artifact");
+
+    backend
+        .delete_trace_export_manifest_mirror(&tenant_alpha, export_manifest_id)
+        .await
+        .expect("delete alpha export mirror");
+
+    assert!(
+        backend
+            .list_trace_export_manifest_items(&tenant_alpha, export_manifest_id)
+            .await
+            .expect("list alpha export items after delete")
+            .is_empty(),
+        "tenant-scoped export mirror delete removes alpha items"
+    );
+    assert!(
+        backend
+            .list_trace_object_refs(&tenant_alpha, submission_id)
+            .await
+            .expect("list alpha object refs after delete")
+            .is_empty(),
+        "tenant-scoped export mirror delete removes alpha staged refs"
+    );
+    assert_eq!(
+        backend
+            .list_trace_export_manifest_items(&tenant_beta, export_manifest_id)
+            .await
+            .expect("list beta export items after alpha delete")
+            .len(),
+        1,
+        "tenant-scoped export mirror delete must not remove beta items with the same ids"
+    );
+    assert_eq!(
+        backend
+            .list_trace_object_refs(&tenant_beta, submission_id)
+            .await
+            .expect("list beta object refs after alpha delete")
+            .len(),
+        1,
+        "tenant-scoped export mirror delete must not remove beta refs with the same ids"
+    );
+
+    cleanup_tenant(&backend, &tenant_alpha).await;
+    cleanup_tenant(&backend, &tenant_beta).await;
+}
+
+#[tokio::test]
 async fn pg_store_invalidates_exact_vector_entry_with_tenant_submission_scope() {
     let Some(backend) = postgres_backend().await else {
         return;
