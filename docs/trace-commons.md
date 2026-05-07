@@ -448,7 +448,9 @@ probe artifact, reads it back through the same artifact-store abstraction,
 deletes it by default, returns only safe object-store aliases, booleans, blocker
 codes, a probe object-ref hash, and a migration manifest hash, and can append
 `object_store_migration` rollout-smoke evidence that references the manifest
-hash.
+hash. Operators can set `require_versioning: true` in the drill body to make
+the same preflight fail closed unless the selected object store reports
+versioning and restore-after-delete support.
 `POST /v1/admin/db-reconciliation-drill` runs the clean-reconciliation smoke
 check without maintenance side effects: it requires a DB mirror, reuses the
 file-vs-DB reconciliation engine, returns safe aggregate counts plus compact
