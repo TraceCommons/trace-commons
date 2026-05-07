@@ -62624,7 +62624,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revocation_effects_drill_records_credit_reversal_and_object_delete_evidence() {
+    async fn revocation_effects_drill_records_remote_credit_reversal_and_object_delete_evidence() {
         use axum::body::Body;
         use tower::ServiceExt;
 
@@ -62634,11 +62634,18 @@ mod tests {
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 
         let temp = tempfile::tempdir().expect("temp dir");
-        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
-        let artifact_store = ConfiguredTraceArtifactStore::new(
-            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
-            test_artifact_store(artifact_temp.path()),
-        );
+        let remote_temp = tempfile::tempdir().expect("remote artifact temp dir");
+        let key = trace_commons_server::secrets::keychain::generate_master_key_hex();
+        let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("file_system"),
+            Some(remote_temp.path().to_str().expect("utf8 temp path")),
+            Some("test-kms-key-ref"),
+            Some("test-credential-ref"),
+        )
+        .expect("filesystem remote config parses");
+        let artifact_store =
+            ConfiguredTraceArtifactStore::remote_service(remote_config, SecretString::from(key))
+                .expect("filesystem remote service store builds");
         let mut state =
             test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
                 temp.path().to_path_buf(),
@@ -63001,6 +63008,11 @@ mod tests {
                         && reason.contains("status=passed")
                 })
         }));
+        assert_eq!(
+            count_files_under_dir(remote_temp.path()),
+            0,
+            "revocation worker must delete every filesystem-remote canary artifact"
+        );
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
