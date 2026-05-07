@@ -586,6 +586,13 @@ This safe projection lets operators confirm workers cannot lower the
 sample-size or quality requirements below production credit policy and can see
 whether live NEAR submission/confirmation, benchmark evaluator, or benchmark-registry submission is wired without exposing the
 relayer/adapter URL, bearer token, hosts, or account identities.
+Operational summary and `/v1/admin/operational-metrics` also aggregate the NEAR
+credit outbox into safe state counts (`pending`, `submitted`, `confirmed`,
+`failed`, `pending_without_submitter`, and `submitted_without_confirmer`) plus
+submitter/confirmer configured flags. Pending rows without a submitter,
+submitted rows without a confirmer, and failed NEAR outbox rows are promotion
+blockers, while the metrics never expose transaction hashes, account hashes,
+contract ids, adapter URLs, or raw failure text.
 
 Stored envelope body reads now also validate any decoded contributor tenant scope that uses the server `tenant_sha256:<hash>` shape against the authenticated tenant for both file-backed and object-ref-backed reads, so a tampered server tenant ref cannot ride behind otherwise valid metadata while legacy client attribution strings remain non-authoritative.
 

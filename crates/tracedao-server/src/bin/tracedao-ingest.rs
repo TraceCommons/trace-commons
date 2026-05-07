@@ -23580,6 +23580,7 @@ async fn read_trace_operational_summary(
         list_benchmark_conversion_artifacts_for_worker(state, tenant.auth()).await?;
     let benchmark_registry_outbox =
         read_benchmark_registry_outbox_items_for_admin(state, tenant.auth()).await?;
+    let near_credit_outbox = read_near_credit_outbox_items_for_admin(state, tenant.auth()).await?;
     let rollout_smoke_evidence =
         read_rollout_smoke_evidence_for_admin(state, tenant.auth()).await?;
     let revocation_propagation =
@@ -23594,6 +23595,7 @@ async fn read_trace_operational_summary(
             db_summary,
             benchmark_artifacts,
             benchmark_registry_outbox,
+            near_credit_outbox,
             ranking,
             rollout_smoke_evidence,
             revocation_propagation,
@@ -28450,6 +28452,58 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             &[
                 ("tenant_storage_ref", &response.tenant_storage_ref),
                 ("status", status),
+            ],
+            value,
+        );
+    }
+    body.push_str("# HELP tracedao_operational_near_credit_outbox NEAR non-transferable credit receipt outbox counts by operational state.\n");
+    body.push_str("# TYPE tracedao_operational_near_credit_outbox gauge\n");
+    for (state, value) in [
+        ("total", response.near_credit.item_count),
+        ("disabled", response.near_credit.disabled_count),
+        ("pending", response.near_credit.pending_count),
+        ("submitted", response.near_credit.submitted_count),
+        ("confirmed", response.near_credit.confirmed_count),
+        ("failed", response.near_credit.failed_count),
+        (
+            "pending_without_submitter",
+            response.near_credit.pending_without_submitter_count,
+        ),
+        (
+            "submitted_without_confirmer",
+            response.near_credit.submitted_without_confirmer_count,
+        ),
+    ] {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "tracedao_operational_near_credit_outbox",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("state", state),
+            ],
+            value,
+        );
+    }
+    body.push_str("# HELP tracedao_operational_near_credit_adapters Safe NEAR credit adapter readiness flags.\n");
+    body.push_str("# TYPE tracedao_operational_near_credit_adapters gauge\n");
+    for (state, value) in [
+        (
+            "submitter_configured",
+            usize::from(response.near_credit.submitter_configured),
+        ),
+        (
+            "confirmer_configured",
+            usize::from(response.near_credit.confirmer_configured),
+        ),
+    ] {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "tracedao_operational_near_credit_adapters",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("state", state),
             ],
             value,
         );
@@ -48883,6 +48937,7 @@ struct TraceOperationalSummaryResponse {
     vectors: TraceOperationalVectorSummary,
     benchmarks: TraceOperationalBenchmarkSummary,
     ranking: TraceOperationalRankingSummary,
+    near_credit: TraceOperationalNearCreditSummary,
     delayed_credit: TraceOperationalDelayedCreditSummary,
 }
 
@@ -48904,6 +48959,7 @@ struct TraceOperationalSummaryInputs<'a> {
     db_summary: TraceOperationalDbSummary,
     benchmark_artifacts: Vec<TraceBenchmarkConversionArtifact>,
     benchmark_registry_outbox: Vec<TraceBenchmarkRegistryOutboxItem>,
+    near_credit_outbox: Vec<TraceNearCreditOutboxItem>,
     ranking: TraceOperationalRankingSummary,
     rollout_smoke_evidence: Vec<TraceRolloutSmokeEvidenceResponse>,
     revocation_propagation: TraceOperationalRevocationPropagationSummary,
@@ -48937,6 +48993,11 @@ impl TraceOperationalSummaryResponse {
             inputs.state.benchmark_registry_confirmer.is_some(),
             inputs.state.benchmark_evaluator.is_some(),
         );
+        let near_credit = TraceOperationalNearCreditSummary::from_outbox(
+            &inputs.near_credit_outbox,
+            inputs.state.near_credit_submitter.is_some(),
+            inputs.state.near_credit_confirmer.is_some(),
+        );
         let promotion_gates = TraceOperationalPromotionGateSummary::from_inputs(
             TraceOperationalPromotionGateInputs {
                 state: inputs.state,
@@ -48947,6 +49008,7 @@ impl TraceOperationalSummaryResponse {
                 vectors: &vectors,
                 benchmarks: &benchmarks,
                 ranking: &inputs.ranking,
+                near_credit: &near_credit,
                 delayed_credit: &delayed_credit,
                 revocation_propagation: &inputs.revocation_propagation,
             },
@@ -48972,6 +49034,7 @@ impl TraceOperationalSummaryResponse {
             vectors,
             benchmarks,
             ranking: inputs.ranking,
+            near_credit,
             delayed_credit,
         }
     }
@@ -49492,6 +49555,9 @@ struct TraceOperationalPromotionGateSummary {
     ranking_adjudication_issue_count: usize,
     blocked_ranking_credit_event_count: usize,
     ranking_calibration_dataset_manifest_conflict_count: usize,
+    near_credit_outbox_pending_without_submitter_count: usize,
+    near_credit_outbox_submitted_without_confirmer_count: usize,
+    near_credit_outbox_failed_count: usize,
     stale_ranking_worker_run_count: usize,
     failed_ranking_worker_run_count: usize,
     ranking_worker_run_actionable_skip_count: usize,
@@ -49514,6 +49580,7 @@ struct TraceOperationalPromotionGateInputs<'a> {
     vectors: &'a TraceOperationalVectorSummary,
     benchmarks: &'a TraceOperationalBenchmarkSummary,
     ranking: &'a TraceOperationalRankingSummary,
+    near_credit: &'a TraceOperationalNearCreditSummary,
     delayed_credit: &'a TraceOperationalDelayedCreditSummary,
     revocation_propagation: &'a TraceOperationalRevocationPropagationSummary,
 }
@@ -49528,6 +49595,7 @@ impl TraceOperationalPromotionGateSummary {
         let vectors = inputs.vectors;
         let benchmarks = inputs.benchmarks;
         let ranking = inputs.ranking;
+        let near_credit = inputs.near_credit;
         let delayed_credit = inputs.delayed_credit;
         let db_mirror_configured = state.db_mirror.is_some();
         let tenant_rollout_gate_counts = state.tenant_rollout_gates.status_counts();
@@ -49558,6 +49626,11 @@ impl TraceOperationalPromotionGateSummary {
         let blocked_ranking_credit_event_count = ranking.blocked_credit_event_count;
         let ranking_calibration_dataset_manifest_conflict_count =
             ranking.calibration_dataset_manifest_conflict_count;
+        let near_credit_outbox_pending_without_submitter_count =
+            near_credit.pending_without_submitter_count;
+        let near_credit_outbox_submitted_without_confirmer_count =
+            near_credit.submitted_without_confirmer_count;
+        let near_credit_outbox_failed_count = near_credit.failed_count;
         let stale_ranking_worker_run_count = ranking.stale_running_worker_run_count;
         let failed_ranking_worker_run_count = ranking.failed_worker_run_count;
         let artifact_object_store_configured = state.artifact_store.is_some();
@@ -49730,6 +49803,21 @@ impl TraceOperationalPromotionGateSummary {
         );
         push_gap_count(
             &mut blocking_gates,
+            "near_credit_outbox_pending_without_submitter",
+            near_credit_outbox_pending_without_submitter_count,
+        );
+        push_gap_count(
+            &mut blocking_gates,
+            "near_credit_outbox_submitted_without_confirmer",
+            near_credit_outbox_submitted_without_confirmer_count,
+        );
+        push_gap_count(
+            &mut blocking_gates,
+            "near_credit_outbox_failed",
+            near_credit_outbox_failed_count,
+        );
+        push_gap_count(
+            &mut blocking_gates,
             "stale_ranking_worker_runs",
             stale_ranking_worker_run_count,
         );
@@ -49835,6 +49923,9 @@ impl TraceOperationalPromotionGateSummary {
             ranking_adjudication_issue_count,
             blocked_ranking_credit_event_count,
             ranking_calibration_dataset_manifest_conflict_count,
+            near_credit_outbox_pending_without_submitter_count,
+            near_credit_outbox_submitted_without_confirmer_count,
+            near_credit_outbox_failed_count,
             stale_ranking_worker_run_count,
             failed_ranking_worker_run_count,
             ranking_worker_run_actionable_skip_count,
@@ -50566,6 +50657,51 @@ impl TraceOperationalRankingSummary {
             worker_run_skipped_ineligible_total,
             worker_run_reason_counts,
         }
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
+struct TraceOperationalNearCreditSummary {
+    item_count: usize,
+    disabled_count: usize,
+    pending_count: usize,
+    submitted_count: usize,
+    confirmed_count: usize,
+    failed_count: usize,
+    submitter_configured: bool,
+    confirmer_configured: bool,
+    pending_without_submitter_count: usize,
+    submitted_without_confirmer_count: usize,
+}
+
+impl TraceOperationalNearCreditSummary {
+    fn from_outbox(
+        items: &[TraceNearCreditOutboxItem],
+        submitter_configured: bool,
+        confirmer_configured: bool,
+    ) -> Self {
+        let mut summary = Self {
+            item_count: items.len(),
+            submitter_configured,
+            confirmer_configured,
+            ..Self::default()
+        };
+        for item in items {
+            match item.status {
+                StorageTraceCreditSettlementNearStatus::Disabled => summary.disabled_count += 1,
+                StorageTraceCreditSettlementNearStatus::Pending => summary.pending_count += 1,
+                StorageTraceCreditSettlementNearStatus::Submitted => summary.submitted_count += 1,
+                StorageTraceCreditSettlementNearStatus::Confirmed => summary.confirmed_count += 1,
+                StorageTraceCreditSettlementNearStatus::Failed => summary.failed_count += 1,
+            }
+        }
+        if !submitter_configured {
+            summary.pending_without_submitter_count = summary.pending_count;
+        }
+        if !confirmer_configured {
+            summary.submitted_without_confirmer_count = summary.submitted_count;
+        }
+        summary
     }
 }
 
@@ -84587,6 +84723,7 @@ mod tests {
             },
             benchmark_artifacts: Vec::new(),
             benchmark_registry_outbox: Vec::new(),
+            near_credit_outbox: Vec::new(),
             ranking: TraceOperationalRankingSummary::default(),
             rollout_smoke_evidence: Vec::new(),
             revocation_propagation: TraceOperationalRevocationPropagationSummary::default(),
@@ -84731,6 +84868,7 @@ mod tests {
             },
             benchmark_artifacts: Vec::new(),
             benchmark_registry_outbox: Vec::new(),
+            near_credit_outbox: Vec::new(),
             ranking: TraceOperationalRankingSummary::default(),
             rollout_smoke_evidence: Vec::new(),
             revocation_propagation: TraceOperationalRevocationPropagationSummary::default(),
@@ -85544,6 +85682,129 @@ mod tests {
         assert!(!body_text.contains("disabled_remote_probe"));
     }
 
+    #[tokio::test]
+    async fn admin_operational_summary_and_metrics_report_near_credit_outbox_readiness() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut pending_item =
+            submitted_near_credit_outbox_item(Uuid::new_v4(), "near-route-tx-pending", 1_000_000);
+        pending_item.status = StorageTraceCreditSettlementNearStatus::Pending;
+        pending_item.submitted_at = None;
+        pending_item.near_transaction_hash = None;
+        let submitted_item =
+            submitted_near_credit_outbox_item(Uuid::new_v4(), "near-route-tx-submitted", 2_000_000);
+        let mut failed_item =
+            submitted_near_credit_outbox_item(Uuid::new_v4(), "near-route-tx-failed", 3_000_000);
+        failed_item.status = StorageTraceCreditSettlementNearStatus::Failed;
+        failed_item.last_error_hash = Some(sha256_prefixed("route near credit failed"));
+        for item in [&pending_item, &submitted_item, &failed_item] {
+            append_near_credit_outbox_item(temp.path(), "tenant-a", item)
+                .expect("near credit outbox writes");
+        }
+
+        let Json(operational) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary");
+        let operational_json =
+            serde_json::to_value(&operational).expect("operational summary serializes");
+        assert_eq!(
+            operational_json["near_credit"]["item_count"],
+            serde_json::json!(3)
+        );
+        assert_eq!(
+            operational_json["near_credit"]["pending_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["near_credit"]["submitted_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["near_credit"]["failed_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["near_credit"]["pending_without_submitter_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["near_credit"]["submitted_without_confirmer_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["promotion_gates"]["near_credit_outbox_pending_without_submitter_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["promotion_gates"]["near_credit_outbox_submitted_without_confirmer_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["promotion_gates"]["near_credit_outbox_failed_count"],
+            serde_json::json!(1)
+        );
+        assert!(
+            operational
+                .promotion_gates
+                .blocking_gates
+                .contains(&"near_credit_outbox_pending_without_submitter=1".to_string())
+        );
+        assert!(
+            operational
+                .promotion_gates
+                .blocking_gates
+                .contains(&"near_credit_outbox_submitted_without_confirmer=1".to_string())
+        );
+        assert!(
+            operational
+                .promotion_gates
+                .blocking_gates
+                .contains(&"near_credit_outbox_failed=1".to_string())
+        );
+
+        let metrics_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-metrics")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("metrics response");
+        assert_eq!(metrics_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(metrics_response.into_body(), 65536)
+            .await
+            .expect("body reads");
+        let body_text = std::str::from_utf8(&body).expect("metrics body is utf8");
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_near_credit_outbox{{tenant_storage_ref=\"{tenant_ref}\",state=\"pending\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_near_credit_outbox{{tenant_storage_ref=\"{tenant_ref}\",state=\"submitted_without_confirmer\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_near_credit_outbox{{tenant_storage_ref=\"{tenant_ref}\",state=\"failed\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_near_credit_adapters{{tenant_storage_ref=\"{tenant_ref}\",state=\"submitter_configured\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_near_credit_adapters{{tenant_storage_ref=\"{tenant_ref}\",state=\"confirmer_configured\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"near_credit_outbox_pending_without_submitter\"}} 1"
+        )));
+        assert!(!body_text.contains("near-route-tx-submitted"));
+        assert!(!body_text.contains("route near credit failed"));
+    }
+
     #[test]
     fn operational_metrics_body_exports_ranking_model_credit_readiness_gauges() {
         let tenant_ref = tenant_storage_ref("tenant-a");
@@ -85595,6 +85856,7 @@ mod tests {
                 calibration_dataset_manifest_conflict_count: 1,
                 ..TraceOperationalRankingSummary::default()
             },
+            near_credit: TraceOperationalNearCreditSummary::default(),
             delayed_credit: TraceOperationalDelayedCreditSummary::default(),
         };
 
@@ -85622,6 +85884,70 @@ mod tests {
         )));
         assert!(metrics.contains(&format!(
             "tracedao_operational_ranking_reason_counts{{tenant_storage_ref=\"{tenant_ref}\",report=\"blocked_credit\",reason=\"low_confidence_prediction\"}} 1"
+        )));
+    }
+
+    #[test]
+    fn operational_metrics_body_exports_near_credit_outbox_readiness_gauges() {
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        let response = TraceOperationalSummaryResponse {
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_ref.clone(),
+            generated_at: Utc::now(),
+            promotion_gates: TraceOperationalPromotionGateSummary {
+                ready: false,
+                blocking_count: 3,
+                blocking_gates: vec![
+                    "near_credit_outbox_pending_without_submitter=2".to_string(),
+                    "near_credit_outbox_submitted_without_confirmer=1".to_string(),
+                    "near_credit_outbox_failed=1".to_string(),
+                ],
+                near_credit_outbox_pending_without_submitter_count: 2,
+                near_credit_outbox_submitted_without_confirmer_count: 1,
+                near_credit_outbox_failed_count: 1,
+                ..TraceOperationalPromotionGateSummary::default()
+            },
+            object_store: TraceOperationalObjectStoreSummary::default(),
+            rollout_smoke: TraceOperationalRolloutSmokeSummary::default(),
+            revocation_propagation: TraceOperationalRevocationPropagationSummary::default(),
+            submissions: TraceOperationalSubmissionSummary::default(),
+            review_sla: TraceOperationalReviewSlaSummary::default(),
+            exports: TraceOperationalExportSummary::default(),
+            retention: TraceOperationalRetentionSummary::default(),
+            analytics: TraceOperationalAnalyticsSummary::default(),
+            vectors: TraceOperationalVectorSummary::default(),
+            benchmarks: TraceOperationalBenchmarkSummary::default(),
+            ranking: TraceOperationalRankingSummary::default(),
+            near_credit: TraceOperationalNearCreditSummary {
+                item_count: 4,
+                disabled_count: 0,
+                pending_count: 2,
+                submitted_count: 1,
+                confirmed_count: 0,
+                failed_count: 1,
+                submitter_configured: false,
+                confirmer_configured: false,
+                pending_without_submitter_count: 2,
+                submitted_without_confirmer_count: 1,
+            },
+            delayed_credit: TraceOperationalDelayedCreditSummary::default(),
+        };
+
+        let (metrics, _) = trace_operational_metrics_body(&response);
+        assert!(metrics.contains(&format!(
+            "tracedao_operational_near_credit_outbox{{tenant_storage_ref=\"{tenant_ref}\",state=\"pending\"}} 2"
+        )));
+        assert!(metrics.contains(&format!(
+            "tracedao_operational_near_credit_outbox{{tenant_storage_ref=\"{tenant_ref}\",state=\"submitted_without_confirmer\"}} 1"
+        )));
+        assert!(metrics.contains(&format!(
+            "tracedao_operational_near_credit_outbox{{tenant_storage_ref=\"{tenant_ref}\",state=\"failed\"}} 1"
+        )));
+        assert!(metrics.contains(&format!(
+            "tracedao_operational_near_credit_adapters{{tenant_storage_ref=\"{tenant_ref}\",state=\"submitter_configured\"}} 0"
+        )));
+        assert!(metrics.contains(&format!(
+            "tracedao_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"near_credit_outbox_pending_without_submitter\"}} 2"
         )));
     }
 
@@ -86407,6 +86733,7 @@ mod tests {
             vectors: TraceOperationalVectorSummary::default(),
             benchmarks: TraceOperationalBenchmarkSummary::default(),
             ranking: TraceOperationalRankingSummary::default(),
+            near_credit: TraceOperationalNearCreditSummary::default(),
             delayed_credit: TraceOperationalDelayedCreditSummary::default(),
         };
 
@@ -86440,6 +86767,7 @@ mod tests {
             vectors: TraceOperationalVectorSummary::default(),
             benchmarks: TraceOperationalBenchmarkSummary::default(),
             ranking: TraceOperationalRankingSummary::default(),
+            near_credit: TraceOperationalNearCreditSummary::default(),
             delayed_credit: TraceOperationalDelayedCreditSummary::default(),
         };
 
@@ -86487,6 +86815,7 @@ mod tests {
             vectors: TraceOperationalVectorSummary::default(),
             benchmarks: TraceOperationalBenchmarkSummary::default(),
             ranking: TraceOperationalRankingSummary::default(),
+            near_credit: TraceOperationalNearCreditSummary::default(),
             delayed_credit: TraceOperationalDelayedCreditSummary::default(),
         };
 
@@ -86533,6 +86862,7 @@ mod tests {
             },
             benchmark_artifacts: Vec::new(),
             benchmark_registry_outbox: Vec::new(),
+            near_credit_outbox: Vec::new(),
             ranking: TraceOperationalRankingSummary::default(),
             rollout_smoke_evidence: Vec::new(),
             revocation_propagation: TraceOperationalRevocationPropagationSummary::default(),
