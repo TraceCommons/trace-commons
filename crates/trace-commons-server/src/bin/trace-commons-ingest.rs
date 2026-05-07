@@ -49886,6 +49886,23 @@ mod tests {
         Arc::new(LocalEncryptedTraceArtifactStore::new(root, crypto))
     }
 
+    fn count_files_under_dir(root: &Path) -> usize {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return 0;
+        };
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| {
+                let path = entry.path();
+                if path.is_dir() {
+                    count_files_under_dir(&path)
+                } else {
+                    1
+                }
+            })
+            .sum()
+    }
+
     fn auth_headers(token: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         let value = format!("Bearer {token}");
@@ -63400,6 +63417,97 @@ mod tests {
                         && reason.contains("status=passed")
                 })
         }));
+    }
+
+    #[tokio::test]
+    async fn object_store_migration_drill_supports_filesystem_remote_service_store() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let remote_temp = tempfile::tempdir().expect("remote artifact temp dir");
+        let key = trace_commons_server::secrets::keychain::generate_master_key_hex();
+        let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("file_system"),
+            Some(remote_temp.path().to_str().expect("utf8 temp path")),
+            Some("test-kms-key-ref"),
+            Some("test-credential-ref"),
+        )
+        .expect("filesystem remote config parses");
+        let artifact_store =
+            ConfiguredTraceArtifactStore::remote_service(remote_config, SecretString::from(key))
+                .expect("filesystem remote service store builds");
+        let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            None,
+            Some(artifact_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/object-store-migration-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator filesystem remote migration drill",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("admin request builds"),
+            )
+            .await
+            .expect("filesystem remote migration drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("migration drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(true));
+        assert_eq!(
+            value["object_store_name"],
+            serde_json::json!(TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE)
+        );
+        assert_eq!(value["object_store_eligible"], serde_json::json!(true));
+        assert_eq!(value["object_io_enabled"], serde_json::json!(true));
+        assert_eq!(
+            value["plaintext_compatibility_allowed"],
+            serde_json::json!(false)
+        );
+        assert_eq!(value["write_succeeded"], serde_json::json!(true));
+        assert_eq!(value["read_succeeded"], serde_json::json!(true));
+        assert_eq!(value["delete_succeeded"], serde_json::json!(true));
+        assert_eq!(value["blocking_gaps"], serde_json::json!([]));
+        assert!(
+            value["probe_object_ref_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("test-kms-key-ref"));
+        assert!(!body_text.contains("test-credential-ref"));
+        assert!(!body_text.contains("object-store-migration-drill-secret"));
+
+        let lingering_remote_objects = count_files_under_dir(remote_temp.path());
+        assert_eq!(
+            lingering_remote_objects, 0,
+            "migration drill must delete the remote probe artifact"
+        );
     }
 
     #[tokio::test]
