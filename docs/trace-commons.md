@@ -511,7 +511,11 @@ rollout-smoke evidence without exposing model artifacts, trace bodies, raw lab
 notes, external refs, or prediction ids. Failed drill evidence is recorded when
 holdout manifest conflicts, active-model risk, blocked model targets, or blocked
 ranking credits remain, so a stale or conflicted ranking registry cannot
-masquerade as promotion-ready.
+masquerade as promotion-ready. Set `require_process_evaluator=true` on the
+drill request to include configured process-evaluator adapter readiness in the
+same hash-only proof; missing evaluator configuration then records
+`process_evaluator_missing` as a blocker without exposing the adapter URL or
+credentials.
 `POST /v1/admin/credit-settlement-drill` runs the Trace Credits settlement
 promotion check through the admin credit-risk summary plus the existing dry-run
 settlement selector. It validates a supplied NEAR contract id without writing

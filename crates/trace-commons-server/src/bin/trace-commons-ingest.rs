@@ -24182,6 +24182,8 @@ struct TraceRankingModelReadinessDrillRequest {
     #[serde(default = "default_true")]
     require_ready_credit: bool,
     #[serde(default)]
+    require_process_evaluator: bool,
+    #[serde(default)]
     record_evidence: bool,
 }
 
@@ -24437,6 +24439,8 @@ struct TraceRankingModelReadinessDrillResponse {
     evidence_hash: String,
     require_active_model: bool,
     require_ready_credit: bool,
+    require_process_evaluator: bool,
+    process_evaluator_configured: bool,
     active_model_count: usize,
     monitored_model_count: usize,
     at_risk_model_count: usize,
@@ -25847,6 +25851,8 @@ async fn run_ranking_model_readiness_drill(
         evidence_hash: String::new(),
         require_active_model: request.require_active_model,
         require_ready_credit: request.require_ready_credit,
+        require_process_evaluator: request.require_process_evaluator,
+        process_evaluator_configured: state.process_evaluator.is_some(),
         active_model_count: risk_report.active_model_count,
         monitored_model_count: risk_report.monitored_model_count,
         at_risk_model_count: risk_report.at_risk_model_count,
@@ -26719,6 +26725,11 @@ fn ranking_model_readiness_drill_blocking_gaps(
             && response.pending_ranking_credit_event_count > 0
             && response.ready_ranking_credit_event_count == 0,
     );
+    push_key_rotation_gap(
+        &mut gaps,
+        "process_evaluator_missing",
+        response.require_process_evaluator && !response.process_evaluator_configured,
+    );
     push_rollback_gap_count(
         &mut gaps,
         "blocked_ranking_credit_events",
@@ -27520,6 +27531,8 @@ fn ranking_model_readiness_drill_evidence_hash(
             "actor_principal_ref": tenant.principal_ref,
             "require_active_model": response.require_active_model,
             "require_ready_credit": response.require_ready_credit,
+            "require_process_evaluator": response.require_process_evaluator,
+            "process_evaluator_configured": response.process_evaluator_configured,
             "active_model_count": response.active_model_count,
             "monitored_model_count": response.monitored_model_count,
             "at_risk_model_count": response.at_risk_model_count,
@@ -74649,7 +74662,10 @@ mod tests {
         use tower::ServiceExt;
 
         let temp = tempfile::tempdir().expect("temp dir");
-        let state = test_state(temp.path().to_path_buf());
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).process_evaluator =
+            Some(Arc::new(FakeProcessEvaluator::default()));
+        Arc::make_mut(&mut state).process_evaluator_timeout_ms = Some(6_789);
         let (candidate, prediction) =
             seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-readiness-drill-v1")
                 .await;
@@ -74727,7 +74743,8 @@ mod tests {
                             "purpose": "operator ranking readiness drill",
                             "record_evidence": true,
                             "require_active_model": true,
-                            "require_ready_credit": true
+                            "require_ready_credit": true,
+                            "require_process_evaluator": true
                         })
                         .to_string(),
                     ))
@@ -74761,6 +74778,11 @@ mod tests {
         assert_eq!(
             value["blocked_ranking_credit_event_count"],
             serde_json::json!(0)
+        );
+        assert_eq!(value["require_process_evaluator"], serde_json::json!(true));
+        assert_eq!(
+            value["process_evaluator_configured"],
+            serde_json::json!(true)
         );
         assert_eq!(value["blocking_gaps"], serde_json::json!([]));
         assert!(
@@ -74872,6 +74894,63 @@ mod tests {
                         && reason.contains("status=failed")
                 })
         }));
+    }
+
+    #[tokio::test]
+    async fn ranking_model_readiness_drill_blocks_missing_process_evaluator_when_required() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/ranking/readiness-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator ranking evaluator readiness drill",
+                            "record_evidence": true,
+                            "require_active_model": false,
+                            "require_ready_credit": false,
+                            "require_process_evaluator": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("admin request builds"),
+            )
+            .await
+            .expect("readiness drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("readiness drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(false));
+        assert_eq!(value["require_process_evaluator"], serde_json::json!(true));
+        assert_eq!(
+            value["process_evaluator_configured"],
+            serde_json::json!(false)
+        );
+        assert!(
+            value["blocking_gaps"]
+                .as_array()
+                .expect("blocking gaps are an array")
+                .contains(&serde_json::json!("process_evaluator_missing"))
+        );
+        assert_eq!(
+            value["recorded_evidence"]["check_name"],
+            serde_json::json!("ranking_model_readiness")
+        );
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("failed")
+        );
     }
 
     #[tokio::test]
