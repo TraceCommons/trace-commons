@@ -183,7 +183,10 @@ Production deployments can set
 calibration runs fail closed unless the requested model holdout hash has a
 matching registered non-retired calibration dataset row for the same target use
 and policy, and the same missing-registry blocker is enforced before promotion
-or model-derived credit paths trust an active model.
+or model-derived credit paths trust an active model. Production deployments can
+also set `TRACE_COMMONS_RANKING_REQUIRE_ACTIVE_CALIBRATION_DATASET=true` to
+require that registered holdout row to be `active`, turning candidate holdouts
+into visible stewardship blockers until an admin promotes the curated manifest.
 When deployments require multiple joined label sources, calibration also
 requires that many distinct label-writing actor principals so one worker cannot
 satisfy source diversity by switching label-source enums. Model manifests must
