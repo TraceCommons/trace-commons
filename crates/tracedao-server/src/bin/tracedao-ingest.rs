@@ -306,6 +306,8 @@ const TRACE_COMMONS_VECTOR_EMBEDDER_REQUIRE_EXTERNAL: &str =
 const TRACE_COMMONS_VECTOR_SEARCH_URL: &str = "TRACE_COMMONS_VECTOR_SEARCH_URL";
 const TRACE_COMMONS_VECTOR_SEARCH_BEARER_TOKEN: &str = "TRACE_COMMONS_VECTOR_SEARCH_BEARER_TOKEN";
 const TRACE_COMMONS_VECTOR_SEARCH_TIMEOUT_MS: &str = "TRACE_COMMONS_VECTOR_SEARCH_TIMEOUT_MS";
+const TRACE_COMMONS_VECTOR_SEARCH_REQUIRE_EXTERNAL: &str =
+    "TRACE_COMMONS_VECTOR_SEARCH_REQUIRE_EXTERNAL";
 const TRACE_COMMONS_PROCESS_EVALUATOR_URL: &str = "TRACE_COMMONS_PROCESS_EVALUATOR_URL";
 const TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN: &str =
     "TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN";
@@ -492,6 +494,7 @@ struct AppState {
     require_external_vector_embedder: bool,
     vector_searcher: Option<Arc<dyn TraceVectorSearcher>>,
     vector_searcher_timeout_ms: Option<u64>,
+    require_external_vector_searcher: bool,
     export_job_scheduler: Option<TraceExportJobSchedulerConfig>,
     vector_index_scheduler: Option<TraceVectorIndexSchedulerConfig>,
     ranking_calibration_max_age: Option<Duration>,
@@ -1794,6 +1797,13 @@ impl AppState {
             .as_ref()
             .map(|config| config.timeout_ms);
         let vector_searcher = vector_searcher_config.map(|config| config.searcher);
+        let require_external_vector_searcher =
+            env_truthy(TRACE_COMMONS_VECTOR_SEARCH_REQUIRE_EXTERNAL);
+        if require_external_vector_searcher && vector_searcher.is_none() {
+            anyhow::bail!(
+                "{TRACE_COMMONS_VECTOR_SEARCH_REQUIRE_EXTERNAL} requires {TRACE_COMMONS_VECTOR_SEARCH_URL}"
+            );
+        }
         let export_job_scheduler = parse_trace_export_job_scheduler_config_from_env()?;
         let vector_index_scheduler = parse_trace_vector_index_scheduler_config_from_env()?;
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
@@ -1969,6 +1979,7 @@ impl AppState {
             require_external_vector_embedder,
             vector_searcher,
             vector_searcher_timeout_ms,
+            require_external_vector_searcher,
             export_job_scheduler,
             vector_index_scheduler,
             ranking_calibration_max_age,
@@ -5412,6 +5423,7 @@ struct TraceCommonsConfigStatusResponse {
     vector_embedder_required: bool,
     vector_searcher_configured: bool,
     vector_searcher_timeout_ms: Option<u64>,
+    vector_searcher_required: bool,
     export_job_scheduler_configured: bool,
     export_job_scheduler_interval_seconds: Option<u64>,
     export_job_scheduler_dataset_kind: Option<String>,
@@ -5594,6 +5606,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         vector_embedder_required: state.require_external_vector_embedder,
         vector_searcher_configured: state.vector_searcher.is_some(),
         vector_searcher_timeout_ms: state.vector_searcher_timeout_ms,
+        vector_searcher_required: state.require_external_vector_searcher,
         export_job_scheduler_configured: state.export_job_scheduler.is_some(),
         export_job_scheduler_interval_seconds: state
             .export_job_scheduler
@@ -23858,6 +23871,7 @@ struct TraceVectorIndexDrillResponse {
     private_embedder_configured: bool,
     private_embedder_required: bool,
     private_searcher_configured: bool,
+    private_searcher_required: bool,
     scheduler_enabled: bool,
     checked_count: usize,
     vector_entries_indexed: usize,
@@ -24952,6 +24966,7 @@ async fn run_vector_index_drill(
         private_embedder_configured: state.vector_embedder.is_some(),
         private_embedder_required: state.require_external_vector_embedder,
         private_searcher_configured: state.vector_searcher.is_some(),
+        private_searcher_required: state.require_external_vector_searcher,
         scheduler_enabled: state.vector_index_scheduler.is_some(),
         checked_count: worker.checked_count,
         vector_entries_indexed: worker.vector_entries_indexed,
@@ -26082,6 +26097,11 @@ fn vector_index_drill_blocking_gaps(
     );
     push_key_rotation_gap(
         &mut gaps,
+        "external_vector_searcher_required_without_adapter",
+        state.require_external_vector_searcher && state.vector_searcher.is_none(),
+    );
+    push_key_rotation_gap(
+        &mut gaps,
         "vector_index_no_candidates",
         request.require_candidates && candidate_count == 0,
     );
@@ -26816,6 +26836,7 @@ fn vector_index_drill_evidence_hash(
             "private_embedder_configured": state.vector_embedder.is_some(),
             "private_embedder_required": state.require_external_vector_embedder,
             "private_searcher_configured": state.vector_searcher.is_some(),
+            "private_searcher_required": state.require_external_vector_searcher,
             "scheduler_enabled": state.vector_index_scheduler.is_some(),
             "checked_count": response.checked_count,
             "vector_entries_indexed": response.vector_entries_indexed,
@@ -27597,6 +27618,10 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         (
             "private_searcher_configured",
             usize::from(response.vectors.private_searcher_configured),
+        ),
+        (
+            "private_searcher_required",
+            usize::from(response.vectors.private_searcher_required),
         ),
         (
             "scheduler_enabled",
@@ -30510,6 +30535,12 @@ async fn vector_index_handler(
         return Err(api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "trace vector index worker requires TRACE_COMMONS_VECTOR_EMBEDDER_URL",
+        ));
+    }
+    if state.require_external_vector_searcher && state.vector_searcher.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace vector index worker requires TRACE_COMMONS_VECTOR_SEARCH_URL",
         ));
     }
     if state.db_mirror.is_none() {
@@ -49096,6 +49127,7 @@ struct TraceOperationalVectorSummary {
     private_embedder_configured: bool,
     private_embedder_required: bool,
     private_searcher_configured: bool,
+    private_searcher_required: bool,
     scheduler_enabled: bool,
     entry_count: usize,
     active_entries: usize,
@@ -49133,6 +49165,7 @@ impl TraceOperationalVectorSummary {
             private_embedder_configured: state.vector_embedder.is_some(),
             private_embedder_required: state.require_external_vector_embedder,
             private_searcher_configured: state.vector_searcher.is_some(),
+            private_searcher_required: state.require_external_vector_searcher,
             scheduler_enabled: state.vector_index_scheduler.is_some(),
             entry_count: db_summary.vector_entries.len(),
             accepted_current_derived,
@@ -50442,6 +50475,7 @@ mod tests {
             require_external_vector_embedder: false,
             vector_searcher: None,
             vector_searcher_timeout_ms: None,
+            require_external_vector_searcher: false,
             export_job_scheduler: None,
             vector_index_scheduler: None,
             ranking_calibration_max_age: None,
@@ -53581,6 +53615,7 @@ mod tests {
             },
         }));
         Arc::make_mut(&mut state).vector_searcher_timeout_ms = Some(9_012);
+        Arc::make_mut(&mut state).require_external_vector_searcher = true;
 
         let response = app(state)
             .oneshot(
@@ -53633,6 +53668,7 @@ mod tests {
             value["vector_searcher_timeout_ms"],
             serde_json::json!(9_012)
         );
+        assert_eq!(value["vector_searcher_required"], serde_json::json!(true));
 
         let object = value.as_object().expect("status response is object");
         assert!(!object.contains_key("benchmark_evaluator_url"));
@@ -61024,6 +61060,7 @@ mod tests {
             let state = Arc::make_mut(&mut state);
             state.vector_embedder = Some(Arc::new(FakeVectorEmbedder::default()));
             state.require_external_vector_embedder = true;
+            state.require_external_vector_searcher = true;
             state.vector_searcher = Some(Arc::new(FakeVectorSearcher {
                 calls: Arc::new(std::sync::Mutex::new(Vec::new())),
                 response: TraceVectorSearchResponse {
@@ -61057,6 +61094,10 @@ mod tests {
             serde_json::json!(true)
         );
         assert_eq!(
+            response_json["vectors"]["private_searcher_required"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
             response_json["vectors"]["scheduler_enabled"],
             serde_json::json!(true)
         );
@@ -61074,6 +61115,9 @@ mod tests {
         )));
         assert!(metrics.contains(&format!(
             "tracedao_operational_vector_infrastructure{{tenant_storage_ref=\"{tenant_ref}\",state=\"private_searcher_configured\"}} 1"
+        )));
+        assert!(metrics.contains(&format!(
+            "tracedao_operational_vector_infrastructure{{tenant_storage_ref=\"{tenant_ref}\",state=\"private_searcher_required\"}} 1"
         )));
         assert!(metrics.contains(&format!(
             "tracedao_operational_vector_infrastructure{{tenant_storage_ref=\"{tenant_ref}\",state=\"scheduler_enabled\"}} 1"
@@ -62994,6 +63038,7 @@ mod tests {
             require_external_vector_embedder: false,
             vector_searcher: None,
             vector_searcher_timeout_ms: None,
+            require_external_vector_searcher: false,
             export_job_scheduler: None,
             vector_index_scheduler: None,
             ranking_calibration_max_age: None,
@@ -66934,6 +66979,27 @@ mod tests {
         .expect_err("external vector embedder requirement fails closed");
         assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
         assert!(error.1.0.error.contains(TRACE_COMMONS_VECTOR_EMBEDDER_URL));
+    }
+
+    #[tokio::test]
+    async fn vector_index_worker_requires_configured_external_searcher() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).require_external_vector_searcher = true;
+
+        let error = vector_index_handler(
+            State(state),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceVectorIndexRequest {
+                purpose: Some("external vector search required".to_string()),
+                dry_run: true,
+                limit: Some(1),
+            }),
+        )
+        .await
+        .expect_err("external vector searcher requirement fails closed");
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(error.1.0.error.contains(TRACE_COMMONS_VECTOR_SEARCH_URL));
     }
 
     #[tokio::test]
