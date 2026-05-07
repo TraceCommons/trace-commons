@@ -156,6 +156,8 @@ const TRACE_COMMONS_REMOTE_OBJECT_STORE_KMS_KEY_ID: &str =
     "TRACE_COMMONS_REMOTE_OBJECT_STORE_KMS_KEY_ID";
 const TRACE_COMMONS_REMOTE_OBJECT_STORE_CREDENTIAL_REF: &str =
     "TRACE_COMMONS_REMOTE_OBJECT_STORE_CREDENTIAL_REF";
+const TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING: &str =
+    "TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING";
 const TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW";
 const TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT: &str =
@@ -482,6 +484,7 @@ struct AppState {
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Arc<BTreeSet<String>>,
     artifact_store: Option<ConfiguredTraceArtifactStore>,
+    require_object_store_versioning: bool,
     near_credit_submitter: Option<Arc<dyn TraceNearCreditSubmitter>>,
     near_credit_submitter_timeout_ms: Option<u64>,
     near_credit_confirmer: Option<Arc<dyn TraceNearCreditConfirmer>>,
@@ -1777,6 +1780,12 @@ impl AppState {
         let submission_quota = parse_submission_quota_config_from_env()?;
         let legal_hold_retention_policy_ids = parse_legal_hold_retention_policy_ids_from_env()?;
         let artifact_store = trace_artifact_store_from_env(&root)?;
+        let require_object_store_versioning =
+            env_truthy(TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING);
+        validate_required_object_store_versioning_config(
+            require_object_store_versioning,
+            artifact_store.as_ref(),
+        )?;
         let near_credit_submitter_config = trace_near_credit_submitter_from_env()?;
         let near_credit_submitter_timeout_ms = near_credit_submitter_config
             .as_ref()
@@ -1992,6 +2001,7 @@ impl AppState {
             submission_quota,
             legal_hold_retention_policy_ids: Arc::new(legal_hold_retention_policy_ids),
             artifact_store,
+            require_object_store_versioning,
             near_credit_submitter,
             near_credit_submitter_timeout_ms,
             near_credit_confirmer,
@@ -2140,6 +2150,28 @@ fn is_enabled_object_primary_trace_object_store(artifact_store_name: Option<&str
                 | TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE
         )
     )
+}
+
+fn validate_required_object_store_versioning_config(
+    required: bool,
+    artifact_store: Option<&ConfiguredTraceArtifactStore>,
+) -> anyhow::Result<()> {
+    if !required {
+        return Ok(());
+    }
+    let Some(store) = artifact_store else {
+        anyhow::bail!(
+            "{TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING} requires TRACE_COMMONS_OBJECT_STORE with a versioned, restore-capable provider"
+        );
+    };
+    anyhow::ensure!(
+        store.object_versioning_supported() && store.restore_after_delete_supported(),
+        "{TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING} requires a versioned, restore-capable Trace Commons object store; object_store={}, object_versioning={}, restore_after_delete={}",
+        store.object_store_name(),
+        store.object_versioning_supported(),
+        store.restore_after_delete_supported()
+    );
+    Ok(())
 }
 
 fn enforce_db_mirror_write_result(
@@ -5521,6 +5553,9 @@ struct TraceCommonsConfigStatusResponse {
     artifact_store_configured: bool,
     artifact_object_store: Option<String>,
     artifact_object_store_io_enabled: bool,
+    artifact_object_store_versioning_required: bool,
+    artifact_object_store_versioning_supported: bool,
+    artifact_object_store_restore_after_delete_supported: bool,
     object_primary_object_store_eligible: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     trace_corpus_rls: Option<TraceCommonsRlsConfigStatus>,
@@ -5749,6 +5784,15 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .artifact_store
             .as_ref()
             .is_some_and(|store| store.object_io_enabled()),
+        artifact_object_store_versioning_required: state.require_object_store_versioning,
+        artifact_object_store_versioning_supported: state
+            .artifact_store
+            .as_ref()
+            .is_some_and(|store| store.object_versioning_supported()),
+        artifact_object_store_restore_after_delete_supported: state
+            .artifact_store
+            .as_ref()
+            .is_some_and(|store| store.restore_after_delete_supported()),
         object_primary_object_store_eligible: state
             .artifact_store
             .as_ref()
@@ -27669,6 +27713,18 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             "plaintext_compatibility_allowed",
             usize::from(response.object_store.plaintext_compatibility_allowed),
         ),
+        (
+            "versioning_required",
+            usize::from(response.object_store.versioning_required),
+        ),
+        (
+            "object_versioning_supported",
+            usize::from(response.object_store.object_versioning_supported),
+        ),
+        (
+            "restore_after_delete_supported",
+            usize::from(response.object_store.restore_after_delete_supported),
+        ),
     ] {
         push_prometheus_gauge(
             &mut body,
@@ -48499,18 +48555,27 @@ struct TraceOperationalObjectStoreSummary {
     io_enabled: bool,
     object_primary_eligible: bool,
     plaintext_compatibility_allowed: bool,
+    versioning_required: bool,
+    object_versioning_supported: bool,
+    restore_after_delete_supported: bool,
 }
 
 impl TraceOperationalObjectStoreSummary {
     fn from_state(state: &AppState) -> Self {
         let Some(store) = state.artifact_store.as_ref() else {
-            return Self::default();
+            return Self {
+                versioning_required: state.require_object_store_versioning,
+                ..Self::default()
+            };
         };
         Self {
             configured: true,
             io_enabled: store.object_io_enabled(),
             object_primary_eligible: store.object_primary_eligible(),
             plaintext_compatibility_allowed: store.plaintext_compatibility_allowed(),
+            versioning_required: state.require_object_store_versioning,
+            object_versioning_supported: store.object_versioning_supported(),
+            restore_after_delete_supported: store.restore_after_delete_supported(),
         }
     }
 }
@@ -48916,6 +48981,9 @@ struct TraceOperationalPromotionGateSummary {
     ranking_worker_run_skip_reason_counts: BTreeMap<String, usize>,
     credit_settlement_account_cap_configured: bool,
     credit_settlement_account_cap_missing: bool,
+    object_store_versioning_required: bool,
+    object_store_versioning_supported: bool,
+    object_store_restore_after_delete_supported: bool,
 }
 
 struct TraceOperationalPromotionGateInputs<'a> {
@@ -48981,6 +49049,15 @@ impl TraceOperationalPromotionGateSummary {
             .artifact_store
             .as_ref()
             .is_some_and(|store| store.object_primary_eligible());
+        let object_store_versioning_required = state.require_object_store_versioning;
+        let object_store_versioning_supported = state
+            .artifact_store
+            .as_ref()
+            .is_some_and(|store| store.object_versioning_supported());
+        let object_store_restore_after_delete_supported = state
+            .artifact_store
+            .as_ref()
+            .is_some_and(|store| store.restore_after_delete_supported());
         let object_primary_enabled = state.object_primary_submit_review
             || state.object_primary_replay_export
             || state.object_primary_derived_exports;
@@ -49068,6 +49145,12 @@ impl TraceOperationalPromotionGateSummary {
             blocking_gates.push("object_primary_object_store_io_disabled".to_string());
         } else if object_primary_enabled && !object_primary_object_store_eligible {
             blocking_gates.push("object_primary_object_store_not_eligible".to_string());
+        }
+        if object_store_versioning_required && !object_store_versioning_supported {
+            blocking_gates.push("object_store_versioning_required_unsupported".to_string());
+        }
+        if object_store_versioning_required && !object_store_restore_after_delete_supported {
+            blocking_gates.push("object_store_restore_required_unsupported".to_string());
         }
         if db_summary.db_available {
             match trace_corpus_rls_ready {
@@ -49219,6 +49302,9 @@ impl TraceOperationalPromotionGateSummary {
             ranking_worker_run_skip_reason_counts,
             credit_settlement_account_cap_configured,
             credit_settlement_account_cap_missing,
+            object_store_versioning_required,
+            object_store_versioning_supported,
+            object_store_restore_after_delete_supported,
         }
     }
 }
@@ -50781,6 +50867,7 @@ mod tests {
             submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store,
+            require_object_store_versioning: false,
             near_credit_submitter: None,
             near_credit_submitter_timeout_ms: None,
             near_credit_confirmer: None,
@@ -52460,6 +52547,51 @@ mod tests {
     }
 
     #[test]
+    fn required_object_store_versioning_guard_rejects_current_adapters() {
+        validate_required_object_store_versioning_config(false, None)
+            .expect("versioning is optional by default");
+
+        let missing = validate_required_object_store_versioning_config(true, None)
+            .expect_err("required versioning needs an object store");
+        assert!(
+            missing
+                .to_string()
+                .contains("TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING")
+        );
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let local_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            test_artifact_store(temp.path()),
+        );
+        let local_error =
+            validate_required_object_store_versioning_config(true, Some(&local_store))
+                .expect_err("local service store does not provide object versioning");
+        assert!(local_error.to_string().contains("object_versioning=false"));
+
+        let remote_temp = tempfile::tempdir().expect("remote artifact temp dir");
+        let key = trace_commons_server::secrets::keychain::generate_master_key_hex();
+        let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("file_system"),
+            Some(remote_temp.path().to_str().expect("utf8 temp path")),
+            Some("kms-key-ref"),
+            Some("credential-ref"),
+        )
+        .expect("file remote config parses");
+        let remote_store =
+            ConfiguredTraceArtifactStore::remote_service(remote_config, SecretString::from(key))
+                .expect("remote service store builds");
+        let remote_error =
+            validate_required_object_store_versioning_config(true, Some(&remote_store))
+                .expect_err("filesystem remote service store does not provide restore semantics");
+        assert!(
+            remote_error
+                .to_string()
+                .contains("restore_after_delete=false")
+        );
+    }
+
+    #[test]
     fn tenant_rollout_gates_enable_global_or_allowlisted_tenants() {
         let gates = TraceTenantRolloutGates::for_feature(
             TraceTenantRolloutFeature::DbContributorReads,
@@ -53576,6 +53708,18 @@ mod tests {
             serde_json::json!(true)
         );
         assert_eq!(
+            value["artifact_object_store_versioning_required"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["artifact_object_store_versioning_supported"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["artifact_object_store_restore_after_delete_supported"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
             value["object_primary_object_store_eligible"],
             serde_json::json!(true)
         );
@@ -54251,6 +54395,18 @@ mod tests {
         );
         assert_eq!(
             value["artifact_object_store_io_enabled"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["artifact_object_store_versioning_required"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["artifact_object_store_versioning_supported"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["artifact_object_store_restore_after_delete_supported"],
             serde_json::json!(false)
         );
         assert_eq!(
@@ -61432,6 +61588,18 @@ mod tests {
             value["object_store"]["plaintext_compatibility_allowed"],
             serde_json::json!(false)
         );
+        assert_eq!(
+            value["object_store"]["versioning_required"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["object_store"]["object_versioning_supported"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["object_store"]["restore_after_delete_supported"],
+            serde_json::json!(false)
+        );
 
         let body_text = std::str::from_utf8(&body).expect("body is utf8");
         assert!(!body_text.contains("admin-token-a"));
@@ -61447,6 +61615,80 @@ mod tests {
                     .as_deref()
                     .is_some_and(|reason| reason.starts_with("surface=operational_summary;"))
         }));
+    }
+
+    #[tokio::test]
+    async fn operational_summary_blocks_required_object_versioning_without_support() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            test_artifact_store(temp.path()),
+        );
+        let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            None,
+            Some(artifact_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).require_object_store_versioning = true;
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-summary")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("operational summary response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 128 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("operational summary parses");
+        assert_eq!(value["promotion_gates"]["ready"], serde_json::json!(false));
+        assert_eq!(
+            value["object_store"]["versioning_required"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["object_store"]["object_versioning_supported"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["object_store"]["restore_after_delete_supported"],
+            serde_json::json!(false)
+        );
+        assert!(
+            value["promotion_gates"]["blocking_gates"]
+                .as_array()
+                .expect("blocking gates are an array")
+                .contains(&serde_json::json!(
+                    "object_store_versioning_required_unsupported"
+                ))
+        );
+        assert!(
+            value["promotion_gates"]["blocking_gates"]
+                .as_array()
+                .expect("blocking gates are an array")
+                .contains(&serde_json::json!(
+                    "object_store_restore_required_unsupported"
+                ))
+        );
     }
 
     #[tokio::test]
@@ -63514,6 +63756,7 @@ mod tests {
                 "private_corpus_revocable".to_string()
             ])),
             artifact_store: None,
+            require_object_store_versioning: false,
             near_credit_submitter: None,
             near_credit_submitter_timeout_ms: None,
             near_credit_confirmer: None,
@@ -84696,6 +84939,15 @@ mod tests {
         )));
         assert!(body_text.contains(&format!(
             "trace_commons_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"plaintext_compatibility_allowed\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"versioning_required\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"object_versioning_supported\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"restore_after_delete_supported\"}} 0"
         )));
         assert!(body_text.contains(&format!(
             "trace_commons_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 22"
