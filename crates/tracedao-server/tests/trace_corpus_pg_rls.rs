@@ -13,9 +13,11 @@ use tracedao_server::trace_corpus_storage::{
     TraceExportAccessGrantStatus, TraceExportAccessGrantWrite, TraceExportJobStatus,
     TraceExportJobStatusUpdate, TraceExportJobWrite, TraceExportManifestItemInvalidationReason,
     TraceExportManifestItemWrite, TraceExportManifestWrite, TraceObjectArtifactKind,
-    TraceObjectRefWrite, TraceRetentionJobItemAction, TraceRetentionJobItemStatus,
-    TraceRetentionJobItemWrite, TraceRetentionJobStatus, TraceRetentionJobWrite,
-    TraceReviewLeaseAuditAction, TraceRevocationPropagationAction,
+    TraceObjectRefWrite, TraceRankingFeatureWrite, TraceRankingModelStatus,
+    TraceRankingModelVersionWrite, TraceRankingPredictionWrite, TraceRankingWorkerRunKind,
+    TraceRankingWorkerRunStatus, TraceRankingWorkerRunWrite, TraceRetentionJobItemAction,
+    TraceRetentionJobItemStatus, TraceRetentionJobItemWrite, TraceRetentionJobStatus,
+    TraceRetentionJobWrite, TraceReviewLeaseAuditAction, TraceRevocationPropagationAction,
     TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget, TraceSubmissionWrite,
     TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus, TraceTenantAccessGrantWrite,
@@ -1160,6 +1162,208 @@ async fn store_facade_keeps_same_submission_id_isolated_by_tenant() {
             .await;
         tx.commit().await.expect("commit cleanup transaction");
     }
+}
+
+#[tokio::test]
+async fn store_facade_keeps_same_ranking_prediction_and_worker_ids_isolated_by_tenant() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+    assert_trace_rls_policies_installed(&backend).await;
+
+    let tenant_a = format!("rls-ranking-a-{}", Uuid::new_v4());
+    let tenant_b = format!("rls-ranking-b-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    let trace_id = Uuid::new_v4();
+    let ranking_feature_id = Uuid::new_v4();
+    let ranking_prediction_id = Uuid::new_v4();
+    let ranking_worker_run_id = Uuid::new_v4();
+
+    for (tenant_id, utility_micros, reason) in [
+        (&tenant_a, 2_400_000_i64, "tenant_a_high_signal"),
+        (&tenant_b, 800_000_i64, "tenant_b_holdout"),
+    ] {
+        let mut submission = sample_submission(tenant_id, submission_id);
+        submission.trace_id = trace_id;
+        submission.allowed_uses = vec!["ranking_model_training".to_string()];
+        backend
+            .upsert_trace_submission(submission)
+            .await
+            .expect("insert ranking source submission");
+
+        backend
+            .upsert_trace_ranking_model_version(TraceRankingModelVersionWrite {
+                tenant_id: tenant_id.clone(),
+                model_version: "trace-ranker-credit-v1".to_string(),
+                feature_schema_version: "ranking-features-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: TraceRankingModelStatus::Candidate,
+                training_dataset_hash: format!("sha256:{tenant_id}:training"),
+                calibration_dataset_hash: format!("sha256:{tenant_id}:calibration"),
+                model_artifact_hash: format!("sha256:{tenant_id}:model"),
+                actor_principal_ref: format!("principal:{tenant_id}:ranker-admin"),
+            })
+            .await
+            .expect("upsert tenant-scoped ranking model");
+
+        backend
+            .upsert_trace_ranking_feature(TraceRankingFeatureWrite {
+                tenant_id: tenant_id.clone(),
+                ranking_feature_id,
+                submission_id,
+                trace_id,
+                target_use: "ranking_model_training".to_string(),
+                feature_schema_version: "ranking-features-v1".to_string(),
+                feature_vector_hash: format!("sha256:{tenant_id}:feature-vector"),
+                feature_names_hash: format!("sha256:{tenant_id}:feature-names"),
+                source_feature_hash: format!("sha256:{tenant_id}:source"),
+                duplicate_score: Some(0.01),
+                novelty_score: Some(0.8),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.9),
+                coverage_tags: vec![format!("tenant:{tenant_id}")],
+                actor_principal_ref: format!("principal:{tenant_id}:ranker-worker"),
+            })
+            .await
+            .expect("upsert tenant-scoped ranking feature");
+
+        backend
+            .upsert_trace_ranking_prediction(TraceRankingPredictionWrite {
+                tenant_id: tenant_id.clone(),
+                ranking_prediction_id,
+                submission_id,
+                trace_id,
+                target_use: "ranking_model_training".to_string(),
+                model_version: "trace-ranker-credit-v1".to_string(),
+                feature_schema_version: "ranking-features-v1".to_string(),
+                prediction_policy_version: "trace-credit-policy-v1".to_string(),
+                feature_vector_hash: format!("sha256:{tenant_id}:feature-vector"),
+                predicted_utility_micros: utility_micros,
+                uncertainty_micros: 125_000,
+                confidence: 0.91,
+                risk_penalty_micros: 25_000,
+                novelty_bonus_micros: 50_000,
+                settlement_score_micros: utility_micros + 25_000,
+                explanation_codes: vec![reason.to_string()],
+                actor_principal_ref: format!("principal:{tenant_id}:ranker-worker"),
+            })
+            .await
+            .expect("upsert tenant-scoped ranking prediction");
+
+        let mut reason_counts = BTreeMap::new();
+        reason_counts.insert(reason.to_string(), 1);
+        backend
+            .upsert_trace_ranking_worker_run(TraceRankingWorkerRunWrite {
+                tenant_id: tenant_id.clone(),
+                ranking_worker_run_id,
+                run_kind: TraceRankingWorkerRunKind::PredictionCredit,
+                status: TraceRankingWorkerRunStatus::Completed,
+                dry_run: false,
+                reason_hash: format!("sha256:{tenant_id}:worker-reason"),
+                model_version: Some("trace-ranker-credit-v1".to_string()),
+                target_use: Some("ranking_model_training".to_string()),
+                policy_version: Some("trace-credit-policy-v1".to_string()),
+                limit: 10,
+                checked_count: 1,
+                succeeded_count: 1,
+                skipped_existing_count: 0,
+                skipped_model_risk_count: 0,
+                skipped_ineligible_count: 0,
+                pending_after_count: 0,
+                result_refs: vec![format!("ranking_prediction:{ranking_prediction_id}")],
+                reason_counts,
+                actor_principal_ref: format!("principal:{tenant_id}:ranker-worker"),
+                created_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+                last_error_hash: None,
+            })
+            .await
+            .expect("upsert tenant-scoped ranking worker run");
+    }
+
+    let tenant_a_models = backend
+        .list_trace_ranking_model_versions(&tenant_a)
+        .await
+        .expect("list tenant A ranking models");
+    let tenant_b_models = backend
+        .list_trace_ranking_model_versions(&tenant_b)
+        .await
+        .expect("list tenant B ranking models");
+    assert_eq!(tenant_a_models.len(), 1);
+    assert_eq!(tenant_b_models.len(), 1);
+    assert_eq!(tenant_a_models[0].tenant_id, tenant_a);
+    assert_eq!(tenant_b_models[0].tenant_id, tenant_b);
+    assert_ne!(
+        tenant_a_models[0].model_artifact_hash,
+        tenant_b_models[0].model_artifact_hash
+    );
+
+    let tenant_a_predictions = backend
+        .list_trace_ranking_predictions(&tenant_a)
+        .await
+        .expect("list tenant A ranking predictions");
+    let tenant_b_predictions = backend
+        .list_trace_ranking_predictions(&tenant_b)
+        .await
+        .expect("list tenant B ranking predictions");
+    assert_eq!(tenant_a_predictions.len(), 1);
+    assert_eq!(tenant_b_predictions.len(), 1);
+    assert_eq!(
+        tenant_a_predictions[0].ranking_prediction_id,
+        ranking_prediction_id
+    );
+    assert_eq!(
+        tenant_b_predictions[0].ranking_prediction_id,
+        ranking_prediction_id
+    );
+    assert_eq!(tenant_a_predictions[0].tenant_id, tenant_a);
+    assert_eq!(tenant_b_predictions[0].tenant_id, tenant_b);
+    assert_eq!(tenant_a_predictions[0].predicted_utility_micros, 2_400_000);
+    assert_eq!(tenant_b_predictions[0].predicted_utility_micros, 800_000);
+    assert_eq!(
+        tenant_a_predictions[0].explanation_codes,
+        vec!["tenant_a_high_signal"]
+    );
+    assert_eq!(
+        tenant_b_predictions[0].explanation_codes,
+        vec!["tenant_b_holdout"]
+    );
+
+    let tenant_a_worker_runs = backend
+        .list_trace_ranking_worker_runs(&tenant_a)
+        .await
+        .expect("list tenant A ranking worker runs");
+    let tenant_b_worker_runs = backend
+        .list_trace_ranking_worker_runs(&tenant_b)
+        .await
+        .expect("list tenant B ranking worker runs");
+    assert_eq!(tenant_a_worker_runs.len(), 1);
+    assert_eq!(tenant_b_worker_runs.len(), 1);
+    assert_eq!(
+        tenant_a_worker_runs[0].ranking_worker_run_id,
+        ranking_worker_run_id
+    );
+    assert_eq!(
+        tenant_b_worker_runs[0].ranking_worker_run_id,
+        ranking_worker_run_id
+    );
+    assert_eq!(tenant_a_worker_runs[0].tenant_id, tenant_a);
+    assert_eq!(tenant_b_worker_runs[0].tenant_id, tenant_b);
+    assert_eq!(
+        tenant_a_worker_runs[0]
+            .reason_counts
+            .get("tenant_a_high_signal"),
+        Some(&1)
+    );
+    assert_eq!(
+        tenant_b_worker_runs[0]
+            .reason_counts
+            .get("tenant_b_holdout"),
+        Some(&1)
+    );
+
+    cleanup_trace_tenants(&backend, &[&tenant_a, &tenant_b]).await;
 }
 
 #[tokio::test]
