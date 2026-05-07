@@ -28685,10 +28685,9 @@ async fn run_benchmark_conversion_job(
             continue;
         };
         candidates.push(TraceBenchmarkCandidate::from_records(submission, &derived));
-        if candidates.len() >= limit {
-            break;
-        }
     }
+    let mut candidates = dedupe_benchmark_candidates_by_summary_hash(candidates);
+    candidates.truncate(limit);
     let conversion_id = Uuid::new_v4();
     let source_submission_ids = candidates
         .iter()
@@ -44962,6 +44961,55 @@ impl TraceBenchmarkCandidate {
     }
 }
 
+fn dedupe_benchmark_candidates_by_summary_hash(
+    candidates: Vec<TraceBenchmarkCandidate>,
+) -> Vec<TraceBenchmarkCandidate> {
+    let mut representatives = Vec::new();
+    let mut keyed_indexes = BTreeMap::<String, usize>::new();
+    for candidate in candidates {
+        let Some(key) = trace_candidate_summary_dedupe_key(&candidate.canonical_summary_hash)
+        else {
+            representatives.push(candidate);
+            continue;
+        };
+        if let Some(representative_index) = keyed_indexes.get(&key).copied() {
+            if benchmark_candidate_replaces_summary_representative(
+                &candidate,
+                &representatives[representative_index],
+            ) {
+                representatives[representative_index] = candidate;
+            }
+        } else {
+            keyed_indexes.insert(key, representatives.len());
+            representatives.push(candidate);
+        }
+    }
+    representatives
+}
+
+fn benchmark_candidate_replaces_summary_representative(
+    candidate: &TraceBenchmarkCandidate,
+    current: &TraceBenchmarkCandidate,
+) -> bool {
+    let duplicate_cmp = candidate
+        .duplicate_score
+        .total_cmp(&current.duplicate_score);
+    if duplicate_cmp != std::cmp::Ordering::Equal {
+        return duplicate_cmp.is_lt();
+    }
+    let novelty_cmp = candidate.novelty_score.total_cmp(&current.novelty_score);
+    if novelty_cmp != std::cmp::Ordering::Equal {
+        return novelty_cmp.is_gt();
+    }
+    let submission_cmp = candidate
+        .submission_score
+        .total_cmp(&current.submission_score);
+    if submission_cmp != std::cmp::Ordering::Equal {
+        return submission_cmp.is_gt();
+    }
+    candidate.submission_id < current.submission_id
+}
+
 struct BenchmarkEvaluationWorkerDecision {
     status: TraceBenchmarkEvaluationStatus,
     score: f32,
@@ -58532,6 +58580,144 @@ mod tests {
                 && event.kind == "benchmark_conversion"
                 && event.decision_inputs_hash == Some(benchmark.source_submission_ids_hash.clone())
         }));
+    }
+
+    #[tokio::test]
+    async fn benchmark_conversion_dedupes_exact_summary_duplicates_before_credit() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut original = sample_envelope().await;
+        make_metadata_only_low_risk(&mut original);
+        original.consent.scopes = vec![ConsentScope::BenchmarkOnly];
+        original.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        original.trace_card.allowed_uses = vec![TraceAllowedUse::BenchmarkGeneration];
+        let original_id = original.submission_id;
+
+        let mut duplicate = sample_envelope().await;
+        make_metadata_only_low_risk(&mut duplicate);
+        duplicate.consent.scopes = vec![ConsentScope::BenchmarkOnly];
+        duplicate.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        duplicate.trace_card.allowed_uses = vec![TraceAllowedUse::BenchmarkGeneration];
+        duplicate.value.submission_score = 0.99;
+        let duplicate_id = duplicate.submission_id;
+
+        let mut distinct = sample_envelope().await;
+        make_metadata_only_low_risk(&mut distinct);
+        distinct.consent.scopes = vec![ConsentScope::BenchmarkOnly];
+        distinct.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        distinct.trace_card.allowed_uses = vec![TraceAllowedUse::BenchmarkGeneration];
+        distinct.value.submission_score = 0.10;
+        for event in &mut distinct.events {
+            if event.event_type
+                == tracedao_protocol::trace_contribution::TraceContributionEventType::UserMessage
+            {
+                event.redacted_content =
+                    Some("This benchmark source is intentionally distinct".to_string());
+                break;
+            }
+        }
+        let distinct_id = distinct.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(original),
+        )
+        .await
+        .expect("original benchmark submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(duplicate),
+        )
+        .await
+        .expect("duplicate benchmark submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(distinct),
+        )
+        .await
+        .expect("distinct benchmark submission succeeds");
+
+        let derived = read_all_derived_records(temp.path(), "tenant-a").expect("derived reads");
+        let original_hash = derived
+            .iter()
+            .find(|record| record.submission_id == original_id)
+            .expect("original derived exists")
+            .canonical_summary_hash
+            .clone();
+        let duplicate_derived = derived
+            .iter()
+            .find(|record| record.submission_id == duplicate_id)
+            .expect("duplicate derived exists");
+        let distinct_hash = derived
+            .iter()
+            .find(|record| record.submission_id == distinct_id)
+            .expect("distinct derived exists")
+            .canonical_summary_hash
+            .clone();
+        assert_eq!(duplicate_derived.canonical_summary_hash, original_hash);
+        assert!(duplicate_derived.duplicate_score > 0.99);
+        assert_ne!(distinct_hash, original_hash);
+
+        let Json(benchmark) = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(2),
+                purpose: Some("benchmark_dedupe_conversion".to_string()),
+                consent_scope: Some("benchmark_only".to_string()),
+                status: None,
+                privacy_risk: None,
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("reviewer can export de-duplicated benchmark artifact");
+
+        assert_eq!(benchmark.item_count, 2);
+        assert!(
+            benchmark
+                .candidates
+                .iter()
+                .any(|candidate| candidate.submission_id == original_id)
+        );
+        assert!(
+            benchmark
+                .candidates
+                .iter()
+                .any(|candidate| candidate.submission_id == distinct_id)
+        );
+        assert!(
+            benchmark
+                .candidates
+                .iter()
+                .all(|candidate| candidate.submission_id != duplicate_id)
+        );
+
+        let credit_events =
+            read_all_credit_events(temp.path(), "tenant-a").expect("credit events read");
+        let benchmark_credit_events = credit_events
+            .iter()
+            .filter(|event| event.event_type == TraceCreditLedgerEventType::BenchmarkConversion)
+            .collect::<Vec<_>>();
+        assert_eq!(benchmark_credit_events.len(), 2);
+        assert!(
+            benchmark_credit_events
+                .iter()
+                .any(|event| event.submission_id == original_id)
+        );
+        assert!(
+            benchmark_credit_events
+                .iter()
+                .any(|event| event.submission_id == distinct_id)
+        );
+        assert!(
+            benchmark_credit_events
+                .iter()
+                .all(|event| event.submission_id != duplicate_id)
+        );
     }
 
     #[tokio::test]
