@@ -46,6 +46,11 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_ranking_worker_runs",
 ];
 
+const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
+    "(tenant_id = trace_current_tenant_id())",
+    "(tenant_id = public.trace_current_tenant_id())",
+];
+
 impl PgBackend {
     pub async fn new(config: &DatabaseConfig) -> Result<Self, DatabaseError> {
         let pg_config = config
@@ -422,6 +427,26 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _tracedao_migrations WHERE version = $1",
+                &[&18_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _tracedao_migrations (version, name) VALUES ($1, $2)",
+                    &[&18_i32, &"trace_central_rls_tenant_predicate"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -437,6 +462,10 @@ impl Database for PgBackend {
             .iter()
             .map(|table| (*table).to_string())
             .collect::<Vec<_>>();
+        let expected_policy_expressions = TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS
+            .iter()
+            .map(|expression| (*expression).to_string())
+            .collect::<Vec<_>>();
         let rows = client
             .query(
                 "SELECT
@@ -451,8 +480,8 @@ impl Database for PgBackend {
                     SELECT
                         true AS has_policy,
                         pol.cmd = '*'
-                            AND pg_get_expr(pol.qual, pol.polrelid) = '(tenant_id = current_setting(''tracedao.trace_tenant_id''::text, true))'
-                            AND pg_get_expr(pol.with_check, pol.polrelid) = '(tenant_id = current_setting(''tracedao.trace_tenant_id''::text, true))'
+                            AND pg_get_expr(pol.qual, pol.polrelid) = ANY($2)
+                            AND pg_get_expr(pol.with_check, pol.polrelid) = ANY($2)
                             AS expression_matches
                         FROM pg_policies p
                         JOIN pg_policy pol
@@ -466,7 +495,7 @@ impl Database for PgBackend {
                  WHERE n.nspname = current_schema()
                    AND c.relkind = 'r'
                    AND c.relname = ANY($1)",
-                &[&expected_tables],
+                &[&expected_tables, &expected_policy_expressions],
             )
             .await?;
         let current_role = client

@@ -24,6 +24,8 @@ This repository owns the production-storage surface:
 - `migrations/V14__trace_ranking_preference_labels.sql`, adding hash-only pairwise preference labels for ranking training evidence.
 - `migrations/V15__trace_benchmark_registry_outbox.sql`, adding durable hash-only external benchmark registry outbox rows.
 - `migrations/V16__trace_ranking_calibration_datasets.sql`, adding the hash-only ranking calibration/holdout dataset registry.
+- `migrations/V17__trace_ranking_calibration_dataset_manifest_immutability.sql`, preventing calibration dataset manifest rewrites after creation.
+- `migrations/V18__trace_central_rls_tenant_predicate.sql`, centralizing the tenant predicate used by every Trace Commons RLS policy.
 - `crates/tracedao-server/src/trace_corpus_storage.rs` and the PostgreSQL `TraceCorpusStore` implementation.
 - `crates/tracedao-server/src/trace_artifact_store.rs` and the encrypted local service object-store provider.
 - Optional ingest-service DB dual-write behind `TRACE_COMMONS_DB_DUAL_WRITE=true`.
@@ -480,16 +482,16 @@ CREATE TABLE trace_retention_job_items (
 CREATE INDEX idx_trace_retention_job_items_submission ON trace_retention_job_items(tenant_id, submission_id, created_at DESC);
 ```
 
-The server-owned `V1__trace_commons_schema.sql` migration includes the first PostgreSQL RLS policy layer for the tenant-scoped Trace Commons metadata tables:
+The server-owned `V1__trace_commons_schema.sql` migration includes the first PostgreSQL RLS policy layer for the tenant-scoped Trace Commons metadata tables. After `V18__trace_central_rls_tenant_predicate.sql`, the canonical policy shape is:
 
 ```sql
 ALTER TABLE trace_submissions ENABLE ROW LEVEL SECURITY;
-CREATE POLICY trace_submissions_tenant_isolation ON trace_submissions
-    USING (tenant_id = current_setting('tracedao.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('tracedao.trace_tenant_id', true));
+CREATE POLICY trace_corpus_tenant_isolation ON trace_submissions
+    USING (tenant_id = trace_current_tenant_id())
+    WITH CHECK (tenant_id = trace_current_tenant_id());
 ```
 
-The later server-owned `V6__trace_force_rls.sql` migration applies `FORCE ROW LEVEL SECURITY` to every Trace Commons RLS table, so table-owner roles no longer bypass policies for normal runtime access. The PostgreSQL readiness diagnostics probe `SELECT set_config('tracedao.trace_tenant_id', $1, true)` inside a transaction and verify the tenant context clears after commit; the fail-closed startup gate and `POST /v1/admin/postgres-rls-drill` require that transaction-local behavior along with policy/RLS/FORCE-RLS coverage and a non-bypassing role. Runtime/worker roles should be non-superuser roles without `BYPASSRLS`; any explicit worker policy variants should stay narrow rather than becoming blanket bypass.
+The later server-owned `V6__trace_force_rls.sql` migration applies `FORCE ROW LEVEL SECURITY` to every Trace Commons RLS table, so table-owner roles no longer bypass policies for normal runtime access. `V18__trace_central_rls_tenant_predicate.sql` centralizes the policy predicate behind `trace_current_tenant_id()`, then drops and recreates the tenant isolation policy on every Trace Commons RLS table. That gives readiness diagnostics one canonical policy shape to validate and prevents future migrations from drifting into subtly different tenant-setting predicates. The PostgreSQL readiness diagnostics probe `SELECT set_config('tracedao.trace_tenant_id', $1, true)` inside a transaction and verify the tenant context clears after commit; the fail-closed startup gate and `POST /v1/admin/postgres-rls-drill` require that transaction-local behavior along with policy/RLS/FORCE-RLS coverage and a non-bypassing role. Runtime/worker roles should be non-superuser roles without `BYPASSRLS`; any explicit worker policy variants should stay narrow rather than becoming blanket bypass.
 
 ### Rust Store Contract Shape
 
@@ -1082,7 +1084,7 @@ PostgreSQL policy model:
 
 - Enable row-level security on all `trace_*` tables except global policy dictionaries.
 - Set a transaction-local tenant setting such as `tracedao.trace_tenant_id` after authentication.
-- Add `USING (tenant_id = current_setting('tracedao.trace_tenant_id', true))` and matching `WITH CHECK` policies for tenant rows.
+- Keep all tenant policies on the shared `USING (tenant_id = trace_current_tenant_id())` and matching `WITH CHECK` predicate.
 - Give service-worker roles narrow policies for only their job type.
 - Keep admin cross-tenant access behind explicit system-scope methods that always emit audit events.
 

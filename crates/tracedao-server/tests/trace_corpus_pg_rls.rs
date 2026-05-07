@@ -808,6 +808,33 @@ fn force_rls_migration_covers_every_trace_rls_table() {
 }
 
 #[test]
+fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
+    let migrations_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+    let sql = std::fs::read_to_string(
+        migrations_root.join("V18__trace_central_rls_tenant_predicate.sql"),
+    )
+    .expect("read central RLS tenant predicate migration");
+
+    assert!(sql.contains("CREATE OR REPLACE FUNCTION trace_current_tenant_id()"));
+    assert!(sql.contains("RETURNS TEXT"));
+    assert!(sql.contains("current_setting('tracedao.trace_tenant_id', true)"));
+    for table in expected_trace_rls_tables() {
+        assert!(
+            sql.contains(&format!(
+                "DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON {table};"
+            )),
+            "central tenant predicate migration must drop stale policy on {table}"
+        );
+        assert!(
+            sql.contains(&format!(
+                "CREATE POLICY trace_corpus_tenant_isolation ON {table}"
+            )),
+            "central tenant predicate migration must recreate policy on {table}"
+        );
+    }
+}
+
+#[test]
 fn trace_corpus_rls_diagnostics_ready_requires_complete_safe_policy_state() {
     assert!(ready_rls_diagnostics().rls_ready());
 
