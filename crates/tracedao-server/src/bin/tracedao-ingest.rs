@@ -28282,6 +28282,10 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
                 .benchmarks
                 .registry_outbox_submitted_without_confirmer_count,
         ),
+        (
+            "registry_outbox_failed",
+            response.benchmarks.registry_outbox_failed_count,
+        ),
         ("published", response.benchmarks.published_count),
         ("revoked", response.benchmarks.revoked_count),
         (
@@ -49547,6 +49551,7 @@ struct TraceOperationalPromotionGateSummary {
     vector_nearest_neighbor_policy_gap_count: usize,
     benchmark_registry_outbox_pending_without_submitter_count: usize,
     benchmark_registry_outbox_submitted_without_confirmer_count: usize,
+    benchmark_registry_outbox_failed_count: usize,
     publishable_benchmark_without_external_evaluator_count: usize,
     published_benchmark_external_registry_gap_count: usize,
     revoked_benchmark_external_registry_invalidation_gap_count: usize,
@@ -49618,6 +49623,7 @@ impl TraceOperationalPromotionGateSummary {
             benchmarks.registry_outbox_pending_without_submitter_count;
         let benchmark_registry_outbox_submitted_without_confirmer_count =
             benchmarks.registry_outbox_submitted_without_confirmer_count;
+        let benchmark_registry_outbox_failed_count = benchmarks.registry_outbox_failed_count;
         let publishable_benchmark_without_external_evaluator_count =
             benchmarks.publishable_without_external_evaluator_count;
         let at_risk_ranking_model_count = ranking.at_risk_model_count;
@@ -49862,6 +49868,11 @@ impl TraceOperationalPromotionGateSummary {
         );
         push_gap_count(
             &mut blocking_gates,
+            "benchmark_registry_outbox_failed",
+            benchmark_registry_outbox_failed_count,
+        );
+        push_gap_count(
+            &mut blocking_gates,
             "publishable_benchmarks_without_external_evaluator",
             publishable_benchmark_without_external_evaluator_count,
         );
@@ -49915,6 +49926,7 @@ impl TraceOperationalPromotionGateSummary {
             vector_nearest_neighbor_policy_gap_count,
             benchmark_registry_outbox_pending_without_submitter_count,
             benchmark_registry_outbox_submitted_without_confirmer_count,
+            benchmark_registry_outbox_failed_count,
             publishable_benchmark_without_external_evaluator_count,
             published_benchmark_external_registry_gap_count,
             revoked_benchmark_external_registry_invalidation_gap_count,
@@ -62182,6 +62194,63 @@ mod tests {
             persisted.registry.status,
             TraceBenchmarkRegistryStatus::Published
         );
+    }
+
+    #[tokio::test]
+    async fn admin_operational_summary_and_metrics_block_failed_benchmark_registry_outbox_rows() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut failed_item = pending_benchmark_registry_outbox_item(Uuid::new_v4());
+        failed_item.status = StorageTraceBenchmarkRegistryOutboxStatus::Failed;
+        failed_item.last_error_hash = Some(sha256_prefixed("registry submitter outage"));
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &failed_item)
+            .expect("benchmark registry outbox writes");
+
+        let Json(operational) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary");
+        assert_eq!(operational.benchmarks.registry_outbox_failed_count, 1);
+        assert_eq!(
+            operational
+                .promotion_gates
+                .benchmark_registry_outbox_failed_count,
+            1
+        );
+        assert!(
+            operational
+                .promotion_gates
+                .blocking_gates
+                .contains(&"benchmark_registry_outbox_failed=1".to_string())
+        );
+
+        let metrics_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-metrics")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("metrics response");
+        assert_eq!(metrics_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(metrics_response.into_body(), 65536)
+            .await
+            .expect("body reads");
+        let body_text = std::str::from_utf8(&body).expect("metrics body is utf8");
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_benchmarks{{tenant_storage_ref=\"{tenant_ref}\",state=\"registry_outbox_failed\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"benchmark_registry_outbox_failed\"}} 1"
+        )));
+        assert!(!body_text.contains("registry submitter outage"));
     }
 
     #[tokio::test]
