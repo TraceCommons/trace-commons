@@ -527,6 +527,11 @@ cap by default unless `require_account_cap` is explicitly disabled, returns only
 safe account hashes, aggregate risk counts, settlement exclusion reason counts,
 blocker codes, and a sha256-prefixed evidence hash, and can append
 `credit_settlement` rollout-smoke evidence directly.
+Final settlement requests can include `issuer_approval_evidence_hash` to bind
+the batch to a central operator approval artifact. Set
+`TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` to reject live
+settlement without that hash while preserving dry-run and drill workflows for
+pre-approval review.
 Operators can still use `POST /v1/admin/rollout-smoke/evidence` for external
 manual evidence, while operational summary and metrics expose only readiness
 booleans, bounded max-delta metadata, and blocker reason codes.
@@ -570,8 +575,10 @@ and automation gates: `ranking_min_label_count`,
 `ranking_require_calibration_dataset_registry`,
 `ranking_min_confidence_threshold`,
 `ranking_max_average_absolute_error_micros`, and
-`ranking_worker_run_stale_after_hours`. It also reports safe NEAR settlement
-readiness fields: `near_credit_submitter_configured`,
+`ranking_worker_run_stale_after_hours`. It reports
+`credit_settlement_require_issuer_approval` so operators can see whether live
+settlement requires central approval evidence. It also reports safe NEAR
+settlement readiness fields: `near_credit_submitter_configured`,
 `near_credit_submitter_timeout_ms`, `near_credit_outbox_submit_default_limit`,
 `near_credit_outbox_submit_max_limit`,
 `near_credit_confirmer_configured`,
@@ -624,6 +631,12 @@ pending ledger visible for hold/review or a higher governed cap. Operational
 summary and metrics also surface `credit_settlement_account_cap_missing` when
 positive delayed credit exists without an issuer cap, so operators see the
 governance gap before a settlement run or smoke drill.
+`TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` adds the early
+central-issuer fail-closed gate: live admin or worker settlement requests must
+carry a sha256-prefixed `issuer_approval_evidence_hash`, which is persisted on
+the settlement batch and folded into newly queued NEAR receipt attestation and
+issuer-signature hashes. Dry-runs remain approval-free so operators can produce
+or inspect evidence before granting non-transferable credits.
 Admins can inspect `GET /v1/admin/credit-risk-summary` before issuing credit to
 see tenant-scoped pending, held, and over-cap totals grouped by deterministic
 credit-account hash. The response is bounded by `limit` (default 100, max 500)

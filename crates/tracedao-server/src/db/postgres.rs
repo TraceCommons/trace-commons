@@ -447,6 +447,46 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _tracedao_migrations WHERE version = $1",
+                &[&19_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V19__trace_ranking_calibration_label_actor_count.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _tracedao_migrations (version, name) VALUES ($1, $2)",
+                    &[&19_i32, &"trace_ranking_calibration_label_actor_count"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _tracedao_migrations WHERE version = $1",
+                &[&20_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V20__trace_credit_settlement_issuer_approval_hash.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _tracedao_migrations (version, name) VALUES ($1, $2)",
+                    &[&20_i32, &"trace_credit_settlement_issuer_approval_hash"],
+                )
+                .await?;
+        }
         Ok(())
     }
 

@@ -2006,6 +2006,9 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
                 policy_version: "trace-credit-policy-v3".to_string(),
                 status: TraceCreditSettlementBatchStatus::Finalized,
                 reason_hash: settlement_reason_hash.to_string(),
+                issuer_approval_evidence_hash: Some(format!(
+                    "sha256:settlement-{label}-issuer-approval"
+                )),
                 source_credit_event_ids: vec![credit_event_id],
                 source_submission_ids: vec![submission_id],
                 source_list_hash: source_list_hash.to_string(),
@@ -2048,6 +2051,10 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
         assert_eq!(
             settlement.ranking_model_version.as_deref(),
             Some("trace-ranker-settlement-v3")
+        );
+        assert_eq!(
+            settlement.issuer_approval_evidence_hash.as_deref(),
+            Some(format!("sha256:settlement-{label}-issuer-approval").as_str())
         );
         assert_eq!(
             settlement

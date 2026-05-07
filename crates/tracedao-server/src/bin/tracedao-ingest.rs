@@ -246,6 +246,8 @@ const TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT";
+const TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL";
 const TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL: &str = "TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL";
 const TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN: &str =
     "TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN";
@@ -485,6 +487,7 @@ struct AppState {
     analytics_broad_release_noise: Option<TraceAnalyticsNoiseConfig>,
     analytics_broad_release_privacy_accounting: Option<TraceAnalyticsPrivacyAccountingConfig>,
     credit_settlement_max_micros_per_account: Option<i64>,
+    credit_settlement_require_issuer_approval: bool,
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Arc<BTreeSet<String>>,
     artifact_store: Option<ConfiguredTraceArtifactStore>,
@@ -1802,6 +1805,8 @@ impl AppState {
             parse_analytics_privacy_accounting_from_env()?;
         let credit_settlement_max_micros_per_account =
             parse_credit_settlement_max_points_per_account_from_env()?;
+        let credit_settlement_require_issuer_approval =
+            env_truthy(TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL);
         let submission_quota = parse_submission_quota_config_from_env()?;
         let legal_hold_retention_policy_ids = parse_legal_hold_retention_policy_ids_from_env()?;
         let artifact_store = trace_artifact_store_from_env(&root)?;
@@ -2025,6 +2030,7 @@ impl AppState {
             analytics_broad_release_noise,
             analytics_broad_release_privacy_accounting,
             credit_settlement_max_micros_per_account,
+            credit_settlement_require_issuer_approval,
             submission_quota,
             legal_hold_retention_policy_ids: Arc::new(legal_hold_retention_policy_ids),
             artifact_store,
@@ -5523,6 +5529,7 @@ struct TraceCommonsConfigStatusResponse {
     analytics_broad_release_epsilon_micros_per_release: Option<u64>,
     analytics_broad_release_max_epsilon_micros: Option<u64>,
     credit_settlement_max_micros_per_account: Option<i64>,
+    credit_settlement_require_issuer_approval: bool,
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Vec<String>,
     ranking_calibration_max_age_hours: Option<i64>,
@@ -5707,6 +5714,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .analytics_broad_release_privacy_accounting
             .map(|config| config.max_epsilon_micros),
         credit_settlement_max_micros_per_account: state.credit_settlement_max_micros_per_account,
+        credit_settlement_require_issuer_approval: state.credit_settlement_require_issuer_approval,
         submission_quota: state.submission_quota,
         legal_hold_retention_policy_ids: state
             .legal_hold_retention_policy_ids
@@ -7605,6 +7613,8 @@ struct TraceCreditSettlementRunRequest {
     policy_version: String,
     reason: String,
     #[serde(default)]
+    issuer_approval_evidence_hash: Option<String>,
+    #[serde(default)]
     near_contract_id: Option<String>,
     #[serde(default)]
     ranking_model_version: Option<String>,
@@ -7656,6 +7666,8 @@ struct TraceCreditCycleWorkerRunRequest {
     policy_version: String,
     reason: String,
     #[serde(default)]
+    issuer_approval_evidence_hash: Option<String>,
+    #[serde(default)]
     near_contract_id: Option<String>,
     #[serde(default)]
     calibration_limit: Option<usize>,
@@ -7695,6 +7707,8 @@ struct TraceCreditCycleSchedulerRunRequest {
     #[serde(default)]
     policy_version: Option<String>,
     reason: String,
+    #[serde(default)]
+    issuer_approval_evidence_hash: Option<String>,
     #[serde(default)]
     near_contract_id: Option<String>,
     #[serde(default)]
@@ -7791,6 +7805,8 @@ struct TraceCreditSettlementBatchRecord {
     policy_version: String,
     status: StorageTraceCreditSettlementBatchStatus,
     reason_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    issuer_approval_evidence_hash: Option<String>,
     source_credit_event_ids: Vec<Uuid>,
     source_submission_ids: Vec<Uuid>,
     source_list_hash: String,
@@ -8334,6 +8350,7 @@ struct TraceCreditSettlementRunResponse {
     dry_run: bool,
     policy_version: String,
     source_list_hash: String,
+    issuer_approval_evidence_hash: Option<String>,
     limit: Option<usize>,
     settled_source_event_count: usize,
     eligible_source_event_count: usize,
@@ -9967,6 +9984,7 @@ async fn credit_cycle_scheduler_run_handler(
                 model_version: candidate.model_version.clone(),
                 policy_version: candidate.policy_version.clone(),
                 reason: reason.clone(),
+                issuer_approval_evidence_hash: body.issuer_approval_evidence_hash.clone(),
                 near_contract_id: near_contract_id.clone(),
                 calibration_limit: body.calibration_limit,
                 model_promotion_limit: body.model_promotion_limit,
@@ -10200,6 +10218,14 @@ async fn credit_cycle_worker_run_handler(
             "credit cycle worker run requires a non-empty reason",
         ));
     }
+    let issuer_approval_evidence_hash = validate_credit_settlement_issuer_approval_evidence_hash(
+        body.issuer_approval_evidence_hash.as_deref(),
+    )?;
+    require_credit_settlement_issuer_approval_if_configured(
+        state.as_ref(),
+        body.dry_run,
+        issuer_approval_evidence_hash.as_deref(),
+    )?;
     let near_contract_id = body
         .near_contract_id
         .as_deref()
@@ -10327,6 +10353,7 @@ async fn credit_cycle_worker_run_handler(
                     dry_run: body.dry_run,
                     policy_version: policy_version.clone(),
                     reason: reason.clone(),
+                    issuer_approval_evidence_hash: issuer_approval_evidence_hash.clone(),
                     near_contract_id: near_contract_id.clone(),
                     ranking_model_version: Some(model_version.clone()),
                     ranking_target_use: Some(body.target_use),
@@ -10543,6 +10570,7 @@ async fn run_credit_settlement_drill(
             dry_run: true,
             policy_version: request.policy_version,
             reason: purpose.clone(),
+            issuer_approval_evidence_hash: None,
             near_contract_id: near_contract_id.clone(),
             ranking_model_version: request.ranking_model_version,
             ranking_target_use: request.ranking_target_use,
@@ -10771,6 +10799,14 @@ async fn run_credit_settlement(
             "credit settlement requires a non-empty reason",
         ));
     }
+    let issuer_approval_evidence_hash = validate_credit_settlement_issuer_approval_evidence_hash(
+        body.issuer_approval_evidence_hash.as_deref(),
+    )?;
+    require_credit_settlement_issuer_approval_if_configured(
+        state,
+        body.dry_run,
+        issuer_approval_evidence_hash.as_deref(),
+    )?;
     let near_contract_id = body
         .near_contract_id
         .as_deref()
@@ -10993,13 +11029,16 @@ async fn run_credit_settlement(
                 credit_account_hash: credit_account_hash.clone(),
                 policy_version: policy_version.clone(),
                 source_list_hash: item_source_list_hash.clone(),
-                attestation_hash: sha256_prefixed(&format!(
-                    "trace-credit-attestation:v1:{item_source_list_hash}"
-                )),
+                attestation_hash: trace_credit_settlement_attestation_hash(
+                    &item_source_list_hash,
+                    issuer_approval_evidence_hash.as_deref(),
+                ),
                 amount_micros: settled_credit_micros,
-                issuer_signature_hash: sha256_prefixed(&format!(
-                    "trace-credit-settlement:v1:{settlement_batch_id}:{item_source_list_hash}"
-                )),
+                issuer_signature_hash: trace_credit_settlement_issuer_signature_hash(
+                    settlement_batch_id,
+                    &item_source_list_hash,
+                    issuer_approval_evidence_hash.as_deref(),
+                ),
             };
             let near_call = NearCreditReceiptCall::settle(contract_id, receipt)
                 .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
@@ -11043,6 +11082,7 @@ async fn run_credit_settlement(
             policy_version: policy_version.clone(),
             status: StorageTraceCreditSettlementBatchStatus::Finalized,
             reason_hash,
+            issuer_approval_evidence_hash: issuer_approval_evidence_hash.clone(),
             source_credit_event_ids: source_credit_event_ids.clone(),
             source_submission_ids: source_submission_ids.clone(),
             source_list_hash: source_list_hash.clone(),
@@ -11088,6 +11128,7 @@ async fn run_credit_settlement(
         dry_run: body.dry_run,
         policy_version,
         source_list_hash,
+        issuer_approval_evidence_hash,
         limit,
         settled_source_event_count: source_credit_event_ids.len(),
         eligible_source_event_count,
@@ -11249,15 +11290,16 @@ fn near_credit_outbox_item_from_settlement_line_item(
         credit_account_hash: item.credit_account_hash.clone(),
         policy_version: batch.policy_version.clone(),
         source_list_hash: item.source_list_hash.clone(),
-        attestation_hash: sha256_prefixed(&format!(
-            "trace-credit-attestation:v1:{}",
-            item.source_list_hash
-        )),
+        attestation_hash: trace_credit_settlement_attestation_hash(
+            &item.source_list_hash,
+            batch.issuer_approval_evidence_hash.as_deref(),
+        ),
         amount_micros: item.settled_credit_delta_micros,
-        issuer_signature_hash: sha256_prefixed(&format!(
-            "trace-credit-settlement:v1:{}:{}",
-            batch.settlement_batch_id, item.source_list_hash
-        )),
+        issuer_signature_hash: trace_credit_settlement_issuer_signature_hash(
+            batch.settlement_batch_id,
+            &item.source_list_hash,
+            batch.issuer_approval_evidence_hash.as_deref(),
+        ),
     };
     let near_call = NearCreditReceiptCall::settle(contract_id, receipt)?;
     Ok(TraceNearCreditOutboxItem {
@@ -11274,6 +11316,62 @@ fn near_credit_outbox_item_from_settlement_line_item(
         last_error_hash: None,
         confirmed_at: None,
     })
+}
+
+fn trace_credit_settlement_attestation_hash(
+    source_list_hash: &str,
+    issuer_approval_evidence_hash: Option<&str>,
+) -> String {
+    if let Some(approval_hash) = issuer_approval_evidence_hash {
+        sha256_prefixed(&format!(
+            "trace-credit-attestation:v2:{source_list_hash}:{approval_hash}"
+        ))
+    } else {
+        sha256_prefixed(&format!("trace-credit-attestation:v1:{source_list_hash}"))
+    }
+}
+
+fn trace_credit_settlement_issuer_signature_hash(
+    settlement_batch_id: Uuid,
+    source_list_hash: &str,
+    issuer_approval_evidence_hash: Option<&str>,
+) -> String {
+    if let Some(approval_hash) = issuer_approval_evidence_hash {
+        sha256_prefixed(&format!(
+            "trace-credit-settlement:v2:{settlement_batch_id}:{source_list_hash}:{approval_hash}"
+        ))
+    } else {
+        sha256_prefixed(&format!(
+            "trace-credit-settlement:v1:{settlement_batch_id}:{source_list_hash}"
+        ))
+    }
+}
+
+fn validate_credit_settlement_issuer_approval_evidence_hash(
+    value: Option<&str>,
+) -> ApiResult<Option<String>> {
+    value
+        .map(str::trim)
+        .filter(|hash| !hash.is_empty())
+        .map(|hash| validate_trace_sha256_hash(hash, "issuer_approval_evidence_hash"))
+        .transpose()
+}
+
+fn require_credit_settlement_issuer_approval_if_configured(
+    state: &AppState,
+    dry_run: bool,
+    issuer_approval_evidence_hash: Option<&str>,
+) -> ApiResult<()> {
+    if !dry_run
+        && state.credit_settlement_require_issuer_approval
+        && issuer_approval_evidence_hash.is_none()
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "live credit settlement requires issuer_approval_evidence_hash",
+        ));
+    }
+    Ok(())
 }
 
 fn near_credit_reversal_outbox_item_from_settled_credit_event(
@@ -13369,6 +13467,7 @@ fn credit_settlement_batch_to_storage_write(
         policy_version: record.policy_version.clone(),
         status: record.status,
         reason_hash: record.reason_hash.clone(),
+        issuer_approval_evidence_hash: record.issuer_approval_evidence_hash.clone(),
         source_credit_event_ids: record.source_credit_event_ids.clone(),
         source_submission_ids: record.source_submission_ids.clone(),
         source_list_hash: record.source_list_hash.clone(),
@@ -13418,6 +13517,7 @@ fn credit_settlement_batch_from_storage(
         policy_version: record.policy_version,
         status: record.status,
         reason_hash: record.reason_hash,
+        issuer_approval_evidence_hash: record.issuer_approval_evidence_hash,
         source_credit_event_ids: record.source_credit_event_ids,
         source_submission_ids: record.source_submission_ids,
         source_list_hash: record.source_list_hash,
@@ -17971,6 +18071,18 @@ fn validate_sha256_hash(value: &str, label: &str) -> ApiResult<String> {
         Err(api_error(
             StatusCode::BAD_REQUEST,
             format!("ranking {label} must be a sha256-prefixed hash"),
+        ))
+    }
+}
+
+fn validate_trace_sha256_hash(value: &str, label: &str) -> ApiResult<String> {
+    let value = value.trim();
+    if value.starts_with("sha256:") {
+        Ok(value.to_string())
+    } else {
+        Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("{label} must be a sha256-prefixed hash"),
         ))
     }
 }
@@ -51873,6 +51985,7 @@ mod tests {
             analytics_broad_release_noise: None,
             analytics_broad_release_privacy_accounting: None,
             credit_settlement_max_micros_per_account: None,
+            credit_settlement_require_issuer_approval: false,
             submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store,
@@ -54663,6 +54776,10 @@ mod tests {
         assert_eq!(
             value["ranking_min_label_source_count"],
             serde_json::json!(DEFAULT_TRACE_RANKING_MIN_LABEL_SOURCE_COUNT)
+        );
+        assert_eq!(
+            value["credit_settlement_require_issuer_approval"],
+            serde_json::json!(false)
         );
         assert_eq!(
             value["ranking_require_calibration_dataset_registry"],
@@ -65056,6 +65173,7 @@ mod tests {
             analytics_broad_release_noise: None,
             analytics_broad_release_privacy_accounting: None,
             credit_settlement_max_micros_per_account: None,
+            credit_settlement_require_issuer_approval: false,
             submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::from([
                 "private_corpus_revocable".to_string()
@@ -66338,6 +66456,7 @@ mod tests {
                 dry_run: false,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "settlement before revocation".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -69841,6 +69960,7 @@ mod tests {
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceCreditSettlementBatchStatus::Finalized,
                 reason_hash: "sha256:settlement-reason".to_string(),
+                issuer_approval_evidence_hash: None,
                 source_credit_event_ids: vec![Uuid::new_v4()],
                 source_submission_ids: vec![Uuid::new_v4()],
                 source_list_hash: "sha256:settlement-sources".to_string(),
@@ -70147,6 +70267,7 @@ mod tests {
             policy_version: "trace-credit-policy-v1".to_string(),
             status: StorageTraceCreditSettlementBatchStatus::Finalized,
             reason_hash: "sha256:settlement-reason".to_string(),
+            issuer_approval_evidence_hash: None,
             source_credit_event_ids: vec![Uuid::new_v4()],
             source_submission_ids: vec![Uuid::new_v4()],
             source_list_hash: "sha256:settlement-sources".to_string(),
@@ -71575,6 +71696,7 @@ mod tests {
                 dry_run: true,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "preview canary settlement".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -71603,6 +71725,7 @@ mod tests {
                 dry_run: false,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "finalize canary settlement".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -71622,6 +71745,7 @@ mod tests {
                 dry_run: false,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "retry canary settlement".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -71680,6 +71804,212 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_credit_settlement_persists_central_issuer_approval_hash() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(_) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.25,
+                reason: Some("frontier lab central issuer approval probe".to_string()),
+                external_ref: Some("lab-attestation:central-issuer-approval".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+
+        let approval_hash = "sha256:central-issuer-approval-evidence";
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlements")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "dry_run": false,
+                            "policy_version": "trace-credit-policy-v1",
+                            "reason": "central issuer approved batch",
+                            "issuer_approval_evidence_hash": approval_hash
+                        })
+                        .to_string(),
+                    ))
+                    .expect("settlement request builds"),
+            )
+            .await
+            .expect("settlement response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16384)
+            .await
+            .expect("settlement body reads");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json parses");
+        assert_eq!(
+            value["issuer_approval_evidence_hash"],
+            serde_json::json!(approval_hash)
+        );
+
+        let batches =
+            read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(
+            batches[0].issuer_approval_evidence_hash.as_deref(),
+            Some(approval_hash)
+        );
+        let body_text = std::str::from_utf8(&body).expect("settlement response is utf8");
+        assert!(!body_text.contains("frontier lab central issuer approval probe"));
+        assert!(!body_text.contains("lab-attestation:central-issuer-approval"));
+        assert!(!body_text.contains("admin-token-a"));
+    }
+
+    #[tokio::test]
+    async fn credit_settlement_can_require_central_issuer_approval_for_live_batches() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let Json(_) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.0,
+                reason: Some("frontier lab centrally reviewed utility".to_string()),
+                external_ref: Some("lab-attestation:issuer-required".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+
+        let dry_run_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlements")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "dry_run": true,
+                            "policy_version": "trace-credit-policy-v1",
+                            "reason": "preview without issuer approval"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("dry-run request builds"),
+            )
+            .await
+            .expect("dry-run response");
+        assert_eq!(dry_run_response.status(), StatusCode::OK);
+
+        let missing_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlements")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "dry_run": false,
+                            "policy_version": "trace-credit-policy-v1",
+                            "reason": "live settlement missing approval"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("missing approval request builds"),
+            )
+            .await
+            .expect("missing approval response");
+        assert_eq!(missing_response.status(), StatusCode::BAD_REQUEST);
+        let missing_body = axum::body::to_bytes(missing_response.into_body(), 8192)
+            .await
+            .expect("missing approval body reads");
+        let missing_text = std::str::from_utf8(&missing_body).expect("body is utf8");
+        assert!(missing_text.contains("issuer_approval_evidence_hash"));
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement reads")
+                .is_empty()
+        );
+
+        let approved_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlements")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "dry_run": false,
+                            "policy_version": "trace-credit-policy-v1",
+                            "reason": "live settlement with central approval",
+                            "issuer_approval_evidence_hash": "sha256:issuer-required-approval"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("approved request builds"),
+            )
+            .await
+            .expect("approved response");
+        assert_eq!(approved_response.status(), StatusCode::OK);
+        let approved_body = axum::body::to_bytes(approved_response.into_body(), 16384)
+            .await
+            .expect("approved body reads");
+        let approved: serde_json::Value =
+            serde_json::from_slice(&approved_body).expect("approved json parses");
+        assert_eq!(
+            approved["issuer_approval_evidence_hash"],
+            serde_json::json!("sha256:issuer-required-approval")
+        );
+        let batches =
+            read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+        assert_eq!(
+            batches[0].issuer_approval_evidence_hash.as_deref(),
+            Some("sha256:issuer-required-approval")
+        );
+    }
+
+    #[tokio::test]
     async fn contributor_credit_summary_nets_revocation_reversal_against_settled_balance() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -71719,6 +72049,7 @@ mod tests {
                 dry_run: false,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "finalize benchmark utility credit".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: None,
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -71892,6 +72223,7 @@ mod tests {
                 dry_run: false,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "finalize with malformed contract".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("Trace Credits.testnet".to_string()),
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -71960,6 +72292,7 @@ mod tests {
                 dry_run: true,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "preview capped settlement".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -71989,6 +72322,7 @@ mod tests {
                 dry_run: false,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "finalize capped settlement".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -72519,6 +72853,7 @@ mod tests {
                 dry_run: false,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "utility worker cannot use admin settlement route".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: None,
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -72536,6 +72871,7 @@ mod tests {
                     dry_run: false,
                     policy_version: "trace-credit-policy-v1".to_string(),
                     reason: "scheduled utility settlement".to_string(),
+                    issuer_approval_evidence_hash: None,
                     near_contract_id: Some("trace-credits.near".to_string()),
                     ranking_model_version: None,
                     ranking_target_use: None,
@@ -72572,6 +72908,7 @@ mod tests {
                     dry_run: false,
                     policy_version: "trace-credit-policy-v1".to_string(),
                     reason: "scheduled utility settlement retry".to_string(),
+                    issuer_approval_evidence_hash: None,
                     near_contract_id: Some("trace-credits.near".to_string()),
                     ranking_model_version: None,
                     ranking_target_use: None,
@@ -72716,6 +73053,7 @@ mod tests {
             policy_version: "trace-credit-policy-v1".to_string(),
             status: StorageTraceCreditSettlementBatchStatus::Finalized,
             reason_hash: "sha256:first-settlement".to_string(),
+            issuer_approval_evidence_hash: None,
             source_credit_event_ids: vec![source_credit_event_id],
             source_submission_ids: vec![submission_id],
             source_list_hash: first_item_source_hash.clone(),
@@ -72810,6 +73148,7 @@ mod tests {
                 dry_run: false,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "finalize settlement with blocked outbox".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -72831,6 +73170,7 @@ mod tests {
                 dry_run: false,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "retry settlement should repair missing outbox".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -72891,6 +73231,7 @@ mod tests {
                 dry_run: false,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "tenant-wide settlement".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: None,
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -73836,6 +74177,7 @@ mod tests {
                 dry_run: false,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "settlement for NEAR submit worker".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -74052,6 +74394,7 @@ mod tests {
                 dry_run: true,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "ranking settlement without model gate".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: None,
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -74075,6 +74418,7 @@ mod tests {
                 dry_run: true,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "ranking settlement with missing calibration".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: None,
                 ranking_model_version: Some("trace-ranker-settlement-v1".to_string()),
                 ranking_target_use: Some(TraceAllowedUse::RankingModelTraining),
@@ -74211,6 +74555,7 @@ mod tests {
                 dry_run: false,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "ranking settlement with calibrated model".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: None,
                 ranking_model_version: Some(active_model.model_version.clone()),
                 ranking_target_use: Some(TraceAllowedUse::RankingModelTraining),
@@ -74393,6 +74738,7 @@ mod tests {
                 dry_run: true,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "ranking settlement with candidate model".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: None,
                 ranking_model_version: Some(candidate.model_version),
                 ranking_target_use: Some(TraceAllowedUse::RankingModelTraining),
@@ -74547,6 +74893,7 @@ mod tests {
                 dry_run: true,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "ranking settlement excludes unbound prediction".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: None,
                 ranking_model_version: Some(candidate.model_version.clone()),
                 ranking_target_use: Some(TraceAllowedUse::RankingModelTraining),
@@ -74580,6 +74927,7 @@ mod tests {
                 dry_run: false,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "ranking settlement with prediction-bound credit".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: None,
                 ranking_model_version: Some(candidate.model_version),
                 ranking_target_use: Some(TraceAllowedUse::RankingModelTraining),
@@ -76786,6 +77134,7 @@ mod tests {
                 dry_run: false,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "stale calibration should not settle".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: None,
                 ranking_model_version: Some(candidate.model_version),
                 ranking_target_use: Some(TraceAllowedUse::RankingModelTraining),
@@ -78577,7 +78926,9 @@ mod tests {
     #[tokio::test]
     async fn credit_cycle_worker_runs_ranking_credit_settlement_sequence() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let state = test_state(temp.path().to_path_buf());
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
+        let issuer_approval_evidence_hash = "sha256:credit-cycle-issuer-approval".to_string();
         let (candidate, prediction) =
             seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-credit-cycle-v1").await;
 
@@ -78592,6 +78943,7 @@ mod tests {
                 model_version: candidate.model_version.clone(),
                 policy_version: candidate.policy_version.clone(),
                 reason: "scheduled credit cycle".to_string(),
+                issuer_approval_evidence_hash: Some(issuer_approval_evidence_hash.clone()),
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 calibration_limit: Some(10),
                 model_promotion_limit: Some(10),
@@ -78614,6 +78966,10 @@ mod tests {
         assert_eq!(cycle.model_promotion.promoted_count, 1);
         assert_eq!(cycle.prediction_credit.credited_count, 1);
         assert_eq!(cycle.settlement.settled_source_event_count, 1);
+        assert_eq!(
+            cycle.settlement.issuer_approval_evidence_hash.as_deref(),
+            Some(issuer_approval_evidence_hash.as_str())
+        );
         assert_eq!(cycle.settlement.near_outbox_item_count, 1);
         assert!(cycle.near_outbox_submit.dry_run);
         assert_eq!(cycle.near_outbox_submit.checked, 1);
@@ -78637,6 +78993,13 @@ mod tests {
         assert_eq!(
             outbox[0].status,
             StorageTraceCreditSettlementNearStatus::Pending
+        );
+        let batches =
+            read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("batches read");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(
+            batches[0].issuer_approval_evidence_hash.as_deref(),
+            Some(issuer_approval_evidence_hash.as_str())
         );
         let worker_runs =
             read_all_ranking_worker_runs(temp.path(), "tenant-a").expect("worker runs read");
@@ -78700,6 +79063,7 @@ mod tests {
                 model_version: candidate.model_version.clone(),
                 policy_version: candidate.policy_version.clone(),
                 reason: "scheduled credit cycle with NEAR confirmation".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 calibration_limit: Some(10),
                 model_promotion_limit: Some(10),
@@ -78749,6 +79113,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn credit_cycle_worker_requires_issuer_approval_before_side_effects() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
+        let (candidate, _) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-credit-cycle-gated-v1")
+                .await;
+
+        let error = credit_cycle_worker_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleWorkerRunRequest {
+                dry_run: false,
+                submit_near_outbox: false,
+                confirm_near_outbox: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: candidate.model_version.clone(),
+                policy_version: candidate.policy_version.clone(),
+                reason: "scheduled credit cycle without issuer approval".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect_err("issuer approval gate rejects before claiming the cycle");
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.1.0.error,
+            "live credit settlement requires issuer_approval_evidence_hash"
+        );
+        assert!(
+            read_all_ranking_worker_runs(temp.path(), "tenant-a")
+                .expect("worker runs read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit events read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement batches read")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn credit_cycle_scheduler_runs_next_eligible_model() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
@@ -78772,6 +79200,7 @@ mod tests {
                 model_version: None,
                 policy_version: Some(candidate.policy_version.clone()),
                 reason: "scheduled next eligible credit cycle".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 limit: Some(1),
                 calibration_limit: Some(10),
@@ -78951,6 +79380,7 @@ mod tests {
                 model_version: None,
                 policy_version: Some("trace-credit-policy-v1".to_string()),
                 reason: "scheduled credit cycle should skip claim".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 limit: Some(1),
                 calibration_limit: Some(10),
@@ -79008,6 +79438,7 @@ mod tests {
                 model_version: None,
                 policy_version: Some("trace-credit-policy-v1".to_string()),
                 reason: "contributor should not run scheduler".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 limit: Some(1),
                 calibration_limit: Some(10),
@@ -79058,6 +79489,7 @@ mod tests {
                 model_version: None,
                 policy_version: Some("trace-credit-policy-v1".to_string()),
                 reason: "bad scheduler limit".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 limit: Some(0),
                 calibration_limit: Some(10),
@@ -79120,6 +79552,7 @@ mod tests {
                 model_version: None,
                 policy_version: Some(candidate.policy_version),
                 reason: "scheduled credit cycle should skip unready candidate".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 limit: Some(1),
                 calibration_limit: Some(10),
@@ -79224,6 +79657,7 @@ mod tests {
                 model_version: None,
                 policy_version: Some(candidate.policy_version),
                 reason: "scheduled credit cycle should skip unjoined evidence".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 limit: Some(1),
                 calibration_limit: Some(10),
@@ -79285,6 +79719,7 @@ mod tests {
                 model_version: None,
                 policy_version: Some(candidate.policy_version),
                 reason: "scheduled credit cycle should skip pairwise-risk candidate".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 limit: Some(1),
                 calibration_limit: Some(10),
@@ -79339,6 +79774,7 @@ mod tests {
                 model_version: "trace-ranker-credit-cycle-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "contributor should not run credit cycle".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 calibration_limit: Some(10),
                 model_promotion_limit: Some(10),
@@ -79424,6 +79860,7 @@ mod tests {
                 model_version: "trace-ranker-credit-cycle-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "overlapping credit cycle".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 calibration_limit: Some(10),
                 model_promotion_limit: Some(10),
@@ -79483,6 +79920,7 @@ mod tests {
                 model_version: "trace-ranker-missing-model-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "cycle should fail during near outbox".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 calibration_limit: Some(10),
                 model_promotion_limit: Some(10),
@@ -80417,6 +80855,7 @@ mod tests {
                 dry_run: false,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "held account settlement attempt".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -80572,6 +81011,7 @@ mod tests {
                 dry_run: false,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "settle released hold account".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -80906,6 +81346,7 @@ mod tests {
                 dry_run: false,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "DB-backed settlement".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -80983,6 +81424,7 @@ mod tests {
             policy_version: "trace-credit-policy-v1".to_string(),
             status: StorageTraceCreditSettlementBatchStatus::Finalized,
             reason_hash: sha256_prefixed("settled before revocation"),
+            issuer_approval_evidence_hash: None,
             source_credit_event_ids: vec![credit_event_id, other_credit_event_id],
             source_submission_ids: vec![submission_id, Uuid::new_v4()],
             source_list_hash: line_source_hash.clone(),
@@ -81112,6 +81554,7 @@ mod tests {
                 dry_run: false,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "settlement before revocation".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -81291,6 +81734,7 @@ mod tests {
                 dry_run: false,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "settle benchmark conversion credit before revocation".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -84962,6 +85406,7 @@ mod tests {
                 dry_run: false,
                 policy_version: candidate.policy_version,
                 reason: "settlement excludes low-confidence ranking credit".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: None,
                 ranking_model_version: Some(active.model_version),
                 ranking_target_use: Some(TraceAllowedUse::RankingModelTraining),
@@ -85461,6 +85906,7 @@ mod tests {
                 dry_run: false,
                 policy_version: candidate.policy_version,
                 reason: "settlement excludes uncleared active model risk".to_string(),
+                issuer_approval_evidence_hash: None,
                 near_contract_id: None,
                 ranking_model_version: Some(active.model_version),
                 ranking_target_use: Some(TraceAllowedUse::RankingModelTraining),

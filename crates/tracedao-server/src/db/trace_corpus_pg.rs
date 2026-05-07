@@ -97,8 +97,9 @@ const TRACE_UTILITY_ATTESTATION_COLUMNS: &str = "\
 
 const TRACE_CREDIT_SETTLEMENT_BATCH_COLUMNS: &str = "\
     tenant_id, settlement_batch_id, policy_version, status, reason_hash, \
-    source_credit_event_ids, source_submission_ids, source_list_hash, settled_credit_points, \
-    settled_credit_micros, line_items_json, near_contract_id, ranking_model_version, \
+    issuer_approval_evidence_hash, source_credit_event_ids, source_submission_ids, \
+    source_list_hash, settled_credit_points, settled_credit_micros, line_items_json, \
+    near_contract_id, ranking_model_version, \
     ranking_target_use, ranking_calibration_run_id, ranking_calibration_report_hash, \
     ranking_calibration_joined_evidence_hash, ranking_credit_events_excluded_count, \
     ranking_credit_events_excluded_reason_counts_json, actor_principal_ref, created_at";
@@ -458,6 +459,7 @@ fn row_to_credit_settlement_batch(
             "TraceCreditSettlementBatchStatus",
         )?,
         reason_hash: row.get("reason_hash"),
+        issuer_approval_evidence_hash: row.get("issuer_approval_evidence_hash"),
         source_credit_event_ids: row.get("source_credit_event_ids"),
         source_submission_ids: row.get("source_submission_ids"),
         source_list_hash: row.get("source_list_hash"),
@@ -3696,22 +3698,24 @@ impl TraceCorpusStore for PgBackend {
                 &format!(
                     "INSERT INTO trace_credit_settlement_batches (
                         tenant_id, settlement_batch_id, policy_version, status, reason_hash,
-                        source_credit_event_ids, source_submission_ids, source_list_hash,
-                        settled_credit_points, settled_credit_micros, line_items_json,
-                        near_contract_id, ranking_model_version, ranking_target_use,
+                        issuer_approval_evidence_hash, source_credit_event_ids,
+                        source_submission_ids, source_list_hash, settled_credit_points,
+                        settled_credit_micros, line_items_json, near_contract_id,
+                        ranking_model_version, ranking_target_use,
                         ranking_calibration_run_id, ranking_calibration_report_hash,
                         ranking_calibration_joined_evidence_hash,
                         ranking_credit_events_excluded_count,
                         ranking_credit_events_excluded_reason_counts_json,
                         actor_principal_ref
                      ) VALUES (
-                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                        $17, $18, $19, $20
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                        $16, $17, $18, $19, $20, $21
                      )
                      ON CONFLICT (tenant_id, settlement_batch_id) DO UPDATE SET
                         policy_version = excluded.policy_version,
                         status = excluded.status,
                         reason_hash = excluded.reason_hash,
+                        issuer_approval_evidence_hash = excluded.issuer_approval_evidence_hash,
                         source_credit_event_ids = excluded.source_credit_event_ids,
                         source_submission_ids = excluded.source_submission_ids,
                         source_list_hash = excluded.source_list_hash,
@@ -3735,6 +3739,7 @@ impl TraceCorpusStore for PgBackend {
                     &batch.policy_version,
                     &status,
                     &batch.reason_hash,
+                    &batch.issuer_approval_evidence_hash,
                     &batch.source_credit_event_ids,
                     &batch.source_submission_ids,
                     &batch.source_list_hash,

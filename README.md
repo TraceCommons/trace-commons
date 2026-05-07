@@ -51,8 +51,12 @@ Trace Credits are non-transferable account credits backed by reviewed utility
 evidence. Uploads and ranker scores do not settle credit directly. Utility
 workers record hash-only attestations for accepted traces, admins run settlement
 batches, and optional NEAR receipt calls are queued only after off-chain
-settlement finalizes. The worker `POST /v1/workers/credit-cycle/run` route can
-run the production credit path in bounded steps for a single model/version:
+settlement finalizes. Operators can pass a hash-only
+`issuer_approval_evidence_hash` on final settlement batches; deployments that
+set `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` reject live
+settlement without that central approval evidence while still allowing dry-runs.
+The worker `POST /v1/workers/credit-cycle/run` route can run the production
+credit path in bounded steps for a single model/version:
 calibration, model promotion, prediction credit, settlement, then a NEAR outbox
 dry-run, explicit submit, or explicit confirmation poll. Settlement retries repair missing NEAR outbox rows
 from finalized batches, and revocation propagation can append deterministic
@@ -114,7 +118,8 @@ poll submitted transactions through an operator-owned confirmer and move rows to
 confirmed or failed status. Workers can still manually mark items submitted,
 confirmed, or failed for fallback operations. The server ledger remains
 authoritative; NEAR payloads contain batch ids, account hashes, source-list
-hashes, policy versions, amounts, and issuer-signature hashes, never trace
+hashes, policy versions, optional issuer-approval evidence hashes folded into
+attestation/signature hashes, amounts, and issuer-signature hashes, never trace
 bodies or raw contributor identity. Confirmation requests stay hash-only around
 the original call payload.
 `GET /v1/admin/config-status` exposes only safe NEAR readiness fields for this
