@@ -61748,6 +61748,153 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn maintenance_purges_filesystem_remote_object_primary_artifact() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let remote_temp = tempfile::tempdir().expect("remote artifact temp dir");
+        let key = tracedao_server::secrets::keychain::generate_master_key_hex();
+        let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("file_system"),
+            Some(remote_temp.path().to_str().expect("utf8 temp path")),
+            Some("retention-test-kms-key-ref"),
+            Some("retention-test-credential-ref"),
+        )
+        .expect("filesystem remote config parses");
+        let artifact_store =
+            ConfiguredTraceArtifactStore::remote_service(remote_config, SecretString::from(key))
+                .expect("filesystem remote service store builds");
+        let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            None,
+            Some(artifact_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).object_primary_submit_review = true;
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("object-primary submission succeeds");
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let object_path = temp.path().join(&record.object_key);
+        assert!(
+            !object_path.exists(),
+            "object-primary submit should not write a plaintext envelope body"
+        );
+        let receipt = record
+            .artifact_receipt
+            .clone()
+            .expect("remote service artifact receipt exists");
+        let artifact_store = state
+            .artifact_store
+            .as_ref()
+            .expect("remote service artifact store is configured");
+        let stored_envelope: TraceContributionEnvelope = artifact_store
+            .get_json(&record.tenant_storage_ref, &receipt)
+            .expect("remote service artifact can be read");
+        assert_eq!(stored_envelope.submission_id, submission_id);
+        assert_eq!(
+            count_files_under_dir(remote_temp.path()),
+            1,
+            "remote service artifact provider should contain the submitted envelope only"
+        );
+
+        let metadata_path = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"))
+            .join("metadata")
+            .join(format!("{submission_id}.json"));
+        let mut metadata_json = serde_json::to_value(record).expect("record serializes");
+        let expired_at = Utc::now() - chrono::Duration::days(2);
+        metadata_json["expires_at"] = serde_json::json!(expired_at.to_rfc3339());
+        write_json_file(&metadata_path, &metadata_json, "expired trace metadata")
+            .expect("expired metadata writes");
+
+        let Json(dry_run) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_remote_retention_purge_dry_run".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: Some(Utc::now()),
+            }),
+        )
+        .await
+        .expect("remote dry-run purge succeeds");
+        assert_eq!(dry_run.records_marked_purged, 0);
+        assert_eq!(dry_run.trace_object_files_deleted, 0);
+        assert_eq!(dry_run.encrypted_artifacts_deleted, 0);
+        assert!(!object_path.exists());
+        artifact_store
+            .get_json::<TraceContributionEnvelope>(&tenant_storage_ref("tenant-a"), &receipt)
+            .expect("dry-run keeps remote service artifact");
+        assert_eq!(
+            count_files_under_dir(remote_temp.path()),
+            1,
+            "dry-run purge must not delete remote service artifacts"
+        );
+
+        let Json(response) = maintenance_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("test_remote_retention_purge".to_string()),
+                dry_run: false,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: false,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: Some(Utc::now()),
+            }),
+        )
+        .await
+        .expect("remote purge succeeds");
+        assert_eq!(response.records_marked_expired, 1);
+        assert_eq!(response.records_marked_purged, 1);
+        assert_eq!(response.trace_object_files_deleted, 0);
+        assert_eq!(response.encrypted_artifacts_deleted, 1);
+        assert!(!object_path.exists());
+        let purged_record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("purged record reads")
+            .expect("purged record exists");
+        assert_eq!(purged_record.status, TraceCorpusStatus::Purged);
+        assert!(purged_record.purged_at.is_some());
+        artifact_store
+            .get_json::<TraceContributionEnvelope>(&tenant_storage_ref("tenant-a"), &receipt)
+            .expect_err("remote service artifact was deleted");
+        assert_eq!(
+            count_files_under_dir(remote_temp.path()),
+            0,
+            "live purge must delete the filesystem-remote service-owned artifact"
+        );
+    }
+
+    #[tokio::test]
     async fn retention_dry_run_drill_records_smoke_evidence_and_preserves_records() {
         use axum::body::Body;
         use tower::ServiceExt;
