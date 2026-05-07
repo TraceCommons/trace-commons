@@ -12,6 +12,18 @@ use uuid::Uuid;
 
 use crate::error::DatabaseError;
 
+fn default_trace_ranking_min_label_source_count() -> u32 {
+    1
+}
+
+fn default_trace_ranking_joined_evidence_hash() -> String {
+    "sha256:legacy".to_string()
+}
+
+fn default_trace_ranking_worker_run_status() -> TraceRankingWorkerRunStatus {
+    TraceRankingWorkerRunStatus::Completed
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TraceCorpusStatus {
@@ -88,6 +100,9 @@ pub enum TraceAuditAction {
     BenchmarkConvert,
     ProcessEvaluate,
     PolicyUpdate,
+    ExportJobRecovery,
+    RankingWorkerRunRecovery,
+    RankingCalibrationDatasetQuarantine,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -117,6 +132,623 @@ pub enum TraceCreditSettlementState {
     Pending,
     Final,
     Reversed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceCreditSettlementBatchStatus {
+    DryRun,
+    Finalized,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceCreditSettlementNearStatus {
+    Disabled,
+    Pending,
+    Submitted,
+    Confirmed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceBenchmarkRegistryOutboxOperation {
+    Publish,
+    Revoke,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceBenchmarkRegistryOutboxStatus {
+    Pending,
+    Submitted,
+    Confirmed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceCreditHoldReason {
+    DuplicateClusterUnderReview,
+    PrivacyRiskUnderReview,
+    SuspectedAbuse,
+    RevocationPropagation,
+    AttestationDispute,
+    PolicyMigration,
+    LegalCompliance,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceRankingModelStatus {
+    Candidate,
+    Active,
+    Deprecated,
+    Archived,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceRankingLabelSource {
+    FrontierLab,
+    Reviewer,
+    Benchmark,
+    System,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceRankingUtilityCategory {
+    ModelTraining,
+    RankingTraining,
+    Evaluation,
+    Regression,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceRankingLabelOutcome {
+    Useful,
+    Neutral,
+    Rejected,
+    RegressionCaught,
+    Disputed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceRankingCalibrationDatasetStatus {
+    Candidate,
+    Active,
+    Deprecated,
+    Archived,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingModelVersionWrite {
+    pub tenant_id: String,
+    pub model_version: String,
+    pub feature_schema_version: String,
+    pub policy_version: String,
+    pub status: TraceRankingModelStatus,
+    pub training_dataset_hash: String,
+    pub calibration_dataset_hash: String,
+    pub model_artifact_hash: String,
+    pub actor_principal_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingModelVersionRecord {
+    pub tenant_id: String,
+    pub model_version: String,
+    pub feature_schema_version: String,
+    pub policy_version: String,
+    pub status: TraceRankingModelStatus,
+    pub training_dataset_hash: String,
+    pub calibration_dataset_hash: String,
+    pub model_artifact_hash: String,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingCalibrationDatasetWrite {
+    pub tenant_id: String,
+    pub calibration_dataset_hash: String,
+    pub target_use: String,
+    pub policy_version: String,
+    pub source_manifest_hash: String,
+    pub source_count: u32,
+    pub label_source_count: u32,
+    pub label_actor_count: u32,
+    pub status: TraceRankingCalibrationDatasetStatus,
+    pub actor_principal_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingCalibrationDatasetStatusUpdate {
+    pub tenant_id: String,
+    pub calibration_dataset_hash: String,
+    pub target_use: String,
+    pub policy_version: String,
+    pub status: TraceRankingCalibrationDatasetStatus,
+    pub actor_principal_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingCalibrationDatasetRecord {
+    pub tenant_id: String,
+    pub calibration_dataset_hash: String,
+    pub target_use: String,
+    pub policy_version: String,
+    pub source_manifest_hash: String,
+    pub source_count: u32,
+    pub label_source_count: u32,
+    pub label_actor_count: u32,
+    pub status: TraceRankingCalibrationDatasetStatus,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceRankingFeatureWrite {
+    pub tenant_id: String,
+    pub ranking_feature_id: Uuid,
+    pub submission_id: Uuid,
+    pub trace_id: Uuid,
+    pub target_use: String,
+    pub feature_schema_version: String,
+    pub feature_vector_hash: String,
+    pub feature_names_hash: String,
+    pub source_feature_hash: String,
+    pub duplicate_score: Option<f32>,
+    pub novelty_score: Option<f32>,
+    pub privacy_risk_score: Option<f32>,
+    pub quality_score: Option<f32>,
+    pub coverage_tags: Vec<String>,
+    pub actor_principal_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceRankingFeatureRecord {
+    pub tenant_id: String,
+    pub ranking_feature_id: Uuid,
+    pub submission_id: Uuid,
+    pub trace_id: Uuid,
+    pub target_use: String,
+    pub feature_schema_version: String,
+    pub feature_vector_hash: String,
+    pub feature_names_hash: String,
+    pub source_feature_hash: String,
+    pub duplicate_score: Option<f32>,
+    pub novelty_score: Option<f32>,
+    pub privacy_risk_score: Option<f32>,
+    pub quality_score: Option<f32>,
+    pub coverage_tags: Vec<String>,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceRankingPredictionWrite {
+    pub tenant_id: String,
+    pub ranking_prediction_id: Uuid,
+    pub submission_id: Uuid,
+    pub trace_id: Uuid,
+    pub target_use: String,
+    pub model_version: String,
+    pub feature_schema_version: String,
+    pub prediction_policy_version: String,
+    pub feature_vector_hash: String,
+    pub predicted_utility_micros: i64,
+    pub uncertainty_micros: i64,
+    pub confidence: f32,
+    pub risk_penalty_micros: i64,
+    pub novelty_bonus_micros: i64,
+    pub settlement_score_micros: i64,
+    pub explanation_codes: Vec<String>,
+    pub actor_principal_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceRankingPredictionRecord {
+    pub tenant_id: String,
+    pub ranking_prediction_id: Uuid,
+    pub submission_id: Uuid,
+    pub trace_id: Uuid,
+    pub target_use: String,
+    pub model_version: String,
+    pub feature_schema_version: String,
+    pub prediction_policy_version: String,
+    pub feature_vector_hash: String,
+    pub predicted_utility_micros: i64,
+    pub uncertainty_micros: i64,
+    pub confidence: f32,
+    pub risk_penalty_micros: i64,
+    pub novelty_bonus_micros: i64,
+    pub settlement_score_micros: i64,
+    pub explanation_codes: Vec<String>,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingLabelWrite {
+    pub tenant_id: String,
+    pub ranking_label_id: Uuid,
+    pub submission_id: Uuid,
+    pub trace_id: Uuid,
+    pub target_use: String,
+    pub label_source: TraceRankingLabelSource,
+    pub utility_category: TraceRankingUtilityCategory,
+    pub label_outcome: TraceRankingLabelOutcome,
+    pub utility_delta_micros: i64,
+    pub evidence_hash: String,
+    pub external_ref_hash: String,
+    pub actor_principal_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingLabelRecord {
+    pub tenant_id: String,
+    pub ranking_label_id: Uuid,
+    pub submission_id: Uuid,
+    pub trace_id: Uuid,
+    pub target_use: String,
+    pub label_source: TraceRankingLabelSource,
+    pub utility_category: TraceRankingUtilityCategory,
+    pub label_outcome: TraceRankingLabelOutcome,
+    pub utility_delta_micros: i64,
+    pub evidence_hash: String,
+    pub external_ref_hash: String,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingPreferenceLabelWrite {
+    pub tenant_id: String,
+    pub preference_label_id: Uuid,
+    pub preferred_submission_id: Uuid,
+    pub preferred_trace_id: Uuid,
+    pub rejected_submission_id: Uuid,
+    pub rejected_trace_id: Uuid,
+    pub target_use: String,
+    pub label_source: TraceRankingLabelSource,
+    pub utility_category: TraceRankingUtilityCategory,
+    pub preference_strength_micros: i64,
+    pub evidence_hash: String,
+    pub external_ref_hash: String,
+    pub actor_principal_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingPreferenceLabelRecord {
+    pub tenant_id: String,
+    pub preference_label_id: Uuid,
+    pub preferred_submission_id: Uuid,
+    pub preferred_trace_id: Uuid,
+    pub rejected_submission_id: Uuid,
+    pub rejected_trace_id: Uuid,
+    pub target_use: String,
+    pub label_source: TraceRankingLabelSource,
+    pub utility_category: TraceRankingUtilityCategory,
+    pub preference_strength_micros: i64,
+    pub evidence_hash: String,
+    pub external_ref_hash: String,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceRankingCalibrationRunWrite {
+    pub tenant_id: String,
+    pub calibration_run_id: Uuid,
+    pub model_version: String,
+    pub target_use: String,
+    pub policy_version: String,
+    pub evaluation_dataset_hash: String,
+    pub prediction_count: u32,
+    pub label_count: u32,
+    pub joined_label_prediction_count: u32,
+    pub joined_label_source_count: u32,
+    pub joined_evidence_hash: String,
+    pub average_predicted_utility_micros: Option<i64>,
+    pub average_label_utility_delta_micros: Option<i64>,
+    pub average_absolute_error_micros: Option<i64>,
+    pub max_label_source_average_absolute_error_micros: Option<i64>,
+    pub max_error_label_source: Option<String>,
+    pub mean_signed_error_micros: Option<i64>,
+    pub low_confidence_prediction_count: u32,
+    pub confidence_threshold: f32,
+    pub min_label_count: u32,
+    pub min_label_source_count: u32,
+    pub max_average_absolute_error_micros: i64,
+    pub promotable: bool,
+    pub reason_codes: Vec<String>,
+    pub report_hash: String,
+    pub actor_principal_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceRankingCalibrationRunRecord {
+    pub tenant_id: String,
+    pub calibration_run_id: Uuid,
+    pub model_version: String,
+    pub target_use: String,
+    pub policy_version: String,
+    pub evaluation_dataset_hash: String,
+    pub prediction_count: u32,
+    pub label_count: u32,
+    pub joined_label_prediction_count: u32,
+    #[serde(default)]
+    pub joined_label_source_count: u32,
+    #[serde(default = "default_trace_ranking_joined_evidence_hash")]
+    pub joined_evidence_hash: String,
+    pub average_predicted_utility_micros: Option<i64>,
+    pub average_label_utility_delta_micros: Option<i64>,
+    pub average_absolute_error_micros: Option<i64>,
+    #[serde(default)]
+    pub max_label_source_average_absolute_error_micros: Option<i64>,
+    #[serde(default)]
+    pub max_error_label_source: Option<String>,
+    pub mean_signed_error_micros: Option<i64>,
+    pub low_confidence_prediction_count: u32,
+    pub confidence_threshold: f32,
+    pub min_label_count: u32,
+    #[serde(default = "default_trace_ranking_min_label_source_count")]
+    pub min_label_source_count: u32,
+    pub max_average_absolute_error_micros: i64,
+    pub promotable: bool,
+    pub reason_codes: Vec<String>,
+    pub report_hash: String,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceRankingWorkerRunKind {
+    Calibration,
+    PredictionCredit,
+    ModelPromotion,
+    CreditCycle,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceRankingWorkerRunStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingWorkerRunWrite {
+    pub tenant_id: String,
+    pub ranking_worker_run_id: Uuid,
+    pub run_kind: TraceRankingWorkerRunKind,
+    pub status: TraceRankingWorkerRunStatus,
+    pub dry_run: bool,
+    pub reason_hash: String,
+    pub model_version: Option<String>,
+    pub target_use: Option<String>,
+    pub policy_version: Option<String>,
+    pub limit: u32,
+    pub checked_count: u32,
+    pub succeeded_count: u32,
+    pub skipped_existing_count: u32,
+    pub skipped_model_risk_count: u32,
+    pub skipped_ineligible_count: u32,
+    pub pending_after_count: u32,
+    pub result_refs: Vec<String>,
+    pub reason_counts: BTreeMap<String, u32>,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub last_error_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRankingWorkerRunRecord {
+    pub tenant_id: String,
+    pub ranking_worker_run_id: Uuid,
+    pub run_kind: TraceRankingWorkerRunKind,
+    #[serde(default = "default_trace_ranking_worker_run_status")]
+    pub status: TraceRankingWorkerRunStatus,
+    pub dry_run: bool,
+    pub reason_hash: String,
+    pub model_version: Option<String>,
+    pub target_use: Option<String>,
+    pub policy_version: Option<String>,
+    pub limit: u32,
+    pub checked_count: u32,
+    pub succeeded_count: u32,
+    pub skipped_existing_count: u32,
+    pub skipped_model_risk_count: u32,
+    pub skipped_ineligible_count: u32,
+    pub pending_after_count: u32,
+    pub result_refs: Vec<String>,
+    pub reason_counts: BTreeMap<String, u32>,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_error_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceCreditAccountSettlementLineItem {
+    pub credit_account_ref: String,
+    pub credit_account_hash: String,
+    pub settled_credit_delta_micros: i64,
+    pub source_credit_event_ids: Vec<Uuid>,
+    pub source_submission_ids: Vec<Uuid>,
+    pub source_list_hash: String,
+    pub near_status: TraceCreditSettlementNearStatus,
+    pub near_outbox_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceUtilityAttestationWrite {
+    pub tenant_id: String,
+    pub attestation_id: Uuid,
+    pub event_type: TraceCreditEventType,
+    pub use_category: String,
+    pub policy_version: String,
+    pub evidence_hash: String,
+    pub external_ref_hash: String,
+    pub source_submission_ids: Vec<Uuid>,
+    pub actor_principal_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceUtilityAttestationRecord {
+    pub tenant_id: String,
+    pub attestation_id: Uuid,
+    pub event_type: TraceCreditEventType,
+    pub use_category: String,
+    pub policy_version: String,
+    pub evidence_hash: String,
+    pub external_ref_hash: String,
+    pub source_submission_ids: Vec<Uuid>,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceCreditSettlementBatchWrite {
+    pub tenant_id: String,
+    pub settlement_batch_id: Uuid,
+    pub policy_version: String,
+    pub status: TraceCreditSettlementBatchStatus,
+    pub reason_hash: String,
+    pub source_credit_event_ids: Vec<Uuid>,
+    pub source_submission_ids: Vec<Uuid>,
+    pub source_list_hash: String,
+    pub settled_credit_points: String,
+    pub settled_credit_micros: i64,
+    pub line_items: Vec<TraceCreditAccountSettlementLineItem>,
+    pub near_contract_id: Option<String>,
+    pub ranking_model_version: Option<String>,
+    pub ranking_target_use: Option<String>,
+    pub ranking_calibration_run_id: Option<Uuid>,
+    pub ranking_calibration_report_hash: Option<String>,
+    pub ranking_calibration_joined_evidence_hash: Option<String>,
+    pub ranking_credit_events_excluded_count: u32,
+    pub ranking_credit_events_excluded_reason_counts: BTreeMap<String, u32>,
+    pub actor_principal_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceCreditSettlementBatchRecord {
+    pub tenant_id: String,
+    pub settlement_batch_id: Uuid,
+    pub policy_version: String,
+    pub status: TraceCreditSettlementBatchStatus,
+    pub reason_hash: String,
+    pub source_credit_event_ids: Vec<Uuid>,
+    pub source_submission_ids: Vec<Uuid>,
+    pub source_list_hash: String,
+    pub settled_credit_points: String,
+    pub settled_credit_micros: i64,
+    pub line_items: Vec<TraceCreditAccountSettlementLineItem>,
+    pub near_contract_id: Option<String>,
+    pub ranking_model_version: Option<String>,
+    pub ranking_target_use: Option<String>,
+    pub ranking_calibration_run_id: Option<Uuid>,
+    pub ranking_calibration_report_hash: Option<String>,
+    pub ranking_calibration_joined_evidence_hash: Option<String>,
+    pub ranking_credit_events_excluded_count: u32,
+    pub ranking_credit_events_excluded_reason_counts: BTreeMap<String, u32>,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceCreditHoldWrite {
+    pub tenant_id: String,
+    pub hold_id: Uuid,
+    pub credit_account_ref: String,
+    pub credit_account_hash: String,
+    pub reason: TraceCreditHoldReason,
+    pub reason_hash: String,
+    pub actor_principal_ref: String,
+    pub released_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceCreditHoldRecord {
+    pub tenant_id: String,
+    pub hold_id: Uuid,
+    pub credit_account_ref: String,
+    pub credit_account_hash: String,
+    pub reason: TraceCreditHoldReason,
+    pub reason_hash: String,
+    pub actor_principal_ref: String,
+    pub created_at: DateTime<Utc>,
+    pub released_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceNearCreditOutboxItemWrite {
+    pub tenant_id: String,
+    pub near_outbox_id: Uuid,
+    pub settlement_batch_id: Uuid,
+    pub credit_account_hash: String,
+    pub near_call_json: serde_json::Value,
+    pub status: TraceCreditSettlementNearStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceNearCreditOutboxItemRecord {
+    pub tenant_id: String,
+    pub near_outbox_id: Uuid,
+    pub settlement_batch_id: Uuid,
+    pub credit_account_hash: String,
+    pub near_call_json: serde_json::Value,
+    pub status: TraceCreditSettlementNearStatus,
+    pub created_at: DateTime<Utc>,
+    pub submitted_at: Option<DateTime<Utc>>,
+    pub near_transaction_hash: Option<String>,
+    pub last_error_hash: Option<String>,
+    pub confirmed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceBenchmarkRegistryOutboxItemWrite {
+    pub tenant_id: String,
+    pub benchmark_outbox_id: Uuid,
+    pub conversion_id: Uuid,
+    pub operation: TraceBenchmarkRegistryOutboxOperation,
+    pub registry_ref: String,
+    pub artifact_payload_hash: String,
+    pub source_submission_ids_hash: String,
+    pub evaluator_ref: Option<String>,
+    pub evaluation_score: Option<f32>,
+    pub status: TraceBenchmarkRegistryOutboxStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceBenchmarkRegistryOutboxItemRecord {
+    pub tenant_id: String,
+    pub benchmark_outbox_id: Uuid,
+    pub conversion_id: Uuid,
+    pub operation: TraceBenchmarkRegistryOutboxOperation,
+    pub registry_ref: String,
+    pub artifact_payload_hash: String,
+    pub source_submission_ids_hash: String,
+    pub evaluator_ref: Option<String>,
+    pub evaluation_score: Option<f32>,
+    pub status: TraceBenchmarkRegistryOutboxStatus,
+    pub created_at: DateTime<Utc>,
+    pub submitted_at: Option<DateTime<Utc>>,
+    pub external_receipt_ref: Option<String>,
+    pub last_error_hash: Option<String>,
+    pub confirmed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -540,6 +1172,17 @@ pub enum TraceAuditSafeMetadata {
         lease_expires_at: Option<DateTime<Utc>>,
         review_due_at: Option<DateTime<Utc>>,
     },
+    TraceContentRead {
+        surface: String,
+        purpose_hash: Option<String>,
+    },
+    Read {
+        surface: String,
+        item_count: u32,
+    },
+    Revocation {
+        reason_hash: String,
+    },
     Export {
         artifact_kind: TraceObjectArtifactKind,
         purpose_code: Option<String>,
@@ -576,6 +1219,25 @@ pub enum TraceAuditSafeMetadata {
         allowed_consent_scope_count: u32,
         allowed_use_count: u32,
         grant_projection_hash: String,
+    },
+    ExportJobRecovery {
+        export_job_id: Uuid,
+        recovered_status: TraceExportJobStatus,
+        reason_hash: String,
+    },
+    RankingWorkerRunRecovery {
+        ranking_worker_run_id: Uuid,
+        run_kind: TraceRankingWorkerRunKind,
+        recovered_status: TraceRankingWorkerRunStatus,
+        reason_hash: String,
+    },
+    RankingCalibrationDatasetQuarantine {
+        calibration_dataset_hash: String,
+        target_use: String,
+        policy_version: String,
+        archived_source_manifest_hash: String,
+        conflict_key_hash: String,
+        reason_hash: String,
     },
 }
 
@@ -1114,6 +1776,91 @@ pub trait TraceCorpusStore: Send + Sync {
         tenant_id: &str,
     ) -> Result<Vec<TraceVectorEntryRecord>, DatabaseError>;
 
+    async fn upsert_trace_ranking_model_version(
+        &self,
+        model_version: TraceRankingModelVersionWrite,
+    ) -> Result<TraceRankingModelVersionRecord, DatabaseError>;
+
+    async fn list_trace_ranking_model_versions(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingModelVersionRecord>, DatabaseError>;
+
+    async fn upsert_trace_ranking_calibration_dataset(
+        &self,
+        dataset: TraceRankingCalibrationDatasetWrite,
+    ) -> Result<TraceRankingCalibrationDatasetRecord, DatabaseError>;
+
+    async fn update_trace_ranking_calibration_dataset_status(
+        &self,
+        update: TraceRankingCalibrationDatasetStatusUpdate,
+    ) -> Result<TraceRankingCalibrationDatasetRecord, DatabaseError>;
+
+    async fn list_trace_ranking_calibration_datasets(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingCalibrationDatasetRecord>, DatabaseError>;
+
+    async fn upsert_trace_ranking_feature(
+        &self,
+        feature: TraceRankingFeatureWrite,
+    ) -> Result<TraceRankingFeatureRecord, DatabaseError>;
+
+    async fn list_trace_ranking_features(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingFeatureRecord>, DatabaseError>;
+
+    async fn upsert_trace_ranking_prediction(
+        &self,
+        prediction: TraceRankingPredictionWrite,
+    ) -> Result<TraceRankingPredictionRecord, DatabaseError>;
+
+    async fn list_trace_ranking_predictions(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingPredictionRecord>, DatabaseError>;
+
+    async fn upsert_trace_ranking_label(
+        &self,
+        label: TraceRankingLabelWrite,
+    ) -> Result<TraceRankingLabelRecord, DatabaseError>;
+
+    async fn list_trace_ranking_labels(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingLabelRecord>, DatabaseError>;
+
+    async fn upsert_trace_ranking_preference_label(
+        &self,
+        preference: TraceRankingPreferenceLabelWrite,
+    ) -> Result<TraceRankingPreferenceLabelRecord, DatabaseError>;
+
+    async fn list_trace_ranking_preference_labels(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingPreferenceLabelRecord>, DatabaseError>;
+
+    async fn upsert_trace_ranking_calibration_run(
+        &self,
+        run: TraceRankingCalibrationRunWrite,
+    ) -> Result<TraceRankingCalibrationRunRecord, DatabaseError>;
+
+    async fn list_trace_ranking_calibration_runs(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingCalibrationRunRecord>, DatabaseError>;
+
+    async fn upsert_trace_ranking_worker_run(
+        &self,
+        run: TraceRankingWorkerRunWrite,
+    ) -> Result<TraceRankingWorkerRunRecord, DatabaseError>;
+
+    async fn list_trace_ranking_worker_runs(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingWorkerRunRecord>, DatabaseError>;
+
     async fn upsert_trace_export_manifest(
         &self,
         manifest: TraceExportManifestWrite,
@@ -1182,10 +1929,84 @@ pub trait TraceCorpusStore: Send + Sync {
         tenant_id: &str,
     ) -> Result<Vec<TraceAuditEventRecord>, DatabaseError>;
 
+    async fn list_recent_trace_audit_events(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+    ) -> Result<Vec<TraceAuditEventRecord>, DatabaseError>;
+
     async fn append_trace_credit_event(
         &self,
         credit_event: TraceCreditEventWrite,
     ) -> Result<(), DatabaseError>;
+
+    async fn upsert_trace_utility_attestation(
+        &self,
+        attestation: TraceUtilityAttestationWrite,
+    ) -> Result<TraceUtilityAttestationRecord, DatabaseError>;
+
+    async fn list_trace_utility_attestations(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceUtilityAttestationRecord>, DatabaseError>;
+
+    async fn upsert_trace_credit_settlement_batch(
+        &self,
+        batch: TraceCreditSettlementBatchWrite,
+    ) -> Result<TraceCreditSettlementBatchRecord, DatabaseError>;
+
+    async fn list_trace_credit_settlement_batches(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceCreditSettlementBatchRecord>, DatabaseError>;
+
+    async fn upsert_trace_credit_hold(
+        &self,
+        hold: TraceCreditHoldWrite,
+    ) -> Result<TraceCreditHoldRecord, DatabaseError>;
+
+    async fn list_trace_credit_holds(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceCreditHoldRecord>, DatabaseError>;
+
+    async fn upsert_trace_near_credit_outbox_item(
+        &self,
+        item: TraceNearCreditOutboxItemWrite,
+    ) -> Result<TraceNearCreditOutboxItemRecord, DatabaseError>;
+
+    async fn list_trace_near_credit_outbox_items(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceNearCreditOutboxItemRecord>, DatabaseError>;
+
+    async fn update_trace_near_credit_outbox_status(
+        &self,
+        tenant_id: &str,
+        near_outbox_id: Uuid,
+        status: TraceCreditSettlementNearStatus,
+        near_transaction_hash: Option<String>,
+        last_error_hash: Option<String>,
+    ) -> Result<Option<TraceNearCreditOutboxItemRecord>, DatabaseError>;
+
+    async fn upsert_trace_benchmark_registry_outbox_item(
+        &self,
+        item: TraceBenchmarkRegistryOutboxItemWrite,
+    ) -> Result<TraceBenchmarkRegistryOutboxItemRecord, DatabaseError>;
+
+    async fn list_trace_benchmark_registry_outbox_items(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceBenchmarkRegistryOutboxItemRecord>, DatabaseError>;
+
+    async fn update_trace_benchmark_registry_outbox_status(
+        &self,
+        tenant_id: &str,
+        benchmark_outbox_id: Uuid,
+        status: TraceBenchmarkRegistryOutboxStatus,
+        external_receipt_ref: Option<String>,
+        last_error_hash: Option<String>,
+    ) -> Result<Option<TraceBenchmarkRegistryOutboxItemRecord>, DatabaseError>;
 
     async fn write_trace_tombstone(
         &self,
@@ -1242,6 +2063,30 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         tenant_id: &str,
         export_job_id: Uuid,
+        update: TraceExportJobStatusUpdate,
+    ) -> Result<Option<TraceExportJobRecord>, DatabaseError>;
+
+    async fn claim_next_trace_export_job(
+        &self,
+        tenant_id: &str,
+        requested_dataset_kind: Option<&str>,
+        claim_at: DateTime<Utc>,
+        worker_principal_ref: &str,
+    ) -> Result<Option<TraceExportJobRecord>, DatabaseError>;
+
+    async fn recover_stale_trace_export_job(
+        &self,
+        tenant_id: &str,
+        export_job_id: Uuid,
+        stale_at: DateTime<Utc>,
+        update: TraceExportJobStatusUpdate,
+    ) -> Result<Option<TraceExportJobRecord>, DatabaseError>;
+
+    async fn retry_failed_trace_export_job(
+        &self,
+        tenant_id: &str,
+        export_job_id: Uuid,
+        retry_at: DateTime<Utc>,
         update: TraceExportJobStatusUpdate,
     ) -> Result<Option<TraceExportJobRecord>, DatabaseError>;
 

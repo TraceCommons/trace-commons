@@ -85,13 +85,18 @@ the secret token value only, not the expiry metadata. The ingest service recogni
 configuration). Worker roles do not inherit reviewer
 visibility: export workers can build replay/ranker exports, benchmark workers
 can run benchmark conversion through either the reviewer-compatible conversion
-route or a dedicated worker route, retention workers can run the dedicated
+route or a dedicated worker route, can run deterministic benchmark
+evaluation batches through the benchmark-evaluations worker route, and can run
+registry publication batches through the benchmark-registry-publications route, retention workers can run the dedicated
 retention worker route or retention-scoped maintenance, revocation workers can
 run only the dedicated revocation-propagation route, and vector workers can run
 the dedicated vector-index worker route or vector-index maintenance. Utility
 credit workers can append idempotent delayed utility credit through their
-dedicated route for accepted traces only, without access to reviewer bonus,
-abuse penalty, review queues, audit logs, or tenant policy administration.
+dedicated route for accepted traces only and can run the bounded credit-cycle
+coordinator for one model/policy/target, or the scheduler route that selects the
+next eligible candidate/active model for one target/policy and skips existing
+live claims, without access to reviewer bonus, abuse penalty, review queues,
+audit logs, or tenant policy administration.
 As an alternative to configured static bearer tokens, internal deployments can
 set `TRACE_COMMONS_SIGNED_TOKEN_SECRET` to accept HS256 signed tenant claims.
 This HS256 path is an internal bridge for controlled pilots, not the production
@@ -213,6 +218,24 @@ ironclaw traces process-evaluation-submit \
   --utility-credit-points-delta 0.5 \
   --utility-external-ref process-eval:nightly:2026-04-26
 ```
+
+The same worker request can optionally include a `ranking_label` object for
+accepted traces that are also allowed for the requested ranking target use. The
+server validates that target before reading the trace body, stores only a
+deterministic process-evaluation evidence hash plus the external-ref hash in the
+ranking label row, requires the label source to remain `system`, and treats
+repeated external refs as idempotent retries when the evidence and label fields
+match.
+
+Schedulers can also use `POST /v1/workers/process-evaluations/run` for bounded
+process-evaluation batches. When `TRACE_COMMONS_PROCESS_EVALUATOR_URL` is
+configured, the worker sends only derived candidate summaries, summary hashes,
+hashed submission/trace ids, purpose hashes, evaluator refs, and safe aggregate
+metadata to the adapter. It omits raw trace bodies, contributor principals, raw
+submission ids, and raw external refs. Requests can set
+`require_external_evaluator=true` to fail closed when the adapter is absent, and
+can provide a ranking target plus `external_ref_prefix` to append idempotent
+system ranking labels from the evaluator response.
 
 When `--utility-credit-points-delta` is set, the helper also sends a trimmed
 `utility_external_ref`; the service uses that external reference to append an
@@ -340,7 +363,7 @@ TRACE_COMMONS_SERVICE_OBJECT_STORE_DIR=/var/lib/ironclaw/trace-object-store \
 DATABASE_URL=postgres://trace-commons:trace-commons@localhost/trace-commons \
 cargo run --bin trace-commons-ingest
 
-# Require replay export body reads through service-local DB object refs.
+# Require replay export body reads through service-owned DB object refs.
 TRACE_COMMONS_DB_DUAL_WRITE=true \
 TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES=true \
 TRACE_COMMONS_DB_REPLAY_EXPORT_READS=true \
@@ -366,15 +389,285 @@ DATABASE_URL=postgres://trace-commons:trace-commons@localhost/trace-commons \
 cargo run --bin trace-commons-ingest
 ```
 
-`TRACE_COMMONS_DB_DUAL_WRITE=true` builds a PostgreSQL-backed `TraceCorpusStore` mirror from `DATABASE_URL`. The mirror writes tenant-scoped submissions, tenant policies, tenant access grants, object refs, derived precheck records, export manifest metadata, export manifest item snapshots, audit events, credit events, review state, revocation tombstones, and retention maintenance job/item ledger rows, including redaction-count aggregates and derived summary/tool/coverage metadata needed for DB-backed reviewer/export/analytics paths. By default, pilot API reads still use the file-backed store. `TRACE_COMMONS_DB_TENANT_POLICY_READS=true` switches submission and export policy lookup to DB-backed `trace_tenant_policies`; combine it with `TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY=true` to fail closed when no tenant policy exists. `TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS=true` requires DB dual-write and makes trace submission, contributor credit reads, contributor credit-event reads, and contributor submission-status sync fail closed unless `trace_tenant_access_grants` contains an active exact-role row for the authenticated tenant/principal; any grant allow-lists narrow the effective consent/use policy before envelope validation proceeds. Admin-token reads and writes through `/v1/admin/tenant-policy` append hash-chained file audit events and mirror safe DB audit metadata with policy version, allow-list counts, and a policy projection hash. Admin-token reads, creates, and revocations through `/v1/admin/tenant-access-grants` are tenant-scoped and mirror safe DB audit metadata with the action, role/status, allow-list counts, and a grant projection hash. Admin-token reads through `/v1/admin/config-status` expose only safe cutover booleans, schema version, DB/object-store configured status, configured legal-hold policy IDs, the max export item cap, submission quota limits, the object-store provider alias, tenant rollout allowlist counts, and PostgreSQL Trace Commons RLS readiness counts when the DB backend can report them; the RLS status now separates policy readiness from `FORCE ROW LEVEL SECURITY` readiness and reports only table-count/name diagnostics, not row data. Set `TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY=true` with `TRACE_COMMONS_DB_DUAL_WRITE=true` and `DATABASE_URL` to fail startup unless every Trace Commons table has the tenant policy installed, RLS enabled, FORCE RLS enabled, matching policy expressions, and a runtime role that does not bypass RLS. The response omits roots, tokens, paths, secrets, tenant ids, row contents, and tenant policy contents while still writing a read audit event. `TRACE_COMMONS_DB_CONTRIBUTOR_READS=true` switches `/v1/contributors/me/credit`, `/v1/contributors/me/credit-events`, and `/v1/contributors/me/submission-status` to the DB mirror; it requires DB dual-write/backfill to be configured and preserves tenant plus principal filtering. `TRACE_COMMONS_DB_REVIEWER_READS=true` switches reviewer/admin metadata reads for analytics, trace listing, quarantine queue, active-learning queue, benchmark candidate conversion, ranker candidate/pair exports, review decisions, and review lease claim/release state to the DB mirror. Review leases are tenant-scoped, bound to the authenticated reviewer/admin principal, may be reclaimed by the same principal or after expiration, and are cleared automatically when a trace leaves quarantine. Review decisions are allowed only for live quarantined submissions: accepted/rejected/revoked/expired/purged submissions are rejected before any envelope body is read, and approvals are blocked for aggregate-only retention classes that do not permit derived corpus artifacts. Review decisions resolve envelope bodies through active DB object refs first; compatibility mode may fall back to a file-backed body only when file metadata is still present, while DB-sourced submissions with no file metadata require an active submitted-envelope object ref and do not recreate the missing file metadata row. Set `TRACE_COMMONS_DB_REVIEWER_REQUIRE_OBJECT_REFS=true` with DB reviewer reads to make all DB-backed review decisions fail closed when no active submitted-envelope object ref exists. `TRACE_COMMONS_DB_REPLAY_EXPORT_READS=true` switches replay export eligibility and derived metadata selection to the DB mirror, then attempts to resolve submitted envelope bodies through a shared replay body-read policy/audit helper that verifies tenant scope, object ref ownership, artifact kind, and content hash for DB object refs, including the encrypted local artifact sidecar. Compatibility mode falls back to the file-backed envelope body if no active DB object ref exists. Set `TRACE_COMMONS_DB_REPLAY_EXPORT_REQUIRE_OBJECT_REFS=true` with DB replay export reads to fail closed instead. `TRACE_COMMONS_DERIVED_EXPORT_REQUIRE_OBJECT_REFS=true` requires DB dual-write and makes benchmark conversion plus ranker candidate/pair exports fail closed unless every selected source has an active submitted-envelope object ref that can be tenant/hash verified before artifacts, provenance, or utility credit are published. `TRACE_COMMONS_DB_AUDIT_READS=true` switches `/v1/audit/events` to the DB mirror. Each global DB read/object-ref gate has a comma-separated tenant allowlist companion for canary promotion: `TRACE_COMMONS_DB_CONTRIBUTOR_READS_TENANT_IDS`, `TRACE_COMMONS_DB_REVIEWER_READS_TENANT_IDS`, `TRACE_COMMONS_DB_REVIEWER_REQUIRE_OBJECT_REFS_TENANT_IDS`, `TRACE_COMMONS_DB_REPLAY_EXPORT_READS_TENANT_IDS`, `TRACE_COMMONS_DB_REPLAY_EXPORT_REQUIRE_OBJECT_REFS_TENANT_IDS`, `TRACE_COMMONS_DB_AUDIT_READS_TENANT_IDS`, `TRACE_COMMONS_DB_TENANT_POLICY_READS_TENANT_IDS`, and `TRACE_COMMONS_DERIVED_EXPORT_REQUIRE_OBJECT_REFS_TENANT_IDS`; dependency gates must cover the same tenants before fail-closed object-ref or object-primary modes can be enabled. Maintenance reconciliation reports reader-projection parity for contributor credit/status/events, reviewer metadata, analytics, audit event counts, and replay/export manifest summaries so operators can check each read flag before promotion; it also reports file/DB credit-ledger and canonical audit-event ID gaps so operators can distinguish count parity from missing mirrored rows. Reconciliation responses include `blocking_gaps`, a compact machine-readable list of promotion blockers. Set `TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN=true` after dual-write/backfill parity looks stable to reject maintenance requests that omit `reconcile_db_mirror: true` with `400 Bad Request` and to fail closed with `409 Conflict` when reconciliation still reports promotion-blocking gaps. Requests that ask for reconciliation without a configured DB mirror return `503 Service Unavailable`. Audit-chain verification also includes a DB mirror report that checks previous-hash continuity, recomputes hashes for canonical mirrored payloads, and compares DB action/metadata projections against those payloads; derived diagnostics compare file/DB presence, status, canonical-summary hashes, and active derived rows attached to invalid sources; export diagnostics split DB manifests into replay, benchmark, ranker, and other counts, flag manifest items missing source object refs, and report active export manifests/items still referencing invalid sources; object-ref diagnostics distinguish missing/unreadable bodies from content-hash integrity mismatches; and vector diagnostics flag accepted/current canonical summaries that still need active vector entries.
+`TRACE_COMMONS_DB_DUAL_WRITE=true` builds a PostgreSQL-backed `TraceCorpusStore` mirror from `DATABASE_URL`. The mirror writes tenant-scoped submissions, tenant policies, tenant access grants, object refs, derived precheck records, export manifest metadata, export manifest item snapshots, audit events, credit events, utility attestations, credit settlement batches, credit holds, NEAR credit outbox rows/status, review state, revocation tombstones, retention maintenance job/item ledger rows, ranking calibration dataset registry rows, ranking model/feature/prediction/label evidence, ranking calibration runs, and ranking worker-run ledger rows, including redaction-count aggregates and derived summary/tool/coverage metadata needed for DB-backed reviewer/export/analytics/ranking paths. By default, pilot API reads still use the file-backed store. `TRACE_COMMONS_DB_TENANT_POLICY_READS=true` switches submission and export policy lookup to DB-backed `trace_tenant_policies`; combine it with `TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY=true` to fail closed when no tenant policy exists. `TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS=true` requires DB dual-write and makes trace submission, contributor credit reads, contributor credit-event reads, and contributor submission-status sync fail closed unless `trace_tenant_access_grants` contains an active exact-role row for the authenticated tenant/principal; any grant allow-lists narrow the effective consent/use policy before envelope validation proceeds. Admin-token reads and writes through `/v1/admin/tenant-policy` append hash-chained file audit events and mirror safe DB audit metadata with policy version, allow-list counts, and a policy projection hash. Admin-token reads, creates, and revocations through `/v1/admin/tenant-access-grants` are tenant-scoped and mirror safe DB audit metadata with the action, role/status, allow-list counts, and a grant projection hash. Admin-token reads through `/v1/admin/config-status` expose only safe cutover booleans, schema version, DB/object-store configured status, configured legal-hold policy IDs, ranking calibration max-age hours, ranking minimum label-source count, the max export item cap, submission quota limits, export-job scheduler enablement plus bounded interval/dataset/limit fields, the object-store provider alias, object-store I/O enabled status, object-primary object-store eligibility, object-store versioning requirement/support booleans, tenant rollout allowlist counts, and PostgreSQL Trace Commons RLS readiness counts when the DB backend can report them; the RLS status now separates policy readiness from `FORCE ROW LEVEL SECURITY` readiness and reports only table-count/name diagnostics, not row data. Set `TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY=true` with `TRACE_COMMONS_DB_DUAL_WRITE=true` and `DATABASE_URL` to fail startup unless every Trace Commons table has the tenant policy installed, RLS enabled, FORCE RLS enabled, matching policy expressions, and a runtime role that does not bypass RLS. The response omits roots, tokens, paths, secrets, tenant ids, raw scheduler retry notes, row contents, and tenant policy contents while still writing a read audit event. `TRACE_COMMONS_DB_CONTRIBUTOR_READS=true` switches `/v1/contributors/me/credit`, `/v1/contributors/me/credit-events`, and `/v1/contributors/me/submission-status` to the DB mirror; it requires DB dual-write/backfill to be configured and preserves tenant plus principal filtering. `TRACE_COMMONS_DB_REVIEWER_READS=true` switches reviewer/admin metadata reads for analytics, trace listing, quarantine queue, active-learning queue, benchmark candidate conversion, ranker candidate/pair exports, credit settlement/hold/attestation/outbox lists, ranking evidence/calibration, review decisions, and review lease claim/release state to the DB mirror. Review leases are tenant-scoped, bound to the authenticated reviewer/admin principal, may be reclaimed by the same principal or after expiration, and are cleared automatically when a trace leaves quarantine. Review decisions are allowed only for live quarantined submissions: accepted/rejected/revoked/expired/purged submissions are rejected before any envelope body is read, and approvals are blocked for aggregate-only retention classes that do not permit derived corpus artifacts. Review decisions resolve envelope bodies through active DB object refs first; compatibility mode may fall back to a file-backed body only when file metadata is still present, while DB-sourced submissions with no file metadata require an active submitted-envelope object ref and do not recreate the missing file metadata row. Set `TRACE_COMMONS_DB_REVIEWER_REQUIRE_OBJECT_REFS=true` with DB reviewer reads to make all DB-backed review decisions fail closed when no active submitted-envelope object ref exists. `TRACE_COMMONS_DB_REPLAY_EXPORT_READS=true` switches replay export eligibility and derived metadata selection to the DB mirror, then attempts to resolve submitted envelope bodies through a shared replay body-read policy/audit helper that verifies tenant scope, object ref ownership, artifact kind, and content hash for DB object refs, including the encrypted local artifact sidecar. Compatibility mode falls back to the file-backed envelope body if no active DB object ref exists. Set `TRACE_COMMONS_DB_REPLAY_EXPORT_REQUIRE_OBJECT_REFS=true` with DB replay export reads to fail closed instead. `TRACE_COMMONS_DERIVED_EXPORT_REQUIRE_OBJECT_REFS=true` requires DB dual-write and makes benchmark conversion plus ranker candidate/pair exports fail closed unless every selected source has an active submitted-envelope object ref that can be tenant/hash verified before artifacts, provenance, or utility credit are published. `TRACE_COMMONS_DB_AUDIT_READS=true` switches `/v1/audit/events` to the DB mirror. Each global DB read/object-ref gate has a comma-separated tenant allowlist companion for canary promotion: `TRACE_COMMONS_DB_CONTRIBUTOR_READS_TENANT_IDS`, `TRACE_COMMONS_DB_REVIEWER_READS_TENANT_IDS`, `TRACE_COMMONS_DB_REVIEWER_REQUIRE_OBJECT_REFS_TENANT_IDS`, `TRACE_COMMONS_DB_REPLAY_EXPORT_READS_TENANT_IDS`, `TRACE_COMMONS_DB_REPLAY_EXPORT_REQUIRE_OBJECT_REFS_TENANT_IDS`, `TRACE_COMMONS_DB_AUDIT_READS_TENANT_IDS`, `TRACE_COMMONS_DB_TENANT_POLICY_READS_TENANT_IDS`, and `TRACE_COMMONS_DERIVED_EXPORT_REQUIRE_OBJECT_REFS_TENANT_IDS`; dependency gates must cover the same tenants before fail-closed object-ref or object-primary modes can be enabled. Maintenance reconciliation reports reader-projection parity for contributor credit/status/events, reviewer metadata, analytics, audit event counts, and replay/export manifest summaries so operators can check each read flag before promotion; it also reports file/DB credit-ledger and canonical audit-event ID gaps so operators can distinguish count parity from missing mirrored rows. For credit-bearing ranking paths, reconciliation now reports file/DB counts, missing rows, model status drift, calibration dataset registry drift, calibration report-hash drift, and worker-run status drift for ranking model versions, calibration dataset registry rows, feature/prediction/label evidence, calibration runs, and ranking worker runs. Reconciliation responses include `blocking_gaps`, a compact machine-readable list of promotion blockers. Set `TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN=true` after dual-write/backfill parity looks stable to reject maintenance requests that omit `reconcile_db_mirror: true` with `400 Bad Request` and to fail closed with `409 Conflict` when reconciliation still reports promotion-blocking gaps. When that clean-reconciliation gate is enabled, global DB reader flags and their tenant allowlists also require `TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES=true` so a clean reconciliation cannot drift immediately through best-effort mirror writes. Requests that ask for reconciliation without a configured DB mirror return `503 Service Unavailable`. Audit-chain verification also includes a DB mirror report that checks previous-hash continuity, recomputes hashes for canonical mirrored payloads, and compares DB action/metadata projections against those payloads; derived diagnostics compare file/DB presence, status, canonical-summary hashes, and active derived rows attached to invalid sources; export diagnostics split DB manifests into replay, benchmark, ranker, and other counts, flag manifest items missing source object refs, and report active export manifests/items still referencing invalid sources; object-ref diagnostics distinguish missing/unreadable bodies from content-hash integrity mismatches; and vector diagnostics flag accepted/current canonical summaries that still need active vector entries.
 
-Set `TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES=true` during production cutover after DB dual-write parity checks pass. It requires `TRACE_COMMONS_DB_DUAL_WRITE=true` and makes submission, revocation, review decision, credit, replay export manifest, benchmark/ranker provenance, audit, and trace-content-read mirror failures return an internal error instead of silently continuing with file-only state. Submission, delayed-credit, replay export manifest, benchmark provenance, benchmark lifecycle, and ranker provenance mirror failures also avoid publishing local file-side metadata/object, ledger, replay-manifest, artifact/provenance, or staged service-local encrypted artifact objects for the failed operation. If a final export audit mirror fails after export metadata was staged, required mode removes the replay/benchmark/ranker file artifacts and deletes the DB export manifest/items/object refs for that export. Replay, benchmark, and ranker export DB mirrors write manifest metadata, export artifact object refs, and manifest item snapshots through one backend transaction so an item/reference validation failure does not leave a partial DB export.
+The PostgreSQL RLS-ready gate also requires the runtime role to be separate from
+the Trace Commons table-owner role. Migrations can run as an owner/admin role,
+but serving traffic should use a non-owner role without `BYPASSRLS`.
 
-`TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES` is a comma-separated list of validated central retention policy IDs. Matching submissions are not newly expired or purged by maintenance even when `expires_at` or `purge_expired_before` would otherwise match; `/v1/admin/config-status` exposes the configured IDs for admin verification.
+`/v1/admin/config-status` also reports whether broad-release analytics count
+noise and privacy accounting are configured, the count-noise max delta, the
+epsilon charged per broad release, and the tenant max epsilon cap without
+exposing `TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_KEY` or any derived key
+material.
 
-`TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT` optionally suppresses aggregate analytics cells whose count is below the configured threshold. The endpoint still returns content-free totals and reports `min_cell_count` plus `suppressed_cell_count` so reviewers know a privacy threshold was applied.
+Maintenance reconciliation also reports
+`ranking_calibration_dataset_manifest_conflict_keys` for legacy file-backed
+holdout registries whose history contains conflicting manifest/count metadata
+for one `(calibration_dataset_hash, target_use, policy_version)` key.
+Admin dataset-readiness, ranking-credit readiness, and operational-summary
+routes project the same legacy conflict class into safe aggregate
+`calibration_dataset_manifest_conflict_count` fields and
+`ranking_calibration_dataset_manifest_conflicts` promotion-gate blockers, so
+operators can hold credit issuance without exposing the underlying manifest
+history. Operational summary also projects PostgreSQL RLS production readiness
+into aggregate-only promotion-gate fields, exposes the safe artifact
+object-store alias plus object-store readiness booleans without bucket, KMS,
+credential, or path values, and operational metrics export the same finite
+object-store alias as a safe gauge label plus one finite per-check
+rollout-smoke state gauge for dashboarding missing, failed, stale, and passed
+rehearsal evidence. It also projects analytics broad-release min-cell and
+count-noise readiness, safe vector-infrastructure readiness booleans alongside
+vector coverage, ranking backtest pass/fail counts, label-adjudication issue
+counts, and reason-code totals into the ranking block and promotion gates, and
+it includes a `rollout_smoke` preflight block that
+lists required canary smoke checks, including `tenant_canary_isolation`,
+`db_reconciliation_clean`, `rollback_flag_drill`, `key_rotation_drill`,
+revocation propagation, retention dry-run, vector indexing, analytics release,
+ranking-model readiness, credit settlement, object-store migration, PostgreSQL
+RLS readiness, and audit-chain verification, while reporting recorded, passed,
+failed, stale, and missing rehearsal evidence separately from promotion-gate readiness. Admin-only
+`GET /v1/admin/rollout-smoke/preflight`
+returns that `rollout_smoke` block together with the latest hash-only evidence
+record for each required check, so operators can review promotion readiness
+without stitching together operational-summary and evidence-list reads.
+Operators inspect and capture evidence history with admin-only `GET` and `POST`
+`/v1/admin/rollout-smoke/evidence`; `GET` can collapse history to the latest
+record per check with `latest_only=true`, and writes name one required check, a
+`passed` or `failed` status, a sha256-prefixed evidence hash, and an optional
+external reference that is stored only as a hash in the tenant audit chain.
+`POST /v1/admin/canary-read-drill` turns an existing canary submission into
+hash-only evidence for `submit_status`, `tenant_canary_isolation`,
+`contributor_credit`, `reviewer_metadata`, `replay_export_selection`, and
+`audit_reads`. Operators provide the canary `submission_id` plus a fallback
+tenant id for isolation; the response exposes only aggregate booleans, counts,
+blocker codes, and hashes before optionally appending one rollout-smoke evidence
+row per check.
+`POST /v1/admin/object-primary-read-drill` proves the object-primary read path
+for an existing canary submission: submitted-envelope object refs must be
+service-owned and tenant/hash readable, review and replay body reads must resolve
+through object refs, plaintext submitted body files must be absent, and a
+fallback tenant must remain outside object-primary rollout. The response returns
+only readiness booleans, blocker codes, hashes, and optional `object_primary_reads`
+rollout-smoke evidence.
+`POST /v1/admin/object-store-migration-drill` proves the configured
+service-owned object store can perform the migration-critical write/read/delete
+cycle without exposing object keys or probe payloads. It writes a short encrypted
+probe artifact, reads it back through the same artifact-store abstraction,
+deletes it by default, returns only safe object-store aliases, booleans, blocker
+codes, a probe object-ref hash, and a migration manifest hash, and can append
+`object_store_migration` rollout-smoke evidence that references the manifest
+hash. Operators can set `require_versioning: true` in the drill body to make
+the same preflight fail closed unless the selected object store reports
+versioning and restore-after-delete support.
+`POST /v1/admin/db-reconciliation-drill` runs the clean-reconciliation smoke
+check without maintenance side effects: it requires a DB mirror, reuses the
+file-vs-DB reconciliation engine, returns safe aggregate counts plus compact
+blocker codes, and can append `db_reconciliation_clean` rollout-smoke evidence.
+`POST /v1/admin/rollback-drill` runs the concrete rollback smoke check against
+the current tenant: it requires a DB mirror, compares file-backed and DB-backed
+submission, audit, and tombstone ids without deleting or rewriting either side,
+returns safe aggregate counts plus compact blocker codes, and can append the
+`rollback_flag_drill` rollout-smoke evidence row with only hashes.
+`POST /v1/admin/key-rotation-drill` runs the matching managed-EdDSA rotation
+smoke check: it reports only safe keyset counts and refresh-health booleans,
+requires production-shaped managed EdDSA enforcement with at least two active
+managed keys, issuer/audience/JTI/TTL policy, and a fresh guarded refresh
+window, and can append `key_rotation_drill` evidence without exposing key ids,
+PEMs, hosts, URLs, or bearer fetch credentials.
+`POST /v1/admin/postgres-rls-drill` runs the PostgreSQL RLS readiness smoke
+check from the same safe diagnostics exposed by config status. It returns only
+aggregate policy/RLS/FORCE RLS counts, role-bypass and runtime table-owner
+state, and compact blocker codes, and can append `postgres_rls_readiness`
+evidence.
+`POST /v1/admin/retention-dry-run-drill` runs the retention/cache selection
+smoke check through the real maintenance dry-run path with backfill, vector
+indexing, reconciliation, and audit-chain verification disabled. It returns
+tenant-scoped aggregate candidate counts, dry-run deletion guards, compact
+blocker codes, and can append `retention_dry_run` evidence without changing
+trace status or deleting objects.
+`POST /v1/admin/vector-index-drill` runs the vector-index smoke check through
+the real vector worker selector in dry-run mode. It requires a DB mirror,
+returns safe candidate/index coverage counts plus private vector infrastructure
+readiness booleans, blocks readiness when candidate coverage is absent or the
+limit leaves pending candidates, and can append `vector_index` evidence without
+writing vector entries or exposing scheduler tokens/purposes.
+`POST /v1/admin/analytics-release-drill` runs the broad analytics release
+preflight against the reviewer metadata view using the configured minimum cell
+count, keyed count-noise settings, and optional epsilon ledger. The response
+returns only safe aggregate privacy-budget fields, compact blocker codes,
+noise/accounting status, and a sha256-prefixed evidence hash; it can append the
+`analytics_release` rollout-smoke evidence row directly without exposing the
+noise key, tenant token, raw trace data, or aggregate maps.
+`POST /v1/admin/ranking/readiness-drill` wraps the active-model risk,
+dataset-readiness, and ranking-credit readiness reports into one hash-only
+promotion proof. It returns only counts, blocker-code aggregates, and a
+sha256-prefixed evidence hash, and can append `ranking_model_readiness`
+rollout-smoke evidence without exposing model artifacts, trace bodies, raw lab
+notes, external refs, or prediction ids. Failed drill evidence is recorded when
+holdout manifest conflicts, active-model risk, blocked model targets, or blocked
+ranking credits remain, so a stale or conflicted ranking registry cannot
+masquerade as promotion-ready.
+`POST /v1/admin/credit-settlement-drill` runs the Trace Credits settlement
+promotion check through the admin credit-risk summary plus the existing dry-run
+settlement selector. It validates a supplied NEAR contract id without writing
+settlement batches or NEAR outbox rows, requires a configured per-account issuer
+cap by default unless `require_account_cap` is explicitly disabled, returns only
+safe account hashes, aggregate risk counts, settlement exclusion reason counts,
+blocker codes, and a sha256-prefixed evidence hash, and can append
+`credit_settlement` rollout-smoke evidence directly.
+Operators can still use `POST /v1/admin/rollout-smoke/evidence` for external
+manual evidence, while operational summary and metrics expose only readiness
+booleans, bounded max-delta metadata, and blocker reason codes.
+`POST /v1/admin/revocation-propagation-drill` runs the revocation-propagation
+smoke check through the real worker dry-run path. It requires a DB mirror,
+returns only aggregate due/completed/failed/skipped/pending counts plus compact
+dry-run blocker codes, leaves propagation rows unclaimed, and can append
+`revocation_propagation` evidence.
+`POST /v1/admin/revocation-effects-drill` is the post-live canary proof for the
+same revoked submission: it reads DB propagation rows, reversed credit events,
+NEAR reversal outbox rows, deleted service-owned object refs, and physical-delete
+receipt rows, then can append hash-only `delayed_credit_reversal` and
+`object_deletion_refs` evidence without exposing trace bodies, credit-account
+refs, object keys, or raw operator reasons.
+`POST /v1/admin/audit-chain-drill` runs audit-chain verification without
+maintenance side effects and can append `audit_chain_verification` evidence;
+responses expose counts, last hashes, blocker codes, and hashes of verifier
+failures rather than raw audit failure text.
+`GET /v1/admin/ranking/calibration-dataset-conflicts` provides the
+operator drill-down: exact conflict keys, latest projected hash-only registry
+metadata, whether the latest row still blocks credit issuance, and a remediation
+hint to register a new calibration dataset hash or policy version instead of
+rewriting the conflicted key. `POST
+/v1/admin/ranking/calibration-dataset-conflicts/quarantine` appends an
+`archived` status row using the latest projected manifest metadata for a
+conflicted key; that retires the key from active manifest-conflict blockers
+without rewriting the old rows, while any model still depending on the retired
+holdout remains blocked by `calibration_dataset_retired`. When strict DB mirror
+writes are enabled and the DB already has older immutable manifest metadata for
+that key, quarantine mirrors a status-only archive update so the DB preserves its
+existing manifest fields instead of accepting a manifest rewrite. The route also
+appends a `ranking_calibration_dataset_quarantine` audit event with hash-only
+conflict-key and operator-reason metadata.
 
-`TRACE_COMMONS_ARTIFACT_KEY_HEX` enables encrypted trace object storage. `TRACE_COMMONS_ENCRYPTED_ARTIFACTS=true` can be used as an explicit guard for the legacy encrypted artifact sidecar, but still requires the key. `TRACE_COMMONS_OBJECT_STORE=local_service` selects the production-shaped service-owned local backend and records DB object refs with the `trace_commons_service_local_encrypted` provider alias. That mode uses `TRACE_COMMONS_SERVICE_OBJECT_STORE_DIR` when set, otherwise `TRACE_COMMONS_ARTIFACT_DIR`, otherwise `TRACE_COMMONS_DATA_DIR/service_object_store`. In both encrypted modes, submitted redacted envelopes, benchmark conversion artifacts, and ranker export provenance manifests are encrypted with TraceCommons secrets crypto, stored under a tenant-hashed artifact directory, and referenced by DB object refs. The local backend now sits behind the `TraceArtifactStore` provider trait so remote object/KMS-backed providers can share the same serialized JSON write/read/delete contract later. File-backed submission records retain envelope receipts so envelope reads resolve through encrypted object storage when present; benchmark/ranker export manifest items carry per-source object refs to the shared export artifact or provenance object. `TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW=true` is a production-shaped submit/review cutover guard: it requires DB dual-write, required DB mirror writes, DB reviewer reads, reviewer object-ref reads, and `TRACE_COMMONS_OBJECT_STORE=local_service`, then omits the plaintext submitted/reviewed envelope body files while still writing compatibility metadata, derived records, and file audit rows. `TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT=true` is the replay-export companion guard: it requires DB dual-write, required DB mirror writes, DB replay export reads, replay object-ref-required reads, and the service-local object store, then makes replay body exports use the existing DB object-ref path without file fallback. `TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS=true` is the benchmark/ranker companion guard: it requires DB dual-write, required DB mirror writes, DB reviewer reads, required derived source object refs, export guardrails, and the service-local object store, then stores benchmark artifacts and ranker provenance only in encrypted object storage while keeping DB manifest/items as the durable index for purpose filters and lifecycle invalidation. The object-primary guards also accept `TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW_TENANT_IDS`, `TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT_TENANT_IDS`, and `TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS_TENANT_IDS` for tenant-by-tenant promotion behind the same dependency checks.
+Ranking worker-run ledger rows are part of the ranking DB mirror, the
+DB-backed reviewer ranking read surface, and the maintenance reconciliation
+promotion gate.
+
+`GET /v1/admin/config-status` also reports the server-owned ranking calibration
+and automation gates: `ranking_min_label_count`,
+`ranking_require_calibration_dataset_registry`,
+`ranking_min_confidence_threshold`,
+`ranking_max_average_absolute_error_micros`, and
+`ranking_worker_run_stale_after_hours`. It also reports safe NEAR settlement
+readiness fields: `near_credit_submitter_configured`,
+`near_credit_submitter_timeout_ms`, `near_credit_outbox_submit_default_limit`,
+`near_credit_outbox_submit_max_limit`,
+`near_credit_confirmer_configured`,
+`near_credit_confirmer_timeout_ms`,
+`near_credit_outbox_confirm_default_limit`,
+`near_credit_outbox_confirm_max_limit`,
+`benchmark_registry_submitter_configured`,
+`benchmark_registry_submitter_timeout_ms`,
+`benchmark_registry_outbox_submit_default_limit`,
+`benchmark_registry_outbox_submit_max_limit`,
+`benchmark_registry_confirmer_configured`,
+`benchmark_registry_confirmer_timeout_ms`,
+`benchmark_registry_outbox_confirm_default_limit`,
+`benchmark_registry_outbox_confirm_max_limit`,
+`benchmark_evaluator_configured`,
+`benchmark_evaluator_timeout_ms`, and
+`credit_cycle_worker_step_count`.
+This safe projection lets operators confirm workers cannot lower the
+sample-size or quality requirements below production credit policy and can see
+whether live NEAR submission/confirmation, benchmark evaluator, or benchmark-registry submission is wired without exposing the
+relayer/adapter URL, bearer token, hosts, or account identities.
+
+Stored envelope body reads now also validate any decoded contributor tenant scope that uses the server `tenant_sha256:<hash>` shape against the authenticated tenant for both file-backed and object-ref-backed reads, so a tampered server tenant ref cannot ride behind otherwise valid metadata while legacy client attribution strings remain non-authoritative.
+
+Maintenance parity for credit settlement is first-class: backfill counts and mirrors file-backed utility attestations, credit settlement batches, credit holds, and NEAR credit outbox rows/status, while reconciliation reports file/DB counts, missing-id gaps, settlement/outbox status drift, and hold-release drift for each family before credit settlement read flags or required mirror writes are promoted. Ranking parity uses the same maintenance channel: backfill counts and mirrors file-backed ranking model versions, calibration dataset registry rows, feature/prediction/label evidence, calibration runs, and worker-run rows, while reconciliation reports file/DB counts, missing rows, model status drift, calibration dataset status drift, calibration report-hash drift, and worker-run status drift before DB reviewer ranking reads or credit-bearing ranking paths are promoted. Benchmark registry parity follows the same operator contract: published and revoked benchmark artifacts enqueue hash-only registry publish/revoke outbox rows, backfill mirrors those rows/status into PostgreSQL, and reconciliation treats missing registry outbox rows or status/receipt drift as blockers before external registry adapter readiness is promoted.
+
+Set `TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES=true` during production cutover after DB dual-write parity checks pass. It requires `TRACE_COMMONS_DB_DUAL_WRITE=true` and makes submission, revocation, review decision, credit, utility attestation, credit settlement, credit hold, NEAR credit outbox, benchmark registry outbox, ranking evidence/calibration, replay export manifest, benchmark/ranker provenance, audit, and trace-content-read mirror failures return an internal error instead of silently continuing with file-only state. Submission, delayed-credit, credit settlement control-plane, benchmark registry outbox, ranking evidence/calibration, replay export manifest, benchmark provenance, benchmark lifecycle, and ranker provenance mirror failures also avoid publishing local file-side metadata/object, ledger, settlement/outbox JSONL records, ranking JSONL evidence, replay-manifest, artifact/provenance, or staged service-local encrypted artifact objects for the failed operation. If a final export audit mirror fails after export metadata was staged, required mode removes the replay/benchmark/ranker file artifacts and deletes the DB export manifest/items/object refs for that export. Replay, benchmark, and ranker export DB mirrors write manifest metadata, export artifact object refs, and manifest item snapshots through one backend transaction so an item/reference validation failure does not leave a partial DB export.
+
+Required mirror mode also applies to ranking worker-run ledger writes, so failed
+DB run accounting blocks the worker response instead of leaving automation
+history file-only.
+
+`TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT` optionally sets a
+per-account live-settlement cap in credit points. It defaults to unset for pilot
+compatibility; `0` also disables the cap. Production settlement drills now treat
+an unset cap as `settlement_account_cap_missing` unless the request explicitly
+sets `require_account_cap: false` for a non-production rehearsal. When
+configured, dry-run and live settlement responses report the cap in micros plus
+aggregate `settlement_policy_excluded_*` counts. Any account whose currently
+pending settlement-eligible positive credit exceeds the cap is excluded from
+that run without creating settlement batches or NEAR outbox rows, leaving the
+pending ledger visible for hold/review or a higher governed cap. Operational
+summary and metrics also surface `credit_settlement_account_cap_missing` when
+positive delayed credit exists without an issuer cap, so operators see the
+governance gap before a settlement run or smoke drill.
+Admins can inspect `GET /v1/admin/credit-risk-summary` before issuing credit to
+see tenant-scoped pending, held, and over-cap totals grouped by deterministic
+credit-account hash. The response is bounded by `limit` (default 100, max 500)
+and returns `account_count`, `returned_account_count`, and `truncated` so
+operators can tell whether more hashed accounts remain. It omits raw account
+refs, source event ids, external refs, hold reason details, and trace bodies.
+
+`TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES` is a comma-separated list of validated central retention policy IDs. Matching submissions are not newly expired or purged by maintenance even when `expires_at` or `purge_expired_before` would otherwise match, but the hold is honored only when the stored policy id matches the server-derived retention class for the submission's allowed uses. Review and maintenance also fail closed if file-backed metadata extends `expires_at` beyond that server-derived retention window. `/v1/admin/config-status` exposes the configured IDs for admin verification.
+
+`TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS` optionally sets a fail-closed
+freshness window for model-derived ranking credit. When set, ranking model
+promotion, `/v1/workers/ranking/prediction-credit`, and ranking-utility
+settlement all require the latest matching promotable calibration run to be no
+older than the configured hour count. This lets production credit issuers stop
+minting or settling credits from stale ranking models while preserving the
+file-backed pilot default when unset.
+
+`TRACE_COMMONS_RANKING_MIN_LABEL_COUNT` sets the server-owned minimum joined
+prediction/label count that a calibration run must meet before it can promote a
+model or back ranking-derived credit. Calibration workers may request a higher
+run-specific floor, but they cannot lower the deployment floor. It defaults to
+`1` for pilot compatibility and accepts `1` through `1000000`; production credit
+issuers should raise it to match the smallest calibration cohort they are
+willing to treat as credit-bearing evidence.
+
+`TRACE_COMMONS_RANKING_MIN_CONFIDENCE_THRESHOLD` sets a server-owned floor for
+the per-prediction confidence threshold used by calibration runs. Calibration
+workers may request a higher threshold, but not a lower one. It defaults to `0`
+for pilot compatibility and accepts `0` through `1`.
+
+`TRACE_COMMONS_RANKING_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS` sets a server-owned
+ceiling for acceptable aggregate and per-label-source calibration error. The
+effective calibration threshold is the lower of the worker request and this
+deployment ceiling. It defaults to `1000000` micros and accepts `0` through
+`1000000000000`.
+
+`TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT` sets the minimum distinct label
+source count that a joined calibration run needs before it can promote a model
+or back ranking-derived credit. It defaults to `1` for pilot compatibility and
+accepts `1` through `4`, matching the current `frontier_lab`, `reviewer`,
+`benchmark`, and `system` label source taxonomy. Production credit issuers
+should raise it, typically to `2`, so one lab or reviewer source cannot
+unilaterally calibrate a credit-bearing ranking model.
+
+`TRACE_COMMONS_RANKING_MIN_PAIRWISE_LABEL_COUNT` sets the minimum joined
+pairwise preference-label count required by the active model-risk report before
+ranking-derived credit is considered risk-clear. It defaults to `0` for pilot
+compatibility and accepts `0` through `1000000`; production issuers can raise it
+once pairwise reviewer/frontier-lab feedback is part of the credit-safety bar.
+
+`TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS` sets the minimum fraction
+of joined pairwise preferences that an active model must order correctly,
+encoded in micros. It defaults to `500000` (chance for binary preferences) and
+accepts `0` through `1000000`; active model-risk reports emit
+`pairwise_accuracy_below_threshold` when joined pairwise evidence exists but the
+model falls below this deployment threshold.
+
+`TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT` optionally suppresses aggregate analytics cells whose count is below the configured threshold. The endpoint still returns content-free totals and reports `min_cell_count` plus `suppressed_cell_count` for compatibility, and also returns a `privacy_budget` object with the `k_anonymity_min_cell` strategy, released/suppressed cell counts, whether suppression was applied, and conservative broad-release blocker reasons such as `min_cell_count_disabled` or `small_cells_suppressed`. Reviewers/admins can request `GET /v1/analytics/summary?release_scope=broad` as a publication preflight; the route fails closed with safe blocker reason codes when the privacy budget is not broad-release ready.
+
+Broad-release analytics also require `TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_KEY`. When the key is absent, `release_scope=broad` fails with `noise_not_configured` even if the minimum-cell budget otherwise clears. `TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_MAX_DELTA` can set the positive integer count-noise bound and defaults to `1` when the key is present. Broad-release responses apply deterministic keyed count noise to nonzero totals and aggregate cells using tenant/cell context, then report `privacy_budget.strategy = k_anonymity_min_cell+keyed_count_noise`, `noise_applied`, `noise_max_delta`, and `noisy_cell_count`. Deployments can also set `TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_EPSILON_MICROS` and `TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_MAX_EPSILON_MICROS`; successful broad releases append a hash-chained audit row with the epsilon charged, spent, and remaining, and later broad releases fail closed with `privacy_budget_exhausted` when the tenant cap is exhausted.
+
+`TRACE_COMMONS_ARTIFACT_KEY_HEX` enables encrypted trace object storage. `TRACE_COMMONS_ENCRYPTED_ARTIFACTS=true` can be used as an explicit guard for the legacy encrypted artifact sidecar, but still requires the key. `TRACE_COMMONS_OBJECT_STORE=local_service` selects the production-shaped service-owned local backend and records DB object refs with the `trace_commons_service_local_encrypted` provider alias. That mode uses `TRACE_COMMONS_SERVICE_OBJECT_STORE_DIR` when set, otherwise `TRACE_COMMONS_ARTIFACT_DIR`, otherwise `TRACE_COMMONS_DATA_DIR/service_object_store`. `TRACE_COMMONS_OBJECT_STORE=remote_service` with `TRACE_COMMONS_REMOTE_OBJECT_STORE_PROVIDER=file_system` selects the filesystem-backed service-owned remote adapter, records DB object refs with the `trace_commons_service_owned_remote` provider alias, and uses an absolute `TRACE_COMMONS_REMOTE_OBJECT_STORE_BUCKET` path as the remote object root; AWS/GCS/Azure selections remain fail-closed behind `trace_commons_service_owned_remote_disabled`. Set `TRACE_COMMONS_REMOTE_OBJECT_STORE_FILE_SYSTEM_VERSIONING=true` on the filesystem-backed remote adapter to archive encrypted records on delete and allow restore-after-delete rehearsal across process restarts. In encrypted service-owned modes, submitted redacted envelopes, benchmark conversion artifacts, and ranker export provenance manifests are encrypted with TraceCommons secrets crypto, stored under tenant-hashed or tenant/submission-hashed artifact paths, and referenced by DB object refs. File-backed submission records retain envelope receipts so envelope reads resolve through encrypted object storage when present; benchmark/ranker export manifest items carry per-source object refs to the shared export artifact or provenance object. `TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING=true` is a startup guard for cloud cutover candidates: it fails startup unless the selected service-owned object store reports both object versioning and restore-after-delete support. Local-service and default filesystem-remote adapters report those capabilities as false; versioned filesystem-remote can satisfy the guard for rollback drills, while AWS/GCS/Azure still require production provider adapters before cloud cutover. `TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW=true` is a production-shaped submit/review cutover guard: it requires DB dual-write, required DB mirror writes, DB reviewer reads, reviewer object-ref reads, and an enabled service-owned object store (`local_service` or filesystem `remote_service`), then omits the plaintext submitted/reviewed envelope body files while still writing compatibility metadata, derived records, and file audit rows. `TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT=true` is the replay-export companion guard: it requires DB dual-write, required DB mirror writes, DB replay export reads, replay object-ref-required reads, and an enabled service-owned object store, then makes replay body exports use the existing DB object-ref path without file fallback. `TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS=true` is the benchmark/ranker companion guard: it requires DB dual-write, required DB mirror writes, DB reviewer reads, required derived source object refs, export guardrails, and an enabled service-owned object store, then stores benchmark artifacts and ranker provenance only in encrypted object storage while keeping DB manifest/items as the durable index for purpose filters and lifecycle invalidation. The object-primary guards also accept `TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW_TENANT_IDS`, `TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT_TENANT_IDS`, and `TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS_TENANT_IDS` for tenant-by-tenant promotion behind the same dependency checks.
 
 Then opt a client into that endpoint:
 
@@ -397,9 +690,11 @@ The service exposes:
 - `GET /v1/contributors/me/credit`
 - `GET /v1/contributors/me/credit-events`
 - `POST /v1/contributors/me/submission-status`
-- `GET /v1/analytics/summary`
+- `GET /v1/analytics/summary` with optional `release_scope=operator|broad`
 - `GET /v1/review/quarantine`
 - `GET /v1/review/active-learning`
+- `GET /v1/review/routing-summary`
+- `POST /v1/review/batch-decisions`
 - `POST /v1/review/{submission_id}/decision`
 - `POST /v1/review/{submission_id}/lease`
 - `DELETE /v1/review/{submission_id}/lease`
@@ -409,25 +704,351 @@ The service exposes:
 - `POST /v1/benchmarks/convert`
 - `POST /v1/benchmarks/{conversion_id}/lifecycle`
 - `POST /v1/workers/benchmark-convert`
+- `POST /v1/workers/benchmark-evaluations/run`
+- `POST /v1/workers/benchmark-registry-publications/run`
+- `GET /v1/admin/benchmark-registry-outbox`
+- `POST /v1/workers/benchmark-registry-outbox/submit`
+- `POST /v1/workers/benchmark-registry-outbox/confirm`
+- `POST /v1/workers/benchmark-registry-outbox/mark-status`
 - `GET|POST /v1/workers/replay-export`
 - `GET|POST /v1/workers/ranker/training-candidates`
 - `GET|POST /v1/workers/ranker/training-pairs`
 - `POST /v1/workers/utility-credit`
+- `POST /v1/workers/utility-attestations`
+- `GET /v1/admin/credit-attestations`
+- `GET|POST /v1/admin/credit-holds`
+- `POST /v1/admin/credit-holds/{hold_id}/release`
+- `GET /v1/admin/credit-risk-summary` with optional `limit`
+- `GET|POST /v1/admin/credit-settlements`
+- `POST /v1/workers/credit-settlements/run`
+- `POST /v1/workers/credit-cycle/run`
+- `POST /v1/workers/credit-cycle/scheduler/run`
+- `GET /v1/admin/near-credit-outbox`
+- `POST /v1/workers/near-credit-outbox/submit`
+- `POST /v1/workers/near-credit-outbox/confirm`
+- `POST /v1/workers/near-credit-outbox/mark-status`
+- `GET|POST /v1/admin/ranking/model-versions`
+- `GET|POST /v1/admin/ranking/calibration-datasets`
+- `POST /v1/admin/ranking/model-promotions`
+- `GET /v1/admin/ranking/features`
+- `GET /v1/admin/ranking/predictions`
+- `GET /v1/admin/ranking/labels`
+- `GET /v1/admin/ranking/preference-labels`
+- `GET /v1/admin/ranking/adjudication-report`
+- `GET /v1/admin/ranking/labeler-reliability-report`
+- `GET /v1/admin/ranking/calibration-report`
+- `GET /v1/admin/ranking/pairwise-evaluation-report`
+- `GET /v1/admin/ranking/model-backtest-report`
+- `GET /v1/admin/ranking/model-risk-report`
+- `GET /v1/admin/ranking/dataset-readiness-report`
+- `GET /v1/admin/ranking/credit-readiness-report`
+- `POST /v1/admin/ranking/readiness-drill`
+- `GET /v1/admin/ranking/worker-runs`
+- `POST /v1/admin/ranking/worker-runs/{ranking_worker_run_id}/recover-stale`
+- `GET /v1/admin/ranking/calibration-runs`
+- `POST /v1/workers/ranking/features`
+- `POST /v1/workers/ranking/predictions`
+- `POST /v1/workers/ranking/prediction-credit`
+- `POST /v1/workers/ranking/prediction-credit/run`
+- `POST /v1/workers/ranking/model-promotions/run`
+- `POST /v1/workers/ranking/labels`
+- `POST /v1/workers/ranking/preference-labels`
+- `POST /v1/workers/ranking/calibration-runs`
+- `POST /v1/workers/ranking/calibration-runs/run`
 - `GET /v1/ranker/training-candidates`
 - `GET /v1/ranker/training-pairs`
 - `GET|POST|PUT /v1/admin/tenant-policy`
 - `GET /v1/admin/export/access-grants`
 - `GET /v1/admin/export/jobs`
+- `POST /v1/admin/export/jobs/{export_job_id}/recover-stale`
+- `POST /v1/admin/export/jobs/{export_job_id}/retry`
+- `POST /v1/workers/export/jobs/claim-next`
+- `POST /v1/workers/export/jobs/claim-and-run`
+- `POST /v1/workers/export/jobs/run-queued`
+- `POST /v1/workers/export/jobs/retry-failed`
 - `GET /v1/admin/config-status`
+- `GET /v1/admin/vector-entries`
+- `GET|POST /v1/admin/rollout-smoke/evidence`
+- `GET /v1/admin/rollout-smoke/preflight`
+- `POST /v1/admin/canary-read-drill`
+- `POST /v1/admin/object-primary-read-drill`
+- `POST /v1/admin/object-store-migration-drill`
+- `POST /v1/admin/db-reconciliation-drill`
+- `POST /v1/admin/rollback-drill`
+- `POST /v1/admin/key-rotation-drill`
+- `POST /v1/admin/postgres-rls-drill`
+- `POST /v1/admin/retention-dry-run-drill`
+- `POST /v1/admin/vector-index-drill`
+- `POST /v1/admin/analytics-release-drill`
+- `POST /v1/admin/benchmark-readiness-drill`
+- `POST /v1/admin/credit-settlement-drill`
+- `POST /v1/admin/revocation-propagation-drill`
+- `POST /v1/admin/revocation-effects-drill`
+- `POST /v1/admin/audit-chain-drill`
 - `POST /v1/admin/maintenance`
 - `POST /v1/workers/retention-maintenance`
 - `POST /v1/workers/revocation-propagation`
 - `POST /v1/workers/vector-index`
 - `GET /v1/audit/events`
 
-The ingestion service treats every upload as untrusted. It validates the schema and revocable consent, re-runs deterministic redaction on the submitted envelope, recomputes privacy hashes and credit estimates, enforces optional per-tenant/per-principal hourly contributor submission quotas for autonomous upload safety, stores accepted low-risk traces under the authenticated tenant, and quarantines medium/high-risk traces with zero immediate credit. Reviewer quarantine and active-learning queues are prioritized work queues: queue items expose `review_age_hours`, `review_escalation_state`, `review_escalation_reasons`, and optional DB-backed review lease metadata so operators can filter by `lease_filter=all|mine|available|active|expired`, then sort by reviewer SLA pressure, assignment, and escalation causes without opening trace bodies. Revocation writes a tenant-scoped, first-writer-wins tombstone with redaction and canonical-summary hashes when available, marks local or DB-backed metadata revoked only for authorized owners/reviewers, lifecycle-revokes any published benchmark artifact derived from the source, and blocks later uploads in the same tenant that match a retained file-backed or DB-mirrored tombstone redaction hash, canonical-summary hash, or submission id.
+`GET /v1/audit/events` accepts an optional `limit` query parameter, defaults to 100 events, and caps responses at 500 events. Reviewer audit reads use that limit at the storage boundary: file-backed reads parse only the latest audit-log tail needed for the response, while DB-backed reads use a tenant-scoped latest-events query ordered by audit sequence.
 
-Replay dataset exports, benchmark conversion artifacts, and ranker training exports include a deterministic `sha256:` hash of their source item list. The same hash is mirrored into audit `decision_inputs_hash` for the export event, giving reviewers a stable tenant-scoped proof of which submissions fed an exported dataset without exposing trace content in the audit row. Benchmark conversion artifacts also carry a schema version plus registry/evaluation lifecycle metadata; new conversions start as registry `candidate` and evaluation `not_run`, and benchmark workers or reviewers can update registry/evaluator state through the lifecycle endpoint without changing the export contract. The `ironclaw traces benchmark-lifecycle-update` helper posts the same registry/evaluator patch shape for worker automation and manual reviewer operations. Lifecycle updates rewrite the tenant-scoped file artifact in compatibility mode or the encrypted service-local object in object-primary mode, refresh DB object refs when the DB mirror is configured, and append an audit event with the registry/evaluation statuses; in required mirror mode the rewrite happens only after the DB mirror succeeds. Benchmark and ranker exports also write tenant-local provenance manifests with source ids, caller-supplied purpose, and invalidation fields; CLI ranker candidate/pair export commands accept `--purpose` so guarded services can require it. Export workers should prefer the dedicated `/v1/workers/replay-export`, `/v1/workers/ranker/training-candidates`, and `/v1/workers/ranker/training-pairs` routes, which reuse the same tenant policy, consent/use filtering, access-grant, export-job, audit, and source-hash behavior as the reviewer/admin export routes while keeping automation on worker-scoped endpoints. Admins can inspect the durable grant/job control-plane rows through `GET /v1/admin/export/access-grants` and `GET /v1/admin/export/jobs`, with bounded status and dataset-kind filters, or the matching `ironclaw traces export-access-grants-list` and `export-jobs-list` helpers. Revocation and retention maintenance mark those provenance manifests invalid instead of deleting them. Benchmark conversion plus ranker candidate and pair exports revalidate DB source status immediately before publishing artifacts and append idempotent delayed utility credit events for included accepted sources, keyed by tenant plus submission so rerunning the same worker surface does not double-credit. Trusted offline utility jobs can use `POST /v1/workers/utility-credit` with `regression_catch`, `training_utility`, or `ranking_utility`, a concrete `external_ref`, and one or more accepted submission ids to append the same idempotent delayed credit without exposing reviewer-only credit mutation; the worker rejects sources whose consent/use metadata or tenant policy does not permit the requested evaluation, model-training, or ranking-training use. Tenant policy allowed-use ABAC is applied before exports and process-evaluation labeling, then again while selecting sources, so replay exports, benchmark conversion, ranker exports, and process-evaluation workers cannot publish or label sources outside the tenant's consent/use allow-list. Signed-token allow-lists are enforced on the same downstream paths: replay exports, benchmark/ranker dataset generation, process-evaluation workers, and utility-credit workers cannot consume sources outside the caller claim's allowed scopes/uses. Production-like deployments can also require active submitted-envelope object refs for every benchmark/ranker source so stale or unreadable trace bodies fail before publishing derived artifacts. Replay dataset exports mirror compact DB manifest rows plus per-source item snapshots with source status, hash, and source object ref at export time; benchmark and ranker item rows name the derived summary artifact version used and now carry per-source object refs to the benchmark artifact or ranker provenance payload. In file-backed mode those refs point at the local JSON artifact; in service-local encrypted mode they point at the tenant-checked encrypted object-store payload. Manifest metadata, export artifact object refs, and item snapshots are mirrored transactionally in PostgreSQL. Manifest and item rows are invalidated when any source submission is revoked, expired, or purged. Reviewer/admin tokens can inspect replay export manifest metadata through `GET /v1/datasets/replay/manifests`; DB-backed listing is scoped to replay dataset manifests and filters out benchmark/ranker provenance rows.
+The ingestion service treats every upload as untrusted. It validates the schema and revocable consent, re-runs deterministic redaction on the submitted envelope, recomputes privacy hashes and credit estimates, enforces optional per-tenant/per-principal hourly contributor submission quotas for autonomous upload safety, stores accepted low-risk traces under the authenticated tenant, and quarantines medium/high-risk traces with zero immediate credit. Reviewer quarantine and active-learning queues are prioritized work queues: queue items expose `review_age_hours`, `review_escalation_state`, `review_escalation_reasons`, and optional DB-backed review lease metadata so operators can filter by `lease_filter=all|mine|available|active|expired`, then sort by reviewer SLA pressure, assignment, and escalation causes without opening trace bodies. `GET /v1/review/routing-summary` gives reviewers/admins aggregate routing pressure, available/active/expired/mine counts, privacy-risk and escalation buckets, and hash-only assignee load counts without exposing trace bodies or raw reviewer principals. Reviewers/admins can apply a bounded common approve/reject decision to up to 50 submission ids through `POST /v1/review/batch-decisions`; each item still runs the same single-submission eligibility, lease, ABAC, body-read, object-ref, mirror, and audit path as `POST /v1/review/{submission_id}/decision`, and the response reports per-submission success or safe error metadata. Revocation writes a tenant-scoped, first-writer-wins tombstone with redaction and canonical-summary hashes when available, marks local or DB-backed metadata revoked only for authorized owners/reviewers, lifecycle-revokes any published benchmark artifact derived from the source, and blocks later uploads in the same tenant that match a retained file-backed or DB-mirrored tombstone redaction hash, canonical-summary hash, or submission id.
+
+Replay dataset exports, benchmark conversion artifacts, and ranker training exports include a deterministic `sha256:` hash of their source item list. The same hash is mirrored into audit `decision_inputs_hash` for the export event, giving reviewers a stable tenant-scoped proof of which submissions fed an exported dataset without exposing trace content in the audit row. Benchmark conversion artifacts also carry a schema version plus registry/evaluation lifecycle metadata; new conversions start as registry `candidate` and evaluation `not_run`, and benchmark workers or reviewers can update registry/evaluator state through the lifecycle endpoint without changing the export contract. The lifecycle endpoint rejects `published` registry status unless the artifact also has `passed` evaluator status, registry ref, published timestamp, evaluator ref, evaluated timestamp, and evaluator score, so registry publication cannot outrun the server-side evaluator record. `POST /v1/workers/benchmark-evaluations/run` uses the configured `TRACE_COMMONS_BENCHMARK_EVALUATOR_URL` adapter when present; schedulers can set `require_external_evaluator=true` to fail closed instead of falling back to the in-process structural evaluator. The evaluator request contains bounded derived candidate summaries, artifact/source-list hashes, purpose hash, evaluator ref, and scoring threshold, but omits raw trace bodies, contributor principals, and raw source submission ids. When a lifecycle update moves an artifact to `published`, the service also writes a durable benchmark registry publish outbox row containing only ids, registry refs, source-list hashes, artifact-payload hashes, evaluator refs, scores, and status timestamps; when source revocation or retention invalidation lifecycle-revokes a previously published artifact, the service writes a matching hash-only revoke outbox row for the same registry ref. Admins can inspect these rows through `GET /v1/admin/benchmark-registry-outbox`, benchmark workers can submit pending/failed rows to a configured registry adapter through `POST /v1/workers/benchmark-registry-outbox/submit`, poll submitted rows for confirmation through `POST /v1/workers/benchmark-registry-outbox/confirm`, and use `POST /v1/workers/benchmark-registry-outbox/mark-status` as a manual fallback using external receipt refs and hashed error details. Admin-only `POST /v1/admin/benchmark-readiness-drill` summarizes benchmark artifacts, evaluator readiness, registry outbox status, and adapter gaps without exposing raw artifacts, and can record the required `benchmark_pipeline` rollout-smoke evidence row. Set `TRACE_COMMONS_BENCHMARK_EVALUATOR_URL` to point at a trusted evaluator adapter; `TRACE_COMMONS_BENCHMARK_EVALUATOR_BEARER_TOKEN` adds bearer auth, and `TRACE_COMMONS_BENCHMARK_EVALUATOR_TIMEOUT_MS` bounds evaluation calls. Set `TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL` to point at a trusted registry adapter; `TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN` adds bearer auth, and `TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_TIMEOUT_MS` bounds submit calls. Set `TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_URL` to point at the adapter's confirmation endpoint; `TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN` adds bearer auth, and `TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS` bounds confirmation calls. Registry submitter and confirmation requests are hash-only and contain no raw benchmark artifact or trace body. The `ironclaw traces benchmark-lifecycle-update` helper posts the same registry/evaluator patch shape for worker automation and manual reviewer operations. Lifecycle updates rewrite the tenant-scoped file artifact in compatibility mode or the encrypted service-local object in object-primary mode, refresh DB object refs when the DB mirror is configured, and append an audit event with the registry/evaluation statuses; in required mirror mode the rewrite happens only after the DB mirror succeeds. Benchmark and ranker exports also write tenant-local provenance manifests with source ids, caller-supplied purpose, and invalidation fields; CLI ranker candidate/pair export commands accept `--purpose` so guarded services can require it. Export workers should prefer the dedicated `/v1/workers/replay-export`, `/v1/workers/ranker/training-candidates`, and `/v1/workers/ranker/training-pairs` routes, which reuse the same tenant policy, consent/use filtering, access-grant, export-job, audit, and source-hash behavior as the reviewer/admin export routes while keeping automation on worker-scoped endpoints. Admins can inspect the durable grant/job control-plane rows through `GET /v1/admin/export/access-grants` and `GET /v1/admin/export/jobs`, with bounded status and dataset-kind filters, or the matching `ironclaw traces export-access-grants-list` and `export-jobs-list` helpers. Revocation and retention maintenance mark those provenance manifests invalid instead of deleting them. Benchmark conversion plus ranker candidate and pair exports revalidate DB source status immediately before publishing artifacts and append idempotent delayed utility credit events for included accepted sources, keyed by tenant plus submission so rerunning the same worker surface does not double-credit. Trusted offline utility jobs can use `POST /v1/workers/utility-credit` with `regression_catch`, `training_utility`, or carefully scoped ranking backfills, a concrete `external_ref`, and one or more accepted submission ids to append idempotent delayed credit without exposing reviewer-only credit mutation. Model-derived ranking credit should prefer `POST /v1/workers/ranking/prediction-credit`, which takes a single `ranking_prediction_id` plus reason, requires the referenced prediction to come from the latest active matching model with a positive settlement score, and appends one idempotent `ranking_utility` credit event bound to `ranking_prediction:<uuid>`. Frontier-lab or trusted-worker evidence should prefer `POST /v1/workers/utility-attestations`, which stores a hash-only attestation record with policy version, evidence hash, external-ref hash, and source ids before appending the same idempotent pending utility credit. Ranking workers can separately write hash-only feature records, model predictions, frontier/reviewer labels, and aggregate calibration runs for accepted submissions; prediction writes are accepted only when they bind to a registered active/candidate model, that model's policy and feature schema, and an existing feature vector hash for the same source. Admin calibration reports join predictions to labels, while persisted calibration runs record model version, target use, policy version, evaluation dataset hash, error metrics, confidence thresholds, promotion thresholds, joined label-source diversity counts, max per-source calibration error, deterministic joined-evidence hash, reason codes, and a report hash before model-derived credit is trusted; calibration runs must use the registered model calibration dataset hash, ignore mismatched legacy prediction policy/schema rows, and can fail with `insufficient_label_source_diversity` when `TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT` is higher than the joined source count or `label_source_error_above_threshold` when any label-source cohort exceeds the calibration error threshold. Registered model manifests are immutable for a `model_version`: changing the feature schema, policy, training dataset, calibration dataset, or artifact hash requires a new model version, while status transitions reuse the same manifest. Admins can stage models as `candidate` before calibration, and `POST /v1/admin/ranking/model-promotions` promotes an eligible candidate to `active` only when the requested model/policy/target-use/calibration-dataset run is promotable and the latest matching evidence is still promotable; legacy mutable records with a different calibration dataset hash require a fresh matching run before promotion. Ranking prediction-credit and utility settlement use the same current-model calibration dataset gate; ranking utility settlement also requires the named model's latest version to be `active` and to match the settlement policy, with a latest promotable calibration run for the requested target use; each ranking utility credit event must reference a matching `ranking_prediction:<uuid>` whose source, model, policy, target use, and settlement score match the credit event. Admins then run `POST /v1/admin/credit-settlements` in dry-run or final mode to convert eligible pending utility events into non-transferable settled account credit; utility workers can use the narrower `POST /v1/workers/credit-settlements/run` route with the same explicit policy version, optional ranking model/target-use gate, optional NEAR contract id, and idempotent retry behavior without gaining generic admin settlement access. Active credit holds exclude accounts from settlement and move eligible pending points into the held projection. Contributor credit summaries keep settlement and hold projections scoped to the contributor principal, while reviewer/admin credit summaries include tenant-wide settlement line items they are authorized to read. When a settlement request includes a NEAR contract id, the service writes a durable NEAR outbox item for each settled account, using only batch ids, account hashes, source-list hashes, policy versions, amounts, and issuer-signature hashes; if a retry finds a finalized batch whose outbox item is missing, it reconstructs the same hash-only pending outbox item before skipping already-settled source events. Set `TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL` to point at a trusted NEAR relayer; utility workers can then call `POST /v1/workers/near-credit-outbox/submit` to submit pending outbox payloads, record public transaction hashes, mark relayer failures with hashed error details, and append a bounded audit event. `TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN` adds relayer bearer auth, and `TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS` bounds submit calls. The manual `POST /v1/workers/near-credit-outbox/mark-status` route remains available for confirmation, recovery, and operator fallback. Tenant policy allowed-use ABAC is applied before exports and process-evaluation labeling, then again while selecting sources, so replay exports, benchmark conversion, ranker exports, process-evaluation workers, utility-credit workers, utility-attestation workers, ranking-evidence workers, ranking prediction-credit workers, and settlement workers cannot publish, label, rank, credit, or settle sources outside the tenant's consent/use allow-list. Signed-token allow-lists are enforced on the same downstream paths: replay exports, benchmark/ranker dataset generation, process-evaluation workers, utility-credit workers, utility-attestation workers, ranking-evidence workers, and ranking prediction-credit workers cannot consume sources outside the caller claim's allowed scopes/uses. Production-like deployments can also require active submitted-envelope object refs for every benchmark/ranker source so stale or unreadable trace bodies fail before publishing derived artifacts. Replay dataset exports mirror compact DB manifest rows plus per-source item snapshots with source status, hash, and source object ref at export time; benchmark and ranker item rows name the derived summary artifact version used and now carry per-source object refs to the benchmark artifact or ranker provenance payload. In file-backed mode those refs point at the local JSON artifact; in service-local encrypted mode they point at the tenant-checked encrypted object-store payload. Manifest metadata, export artifact object refs, and item snapshots are mirrored transactionally in PostgreSQL. Manifest and item rows are invalidated when any source submission is revoked, expired, or purged. Reviewer/admin tokens can inspect replay export manifest metadata through `GET /v1/datasets/replay/manifests`; DB-backed listing is scoped to replay dataset manifests and filters out benchmark/ranker provenance rows.
+
+Credit-hold release is admin-only through
+`POST /v1/admin/credit-holds/{hold_id}/release`. The route requires a non-empty
+operator `reason_detail`, keeps responses hash-only without raw hold or release
+reason text, projects one current hold state across append-only file records and
+DB mirrors, appends hash-only credit-mutation audit rows for placement and
+release, and lets the next settlement run include the account again when no other
+active hold or policy blocker remains.
+
+`GET /v1/admin/credit-risk-summary` gives admins a safe bounded pre-issuance
+view of pending, held, and over-cap credit grouped by account hash, so operators
+can review capped or held accounts without exposing raw account refs, event ids,
+external refs, or hold details. If review clears a held account, admins release
+the specific hold through the release route before rerunning the risk summary or
+settlement drill. The optional `limit` defaults to 100 accounts and is capped at
+500; aggregate totals are computed before account-list truncation.
+
+Export job rows preserve a `trace_export_job_request.v1` metadata snapshot
+across start, completion, and failure with requested/effective limits,
+status/privacy/consent filters, and only hashed external refs for later
+replayable worker execution. `POST /v1/workers/export/jobs/claim-next` lets an
+export worker atomically claim the oldest unexpired queued job for the current
+tenant and optional dataset-kind filter, marking it `running` without reading
+trace bodies. `POST /v1/workers/export/jobs/claim-and-run` supports queued
+replay, benchmark-conversion, ranker-candidate, and ranker-pair jobs: it claims
+the next queued job for that dataset kind, reconstructs
+status/privacy/consent/limit filters from the safe metadata snapshot, runs the
+existing export/artifact/provenance path, and marks the same job row complete or
+failed instead of creating a second job. `POST /v1/workers/export/jobs/run-queued`
+is the bounded scheduler route: it claims up to `max_jobs` queued rows
+(default 10, max 50; explicit values outside 1..=50 are rejected),
+optionally filtered by dataset kind, continues after per-job execution failures
+by terminalizing failed rows, and returns safe completed/failed/pending counts
+plus job summaries without embedding exported trace bodies. The
+`/v1/workers/export/jobs/retry-failed` worker route is the bounded retry pass: it
+scans failed unexpired jobs with replayable request metadata, applies retry-count
+and exponential-delay bounds, requeues due rows with hash-only retry metadata,
+and reports retried/not-due/ineligible/remaining-failed counts. Explicit retry
+limits outside `max_jobs` 1..=50, `max_retry_count` 1..=25, or delay windows
+0..=86400 seconds are rejected; `max_delay_seconds` must be at least
+`base_delay_seconds`. Deployments that want the server to own that loop can
+configure
+`TRACE_COMMONS_EXPORT_JOB_SCHEDULER_TOKEN` with an export-worker bearer token;
+the optional in-process scheduler sleeps for
+`TRACE_COMMONS_EXPORT_JOB_SCHEDULER_INTERVAL_SECONDS` (default 60), runs the same
+`retry-failed` pass, then runs the same `run-queued` pass. The scheduler accepts
+the same optional dataset-kind narrowing and bounded controls through
+`TRACE_COMMONS_EXPORT_JOB_SCHEDULER_DATASET_KIND`,
+`TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RUN_QUEUED_MAX_JOBS`,
+`TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_FAILED_MAX_JOBS`,
+`TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_FAILED_MAX_RETRY_COUNT`,
+`TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_BASE_DELAY_SECONDS`, and
+`TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_MAX_DELAY_SECONDS`; the raw token and
+retry note are never logged, and retry audit rows keep only reason hashes.
+
+Set `TRACE_COMMONS_VECTOR_EMBEDDER_URL` to point at a trusted private embedding
+adapter for vector-index payloads; `TRACE_COMMONS_VECTOR_EMBEDDER_BEARER_TOKEN`
+adds bearer auth, `TRACE_COMMONS_VECTOR_EMBEDDER_TIMEOUT_MS` bounds calls, and
+`TRACE_COMMONS_VECTOR_EMBEDDER_REQUIRE_EXTERNAL=true` makes vector indexing fail
+closed when no adapter is configured. Embedder requests contain the redacted
+canonical-summary embedding input, source/hash metadata, tool/category/coverage
+tags, and a purpose hash; they omit raw trace bodies, contributor principals,
+raw submission ids, and raw trace ids. If no adapter is configured and the
+fail-closed flag is off, vector indexing keeps using the deterministic local
+redacted-summary embedding fallback.
+
+Set `TRACE_COMMONS_VECTOR_SEARCH_URL` to point at a trusted private vector-search
+adapter for ANN/vector-store lookup; `TRACE_COMMONS_VECTOR_SEARCH_BEARER_TOKEN`
+adds bearer auth, `TRACE_COMMONS_VECTOR_SEARCH_TIMEOUT_MS` bounds calls, and
+`TRACE_COMMONS_VECTOR_SEARCH_REQUIRE_EXTERNAL=true` makes startup and the
+vector-index worker fail closed when no private search adapter is configured.
+The search request contains only the target vector-entry id, redacted embedding
+vector, embedding metadata, source hash, and purpose hash. Search responses only
+return candidate vector-entry ids plus scores; the server then revalidates every
+candidate against active tenant DB vector metadata, compatible
+model/store/dimension/version fields, and the current derived trace id map
+before those neighbors can affect duplicate, novelty, nearest-trace, or
+`embedding:` cluster metadata. Invalid, stale, cross-store, same-submission,
+unknown, non-finite, or below-threshold search neighbors are ignored.
+
+Deployments that want the server to own vector-index catch-up can configure
+`TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_TOKEN` with a vector-worker bearer token.
+Startup validates that the token can call the vector worker route and that the
+DB mirror is configured, then the in-process scheduler sleeps for
+`TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_INTERVAL_SECONDS` (default 60) before
+calling `POST /v1/workers/vector-index` with the same bounded worker semantics.
+`TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_LIMIT` caps each pass from 1 to 500,
+`TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_DRY_RUN=true` keeps the scheduler in
+count-only mode, and `TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_PURPOSE` sets the
+audited worker purpose. Config status exposes only scheduler enablement,
+interval, limit, and dry-run status; it never returns the worker token or raw
+purpose text.
+
+Stale export-job recovery is intentionally narrow. If a `running` export job is
+still open after its grant expiry, an admin can call
+`POST /v1/admin/export/jobs/{export_job_id}/recover-stale` with a non-empty
+reason to atomically mark only that stale running row `expired`. The response,
+DB row, and audit metadata store only the job id, recovered status, reason hash,
+and safe recovery markers, never the raw operator note or trace bodies. The admin
+retry route (`POST /v1/admin/export/jobs/{export_job_id}/retry`) only requeues
+failed jobs while the job is still unexpired and still carries replayable
+`trace_export_job_request.v1` metadata. Retry clears terminal execution fields,
+returns the row to `queued`, increments a safe retry counter, records only reason
+hashes and admin principal refs, and then lets worker schedulers claim the job
+normally.
+
+Ranking model manifests must keep training and calibration dataset hashes
+disjoint. New overlapping manifests are rejected, and legacy overlapping
+manifests are blocked by model promotion, prediction-credit, settlement, and
+active-model risk gates under `training_calibration_dataset_overlap`, so the
+registered calibration dataset acts as holdout evidence rather than a reused
+training split.
+
+Admins can manage the holdout registry through
+`GET|POST /v1/admin/ranking/calibration-datasets`. Registry rows are hash-only:
+they store calibration dataset hash, target use, policy version, source-list
+manifest hash, source count, label-source count, label-actor count, lifecycle
+status, and a hashed actor principal. They do not store trace bodies, reviewer
+notes, raw lab refs, or source ids.
+For an existing `(calibration_dataset_hash, target_use, policy_version)` holdout
+key, status-only lifecycle updates are append-only but must keep the source
+manifest hash, source count, label-source count, and label-actor count unchanged.
+Manifest or count changes require a new dataset hash or policy version, and both
+file-backed writes and PostgreSQL mirror writes reject those rewrites.
+File-backed readers also fail closed if legacy JSONL history contains conflicting
+manifest rows for one holdout key.
+Calibration runs may use matching registry rows in `candidate` or `active`
+status, but reject matching `deprecated` or `archived` rows so retired holdout
+sets cannot keep model evidence alive after stewardship review.
+
+Calibration sample counts use effective labels, not raw label rows. If the same
+label source writes multiple labels for the same submission and target use, the
+latest `(submission_id, target_use, label_source)` row replaces older rows for
+joined evidence, aggregate error, label-source diversity, and promotion
+thresholds. A latest `disputed` label removes that source from joined
+calibration evidence until a newer non-disputed label arrives, so challenge
+labels cannot keep a model promotable by carrying the older score forward.
+Different label sources on the same submission still count as distinct evidence,
+but the write path binds each label-source enum to an authority role: utility
+workers may write `frontier_lab`, reviewer/admin tokens may write `reviewer`,
+benchmark workers may write `benchmark`, process-evaluation workers may write
+`system`, and admins may override for controlled repairs.
+However, when `TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT` requires multiple
+joined sources, those sources must also be written by at least that many distinct
+actor principals; otherwise the run records
+`insufficient_label_actor_diversity` and remains non-promotable.
+
+Process-evaluation-derived ranking labels are intended as auxiliary evaluator
+evidence, not direct credit authority. They participate in the same calibration,
+model-risk, readiness, and settlement gates as other ranking labels.
+
+`GET /v1/admin/ranking/adjudication-report` groups the latest absolute labels
+and pairwise preferences into unresolved issue buckets for disputed labels,
+cross-source absolute-label outcome conflicts, and reversed pairwise
+preferences. Calibration runs record `ranking_adjudication_issues_present` and
+remain non-promotable while any unresolved issue exists for the target use, so
+stored model-quality evidence cannot advance credit issuance ahead of label
+review. `GET /v1/admin/ranking/labeler-reliability-report` projects the same
+issue participation into source-level and hashed-actor rows, including
+absolute-label, preference-label, dispute, conflict, and total issue counts
+without exposing raw actor principals or external refs.
+
+Set `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL` to point at the relayer's confirmation endpoint; utility workers can then call `POST /v1/workers/near-credit-outbox/confirm` to poll submitted NEAR rows, mark confirmed transactions, or record hashed terminal failures without sending raw NEAR call args. `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_BEARER_TOKEN` adds confirmation bearer auth, and `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_TIMEOUT_MS` bounds confirmation calls.
+
+Pairwise ranking preference labels are available through `/v1/workers/ranking/preference-labels` and `/v1/admin/ranking/preference-labels`. They bind a preferred accepted submission to a rejected accepted submission for the same target use and store only evidence/external-ref hashes plus positive preference strength; they are training evidence for rankers or reward models, not a substitute for the absolute utility labels required by calibration and settlement gates. Ranker training-pair exports consume eligible preference labels before score-order heuristics, include the preference label id/source/category/strength/evidence hash, and still require both sides to pass the existing tenant policy, consent, status, privacy-risk, and revocation filters. Admin pairwise-evaluation reports compare latest candidate/active model settlement scores against those preference labels and return joined-pair counts, correct/reversed/tied ordering counts, accuracy in micros, and preferred-score margin aggregates without raw external refs or trace bodies. Active model-risk reports also expose those pairwise metrics and add `pairwise_accuracy_below_threshold` when joined pairwise evidence exists but the model orders less than half of it correctly, letting credit readiness and settlement treat preference drift as an active-model risk.
+
+`POST /v1/workers/ranking/calibration-runs/run` lets production schedulers scan
+active or candidate ranking models with a bounded `limit`, required target use,
+non-empty reason, optional model/policy filters, dry-run support, and optional
+calibration threshold overrides that are still capped by server-owned floors.
+Live runs persist calibration records and append a hash-only worker-run ledger
+row with result refs to the generated calibration ids.
+
+`POST /v1/workers/ranking/model-promotions/run` lets production schedulers scan
+latest candidate ranking models with a bounded `limit`, required target use,
+non-empty reason, optional model/policy filters, and dry-run support. It reuses
+the same overlapping live-run guard, calibration/freshness/diversity gates as
+the admin promotion endpoint, rechecks current joined prediction/label evidence
+against the latest promotable calibration run, promotes only eligible
+candidates, skips ineligible candidates with safe reason counts, and reports
+remaining candidate count without granting utility workers generic admin
+promotion access.
+
+Direct `active` writes to `POST /v1/admin/ranking/model-versions` are rejected:
+activation is target-use scoped, so admins should register `candidate` model
+manifests and activate them through `/v1/admin/ranking/model-promotions`.
+
+`POST /v1/admin/ranking/model-promotions` can also be used as a hash-only
+preflight by setting `dry_run: true`. The response includes the registered
+holdout calibration dataset hash, the stored calibration run/report/evidence
+hashes and joined-evidence counts, and a freshly recomputed current-evidence
+snapshot with the effective server-owned thresholds, error metrics,
+low-confidence prediction count, promotability flag, and reason codes. Operators
+can compare these fields before activation without exposing trace bodies or raw
+frontier-lab references. The promotion gate also requires the current
+candidate/target backtest to pass, so pairwise evidence, ordering failures, or
+unresolved label-adjudication issues from
+`/v1/admin/ranking/model-backtest-report` block activation.
+
+`GET /v1/admin/ranking/dataset-readiness-report` groups the latest ranking model
+manifests by registered holdout calibration dataset hash. Each dataset row
+reports candidate/active/deprecated/archived model counts, models without target
+evidence, target-use readiness rows, current joined-evidence/report hashes,
+effective calibration thresholds, current error metrics, and blocker reason
+counts. The report is derived from the existing model, prediction, label, and
+calibration ledgers, so it works in file-backed mode and DB reviewer-read mode
+without exposing trace bodies or raw lab references.
+
+Promotion and active-model risk recomputation re-apply the current server-owned
+calibration floors to stored calibration evidence. Raising production thresholds
+therefore blocks old calibration runs from activating models, minting prediction
+credit, or settling ranking utility until fresh evidence clears the new policy.
+
+`GET /v1/admin/ranking/worker-runs` exposes the hash-only worker-run ledger for
+bounded ranking calibration, prediction-credit, model-promotion, and full
+credit-cycle automation. Rows include the run id, running/completed/failed
+status, dry-run flag, filters, limits,
+checked/succeeded/skipped counts, result refs, and machine-readable skip reason
+counts, but store only the reason hash rather than raw operator notes.
+Calibration worker runs also add non-promotable persisted calibration run
+reasons, such as `ranking_adjudication_issues_present`, to those counts so a
+successful artifact write still surfaces credit blockers. The same ledger
+coordinates scheduler retries: live non-dry-run calibration,
+prediction-credit, model-promotion, and credit-cycle runs refuse active
+overlapping non-stale rows before appending a new `running` entry. Admins can call
+`POST /v1/admin/ranking/worker-runs/{ranking_worker_run_id}/recover-stale` with
+a non-empty recovery reason to append-finalize a stale running row as `failed`;
+the raw reason is hashed, a `ranking_worker_run_recovery` audit event is
+appended with only the run id, run kind, recovered status, and reason hash,
+fresh active runs are rejected, and the recovered row no longer contributes to
+the stale-run promotion blocker.
+
+`GET /v1/admin/ranking/model-backtest-report` recomputes the same current calibration, pairwise, and label-adjudication checks for latest candidate and active model/target-use pairs. Each row reports current joined-evidence hashes, latest calibration run/report hashes, joined label counts, aggregate and per-source error metrics, low-confidence counts, pairwise evidence and accuracy, pass/fail status, and machine-readable reason codes so operators can evaluate a candidate before promotion or credit issuance without exposing trace bodies or raw lab references.
+
+`GET /v1/admin/ranking/model-risk-report` recomputes the current joined-evidence hash for each active model/target-use pair and reports post-calibration prediction/label counts, current joined-label source diversity, current calibration thresholds, current aggregate/per-label-source error metrics, pairwise preference evidence counts, pairwise policy thresholds, pairwise ordering accuracy, unresolved label-adjudication blockers, low-confidence fresh predictions, stale or non-promotable calibration status, training/calibration dataset overlap, evidence-hash drift, aggregate risk-code counts, and per-model machine-readable risk codes without exposing trace bodies or raw lab references.
+
+`GET /v1/admin/ranking/credit-readiness-report` lists pending positive `ranking_utility` credit events that have not already settled and explains whether each can settle under the referenced active-model prediction. Blocked rows include machine-readable reasons such as missing prediction refs, missing or inactive models, missing/stale/non-promotable/under-diverse calibration, score mismatches, held credit accounts, low-confidence predictions, and uncleared active-model risk codes such as current evidence drift, plus the calibration run/report/joined-evidence hashes when available.
+
+Model-derived ranking credit also applies the latest calibration run's confidence threshold and active-model risk report to each active-model prediction at issuance, readiness, and settlement time. Low-confidence or uncleared-risk predictions remain visible in admin evidence and risk reports, but `/v1/workers/ranking/prediction-credit` rejects them and settlement excludes manually appended ranking utility events that reference them.
+
+Ranking calibration runs apply both caller-supplied thresholds and
+deployment-owned floors. In production, set
+`TRACE_COMMONS_RANKING_MIN_LABEL_COUNT` high enough that a small ad hoc label
+set cannot promote a credit-bearing model, then layer
+`TRACE_COMMONS_RANKING_MIN_CONFIDENCE_THRESHOLD`,
+`TRACE_COMMONS_RANKING_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS`,
+`TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT`,
+`TRACE_COMMONS_RANKING_MIN_PAIRWISE_LABEL_COUNT`,
+`TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS`, and per-source cohort
+error gates on top so the sample is high-quality, broad enough across
+reviewers/labs, and still agrees with pairwise preference evidence. Direct
+registration of an `active` model uses the same calibration freshness and
+diversity gates as the explicit model-promotion route.
 
 Vector indexing now follows the same downstream ABAC model: tenant policy and
 signed-claim allowed-use filters are enforced before the worker runs, then both
@@ -437,13 +1058,70 @@ retention class does not permit derived artifacts. Indexed vector worker
 payloads now include a deterministic local redacted-summary feature embedding
 inside encrypted `WorkerIntermediate` object payloads, while relational vector
 rows retain only metadata, hashes, scores, and provenance. Revocation
-propagation can invalidate a specific vector entry by id, and service-local
+propagation can invalidate a specific vector entry by id, and service-owned
 vector payload objects are verified as vector artifacts before physical
-deletion and receipt recording.
+deletion and receipt recording. When readable active vector payload artifacts
+share the same vector store, model, version, dimension, and embedding algorithm,
+the vector worker now uses their embedding values for nearest-neighbor
+duplicate/novelty scoring and emits `embedding:` cluster ids; otherwise it falls
+back to deterministic redacted-summary similarity.
 
-`POST /v1/admin/maintenance` can also be used by reviewers/admins to bridge file-backed pilot data into the optional DB mirror. It marks submissions expired when their retention-policy `expires_at` has passed, mirrors expiration status plus artifact/export-manifest invalidation to the DB mirror when configured, writes a durable DB retention job row plus per-submission lifecycle item rows for mirrored expire/purge/revoke actions, repairs DB revocation/artifact invalidation for submissions that are already file-marked revoked, lifecycle-revokes published benchmark artifacts whose sources are revoked or expired, prunes cached export payloads whose manifest references revoked or expired sources, and keeps expired traces out of replay, benchmark, and ranker exports. Admin tokens can inspect the durable tenant-scoped retention ledger through `GET /v1/admin/retention/jobs` and `GET /v1/admin/retention/jobs/{retention_job_id}/items`; both routes require the configured DB mirror, support bounded filtered reads, and append read-audit breadcrumbs without exposing trace bodies. The matching CLI helpers are `ironclaw traces retention-jobs-list` and `ironclaw traces retention-job-items`, and the web Trace Commons operator panel exposes the same read-only job/item lookups with its session-only admin token. Retention workers should prefer the narrower `POST /v1/workers/retention-maintenance` route, which exposes only `purpose`, `dry_run`, `prune_export_cache`, `max_export_age_hours`, and `purge_expired_before`. Revocation workers should use `POST /v1/workers/revocation-propagation`, which requires the DB mirror, lists due tenant-scoped revocation-propagation ledger items, claims them with retry attempts, applies metadata/vector/export invalidation actions idempotently, verifies and deletes service-local encrypted submitted/review envelope payloads for exact tenant/submission/object-ref targets, records a durable physical-delete receipt item with an evidence hash when service-local deletion succeeds or was already recorded, marks unsupported physical-delete stores or artifact kinds and credit-settlement actions as skipped, and audits dry-run or completed counts without reading trace bodies unless the action is a bounded object-payload delete. Set `purge_expired_before` to an explicit RFC3339 cutoff plus a non-empty `purpose` to mark already-expired submissions purged and delete their file-backed and encrypted local artifact copies; dry-run purge previews may omit purpose. When a non-dry-run purge or revocation-propagation object-payload delete physically removes a service-local encrypted trace body, the DB mirror marks only the matching tenant/submission/object-store/object-key object ref with `deleted_at`, while expiration and revocation continue to invalidate refs without claiming physical deletion. Revocation-propagation object deletes also upsert a tenant-scoped `PhysicalDeleteReceipt` propagation row so retries can backfill the receipt after a successful delete and reconciliation can distinguish invalidation from proven payload removal. Set `backfill_db_mirror: true` to validate tenant-local file-backed submissions, envelopes, and derived precheck records, then mirror submissions that are not already present in the configured DB. Backfill isolates per-submission and per-export failures so one corrupt envelope, missing derived precheck, or unreadable replay manifest does not block valid records; the maintenance response and audit metadata include `benchmark_artifacts_invalidated` and `db_mirror_backfill_failed` plus bounded failure details. Set `index_vectors: true` to publish deterministic canonical-summary vector metadata rows from accepted DB-mirrored derived records; vector workers should prefer the narrower `POST /v1/workers/vector-index` route, which accepts only `purpose` and `dry_run` and internally builds a vector-only maintenance request. Non-dry-run vector indexing requires an active submitted-envelope object ref that can be read and hash-checked before the vector row is written, and mirrors the source object ref into the per-source content-read audit row. Set `reconcile_db_mirror: true` to return a tenant-scoped report comparing file-backed metadata counts, DB object/vector/export/tombstone counts, DB retention job/item counts, the just-written retention maintenance ledger row/item count, credit-ledger and canonical audit-event ID gaps, active submitted-envelope object ref presence/readability/hash integrity, export manifest item object-ref gaps, active derived/export rows that still point at invalid sources, reader-projection parity for contributor, reviewer metadata, analytics, audit, and replay/export manifest surfaces, and compact `blocking_gaps`. With `TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN=true`, maintenance requests that omit `reconcile_db_mirror: true` fail before maintenance side effects with `400 Bad Request`, and reconciliation requests fail with `409 Conflict` until `blocking_gaps` is empty. Failed dirty reconciliation attempts still append the normal maintenance audit event after any completed maintenance work. Set `verify_audit_chain: true` to include a file-backed audit hash-chain integrity report plus, when a DB mirror is configured, a DB audit report with canonical-payload hash recomputation and projection checks for rows that carry `canonical_event_json`. Use `dry_run: true` to count valid backfill, benchmark artifact invalidation, or vector-index candidates without writing rows or artifacts.
+Vector workers should use `POST /v1/workers/vector-index` for scheduled
+indexing. The worker route requires the DB mirror before it starts, accepts
+`purpose`, `dry_run`, and an optional `limit` from 1 to 500, rejects invalid
+explicit limits with a client error, and returns `checked_count`,
+`vector_entries_indexed`, `skipped_existing_count`, and `pending_after_count`.
+Unlike broad admin maintenance, this route does not mark
+expired/revoked records, prune export caches, write retention ledgers, or run
+DB reconciliation; it only indexes eligible DB-mirrored derived summaries and
+audits the vector-index pass. When a private vector embedder is configured, the
+route stores the adapter-returned embedding model/version/dimension/vector-store
+metadata while keeping the embedding values in the worker-intermediate payload
+artifact instead of DB rows, and compatible existing payloads can drive
+model-backed nearest-neighbor scores for later vector entries. When a private
+vector-search adapter is configured, the route queries it before local payload
+scan and accepts only server-validated active tenant entries as vector neighbors;
+empty search results fall back to readable compatible payloads and then summary
+similarity. Deployments can use `TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_TOKEN` to
+run that same bounded worker route in-process on an interval without granting the
+scheduler generic maintenance authority.
 
-Retention legal holds are service-configured by policy ID, not by trace submitters. A trace envelope can suggest a retention policy, but only the authenticated service configuration decides whether that policy is under legal hold.
+Admin tokens can inspect safe tenant-scoped vector metadata through
+`GET /v1/admin/vector-entries`. The route requires the DB mirror, supports
+bounded `limit`, `status`, `source_projection`, and `submission_id` filters, and
+returns vector ids, source hashes, embedding model/dimension/version,
+nearest-neighbor ids, scores, cluster refs, and lifecycle timestamps. It never
+returns raw trace bodies or embedding values and appends an aggregate read audit
+row for the returned item count.
+
+Shared reviewer/admin list-style reads use the same operator page limit policy:
+omitted `limit` defaults to 100, and explicit limits outside 1..=500 are rejected
+with a client error instead of being silently clamped.
+Outbox submit/confirm workers and the revocation-propagation worker apply the
+same explicit rejection policy to their batch limits, and the vector-index
+worker validates its limit before DB mirror configuration checks.
+
+`POST /v1/admin/maintenance` can also be used by reviewers/admins to bridge file-backed pilot data into the optional DB mirror. It marks submissions expired when their retention-policy `expires_at` has passed, mirrors expiration status plus artifact/export-manifest invalidation to the DB mirror when configured, writes a durable DB retention job row plus per-submission lifecycle item rows for mirrored expire/purge/revoke actions, repairs DB revocation/artifact invalidation for submissions that are already file-marked revoked, lifecycle-revokes published benchmark artifacts whose sources are revoked or expired and enqueues matching registry revoke outbox rows, prunes cached export payloads whose manifest references revoked or expired sources, and keeps expired traces out of replay, benchmark, and ranker exports.
+
+Admin tokens can inspect the durable tenant-scoped retention ledger through `GET /v1/admin/retention/jobs` and `GET /v1/admin/retention/jobs/{retention_job_id}/items`; both routes require the configured DB mirror, support bounded filtered reads, and append read-audit breadcrumbs without exposing trace bodies. The matching CLI helpers are `ironclaw traces retention-jobs-list` and `ironclaw traces retention-job-items`, and the web Trace Commons operator panel exposes the same read-only job/item lookups with its session-only admin token.
+
+Retention workers should prefer the narrower `POST /v1/workers/retention-maintenance` route, which exposes only `purpose`, `dry_run`, `prune_export_cache`, `max_export_age_hours`, and `purge_expired_before`. Revocation workers should use `POST /v1/workers/revocation-propagation`, which requires the DB mirror, lists due tenant-scoped revocation-propagation ledger items, claims them with retry attempts, applies metadata/vector/export invalidation actions idempotently, appends deterministic negative credit-ledger reversal events for settled revoked sources, enqueues `reverse_credit_receipt` NEAR outbox calls for settled sources that had a NEAR contract, verifies and deletes service-owned encrypted submitted/review envelope payloads for exact tenant/submission/object-ref targets, records a durable physical-delete receipt item with an evidence hash when service-owned deletion succeeds or was already recorded, marks unsupported physical-delete stores or artifact kinds as skipped, gives disabled cloud remote object-store rows an explicit disabled-IO skip reason without exposing bucket/KMS/object-key details, and audits dry-run or completed counts without reading trace bodies unless the action is a bounded object-payload delete. The revocation worker limit defaults to 100 and explicit limits outside 1..=500 are rejected.
+
+Set `purge_expired_before` to an explicit RFC3339 cutoff plus a non-empty `purpose` to mark already-expired submissions purged and delete their file-backed plaintext envelope bodies plus service-owned encrypted local or filesystem-remote submitted-envelope artifacts; dry-run purge previews may omit purpose and must not delete those payloads. When a non-dry-run purge or revocation-propagation object-payload delete physically removes a service-owned encrypted trace body, the DB mirror marks only the matching tenant/submission/object-store/object-key object ref with `deleted_at`, while expiration and revocation continue to invalidate refs without claiming physical deletion. Revocation-propagation object deletes also upsert a tenant-scoped `PhysicalDeleteReceipt` propagation row so retries can backfill the receipt after a successful delete and reconciliation can distinguish invalidation from proven payload removal.
+
+Set `backfill_db_mirror: true` to validate tenant-local file-backed submissions, envelopes, and derived precheck records, then mirror submissions that are not already present in the configured DB. Backfill also covers hash-only utility attestations, settlement control-plane rows, NEAR credit outbox rows/status, benchmark registry outbox rows/status, ranking evidence/calibration rows, audit rows, and replay export manifests. Backfill isolates per-submission and per-export failures so one corrupt envelope, missing derived precheck, unreadable replay manifest, or malformed control-plane row does not block valid records; the maintenance response and audit metadata include `benchmark_artifacts_invalidated` and `db_mirror_backfill_failed` plus bounded failure details.
+
+Set `index_vectors: true` to publish deterministic canonical-summary vector metadata rows from accepted DB-mirrored derived records during a broader admin maintenance run. Non-dry-run vector indexing requires an active submitted-envelope object ref that can be read and hash-checked before the vector row is written, and mirrors the source object ref into the per-source content-read audit row.
+
+Set `reconcile_db_mirror: true` to return a tenant-scoped report comparing file-backed metadata counts, DB object/vector/export/tombstone counts, DB retention job/item counts, the just-written retention maintenance ledger row/item count, credit-ledger and canonical audit-event ID gaps, DB canonical audit-payload projection failures, credit-settlement/NEAR/benchmark-registry/ranking control-plane drift, active submitted-envelope object ref presence/readability/hash integrity, export manifest item object-ref gaps, active derived/export rows that still point at invalid sources, reader-projection parity for contributor, reviewer metadata, analytics, audit, and replay/export manifest surfaces, and compact `blocking_gaps`. Canonical DB audit projection drift is reported in `db_audit_canonical_projection_failures`, blocks clean reconciliation, and causes audit reader parity to record a safe DB error hash rather than exposing raw row contents. With `TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN=true`, maintenance requests that omit `reconcile_db_mirror: true` fail before maintenance side effects with `400 Bad Request`, reconciliation requests fail with `409 Conflict` until `blocking_gaps` is empty, and DB reader promotion cannot be configured without required mirror writes. Failed dirty reconciliation attempts still append the normal maintenance audit event after any completed maintenance work. Set `verify_audit_chain: true` to include a file-backed audit hash-chain integrity report plus, when a DB mirror is configured, a DB audit report with canonical-payload hash recomputation and projection checks for rows that carry `canonical_event_json`. Use `dry_run: true` to count valid backfill, benchmark artifact invalidation, or vector-index candidates without writing rows or artifacts.
+
+DB audit hash-chain drift is reported separately in `db_audit_hash_chain_failures` for invalid hash format, genesis/predecessor mismatch, and canonical-payload hash mismatch. It is also included in `blocking_gaps`, so clean reconciliation cannot pass when DB audit rows have matching IDs but broken hash continuity or payload hashes. Ordinary reviewer audit reads also recompute the hash-chained payload for each returned bounded row when chain fields are present, and reject incomplete or mismatched hash fields before returning file-backed or DB-backed audit pages.
+
+Reconciliation also compares a latest bounded audit-reader sample from the file log and DB mirror. Projection drift is reported as `audit_reader_sample_parity=failed` with only counts, event ids, and projection/error hashes in `audit_reader_sample_failures`, so operators can catch legacy DB audit rows whose ids and counts line up but whose reader-visible kind, status, actor, reason hash, export, or hash-chain fields do not.
+
+For credit settlement and benchmark registry cutover, the same maintenance run also backfills and reconciles utility attestations, credit settlement batches, credit holds, NEAR credit outbox rows/status, and benchmark registry outbox rows/status. Dirty gaps or status/release/receipt drift in any of those families are promotion blockers when `TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN=true` is enabled.
+
+Retention legal holds are service-configured by policy ID, not by trace submitters. A trace envelope can suggest a retention policy, but only the authenticated service configuration decides whether that policy is under legal hold. Review, maintenance, replay export, benchmark conversion, and ranker training source selection cross-check current server retention policy ids plus expiration timestamps against the server-derived retention class before reading trace bodies, skipping expiration, purging, or publishing derived/export outputs.
 
 Tenant tokens can be configured as either `tenant_id:token` for contributor access or `tenant_id:role:token` where role is `contributor`, `reviewer`, `admin`, `export_worker`, `retention_worker`, `vector_worker`, `benchmark_worker`, `utility_worker`, or `process_eval_worker`. Add `;expires_at=<RFC3339>` or `;expires=<RFC3339>` to either syntax for a short-lived static-token bridge while production identity claims are still being built. The service can also accept signed HS256 tenant claims when `TRACE_COMMONS_SIGNED_TOKEN_SECRET` is set, and EdDSA/Ed25519 signed claims when an EdDSA public key is configured; these claims bind tenant id, actor/principal, role, allowed consent scopes/uses, issuer, audience, JWT `sub`, and expiry in the bearer token instead of enumerating every token in service configuration. `TRACE_COMMONS_REQUIRE_EDDSA_SIGNED_TOKENS=true` turns static tokens and HS256 signed claims into rejected bridge credentials for all authenticated routes, including admin and worker routes. `TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS=true` is stricter: it also rejects default/ad hoc public-key config and accepts only active managed-keyset EdDSA claims with recognized `kid` headers plus issuer and audience checks. When tenant access grants are required, signed-claim issuer/audience/JWT `sub` values must match any corresponding grant fields before scopes/uses are applied; static-token bridge grants ignore these signed-claim-only binding fields. The claim allow-lists gate submission plus downstream exports, benchmark/ranker generation, process-evaluation labeling, worker utility-credit jobs, and utility-shaped manual delayed-credit mutations. Each static or signed token is treated as its own pseudonymous auth principal inside the tenant, and the principal hash excludes static-token expiry metadata. Reviewer/admin tokens can list tenant-local quarantine, approve or reject live quarantined submissions, append delayed credit events, view tenant analytics, and export approved replay dataset slices. Review decisions and delayed credit mutations require non-empty operator reasons; benchmark/regression/training/ranking delayed credit also requires the source trace and caller policy to permit the credited use. Review decisions fail closed for terminal, expired, non-quarantined, or aggregate-only-approval records before trace content is read. Contributor tokens can submit, revoke, read their own token-principal credit/events, and sync status for their known submission ids, but cannot review, view tenant-wide analytics, append credit events, or export datasets.
 
@@ -493,11 +1171,58 @@ On submit, the service also writes a derived redacted-only record with:
 
 - canonical summary and hash
 - hash-based duplicate precheck
-- placeholder novelty score for later vector replacement
+- deterministic redacted-summary novelty score for worker-side feature provenance
 - coverage tags for channel, tool, tool category, outcome, failure mode, and privacy risk
 - aggregate analytics by status, privacy risk, task success, tool, tool category, and coverage tag
 
-The current API remains intentionally file-backed under `TRACE_COMMONS_DATA_DIR` for compatibility and easy local operation, with optional DB-backed read flags for contributor, reviewer metadata, replay/export selection, and audit surfaces. This server repo owns the production storage path: optional DB dual-write metadata, optional encrypted local artifact storage, object-primary submit/review mode that avoids plaintext envelope body files while retaining file-backed metadata/audit compatibility records, a durable DB revocation-propagation ledger for downstream invalidation/retry work, and a fail-closed reconciliation gate for promotion jobs. `TRACE_COMMONS_OBJECT_STORE=remote_service` is a disabled production scaffold that requires remote provider/bucket/KMS/credential-reference configuration and refuses plaintext compatibility fallback until a real service-owned remote object-store backend is wired. The server-owned `V1__trace_commons_schema.sql` migration covers the tenant-scoped Trace Commons metadata tables without enabling `FORCE ROW LEVEL SECURITY` by default; config-status can report catalog-only RLS readiness, including policy counts, expression mismatches, disabled tables, force-RLS counts, force-RLS missing tables, whether the current role bypasses RLS, and a stricter production-ready boolean. Production deployments can set `TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY=true` to fail startup unless the configured PostgreSQL database is fully ready for RLS as an active tenant boundary. Production deployments still need transaction-local tenant context through every DB-backed runtime path before RLS can become the active trust boundary. Production deployments should finish promoting reviewer/export/analytics paths into DB/object-primary reads and move encrypted artifacts behind remote service-owned object storage before broad rollout.
+The current API remains intentionally file-backed under `TRACE_COMMONS_DATA_DIR`
+for compatibility and easy local operation, with optional DB-backed read flags
+for contributor, reviewer metadata, replay/export selection, and audit surfaces.
+This server repo owns the production storage path: optional DB dual-write
+metadata, optional encrypted local artifact storage, object-primary
+submit/review mode that avoids plaintext envelope body files while retaining
+file-backed metadata/audit compatibility records, a durable DB
+revocation-propagation ledger for downstream invalidation/retry work, Trace
+Credits settlement/hold/attestation/NEAR-outbox tables, ranking
+evidence/calibration tables, and a fail-closed reconciliation gate for promotion
+jobs. `TRACE_COMMONS_OBJECT_STORE=remote_service` now has a service-owned
+filesystem-backed remote adapter (`TRACE_COMMONS_REMOTE_OBJECT_STORE_PROVIDER=file_system`)
+for production-like object I/O rehearsals while AWS/GCS/Azure providers remain
+fail-closed behind the disabled remote alias. Enabled remote service storage
+requires provider/bucket-or-root/KMS/credential-reference configuration plus
+`TRACE_COMMONS_ARTIFACT_KEY_HEX`, refuses plaintext compatibility fallback, and
+can satisfy object-primary startup guards; disabled cloud-provider scaffolds
+still cannot. `TRACE_COMMONS_REMOTE_OBJECT_STORE_FILE_SYSTEM_VERSIONING=true`
+enables encrypted archive-on-delete plus restore rehearsal for the filesystem
+remote adapter. `TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING=true` is the
+separate cloud-cutover guard: startup fails unless the configured store also
+reports object versioning and restore-after-delete support, so local-service and
+default filesystem-remote fail closed while versioned filesystem-remote can run
+rollback drills before a cloud provider is compiled. The server-owned
+`V1__trace_commons_schema.sql` through
+`V18__trace_central_rls_tenant_predicate.sql` migrations cover the
+tenant-scoped Trace Commons metadata, credit-settlement control plane, ranking
+evidence substrate, persisted model-promotion calibration runs, settlement
+ranking gates, default `FORCE ROW LEVEL SECURITY` hardening for every Trace
+Commons RLS table, persisted label-source diversity evidence, per-source
+calibration error evidence for promotion gates, calibration joined-evidence
+hashes, settlement calibration evidence-hash binding, and the central
+`trace_current_tenant_id()` RLS policy predicate; config-status can report
+catalog-only RLS readiness, including policy counts, central-predicate
+expression mismatches, disabled tables, force-RLS counts, force-RLS missing
+tables, whether the current role bypasses RLS, whether the current role owns
+Trace Commons tables, and a stricter production-ready boolean. The
+admin operational summary and metrics promote unsafe RLS diagnostics into a
+`postgres_trace_rls_not_ready` promotion blocker while exposing only readiness
+booleans and aggregate counts, not table names.
+Production deployments can set `TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY=true`
+to fail startup unless the configured PostgreSQL database is fully ready for RLS
+as an active tenant boundary. Production deployments still need a non-bypassing
+non-owner runtime role plus transaction-local tenant context through every
+DB-backed runtime path before RLS can become the active trust boundary. Production
+deployments should finish promoting reviewer/export/analytics paths into
+DB/object-primary reads and move encrypted artifacts behind remote service-owned
+object storage before broad rollout.
 
 ## Production Hardening Roadmap
 
@@ -548,7 +1273,7 @@ The current implementation is a usable MVP for local development and controlled 
 
 - Generate embeddings only from redacted summaries and approved redacted trace fields. Never embed raw traces, sidecar raw text, or unreviewed high-risk content.
 - Keep vector ids tenant-scoped and source-linked so index entries can be deleted or invalidated on revocation/retention.
-- Replace placeholder novelty scoring with a private vector duplicate/novelty worker that records nearest neighbors, duplicate score, cluster id, and coverage contribution.
+- Promote deterministic novelty/duplicate scoring into private vector-backed feature workers. The vector worker can now use a private embedder, compatible stored vector payloads, and an optional private vector-search adapter whose candidate ids are revalidated against active tenant DB vector metadata before they affect nearest-neighbor, cluster, duplicate, or novelty fields. Operational summary, metrics, and `/v1/admin/vector-index-drill` now flag active vector entries whose stored nearest-neighbor refs cannot be resolved to an active compatible vector profile, so cross-model or stale duplicate/novelty evidence blocks promotion. The first ranking feature worker already reserves `feature_provenance:server_derived`, can require active vector metadata for vector-backed duplicate/novelty inputs, and can be required for prediction-credit, readiness, and settlement with `TRACE_COMMONS_RANKING_REQUIRE_SERVER_FEATURE_PROVENANCE=true`; production still needs deployed vector-store operations and rehearsed canary evidence.
 - Add ranking/model-utility jobs as offline analysis. Their outputs may append delayed credit events, but should not become immediate automatic payment signals.
 - Convert approved traces into benchmark/replay datasets through a controlled job that records consent scope, review state, redaction version, deterministic replay requirements, and export manifest id.
 - Require benchmark conversion to fail closed when the trace is revoked, expired, not approved for the target use, or missing replayability metadata.
@@ -653,17 +1378,17 @@ The web settings panel includes a Trace Commons tab for standing opt-in, autonom
 | Web Trace Commons settings and preview endpoints | Implemented MVP | Authenticated gateway endpoints and UI controls exist; server-side tenant/user checks remain the trust boundary, and queue/manual-submit paths preflight scoped opt-in policy before enqueueing. |
 | Private ingestion service | Implemented MVP | Development/internal binary validates schema, reruns redaction, computes hashes/credit, enforces optional contributor-only tenant/principal hourly submission quotas for autonomous uploads, stores accepted/quarantined records, and serves review/status/export routes, including reviewer trace-list filtering by export/provenance purpose. It can now dark-launch DB dual-write metadata and encrypted envelope artifacts. |
 | Tenant token roles | Partial | Static tenant tokens support contributor/reviewer/admin plus scoped export, retention, vector, and benchmark worker behavior; benchmark, retention, and vector workers now have dedicated `/v1/workers/benchmark-convert`, `/v1/workers/retention-maintenance`, and `/v1/workers/vector-index` routes as well as CLI helpers for those scoped routes and scoped compatibility routes where needed; optional `expires_at`/`expires` RFC3339 attributes reject stale bearer tokens before tenant attribution while preserving principal hashes over the token secret only; optional HS256 signed tenant claims bind tenant id, actor principal, role, issuer/audience when configured, allowed submission consent scopes/uses, expiry, optionally bounded `exp - iat` lifetime, and optional required `jti` claim without enumerating every bearer token; optional EdDSA/Ed25519 signed claims can be verified with default, `kid`-selected public keys, or local/file/guarded-HTTPS keysets with activation windows, config status exposes safe total/EdDSA active/inactive/managed key-count aggregates plus guarded remote keyset refresh health without key material, production-like deployments can require EdDSA signed tokens so static and HS256 bridge credentials are rejected on every authenticated route, and stricter deployments can require managed EdDSA keysets so only active `kid`-selected issuer/keyset claims are accepted while refreshing guarded HTTPS keysets live after startup; required tenant access grants can bind signed EdDSA claims to issuer, audience, and JWT `sub` without affecting static-token bridge grants; autonomous and explicit-submit clients can refresh short-lived EdDSA upload claims from a guarded HTTPS issuer instead of storing long-lived Trace Commons bearer tokens; optional tenant submission policies can restrict allowed consent scopes and trace-card uses at ingest and export time, DB-backed tenant policy records can drive submission and export policy reads behind `TRACE_COMMONS_DB_TENANT_POLICY_READS`, admin tokens can manage the current tenant's DB-backed contribution policy via `/v1/admin/tenant-policy` or the `ironclaw traces tenant-policy-get/set` CLI helpers, policy admin reads/writes are audited with safe hash-only policy metadata, and production-like deployments can require every submitting/exporting tenant to have a policy entry. Fuller central policy, RBAC/ABAC, and row-level tenant enforcement hardening remain. |
-| Contributor credit ledger and delayed credit sync | Partial | Append-only local and central credit events exist, pending submission estimates are kept separate from settled final/ledger credit, reviewer/admin delayed credit mutation requires a reason and can resolve submission metadata through the DB reviewer read path when file metadata has been removed, utility-shaped manual delayed credit for benchmark conversion, regression catches, model training, and ranking training now enforces source allowed-use plus tenant-policy and signed-claim ABAC before writing ledger rows, benchmark conversion plus ranker candidate and pair exports append idempotent delayed utility credit with external artifact/job refs, DB credit events preserve training-vs-ranking utility types, terminal traces retain ledger events for audit but exclude those deltas from contributor totals, DB audit rows include typed credit-mutation metadata with hashed reason/reference fields, maintenance reconciliation reports file/DB ledger event ID gaps, and autonomous clients periodically notify opted-in users when submitted or later-revoked records receive ledger changes, including delayed ledger deltas and credit-event counts. Production needs anti-abuse review and stricter settlement policy. |
-| Quarantine/review workflow | Partial | Reviewer/admin routes can list and decide on quarantined redacted traces; quarantine and active-learning queue items expose reviewer SLA/escalation metadata (`review_age_hours`, `review_escalation_state`, and `review_escalation_reasons`) plus optional DB-backed review lease assignment fields for prioritized triage; queue reads can filter lease state with `all`, `mine`, `available`, `active`, or `expired`; review decisions require a non-empty reason, cannot bypass another active reviewer lease, and are rejected for non-quarantined, terminal, expired, or aggregate-only approval records before trace content is read; with DB reviewer reads enabled, reviewers/admins can claim or release durable tenant/principal-scoped leases, review decisions resolve submitted-envelope bodies through active DB object refs when available, can be configured to require active object refs, emit content-read audit rows, and mirror the reviewed envelope body as a fresh `review_snapshot` object ref without reclassifying the original submitted envelope; object-primary submit/review mode can also skip plaintext submitted/reviewed envelope body files. Production still needs richer assignment policy, batch actions, and central reviewer routing. |
-| Replay dataset export | Partial | Approved redacted slices can be exported by reviewer/admin tokens, production-like deployments can require explicit accepted/low-risk/consent-scoped export guardrails for replay, benchmark, and ranker-training exports plus caller-supplied export purposes and active DB object refs for body reads, tenant policy allowed-use ABAC gates replay/benchmark/ranker requests and source selection, and each export call site now goes through a short-lived tenant/principal/purpose/dataset-kind access-grant check before building replay, benchmark, or ranker slices. DB metadata can drive replay export selection, benchmark/ranker exports can fail closed when selected sources lack active submitted-envelope object refs, submitted envelope bodies can resolve through active DB object refs for file or encrypted local artifact stores, object-primary replay export mode can require service-local DB object refs with no file fallback, manifests carry source-list hashes mirrored into audit `decision_inputs_hash`, replay/benchmark/ranker exports mirror durable one-shot grant rows plus running/complete export job rows, replay exports mirror compact DB manifest rows and per-source item snapshots with source object refs plus invalidation timestamps, benchmark/ranker item rows link derived refs, active vector refs when indexed, and per-source object refs to file-backed or service-local encrypted benchmark/ranker artifacts, reviewer/admins can list replay manifest metadata, and each exported trace body read emits a tenant-scoped audit event. Production needs persistent background export workers, remote object storage, broader bulk export controls, and execution of revocation propagation for already-published artifacts. |
-| Analytics summary | Partial | Aggregate counts by status/risk/tool/coverage exist, including content-free process-evaluation aggregates for evaluated trace count, labels, rubric ratings, and score bands. Deployments can set a minimum cell-count threshold to suppress rare aggregate buckets before responses leave the service. Production still needs fuller privacy-budget accounting if exposed broadly. |
-| Production relational DB and encrypted object storage | Partial | Server-owned V1 PostgreSQL schema, server-owned `TraceCorpusStore`, the `PgBackend` implementation, optional ingest DB mirror with contributor, tenant policy, reviewer metadata, durable review lease fields, replay selection reads, policy-gated DB object-ref-backed replay envelope reads, vector-entry metadata, compact replay export manifest metadata, replay export item snapshots, durable retention job/item ledger rows, durable revocation-propagation item rows, backend-enforced same-tenant/submission checks for derived object refs, vector-entry derived refs, and export item derived/object/vector refs, benchmark/ranker export artifact object refs, atomic export manifest/object-ref/item mirror writes inside PostgreSQL with rollback coverage for invalid item references, canonical audit payloads for DB verifier recomputation, DB-native audit append ordering, encrypted local artifact sidecar, `TraceArtifactStore` provider trait, service-owned local encrypted object-store mode, disabled remote-service object-store config scaffold, tenant-allowlisted rollout gates for DB reads/object-ref requirements/object-primary modes, object-primary submit/review mode for plaintext-free envelope body storage, object-primary replay export object-ref read mode, service-local submitted/review envelope physical-delete execution from revocation-propagation items, maintenance-triggered DB mirror backfill for submissions plus existing file-side credit/audit/replay-manifest rows with isolated per-item failure reporting, derived presence/status/hash/invalid-source diagnostics, file/DB credit-ledger and canonical audit-event ID gap diagnostics, split export-manifest kind diagnostics, export item object-ref and invalid-source diagnostics, separate object-ref presence/readability/hash-mismatch diagnostics, vector index gap diagnostics, reader-projection parity diagnostics, initial PostgreSQL tenant RLS policies, and safe PostgreSQL RLS readiness diagnostics exist. Remote object storage implementation, parity enforcement, `FORCE RLS`/service role policy hardening, and broader object-primary reads remain. |
-| Central audit log | Partial | File-backed audit rows now include optional hash-chain fields plus a maintenance verifier while preserving legacy JSONL compatibility, DB audit rows mirror those chain hashes and canonical hash payloads for file-backed events, and PostgreSQL audit rows now carry tenant-scoped `audit_sequence` values assigned inside serialized append transactions that reject stale hash-chain predecessors. Maintenance emits a DB mirror report that checks hash-field format, previous-hash linkage, canonical-payload hash recomputation, DB action/metadata projection drift, and file/DB canonical audit-event ID gaps for mirrored rows. Audit routes and optional DB audit reads cover core submit/review/credit/revoke mutations, contributor credit/status reads with aggregate item counts, retention/purge artifact invalidations, tenant policy admin reads/writes, reviewer analytics/list/review-queue/audit-log reads, dataset/benchmark/ranker exports, per-trace replay export content reads, process-evaluation writes, and per-source derived-summary reads for benchmark conversion, ranker candidate/pair exports, and vector indexing. `object_ref_id` is mirrored when the body is read through a DB object ref; derived-summary read rows carry only safe surface/purpose/source identifiers. Privileged delayed credit, process-evaluation writes, review lease claim/release operations, and tenant policy mutations now mirror typed safe metadata with bounded values and hashes rather than raw request bodies. |
-| Retention enforcement | Partial | Submit records persist retention policy ids and expiry timestamps; maintenance and the dedicated retention worker route mark expired submissions and derived records, mirror DB expiration/artifact/export-manifest invalidation with typed action-count audit rows and durable retention job/item ledger rows when configured, prune cached exports that reference expired sources, skip expiration/purge for operator-configured legal-hold retention policy IDs, and can explicitly purge expired file/encrypted local artifact copies by cutoff only when non-dry-run purge requests carry a non-empty purpose. Production still needs service-owned object storage deletion workflows. |
-| Revocation propagation to derived artifacts | Partial | Current revocation marks local/file status, mirrors DB status, writes tenant-scoped first-writer-wins tombstones with redaction/canonical-summary hashes when available, authorizes DB-only revocation against the original contributor or reviewer/admin principal, rejects same-tenant re-ingest matching retained file-backed or DB-mirrored tombstone submission ids, redaction hashes, or canonical-summary hashes, invalidates DB-mirrored object refs, derived precheck rows, vector metadata entries, replay export manifest rows, replay export item rows, file-backed benchmark/ranker provenance manifests, and published benchmark artifacts by moving their registry state to revoked and evaluation state to inconclusive, blocks file-backed replay export, applies the same DB invalidation path when maintenance discovers an existing file-backed revocation tombstone or already file-marked revoked submission, and can physically delete service-local encrypted submitted/review envelope payloads from exact tenant-scoped object-ref revocation items while marking unsupported stores/artifact kinds as skipped. Production must invalidate external benchmark registries and worker caches. |
-| Vector duplicate/novelty index | Partial | DB schema, storage contract, dedicated vector worker route, maintenance-triggered metadata indexer, object-ref/readability gating before non-dry-run vector writes, per-source vector-index content-read audits with source object refs, and reconciliation gap diagnostics now persist/vector-check vector-entry metadata, nearest trace ids, cluster id, duplicate score, novelty score, and invalidation state for accepted canonical summaries. Duplicate/novelty scoring now uses deterministic redacted-summary similarity with exact-hash matches as the strongest signal, and encrypted artifact storage can persist a redacted canonical-summary vector payload as a worker-intermediate object ref for later embedding-worker promotion. Real embedding generation, vector payload search, and model-backed duplicate/novelty workers are still future work. |
-| Ranking/model utility pipeline | Partial | A trusted offline utility-credit worker route and CLI helper append idempotent delayed credit for accepted traces using `regression_catch`, `training_utility`, or `ranking_utility` plus an external job/artifact reference. Model-specific utility analysis and production settlement policy remain. |
-| Benchmark conversion pipeline | Partial | Reviewer/admin conversion and the dedicated benchmark worker route can produce tenant-scoped benchmark candidate artifacts with schema-versioned registry/evaluation lifecycle metadata, consent/status/risk filters, source-list hashes, immediate DB source-status revalidation, audit events, per-source derived-summary read audits, derived artifact refs, durable provenance manifests that revocation/maintenance can invalidate, idempotent utility credit events, audited lifecycle updates for registry/evaluator state in file-backed and object-primary modes, and source-invalidation propagation that lifecycle-revokes published benchmark artifacts. The CLI now has `benchmark-lifecycle-update` for worker/reviewer automation against that lifecycle endpoint. Production still needs automated registry publication jobs, evaluator orchestration, and external benchmark registry invalidation. |
+| Contributor credit ledger and delayed credit sync | Partial | Append-only local and central credit events exist, pending submission estimates are kept separate from settled final/ledger credit, reviewer/admin delayed credit mutation requires a reason and can resolve submission metadata through the DB reviewer read path when file metadata has been removed, utility-shaped manual delayed credit for benchmark conversion, regression catches, model training, and ranking training now enforces source allowed-use plus tenant-policy and signed-claim ABAC before writing ledger rows, benchmark conversion plus ranker candidate and pair exports append idempotent delayed utility credit with external artifact/job refs, DB credit events preserve training-vs-ranking utility types, terminal traces retain ledger events for audit but exclude those deltas from contributor totals, DB audit rows include typed credit-mutation metadata with hashed reason/reference fields, maintenance reconciliation reports file/DB ledger event ID gaps, settlement can enforce a configured per-account credit cap before final batches or NEAR outbox rows are created, operational summary/metrics block positive delayed-credit settlement promotion when that issuer cap is missing, and autonomous clients periodically notify opted-in users when submitted or later-revoked records receive ledger changes, including delayed ledger deltas and credit-event counts. Production still needs broader fraud-review operations and issuer policy governance. |
+| Quarantine/review workflow | Partial | Reviewer/admin routes can list and decide on quarantined redacted traces; quarantine and active-learning queue items expose reviewer SLA/escalation metadata (`review_age_hours`, `review_escalation_state`, and `review_escalation_reasons`) plus optional DB-backed review lease assignment fields for prioritized triage; queue reads can filter lease state with `all`, `mine`, `available`, `active`, or `expired`; the routing summary exposes safe aggregate pressure, lease state, escalation, privacy-risk, and hash-only assignee load counts for central triage; review decisions require a non-empty reason, cannot bypass another active reviewer lease, and are rejected for non-quarantined, terminal, expired, or aggregate-only approval records before trace content is read; bounded batch decisions can apply one common approve/reject action to up to 50 explicit submission ids while preserving the same per-item lease, ABAC, body-read, object-ref, mirror, and audit path; with DB reviewer reads enabled, reviewers/admins can claim or release durable tenant/principal-scoped leases, review decisions resolve submitted-envelope bodies through active DB object refs when available, can be configured to require active object refs, emit content-read audit rows, and mirror the reviewed envelope body as a fresh `review_snapshot` object ref without reclassifying the original submitted envelope; object-primary submit/review mode can also skip plaintext submitted/reviewed envelope body files. Production still needs richer assignment policy and external reviewer-router integrations. |
+| Replay dataset export | Partial | Approved redacted slices can be exported by reviewer/admin tokens, production-like deployments can require explicit accepted/low-risk/consent-scoped export guardrails for replay, benchmark, and ranker-training exports plus caller-supplied export purposes and active DB object refs for body reads, tenant policy allowed-use ABAC gates replay/benchmark/ranker requests and source selection, and each export call site now goes through a short-lived tenant/principal/purpose/dataset-kind access-grant check before building replay, benchmark, or ranker slices. DB metadata can drive replay export selection, benchmark/ranker exports can fail closed when selected sources lack active submitted-envelope object refs, submitted envelope bodies can resolve through active DB object refs for file or enabled service-owned artifact stores, object-primary replay export mode can require service-owned DB object refs with no file fallback, manifests carry source-list hashes mirrored into audit `decision_inputs_hash`, replay/benchmark/ranker exports mirror durable one-shot grant rows plus running/complete job rows, export workers can claim/run queued replay, benchmark, and ranker jobs with bounded retries, and an optional in-process export scheduler can run the same authenticated retry/drain loop while config/status, operational summary, and metrics expose only safe scheduler readiness. Stale running export jobs surface as operational promotion blockers once their grant expiry has passed, replay exports mirror compact DB manifest rows and per-source item snapshots with source object refs plus invalidation timestamps, benchmark/ranker item rows link derived refs, active vector refs when indexed, and per-source object refs to file-backed or service-owned encrypted benchmark/ranker artifacts, reviewer/admins can list replay manifest metadata, and each exported trace body read emits a tenant-scoped audit event. Production needs cloud remote object storage, broader bulk export controls, rollout hardening, and execution of revocation propagation for already-published artifacts. |
+| Analytics summary | Partial | Aggregate counts by status/risk/tool/coverage exist, including content-free process-evaluation aggregates for evaluated trace count, labels, rubric ratings, and score bands. Process-evaluation workers can also attach idempotent hash-only ranking labels for ranking-allowed traces, while still blocking disallowed target uses before trace-body reads. Deployments can set a minimum cell-count threshold to suppress rare aggregate buckets before responses leave the service, analytics responses include privacy-budget accounting with released/suppressed cell counts, suppression status, broad-release blocker reasons, keyed count-noise metadata, and optional epsilon ledger fields, and `release_scope=broad` fails closed unless the privacy budget is broad-release ready, broad-release noise is configured, and the configured epsilon cap is not exhausted. Operational summary, operational metrics, rollout-smoke, and `POST /v1/admin/analytics-release-drill` now expose safe analytics-release readiness and hash-only evidence without leaking the noise key or raw aggregate maps. A rigorous DP mechanism/proof remains future work before stronger public publication claims. |
+| Production relational DB and encrypted object storage | Partial | Server-owned V1 PostgreSQL schema, server-owned `TraceCorpusStore`, the `PgBackend` implementation, optional ingest DB mirror with contributor, tenant policy, reviewer metadata, durable review lease fields, replay selection reads, policy-gated DB object-ref-backed replay envelope reads, vector-entry metadata, compact replay export manifest metadata, replay export item snapshots, durable retention job/item ledger rows, durable revocation-propagation item rows, durable hash-only benchmark registry outbox rows, backend-enforced same-tenant/submission checks for derived object refs, vector-entry derived refs, and export item derived/object/vector refs, benchmark/ranker export artifact object refs, atomic export manifest/object-ref/item mirror writes inside PostgreSQL with rollback coverage for invalid item references, canonical audit payloads for DB verifier recomputation, DB-native audit append ordering, encrypted local artifact sidecar, `TraceArtifactStore` provider trait, service-owned local encrypted object-store mode, filesystem-backed remote-service object-store mode plus disabled cloud-provider config scaffold, tenant-allowlisted rollout gates for DB reads/object-ref requirements/object-primary modes, object-primary submit/review mode for plaintext-free envelope body storage, object-primary replay export object-ref read mode, service-owned submitted/review envelope physical-delete execution from revocation-propagation items, maintenance-triggered DB mirror backfill for submissions plus existing file-side credit/audit/replay-manifest/registry-outbox rows with isolated per-item failure reporting, derived presence/status/hash/invalid-source diagnostics, file/DB credit-ledger and canonical audit-event ID gap diagnostics, split export-manifest kind diagnostics, export item object-ref and invalid-source diagnostics, benchmark registry outbox gap/status diagnostics, separate object-ref presence/readability/hash-mismatch diagnostics, vector index gap diagnostics, reader-projection parity diagnostics, initial PostgreSQL tenant RLS policies, default `FORCE RLS` migration coverage, centralized `trace_current_tenant_id()` policy predicates, and safe PostgreSQL RLS readiness diagnostics exist. Cloud remote object storage implementation, parity enforcement, non-bypassing service-role hardening, and broader object-primary reads remain. |
+| Central audit log | Partial | File-backed audit rows now include optional hash-chain fields plus a maintenance verifier while preserving legacy JSONL compatibility, DB audit rows mirror those chain hashes and canonical hash payloads for file-backed events, and PostgreSQL audit rows now carry tenant-scoped `audit_sequence` values assigned inside serialized append transactions that reject stale hash-chain predecessors. Maintenance emits a DB mirror report that checks hash-field format, previous-hash linkage, canonical-payload hash recomputation, DB action/metadata projection drift, file/DB canonical audit-event ID gaps, DB canonical-payload projection failures, and submitted-audit privacy-risk metadata drift for mirrored rows; projection drift is a named blocking reconciliation gap and audit-reader parity records only a safe error hash. Audit routes and optional DB audit reads cover core submit/review/credit/revoke mutations, contributor credit/status reads with aggregate item counts, retention/purge artifact invalidations, tenant policy admin reads/writes, reviewer analytics/list/review-queue/audit-log reads, dataset/benchmark/ranker exports, per-trace replay export content reads, process-evaluation writes, and per-source derived-summary reads for benchmark conversion, ranker candidate/pair exports, and vector indexing. Reviewer audit-log reads apply the response limit at the storage boundary, using a bounded file tail or tenant-scoped PostgreSQL `audit_sequence DESC LIMIT` query instead of decoding every audit row for ordinary pages. Aggregate read rows now mirror typed safe metadata with only a code-owned surface and bounded item count; `object_ref_id` is mirrored when the body is read through a DB object ref; trace-content-read rows now mirror typed safe metadata with a code-owned surface and optional purpose hash instead of raw purpose text, and the DB mirror boundary derives or validates that metadata from the hash-only reason fields before write. Submitted audit backfill now preserves typed privacy-risk metadata from matching submission records, and reconciliation reports stale submitted-audit privacy-risk metadata as `db_audit_submission_metadata_mismatches`. Revocation audit rows now carry typed metadata with only the revocation reason hash, while preserving the existing audit reason string for operator review. Canonical reconciliation also compares trace-content-read metadata back to its canonical reason and revocation metadata back to the canonical reason hash so stale typed metadata cannot hide behind a matching raw reason string. Derived-summary read rows carry only safe surface/purpose/source identifiers. Privileged delayed credit, process-evaluation writes, review lease claim/release operations, and tenant policy mutations now mirror typed safe metadata with bounded values and hashes rather than raw request bodies. |
+| Retention enforcement | Partial | Submit records persist server-derived retention policy ids and expiry timestamps; review, maintenance, replay export, benchmark conversion, and ranker source selection reject current server retention policy rows that claim a mismatched policy id or extend `expires_at` beyond the allowed-use-derived retention window; maintenance and the dedicated retention worker route mark expired submissions and derived records, mirror DB expiration/artifact/export-manifest invalidation with typed action-count audit rows and durable retention job/item ledger rows when configured, prune cached exports that reference expired sources, skip expiration/purge for operator-configured legal-hold retention policy IDs only after the stored policy id matches the server-derived allowed-use retention class, and can explicitly purge expired file-backed plaintext bodies plus service-owned encrypted local or filesystem-remote submitted-envelope artifacts by cutoff only when non-dry-run purge requests carry a non-empty purpose. Production still needs cloud remote object-storage deletion workflows and broader purge rehearsal. |
+| Revocation propagation to derived artifacts | Partial | Current revocation marks local/file status, mirrors DB status, writes tenant-scoped first-writer-wins tombstones with redaction/canonical-summary hashes when available, authorizes DB-only revocation against the original contributor or reviewer/admin principal, rejects same-tenant re-ingest matching retained file-backed or DB-mirrored tombstone submission ids, redaction hashes, or canonical-summary hashes, invalidates DB-mirrored object refs, derived precheck rows, vector metadata entries, replay export manifest rows, replay export item rows, file-backed benchmark/ranker provenance manifests, and published benchmark artifacts by moving their registry state to revoked and evaluation state to inconclusive plus enqueueing a hash-only external-registry revoke row, blocks file-backed replay export, applies the same DB invalidation path when maintenance discovers an existing file-backed revocation tombstone or already file-marked revoked submission, and can physically delete service-owned encrypted submitted/review envelope payloads from exact tenant-scoped object-ref revocation items while marking unsupported stores/artifact kinds as skipped. Production must still invalidate worker caches. |
+| Vector duplicate/novelty index | Partial | DB schema, storage contract, dedicated vector worker route, maintenance-triggered metadata indexer, object-ref/readability gating before non-dry-run vector writes, per-source vector-index content-read audits with source object refs, admin-safe vector-entry metadata listing, and reconciliation gap diagnostics now persist/vector-check vector-entry metadata, nearest trace ids, cluster id, duplicate score, novelty score, and invalidation state for accepted canonical summaries. Duplicate/novelty scoring still keeps exact canonical-summary hash matches as the strongest local signal and falls back to deterministic redacted-summary similarity, but the vector worker can now call a trusted private embedding adapter for payload embeddings, persist adapter model/version/dimension/vector-store metadata, fail closed when external embeddings are required, use readable compatible vector payload artifacts for model-backed nearest-neighbor scoring with `embedding:` cluster ids, and query a trusted private vector-search adapter whose response ids are revalidated against active tenant DB vector metadata before use. Operational readiness and the vector-index drill flag stored nearest-neighbor policy gaps when active vector refs are stale or point across incompatible model/store/dimension/version profiles. Deployed vector-store operations and rehearsed canary evidence are still future work. |
+| Ranking/model utility pipeline | Partial | A trusted offline utility-credit worker route and CLI helper append idempotent delayed credit for accepted traces using `regression_catch`, `training_utility`, or `ranking_utility` plus an external job/artifact reference. Ranking workers can write hash-only immutable model manifests, feature hashes, predictions, frontier/reviewer/system evaluator labels, and persisted calibration runs with aggregate quality gates, registered calibration-dataset binding, optional fail-closed holdout registry enforcement through `TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY`, deterministic joined-evidence hashes, server-owned joined-label/confidence/error quality gates, configurable label-source diversity, configurable pairwise evidence/accuracy thresholds, and per-source cohort error gates before model-derived credit is trusted; admins can stage `candidate` models freely, and the admin promotion endpoint activates candidates only when the requested model/policy/target-use/calibration-dataset run is promotable, the latest matching evidence is still promotable, the holdout registry gate is satisfied, and any configured calibration freshness window is satisfied; dry-run promotion responses expose hash-only holdout readiness fields for stored calibration evidence, current recomputed evidence, effective thresholds, errors, low-confidence counts, and reason codes before activation. Dataset-readiness reports group latest model manifests by registered holdout calibration dataset hash and expose candidate/active status counts, target-use readiness, current evidence hashes, thresholds, holdout-registry blockers, errors, and blocker reason counts. Model manifests must use disjoint training/calibration dataset hashes, and active-model risk reports block legacy overlaps under `training_calibration_dataset_overlap`, missing required holdout registrations under `calibration_dataset_not_registered`, and retired holdouts under `calibration_dataset_retired`. Process-evaluation workers can emit idempotent system ranking labels from rubric output only for sources that are allowed for the requested ranking target, storing evidence/external-ref hashes rather than raw evaluator notes; the batch run route can call a configured process-evaluator adapter over derived summaries and hashes and fail closed when the adapter is required but absent. The dedicated ranking prediction-credit worker converts a positive active-model prediction settlement score into one idempotent `ranking_utility` event bound to `ranking_prediction:<uuid>` only while the model's matching calibration dataset remains promotable and fresh under `TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS` when configured and the active model/target has no current model-risk report codes; the batch run endpoint lets schedulers scan stored predictions with bounded forward progress and idempotent retries while blocking uncleared active-model risk by default and reporting risk-code skip counts. Scoped calibration-run, model-promotion, prediction-credit, and credit-cycle batch runs now persist hash-only worker-run lifecycle rows with running/completed/failed status, limits, counts, result refs, skip reason aggregates, and safe fatal-error hashes for admin review. The credit-cycle worker sequences those ranking automation steps with credit settlement and NEAR outbox dry-run/live submit/confirm checks for one model/policy/target and rejects overlapping live non-stale cycles for the same filters. Ranking utility settlement requires the named model to be active with a latest promotable calibration run for the settlement policy/target use and the active model's registered calibration dataset, with no uncleared active-model risk codes, and only fresh prediction-bound ranking credit events can settle. Admin model-risk, credit-readiness, worker-run, operational-summary, and operational-metrics surfaces now expose active-model risk, blocked ranking-credit counts, automation history, worker skip totals and reason aggregates, promotion-gate warnings for actionable worker skips, stale running and failed worker-run blockers, blocker reason aggregates, safe promotion-gate read-audit counts, safe Prometheus-text promotion and operational dashboard gauges, aggregate and per-gate structured warning logs for non-clean promotion gates, the `POST /v1/admin/ranking/readiness-drill` hash-only smoke proof, and a rollout-smoke preflight evidence-gap block without raw trace or lab evidence. Production still needs deployed evaluator operations, curated gold/holdout dataset stewardship, and broader evaluator cohort management. |
+| Benchmark conversion pipeline | Partial | Reviewer/admin conversion and the dedicated benchmark worker route can produce tenant-scoped benchmark candidate artifacts with schema-versioned registry/evaluation lifecycle metadata, consent/status/risk filters, source-list hashes, immediate DB source-status revalidation, audit events, per-source derived-summary read audits, derived artifact refs, durable provenance manifests that revocation/maintenance can invalidate, idempotent utility credit events, audited lifecycle updates for registry/evaluator state in file-backed and object-primary modes, a benchmark-worker evaluation batch route that records deterministic passed/failed evaluator metadata or calls a configured external evaluator adapter without publishing, a benchmark-worker registry publication batch route that publishes only passed evaluator artifacts through the same lifecycle guard, server-enforced publication only after passed evaluator metadata with registry/evaluator refs and score, durable hash-only benchmark registry publish/revoke outbox rows with admin listing, configured adapter submission and confirmation, and worker/manual status marking, maintenance backfill/reconciliation coverage for registry outbox drift, operational-summary readiness counts for candidate, evaluated, publishable, published, revoked, registry outbox status, registry-submitter-configured, registry-confirmer-configured, pending-without-submitter, submitted-without-confirmer, external-evaluator-configured, publishable-without-external-evaluator, external-registry-adapter-gap, and external-registry-invalidation-gap states, promotion blockers for publishable benchmark artifacts when no external evaluator adapter is configured, pending registry outbox rows when no submitter is configured, submitted registry outbox rows when no confirmer is configured, and published or revoked benchmark artifacts whose external registry outbox receipts are not confirmed, and source-invalidation propagation that lifecycle-revokes published benchmark artifacts and enqueues external-registry revoke rows. The CLI now has `benchmark-lifecycle-update` for worker/reviewer automation against that lifecycle endpoint. Production still needs deployed external evaluator and registry adapter operations. |
 | Production sidecar operations | Partial | Sidecar launches now use timeout/IO limits, minimal environment inheritance, stderr hashing, non-fatal deterministic fallback, safe output projection with allow-listed span labels, and canary-secret regression coverage. Production still needs container sandboxing and deployment-specific sidecar isolation. |
 
 ## Credit
@@ -701,6 +1426,77 @@ Authorization: Bearer <reviewer-token>
 }
 ```
 
+Model-derived ranking utility credit uses the prediction-bound route:
+
+```http
+POST /v1/workers/ranking/prediction-credit
+Authorization: Bearer <utility-credit-worker-token>
+
+{
+  "ranking_prediction_id": "018f2b7b-0c11-72fd-95c4-1f9f98feac01",
+  "reason": "active model prediction selected for credit"
+}
+```
+
+The route reads the stored prediction, verifies that its source is still an
+accepted trace allowed for the prediction target use, requires the latest
+registered model version to be `active` with matching policy and feature schema,
+requires the latest matching calibration run to be promotable and fresh when
+`TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS` is set, requires a positive
+settlement score, requires the active model/target pair to have no current
+model-risk report codes, and appends a single idempotent `ranking_utility` event
+whose external reference is `ranking_prediction:<uuid>`.
+
+Production schedulers can call `POST /v1/workers/ranking/prediction-credit/run`
+with a non-empty `reason`, optional `limit`, and optional `model_version`,
+`target_use`, or `policy_version` filters. Live non-dry-run requests first
+reject overlapping active prediction-credit runs for the same tenant and broad
+or narrow matching filters with `409 Conflict`; runs older than
+`ranking_worker_run_stale_after_hours` no longer block retry, but still surface
+as operational blockers until recovered. The run endpoint scans stored
+predictions in creation order, skips already-credited predictions without
+consuming the batch limit, blocks uncredited predictions for active model/target
+pairs with uncleared model-risk report codes unless `allow_at_risk_models` is
+explicitly set, applies the same active-model/calibration/source checks as the
+single-prediction route, and reports checked, credited, already-existing,
+model-risk-skipped, ineligible, still-pending, and blocked-risk reason counts so
+a retrying scheduler can make bounded forward progress without double-crediting
+or minting credits from stale/drifted ranking evidence.
+
+Production credit schedulers that want the full ranking-to-settlement sequence
+can call `POST /v1/workers/credit-cycle/run` with a non-empty `reason`, one
+`model_version`, one `policy_version`, one `target_use`, optional per-step
+limits, optional calibration thresholds, and optional `near_contract_id`. The
+coordinator requires a utility worker, then delegates to the existing bounded
+calibration-run, model-promotion, prediction-credit, credit-settlement, and NEAR
+outbox submit/confirm workers in that order. It records its own `credit_cycle`
+worker-run lifecycle row, rejects overlapping live non-stale cycles for the same
+model/policy/target, and result-refs the delegated ranking worker runs plus the
+settlement batch. `submit_near_outbox` and `confirm_near_outbox` both default to false, so the final NEAR steps
+inspects pending NEAR payloads as a dry-run unless the operator explicitly asks
+the trusted relayer submission or confirmation step to run live.
+
+For unattended cron-style operation, utility workers can call
+`POST /v1/workers/credit-cycle/scheduler/run` instead. The scheduler takes one
+`target_use`, optional `model_version` and `policy_version` filters, the same
+per-step limits and NEAR options as the direct coordinator, and a bounded
+`limit` for candidate selection. It scans latest candidate and active models,
+prefers candidates before active models, skips any model/policy/target that
+already has a live non-stale `credit_cycle` worker-run claim, and runs a
+read-only calibration preflight before creating a direct cycle claim. Candidates
+with no matching prediction evidence, no target labels, no labels that join to
+the model's matching predictions, non-promotable current calibration evidence,
+or uncleared pairwise evidence/accuracy policy risk are reported as scheduler
+skips without creating credit-cycle worker rows, credit events, settlement
+batches, or NEAR outbox items. The response reports
+checked, started, skipped, active-claim skipped, still-pending, and skip-reason
+counts plus a per-candidate decision list and the nested cycle responses.
+Requests with `preflight_only: true` stop after eligibility checks and return
+`eligible`/`skipped` decisions without invoking the direct coordinator or
+creating worker rows, credit events, settlement batches, or NEAR outbox rows.
+This gives external schedulers a safe retry surface without granting generic
+admin settlement access.
+
 Trusted offline utility workers use a narrower bulk route for accepted traces:
 
 ```http
@@ -711,7 +1507,7 @@ Authorization: Bearer <utility-credit-worker-token>
   "event_type": "ranking_utility",
   "credit_points_delta": 1.25,
   "reason": "ranking eval utility",
-  "external_ref": "ranker:nightly-42",
+  "external_ref": "ranking_prediction:018f2b7b-0c11-72fd-95c4-1f9f98feac01",
   "submission_ids": ["..."]
 }
 ```
@@ -725,11 +1521,53 @@ ironclaw traces worker-utility-credit \
   --event-type ranking-utility \
   --credit-points-delta 1.25 \
   --reason "ranking eval utility" \
-  --external-ref ranker:nightly-42 \
+  --external-ref ranking_prediction:018f2b7b-0c11-72fd-95c4-1f9f98feac01 \
   018f2b7b-0c11-72fd-95c4-1f9f98feac01
 ```
 
-The worker route is intentionally limited to `regression_catch`, `training_utility`, and `ranking_utility`; it is not for `reviewer_bonus` or `abuse_penalty`.
+The bulk worker route is intentionally limited to `regression_catch`, `training_utility`, and `ranking_utility`; it is not for `reviewer_bonus` or `abuse_penalty`. For model-derived ranking credit, prefer `/v1/workers/ranking/prediction-credit` so the service derives the amount and external reference from the active-model prediction instead of accepting hand-crafted worker inputs. Ranking utility events are credit-bearing only when the external reference is a single `ranking_prediction:<uuid>` for the same source.
+
+Settlement treats `ranking_utility` as model-derived credit. A settlement run
+without `ranking_model_version` excludes pending ranking utility events from the
+source list. A settlement run that provides `ranking_model_version` uses
+`ranking_target_use` or defaults it to `ranking_model_training`, then requires
+the latest registered model version to be `active`, the active model policy to
+match the request `policy_version`, and the latest matching calibration run to
+be `promotable` and fresh when
+`TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS` is configured. The same
+active model/target/policy risk report must be clear at settlement time; if
+current evidence drift, non-promotable current evidence, or other model-risk
+codes are present, ranking utility events for that gate are excluded. Each
+selected ranking utility credit event must also reference
+`ranking_prediction:<uuid>` for a prediction with the same submission, model,
+target use, policy, and settlement-score micros as the credit delta; otherwise
+the event is excluded from the settlement source list. Settlement responses
+include aggregate `ranking_credit_events_excluded_reason_counts` for dry-runs
+and live runs, with reason codes such as `missing_ranking_model_gate`,
+`missing_prediction_ref`, `low_confidence_prediction`, and active-model risk
+codes. Finalized batches record the calibration run id plus the calibration
+report hash and joined-evidence hash used for the gate.
+When a settlement request includes `near_contract_id`, the NEAR payload builder
+validates it as a lowercase NEAR account id before any settlement batch or
+outbox row is persisted.
+
+Production settlement schedulers should use
+`POST /v1/workers/credit-settlements/run` rather than the admin settlement
+surface. The worker route accepts the same settlement policy fields plus an
+optional `limit` for the maximum source credit events to settle in one run. If
+omitted, the worker route settles at most 100 source events; explicit limits
+must be between 1 and 500. Responses include the applied `limit`, the total
+eligible source-event count, and `pending_after_count` so schedulers can retry
+bounded batches until no eligible settlement work remains.
+For ranking-derived credit, `POST /v1/workers/credit-cycle/run` wraps this route
+after model calibration, promotion, and prediction-credit issuance so a
+scheduler can move one model/policy/target through the credit path without
+gaining generic admin settlement access.
+
+Before a non-dry-run batch is finalized, the server rereads finalized settlement
+batches and rejects any source credit event that has already been finalized in a
+different batch. This gives retries and overlapping workers a final duplicate
+issuance guard in addition to the initial idempotent source selection.
 
 Contributors can read only their own append-only central credit events:
 

@@ -13,9 +13,11 @@ use trace_commons_server::trace_corpus_storage::{
     TraceExportAccessGrantStatus, TraceExportAccessGrantWrite, TraceExportJobStatus,
     TraceExportJobStatusUpdate, TraceExportJobWrite, TraceExportManifestItemInvalidationReason,
     TraceExportManifestItemWrite, TraceExportManifestWrite, TraceObjectArtifactKind,
-    TraceObjectRefWrite, TraceRetentionJobItemAction, TraceRetentionJobItemStatus,
-    TraceRetentionJobItemWrite, TraceRetentionJobStatus, TraceRetentionJobWrite,
-    TraceReviewLeaseAuditAction, TraceRevocationPropagationAction,
+    TraceObjectRefWrite, TraceRankingFeatureWrite, TraceRankingModelStatus,
+    TraceRankingModelVersionWrite, TraceRankingPredictionWrite, TraceRankingWorkerRunKind,
+    TraceRankingWorkerRunStatus, TraceRankingWorkerRunWrite, TraceRetentionJobItemAction,
+    TraceRetentionJobItemStatus, TraceRetentionJobItemWrite, TraceRetentionJobStatus,
+    TraceRetentionJobWrite, TraceReviewLeaseAuditAction, TraceRevocationPropagationAction,
     TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget, TraceSubmissionWrite,
     TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus, TraceTenantAccessGrantWrite,
@@ -107,7 +109,44 @@ fn ready_rls_diagnostics() -> TraceCorpusRlsDiagnostics {
         force_rls_disabled_tables: Vec::new(),
         policy_expression_mismatch_tables: Vec::new(),
         current_role_bypasses_rls: false,
+        current_role_owns_trace_tables: false,
+        tenant_context_transaction_local: true,
     }
+}
+
+fn expected_trace_rls_tables() -> Vec<&'static str> {
+    vec![
+        "trace_tenants",
+        "trace_tenant_policies",
+        "trace_tenant_access_grants",
+        "trace_submissions",
+        "trace_object_refs",
+        "trace_derived_records",
+        "trace_audit_events",
+        "trace_credit_ledger",
+        "trace_tombstones",
+        "trace_vector_entries",
+        "trace_export_manifests",
+        "trace_export_manifest_items",
+        "trace_retention_jobs",
+        "trace_retention_job_items",
+        "trace_export_access_grants",
+        "trace_export_jobs",
+        "trace_revocation_propagation_items",
+        "trace_utility_attestations",
+        "trace_credit_settlement_batches",
+        "trace_credit_holds",
+        "trace_near_credit_outbox",
+        "trace_benchmark_registry_outbox",
+        "trace_ranking_model_versions",
+        "trace_ranking_calibration_datasets",
+        "trace_ranking_features",
+        "trace_ranking_predictions",
+        "trace_ranking_labels",
+        "trace_ranking_preference_labels",
+        "trace_ranking_calibration_runs",
+        "trace_ranking_worker_runs",
+    ]
 }
 
 fn sample_audit_event(
@@ -261,7 +300,8 @@ async fn current_role_bypasses_trace_rls(
                     JOIN pg_roles r ON r.oid = c.relowner
                     WHERE c.relname = 'trace_submissions'
                       AND r.rolname = current_user
-                ) AS is_table_owner,
+                      AND NOT c.relforcerowsecurity
+                ) AS owns_unforced_trace_table,
                 COALESCE((
                     SELECT rolsuper OR rolbypassrls
                     FROM pg_roles
@@ -270,7 +310,7 @@ async fn current_role_bypasses_trace_rls(
             &[],
         )
         .await?;
-    Ok(row.get::<_, bool>("is_table_owner") || row.get::<_, bool>("bypass_role"))
+    Ok(row.get::<_, bool>("owns_unforced_trace_table") || row.get::<_, bool>("bypass_role"))
 }
 
 async fn assert_raw_sql_rls_filters_by_tenant_context(
@@ -714,25 +754,10 @@ async fn cleanup_trace_tenants(backend: &PgBackend, tenant_ids: &[&str]) {
 }
 
 async fn assert_trace_rls_policies_installed(backend: &PgBackend) {
-    let expected_tables = vec![
-        "trace_tenants".to_string(),
-        "trace_tenant_policies".to_string(),
-        "trace_tenant_access_grants".to_string(),
-        "trace_submissions".to_string(),
-        "trace_object_refs".to_string(),
-        "trace_derived_records".to_string(),
-        "trace_audit_events".to_string(),
-        "trace_credit_ledger".to_string(),
-        "trace_tombstones".to_string(),
-        "trace_vector_entries".to_string(),
-        "trace_export_manifests".to_string(),
-        "trace_export_manifest_items".to_string(),
-        "trace_retention_jobs".to_string(),
-        "trace_retention_job_items".to_string(),
-        "trace_export_access_grants".to_string(),
-        "trace_export_jobs".to_string(),
-        "trace_revocation_propagation_items".to_string(),
-    ];
+    let expected_tables: Vec<String> = expected_trace_rls_tables()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
     let client = backend.pool().get().await.expect("get policy connection");
     let rows = client
         .query(
@@ -751,6 +776,65 @@ async fn assert_trace_rls_policies_installed(backend: &PgBackend) {
     let mut expected_tables = expected_tables;
     expected_tables.sort();
     assert_eq!(actual_tables, expected_tables);
+}
+
+#[test]
+fn force_rls_migration_covers_every_trace_rls_table() {
+    let migrations_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+    let mut sql = std::fs::read_to_string(migrations_root.join("V6__trace_force_rls.sql"))
+        .expect("read FORCE RLS production hardening migration");
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V11__trace_ranking_worker_runs.sql"))
+            .expect("read ranking worker run production hardening migration"),
+    );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V14__trace_ranking_preference_labels.sql"))
+            .expect("read ranking preference label production hardening migration"),
+    );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V15__trace_benchmark_registry_outbox.sql"))
+            .expect("read benchmark registry outbox production hardening migration"),
+    );
+    sql.push_str(
+        &std::fs::read_to_string(
+            migrations_root.join("V16__trace_ranking_calibration_datasets.sql"),
+        )
+        .expect("read ranking calibration dataset production hardening migration"),
+    );
+    for table in expected_trace_rls_tables() {
+        let statement = format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY;");
+        assert!(
+            sql.contains(&statement),
+            "FORCE RLS migration must include {statement}"
+        );
+    }
+}
+
+#[test]
+fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
+    let migrations_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+    let sql = std::fs::read_to_string(
+        migrations_root.join("V18__trace_central_rls_tenant_predicate.sql"),
+    )
+    .expect("read central RLS tenant predicate migration");
+
+    assert!(sql.contains("CREATE OR REPLACE FUNCTION trace_current_tenant_id()"));
+    assert!(sql.contains("RETURNS TEXT"));
+    assert!(sql.contains("current_setting('trace-commons.trace_tenant_id', true)"));
+    for table in expected_trace_rls_tables() {
+        assert!(
+            sql.contains(&format!(
+                "DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON {table};"
+            )),
+            "central tenant predicate migration must drop stale policy on {table}"
+        );
+        assert!(
+            sql.contains(&format!(
+                "CREATE POLICY trace_corpus_tenant_isolation ON {table}"
+            )),
+            "central tenant predicate migration must recreate policy on {table}"
+        );
+    }
 }
 
 #[test]
@@ -780,6 +864,11 @@ fn trace_corpus_rls_diagnostics_ready_requires_complete_safe_policy_state() {
     let mut bypass_role = ready_rls_diagnostics();
     bypass_role.current_role_bypasses_rls = true;
     assert!(!bypass_role.rls_ready());
+
+    let mut table_owner_role = ready_rls_diagnostics();
+    table_owner_role.current_role_owns_trace_tables = true;
+    assert!(!table_owner_role.rls_ready());
+    assert!(!table_owner_role.production_ready());
 
     let mut force_rls_disabled = ready_rls_diagnostics();
     force_rls_disabled.force_rls_enabled_count = 1;
@@ -1073,6 +1162,208 @@ async fn store_facade_keeps_same_submission_id_isolated_by_tenant() {
             .await;
         tx.commit().await.expect("commit cleanup transaction");
     }
+}
+
+#[tokio::test]
+async fn store_facade_keeps_same_ranking_prediction_and_worker_ids_isolated_by_tenant() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+    assert_trace_rls_policies_installed(&backend).await;
+
+    let tenant_a = format!("rls-ranking-a-{}", Uuid::new_v4());
+    let tenant_b = format!("rls-ranking-b-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    let trace_id = Uuid::new_v4();
+    let ranking_feature_id = Uuid::new_v4();
+    let ranking_prediction_id = Uuid::new_v4();
+    let ranking_worker_run_id = Uuid::new_v4();
+
+    for (tenant_id, utility_micros, reason) in [
+        (&tenant_a, 2_400_000_i64, "tenant_a_high_signal"),
+        (&tenant_b, 800_000_i64, "tenant_b_holdout"),
+    ] {
+        let mut submission = sample_submission(tenant_id, submission_id);
+        submission.trace_id = trace_id;
+        submission.allowed_uses = vec!["ranking_model_training".to_string()];
+        backend
+            .upsert_trace_submission(submission)
+            .await
+            .expect("insert ranking source submission");
+
+        backend
+            .upsert_trace_ranking_model_version(TraceRankingModelVersionWrite {
+                tenant_id: tenant_id.clone(),
+                model_version: "trace-ranker-credit-v1".to_string(),
+                feature_schema_version: "ranking-features-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: TraceRankingModelStatus::Candidate,
+                training_dataset_hash: format!("sha256:{tenant_id}:training"),
+                calibration_dataset_hash: format!("sha256:{tenant_id}:calibration"),
+                model_artifact_hash: format!("sha256:{tenant_id}:model"),
+                actor_principal_ref: format!("principal:{tenant_id}:ranker-admin"),
+            })
+            .await
+            .expect("upsert tenant-scoped ranking model");
+
+        backend
+            .upsert_trace_ranking_feature(TraceRankingFeatureWrite {
+                tenant_id: tenant_id.clone(),
+                ranking_feature_id,
+                submission_id,
+                trace_id,
+                target_use: "ranking_model_training".to_string(),
+                feature_schema_version: "ranking-features-v1".to_string(),
+                feature_vector_hash: format!("sha256:{tenant_id}:feature-vector"),
+                feature_names_hash: format!("sha256:{tenant_id}:feature-names"),
+                source_feature_hash: format!("sha256:{tenant_id}:source"),
+                duplicate_score: Some(0.01),
+                novelty_score: Some(0.8),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.9),
+                coverage_tags: vec![format!("tenant:{tenant_id}")],
+                actor_principal_ref: format!("principal:{tenant_id}:ranker-worker"),
+            })
+            .await
+            .expect("upsert tenant-scoped ranking feature");
+
+        backend
+            .upsert_trace_ranking_prediction(TraceRankingPredictionWrite {
+                tenant_id: tenant_id.clone(),
+                ranking_prediction_id,
+                submission_id,
+                trace_id,
+                target_use: "ranking_model_training".to_string(),
+                model_version: "trace-ranker-credit-v1".to_string(),
+                feature_schema_version: "ranking-features-v1".to_string(),
+                prediction_policy_version: "trace-credit-policy-v1".to_string(),
+                feature_vector_hash: format!("sha256:{tenant_id}:feature-vector"),
+                predicted_utility_micros: utility_micros,
+                uncertainty_micros: 125_000,
+                confidence: 0.91,
+                risk_penalty_micros: 25_000,
+                novelty_bonus_micros: 50_000,
+                settlement_score_micros: utility_micros + 25_000,
+                explanation_codes: vec![reason.to_string()],
+                actor_principal_ref: format!("principal:{tenant_id}:ranker-worker"),
+            })
+            .await
+            .expect("upsert tenant-scoped ranking prediction");
+
+        let mut reason_counts = BTreeMap::new();
+        reason_counts.insert(reason.to_string(), 1);
+        backend
+            .upsert_trace_ranking_worker_run(TraceRankingWorkerRunWrite {
+                tenant_id: tenant_id.clone(),
+                ranking_worker_run_id,
+                run_kind: TraceRankingWorkerRunKind::PredictionCredit,
+                status: TraceRankingWorkerRunStatus::Completed,
+                dry_run: false,
+                reason_hash: format!("sha256:{tenant_id}:worker-reason"),
+                model_version: Some("trace-ranker-credit-v1".to_string()),
+                target_use: Some("ranking_model_training".to_string()),
+                policy_version: Some("trace-credit-policy-v1".to_string()),
+                limit: 10,
+                checked_count: 1,
+                succeeded_count: 1,
+                skipped_existing_count: 0,
+                skipped_model_risk_count: 0,
+                skipped_ineligible_count: 0,
+                pending_after_count: 0,
+                result_refs: vec![format!("ranking_prediction:{ranking_prediction_id}")],
+                reason_counts,
+                actor_principal_ref: format!("principal:{tenant_id}:ranker-worker"),
+                created_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+                last_error_hash: None,
+            })
+            .await
+            .expect("upsert tenant-scoped ranking worker run");
+    }
+
+    let tenant_a_models = backend
+        .list_trace_ranking_model_versions(&tenant_a)
+        .await
+        .expect("list tenant A ranking models");
+    let tenant_b_models = backend
+        .list_trace_ranking_model_versions(&tenant_b)
+        .await
+        .expect("list tenant B ranking models");
+    assert_eq!(tenant_a_models.len(), 1);
+    assert_eq!(tenant_b_models.len(), 1);
+    assert_eq!(tenant_a_models[0].tenant_id, tenant_a);
+    assert_eq!(tenant_b_models[0].tenant_id, tenant_b);
+    assert_ne!(
+        tenant_a_models[0].model_artifact_hash,
+        tenant_b_models[0].model_artifact_hash
+    );
+
+    let tenant_a_predictions = backend
+        .list_trace_ranking_predictions(&tenant_a)
+        .await
+        .expect("list tenant A ranking predictions");
+    let tenant_b_predictions = backend
+        .list_trace_ranking_predictions(&tenant_b)
+        .await
+        .expect("list tenant B ranking predictions");
+    assert_eq!(tenant_a_predictions.len(), 1);
+    assert_eq!(tenant_b_predictions.len(), 1);
+    assert_eq!(
+        tenant_a_predictions[0].ranking_prediction_id,
+        ranking_prediction_id
+    );
+    assert_eq!(
+        tenant_b_predictions[0].ranking_prediction_id,
+        ranking_prediction_id
+    );
+    assert_eq!(tenant_a_predictions[0].tenant_id, tenant_a);
+    assert_eq!(tenant_b_predictions[0].tenant_id, tenant_b);
+    assert_eq!(tenant_a_predictions[0].predicted_utility_micros, 2_400_000);
+    assert_eq!(tenant_b_predictions[0].predicted_utility_micros, 800_000);
+    assert_eq!(
+        tenant_a_predictions[0].explanation_codes,
+        vec!["tenant_a_high_signal"]
+    );
+    assert_eq!(
+        tenant_b_predictions[0].explanation_codes,
+        vec!["tenant_b_holdout"]
+    );
+
+    let tenant_a_worker_runs = backend
+        .list_trace_ranking_worker_runs(&tenant_a)
+        .await
+        .expect("list tenant A ranking worker runs");
+    let tenant_b_worker_runs = backend
+        .list_trace_ranking_worker_runs(&tenant_b)
+        .await
+        .expect("list tenant B ranking worker runs");
+    assert_eq!(tenant_a_worker_runs.len(), 1);
+    assert_eq!(tenant_b_worker_runs.len(), 1);
+    assert_eq!(
+        tenant_a_worker_runs[0].ranking_worker_run_id,
+        ranking_worker_run_id
+    );
+    assert_eq!(
+        tenant_b_worker_runs[0].ranking_worker_run_id,
+        ranking_worker_run_id
+    );
+    assert_eq!(tenant_a_worker_runs[0].tenant_id, tenant_a);
+    assert_eq!(tenant_b_worker_runs[0].tenant_id, tenant_b);
+    assert_eq!(
+        tenant_a_worker_runs[0]
+            .reason_counts
+            .get("tenant_a_high_signal"),
+        Some(&1)
+    );
+    assert_eq!(
+        tenant_b_worker_runs[0]
+            .reason_counts
+            .get("tenant_b_holdout"),
+        Some(&1)
+    );
+
+    cleanup_trace_tenants(&backend, &[&tenant_a, &tenant_b]).await;
 }
 
 #[tokio::test]
@@ -2025,6 +2316,46 @@ async fn store_facade_preserves_export_grant_job_scope_and_updates() {
     assert_eq!(alpha_jobs.len(), 1);
     assert_eq!(alpha_jobs[0].status, TraceExportJobStatus::Queued);
 
+    let claim_at = requested_at + chrono::Duration::seconds(3);
+    let claimed_alpha = backend
+        .claim_next_trace_export_job(
+            &tenant_alpha,
+            Some("replay"),
+            claim_at,
+            "principal:alpha-export-worker",
+        )
+        .await
+        .expect("claim alpha queued export job")
+        .expect("alpha queued export job is claimable");
+    assert_eq!(claimed_alpha.export_job_id, export_job_id);
+    assert_eq!(claimed_alpha.status, TraceExportJobStatus::Running);
+    assert_eq!(claimed_alpha.started_at, Some(claim_at));
+    assert_eq!(
+        claimed_alpha.metadata.get("request_id").map(String::as_str),
+        Some("pg-rls-alpha")
+    );
+    assert_eq!(
+        claimed_alpha.metadata.get("state").map(String::as_str),
+        Some("running")
+    );
+    assert_eq!(
+        claimed_alpha
+            .metadata
+            .get("claimed_by_principal_ref")
+            .map(String::as_str),
+        Some("principal:alpha-export-worker")
+    );
+    let beta_claim_miss = backend
+        .claim_next_trace_export_job(
+            &tenant_beta,
+            Some("replay"),
+            claim_at,
+            "principal:beta-export-worker",
+        )
+        .await
+        .expect("dataset-kind claim is tenant scoped");
+    assert!(beta_claim_miss.is_none());
+
     let finished_at = requested_at + chrono::Duration::seconds(12);
     let updated_alpha = backend
         .update_trace_export_job_status(
@@ -2055,6 +2386,79 @@ async fn store_facade_preserves_export_grant_job_scope_and_updates() {
     assert_eq!(beta_jobs[0].status, TraceExportJobStatus::Running);
     assert_eq!(beta_jobs[0].item_count, Some(3));
     assert_eq!(beta_jobs[0].result_manifest_id, None);
+
+    let stale_job_id = Uuid::new_v4();
+    let stale_expires_at = requested_at - chrono::Duration::minutes(1);
+    backend
+        .upsert_trace_export_job(TraceExportJobWrite {
+            tenant_id: tenant_alpha.clone(),
+            export_job_id: stale_job_id,
+            grant_id: Uuid::new_v4(),
+            caller_principal_ref: "principal:alpha-exporter".to_string(),
+            requested_dataset_kind: "replay".to_string(),
+            purpose: "alpha-stale-eval".to_string(),
+            max_item_cap: Some(8),
+            status: TraceExportJobStatus::Running,
+            requested_at: requested_at - chrono::Duration::minutes(10),
+            started_at: Some(requested_at - chrono::Duration::minutes(10)),
+            finished_at: None,
+            expires_at: stale_expires_at,
+            result_manifest_id: None,
+            item_count: None,
+            last_error: None,
+            metadata: BTreeMap::from([("state".to_string(), "started".to_string())]),
+        })
+        .await
+        .expect("insert stale alpha export job");
+    let recovered_stale = backend
+        .recover_stale_trace_export_job(
+            &tenant_alpha,
+            stale_job_id,
+            requested_at,
+            TraceExportJobStatusUpdate {
+                status: TraceExportJobStatus::Expired,
+                started_at: Some(requested_at - chrono::Duration::minutes(10)),
+                finished_at: Some(requested_at),
+                result_manifest_id: None,
+                item_count: None,
+                last_error: Some("stale_export_job_expired;reason_hash=sha256:test".to_string()),
+                metadata: BTreeMap::from([
+                    ("state".to_string(), "expired".to_string()),
+                    (
+                        "recovery".to_string(),
+                        "stale_running_export_job".to_string(),
+                    ),
+                ]),
+            },
+        )
+        .await
+        .expect("recover stale alpha export job")
+        .expect("stale alpha export job matches recovery predicate");
+    assert_eq!(recovered_stale.status, TraceExportJobStatus::Expired);
+    assert_eq!(recovered_stale.finished_at, Some(requested_at));
+    assert_eq!(
+        recovered_stale.metadata.get("recovery").map(String::as_str),
+        Some("stale_running_export_job")
+    );
+
+    let fresh_recovery = backend
+        .recover_stale_trace_export_job(
+            &tenant_beta,
+            export_job_id,
+            requested_at,
+            TraceExportJobStatusUpdate {
+                status: TraceExportJobStatus::Expired,
+                started_at: Some(requested_at),
+                finished_at: Some(requested_at),
+                result_manifest_id: None,
+                item_count: Some(3),
+                last_error: Some("should not update fresh rows".to_string()),
+                metadata: BTreeMap::new(),
+            },
+        )
+        .await
+        .expect("fresh beta export job recovery predicate is tenant scoped");
+    assert!(fresh_recovery.is_none());
 
     let missing_tenant_update = backend
         .update_trace_export_job_status(
@@ -2463,25 +2867,35 @@ async fn pg_trace_corpus_rls_diagnostics_report_policy_coverage() {
         .await
         .expect("read RLS diagnostics")
         .expect("PostgreSQL reports RLS diagnostics");
-    assert_eq!(diagnostics.expected_table_count, 16);
-    assert_eq!(diagnostics.policy_installed_count, 16);
-    assert_eq!(diagnostics.rls_enabled_count, 16);
+    assert_eq!(
+        diagnostics.expected_table_count,
+        expected_trace_rls_tables().len()
+    );
+    assert_eq!(
+        diagnostics.policy_installed_count,
+        diagnostics.expected_table_count
+    );
+    assert_eq!(
+        diagnostics.rls_enabled_count,
+        diagnostics.expected_table_count
+    );
     assert!(diagnostics.missing_policy_tables.is_empty());
     assert!(diagnostics.rls_disabled_tables.is_empty());
     assert!(diagnostics.policy_expression_mismatch_tables.is_empty());
-    assert!(diagnostics.force_rls_enabled_count <= diagnostics.expected_table_count);
     assert_eq!(
-        diagnostics.force_rls_ready(),
-        diagnostics.force_rls_enabled_count == diagnostics.expected_table_count
+        diagnostics.force_rls_enabled_count,
+        diagnostics.expected_table_count
     );
+    assert!(diagnostics.force_rls_disabled_tables.is_empty());
+    assert!(diagnostics.force_rls_ready());
     assert_eq!(
         diagnostics.production_ready(),
         diagnostics.rls_ready() && diagnostics.force_rls_ready()
     );
     assert_eq!(
         diagnostics.rls_ready(),
-        !diagnostics.current_role_bypasses_rls,
-        "RLS readiness should be blocked only when the current test role bypasses RLS"
+        !diagnostics.current_role_bypasses_rls && !diagnostics.current_role_owns_trace_tables,
+        "RLS readiness should be blocked only by runtime-role safety once catalog coverage is complete"
     );
 }
 
