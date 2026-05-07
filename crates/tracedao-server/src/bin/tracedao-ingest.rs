@@ -7122,6 +7122,10 @@ fn trace_audit_reason_u64(reason: Option<&str>, key: &str) -> Option<u64> {
     trace_audit_reason_value(reason, key)?.parse::<u64>().ok()
 }
 
+fn trace_audit_reason_bool(reason: Option<&str>, key: &str) -> Option<bool> {
+    trace_audit_reason_value(reason, key)?.parse::<bool>().ok()
+}
+
 fn trace_audit_reason_enum<T>(reason: Option<&str>, key: &str) -> Option<T>
 where
     T: DeserializeOwned,
@@ -23489,6 +23493,8 @@ async fn read_trace_operational_summary(
         read_benchmark_registry_outbox_items_for_admin(state, tenant.auth()).await?;
     let rollout_smoke_evidence =
         read_rollout_smoke_evidence_for_admin(state, tenant.auth()).await?;
+    let revocation_propagation =
+        read_revocation_propagation_summary_for_admin(state, tenant.auth()).await?;
     Ok(TraceOperationalSummaryResponse::from_parts(
         TraceOperationalSummaryInputs {
             state,
@@ -23501,6 +23507,7 @@ async fn read_trace_operational_summary(
             benchmark_registry_outbox,
             ranking,
             rollout_smoke_evidence,
+            revocation_propagation,
             generated_at,
         },
     ))
@@ -27851,6 +27858,49 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             .promotion_gates
             .ranking_worker_run_actionable_skip_count,
     );
+    body.push_str("# HELP tracedao_operational_revocation_propagation_latest_run Latest audited revocation-propagation worker counts by state.\n");
+    body.push_str("# TYPE tracedao_operational_revocation_propagation_latest_run gauge\n");
+    for (state, value) in [
+        (
+            "recorded",
+            usize::from(response.revocation_propagation.latest_run_recorded),
+        ),
+        (
+            "dry_run",
+            usize::from(response.revocation_propagation.latest_run_dry_run),
+        ),
+        (
+            "checked",
+            response.revocation_propagation.latest_checked_count,
+        ),
+        (
+            "completed",
+            response.revocation_propagation.latest_completed_count,
+        ),
+        (
+            "failed",
+            response.revocation_propagation.latest_failed_count,
+        ),
+        (
+            "skipped",
+            response.revocation_propagation.latest_skipped_count,
+        ),
+        (
+            "pending",
+            response.revocation_propagation.latest_pending_count,
+        ),
+    ] {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "tracedao_operational_revocation_propagation_latest_run",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("state", state),
+            ],
+            value,
+        );
+    }
     body.push_str("# HELP tracedao_operational_rollout_smoke_missing_evidence Count of required rollout smoke checks without captured rehearsal evidence.\n");
     body.push_str("# TYPE tracedao_operational_rollout_smoke_missing_evidence gauge\n");
     push_prometheus_gauge(
@@ -48604,6 +48654,7 @@ struct TraceOperationalSummaryResponse {
     promotion_gates: TraceOperationalPromotionGateSummary,
     object_store: TraceOperationalObjectStoreSummary,
     rollout_smoke: TraceOperationalRolloutSmokeSummary,
+    revocation_propagation: TraceOperationalRevocationPropagationSummary,
     submissions: TraceOperationalSubmissionSummary,
     review_sla: TraceOperationalReviewSlaSummary,
     exports: TraceOperationalExportSummary,
@@ -48635,6 +48686,7 @@ struct TraceOperationalSummaryInputs<'a> {
     benchmark_registry_outbox: Vec<TraceBenchmarkRegistryOutboxItem>,
     ranking: TraceOperationalRankingSummary,
     rollout_smoke_evidence: Vec<TraceRolloutSmokeEvidenceResponse>,
+    revocation_propagation: TraceOperationalRevocationPropagationSummary,
     generated_at: DateTime<Utc>,
 }
 
@@ -48676,6 +48728,7 @@ impl TraceOperationalSummaryResponse {
                 benchmarks: &benchmarks,
                 ranking: &inputs.ranking,
                 delayed_credit: &delayed_credit,
+                revocation_propagation: &inputs.revocation_propagation,
             },
         );
         let rollout_smoke = TraceOperationalRolloutSmokeSummary::from_promotion_gates_and_evidence(
@@ -48690,6 +48743,7 @@ impl TraceOperationalSummaryResponse {
             promotion_gates,
             object_store,
             rollout_smoke,
+            revocation_propagation: inputs.revocation_propagation,
             submissions,
             review_sla,
             exports,
@@ -48734,6 +48788,92 @@ impl TraceOperationalObjectStoreSummary {
             restore_after_delete_supported: store.restore_after_delete_supported(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct TraceOperationalRevocationPropagationSummary {
+    latest_run_recorded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    latest_run_at: Option<DateTime<Utc>>,
+    latest_run_dry_run: bool,
+    latest_checked_count: usize,
+    latest_completed_count: usize,
+    latest_failed_count: usize,
+    latest_skipped_count: usize,
+    latest_pending_count: usize,
+}
+
+impl TraceOperationalRevocationPropagationSummary {
+    fn from_audit_events(events: &[TraceCommonsAuditEvent]) -> anyhow::Result<Self> {
+        let mut latest: Option<Self> = None;
+        for record in events
+            .iter()
+            .filter_map(trace_revocation_propagation_summary_from_audit_event)
+        {
+            let record = record?;
+            let is_newer = latest
+                .as_ref()
+                .and_then(|current| current.latest_run_at)
+                .is_none_or(|current| {
+                    record
+                        .latest_run_at
+                        .is_some_and(|candidate| candidate > current)
+                });
+            if is_newer {
+                latest = Some(record);
+            }
+        }
+        Ok(latest.unwrap_or_default())
+    }
+}
+
+async fn read_revocation_propagation_summary_for_admin(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<TraceOperationalRevocationPropagationSummary> {
+    let events = if state.db_audit_reads_for_tenant(&tenant.tenant_id) {
+        read_audit_events_from_db(state, tenant).await?
+    } else {
+        read_all_audit_events(&state.root, &tenant.tenant_id)?
+    };
+    TraceOperationalRevocationPropagationSummary::from_audit_events(&events)
+}
+
+fn trace_revocation_propagation_summary_from_audit_event(
+    event: &TraceCommonsAuditEvent,
+) -> Option<anyhow::Result<TraceOperationalRevocationPropagationSummary>> {
+    if event.kind != "revocation_propagation" {
+        return None;
+    }
+    Some((|| {
+        let reason = event.reason.as_deref();
+        let latest_checked_count = trace_audit_reason_u32(reason, "checked")
+            .context("revocation propagation audit event missing checked count")?
+            as usize;
+        let latest_completed_count = trace_audit_reason_u32(reason, "completed")
+            .context("revocation propagation audit event missing completed count")?
+            as usize;
+        let latest_failed_count = trace_audit_reason_u32(reason, "failed")
+            .context("revocation propagation audit event missing failed count")?
+            as usize;
+        let latest_skipped_count = trace_audit_reason_u32(reason, "skipped")
+            .context("revocation propagation audit event missing skipped count")?
+            as usize;
+        let latest_pending_count = trace_audit_reason_u32(reason, "pending")
+            .context("revocation propagation audit event missing pending count")?
+            as usize;
+        let latest_run_dry_run = trace_audit_reason_bool(reason, "dry_run").unwrap_or(false);
+        Ok(TraceOperationalRevocationPropagationSummary {
+            latest_run_recorded: true,
+            latest_run_at: Some(event.created_at),
+            latest_run_dry_run,
+            latest_checked_count,
+            latest_completed_count,
+            latest_failed_count,
+            latest_skipped_count,
+            latest_pending_count,
+        })
+    })())
 }
 
 const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
@@ -49136,6 +49276,8 @@ struct TraceOperationalPromotionGateSummary {
     failed_ranking_worker_run_count: usize,
     ranking_worker_run_actionable_skip_count: usize,
     ranking_worker_run_skip_reason_counts: BTreeMap<String, usize>,
+    revocation_propagation_latest_failed_count: usize,
+    revocation_propagation_latest_skipped_count: usize,
     credit_settlement_account_cap_configured: bool,
     credit_settlement_account_cap_missing: bool,
     object_store_versioning_required: bool,
@@ -49153,6 +49295,7 @@ struct TraceOperationalPromotionGateInputs<'a> {
     benchmarks: &'a TraceOperationalBenchmarkSummary,
     ranking: &'a TraceOperationalRankingSummary,
     delayed_credit: &'a TraceOperationalDelayedCreditSummary,
+    revocation_propagation: &'a TraceOperationalRevocationPropagationSummary,
 }
 
 impl TraceOperationalPromotionGateSummary {
@@ -49222,6 +49365,10 @@ impl TraceOperationalPromotionGateSummary {
             .worker_run_skipped_model_risk_total
             .saturating_add(ranking.worker_run_skipped_ineligible_total);
         let ranking_worker_run_skip_reason_counts = ranking.worker_run_reason_counts.clone();
+        let revocation_propagation_latest_failed_count =
+            inputs.revocation_propagation.latest_failed_count;
+        let revocation_propagation_latest_skipped_count =
+            inputs.revocation_propagation.latest_skipped_count;
         let credit_settlement_account_cap_configured =
             state.credit_settlement_max_micros_per_account.is_some();
         let credit_settlement_account_cap_missing =
@@ -49371,6 +49518,11 @@ impl TraceOperationalPromotionGateSummary {
             "failed_ranking_worker_runs",
             failed_ranking_worker_run_count,
         );
+        push_gap_count(
+            &mut blocking_gates,
+            "revocation_propagation_failures",
+            revocation_propagation_latest_failed_count,
+        );
         if credit_settlement_account_cap_missing {
             blocking_gates.push("credit_settlement_account_cap_missing".to_string());
         }
@@ -49414,6 +49566,11 @@ impl TraceOperationalPromotionGateSummary {
             &mut warning_gates,
             "ranking_worker_run_actionable_skips",
             ranking_worker_run_actionable_skip_count,
+        );
+        push_gap_count(
+            &mut warning_gates,
+            "revocation_propagation_skips",
+            revocation_propagation_latest_skipped_count,
         );
 
         Self {
@@ -49462,6 +49619,8 @@ impl TraceOperationalPromotionGateSummary {
             failed_ranking_worker_run_count,
             ranking_worker_run_actionable_skip_count,
             ranking_worker_run_skip_reason_counts,
+            revocation_propagation_latest_failed_count,
+            revocation_propagation_latest_skipped_count,
             credit_settlement_account_cap_configured,
             credit_settlement_account_cap_missing,
             object_store_versioning_required,
@@ -84113,6 +84272,7 @@ mod tests {
             benchmark_registry_outbox: Vec::new(),
             ranking: TraceOperationalRankingSummary::default(),
             rollout_smoke_evidence: Vec::new(),
+            revocation_propagation: TraceOperationalRevocationPropagationSummary::default(),
             generated_at: now,
         });
 
@@ -84256,6 +84416,7 @@ mod tests {
             benchmark_registry_outbox: Vec::new(),
             ranking: TraceOperationalRankingSummary::default(),
             rollout_smoke_evidence: Vec::new(),
+            revocation_propagation: TraceOperationalRevocationPropagationSummary::default(),
             generated_at: now,
         });
 
@@ -84975,6 +85136,95 @@ mod tests {
         assert!(body_text.contains(&format!(
             "tracedao_operational_rollout_smoke_failed_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 1"
         )));
+    }
+
+    #[tokio::test]
+    async fn admin_operational_metrics_route_exports_revocation_propagation_worker_skips() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        append_audit_event(
+            temp.path(),
+            "tenant-a",
+            TraceCommonsAuditEvent {
+                event_id: Uuid::new_v4(),
+                tenant_id: "tenant-a".to_string(),
+                submission_id: Uuid::nil(),
+                kind: "revocation_propagation".to_string(),
+                created_at: Utc::now(),
+                status: None,
+                actor_role: Some(TokenRole::RevocationWorker),
+                actor_principal_ref: Some(principal_storage_ref("revocation-worker-token-a")),
+                reason: Some(
+                    "purpose=disabled_remote_probe;dry_run=false;checked=3;completed=1;failed=0;skipped=2;pending=0"
+                        .to_string(),
+                ),
+                export_count: Some(3),
+                export_id: None,
+                decision_inputs_hash: None,
+                previous_event_hash: None,
+                event_hash: None,
+            },
+        )
+        .expect("revocation propagation audit writes");
+
+        let Json(operational) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary");
+        let operational_json =
+            serde_json::to_value(&operational).expect("operational summary serializes");
+        assert_eq!(
+            operational_json["revocation_propagation"]["latest_run_recorded"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            operational_json["revocation_propagation"]["latest_checked_count"],
+            serde_json::json!(3)
+        );
+        assert_eq!(
+            operational_json["revocation_propagation"]["latest_skipped_count"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            operational_json["promotion_gates"]["revocation_propagation_latest_skipped_count"],
+            serde_json::json!(2)
+        );
+        assert!(
+            operational
+                .promotion_gates
+                .warning_gates
+                .contains(&"revocation_propagation_skips=2".to_string())
+        );
+
+        let metrics_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-metrics")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("metrics response");
+        assert_eq!(metrics_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(metrics_response.into_body(), 65536)
+            .await
+            .expect("body reads");
+        let body_text = std::str::from_utf8(&body).expect("metrics body is utf8");
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_revocation_propagation_latest_run{{tenant_storage_ref=\"{tenant_ref}\",state=\"skipped\"}} 2"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_revocation_propagation_latest_run{{tenant_storage_ref=\"{tenant_ref}\",state=\"failed\"}} 0"
+        )));
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("revocation-worker-token-a"));
+        assert!(!body_text.contains("disabled_remote_probe"));
     }
 
     #[test]
@@ -85744,6 +85994,7 @@ mod tests {
             },
             object_store: TraceOperationalObjectStoreSummary::default(),
             rollout_smoke: TraceOperationalRolloutSmokeSummary::default(),
+            revocation_propagation: TraceOperationalRevocationPropagationSummary::default(),
             submissions: TraceOperationalSubmissionSummary::default(),
             review_sla: TraceOperationalReviewSlaSummary::default(),
             exports: TraceOperationalExportSummary::default(),
@@ -85776,6 +86027,7 @@ mod tests {
             },
             object_store: TraceOperationalObjectStoreSummary::default(),
             rollout_smoke: TraceOperationalRolloutSmokeSummary::default(),
+            revocation_propagation: TraceOperationalRevocationPropagationSummary::default(),
             submissions: TraceOperationalSubmissionSummary::default(),
             review_sla: TraceOperationalReviewSlaSummary::default(),
             exports: TraceOperationalExportSummary::default(),
@@ -85822,6 +86074,7 @@ mod tests {
             },
             object_store: TraceOperationalObjectStoreSummary::default(),
             rollout_smoke: TraceOperationalRolloutSmokeSummary::default(),
+            revocation_propagation: TraceOperationalRevocationPropagationSummary::default(),
             submissions: TraceOperationalSubmissionSummary::default(),
             review_sla: TraceOperationalReviewSlaSummary::default(),
             exports: TraceOperationalExportSummary::default(),
@@ -85878,6 +86131,7 @@ mod tests {
             benchmark_registry_outbox: Vec::new(),
             ranking: TraceOperationalRankingSummary::default(),
             rollout_smoke_evidence: Vec::new(),
+            revocation_propagation: TraceOperationalRevocationPropagationSummary::default(),
             generated_at: Utc::now(),
         });
 
