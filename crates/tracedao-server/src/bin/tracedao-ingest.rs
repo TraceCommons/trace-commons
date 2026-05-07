@@ -11742,6 +11742,17 @@ async fn mark_near_credit_outbox_status_handler(
     } else {
         None
     };
+    let existing = read_near_credit_outbox_items_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?
+        .into_iter()
+        .find(|item| item.near_outbox_id == body.near_outbox_id)
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "NEAR credit outbox item not found"))?;
+    ensure_near_status_transaction_hash_matches_existing(
+        &existing,
+        status,
+        near_transaction_hash.as_deref(),
+    )?;
     let updated = update_near_credit_outbox_item_status_with_db_mirror(
         state.as_ref(),
         &tenant,
@@ -12241,34 +12252,57 @@ async fn run_near_credit_outbox_confirm_worker(
         match confirmer.confirm(confirm_request).await {
             Ok(confirm_response) => match confirm_response.status {
                 TraceNearCreditConfirmationStatus::Confirmed => {
-                    let near_transaction_hash = confirm_response
-                        .near_transaction_hash
-                        .as_deref()
-                        .or(item.near_transaction_hash.as_deref())
-                        .context("confirmed NEAR credit response requires near_transaction_hash")
-                        .and_then(normalize_near_transaction_hash)?;
-                    let updated = update_near_credit_outbox_item_status_with_db_mirror(
-                        state,
-                        tenant,
-                        item.near_outbox_id,
-                        StorageTraceCreditSettlementNearStatus::Confirmed,
-                        Some(near_transaction_hash),
-                        None,
-                    )
-                    .await?
-                    .with_context(|| {
-                        format!(
-                            "NEAR credit outbox item {} disappeared before confirmed status update",
-                            item.near_outbox_id
-                        )
-                    })?;
-                    anyhow::ensure!(
-                        updated.status == StorageTraceCreditSettlementNearStatus::Confirmed,
-                        "NEAR credit outbox item {} did not update to confirmed status",
-                        item.near_outbox_id
-                    );
-                    response.confirmed += 1;
-                    response.pending = response.pending.saturating_sub(1);
+                    match confirmed_near_transaction_hash_for_outbox_item(&item, &confirm_response)
+                    {
+                        Ok(near_transaction_hash) => {
+                            let updated = update_near_credit_outbox_item_status_with_db_mirror(
+                                state,
+                                tenant,
+                                item.near_outbox_id,
+                                StorageTraceCreditSettlementNearStatus::Confirmed,
+                                Some(near_transaction_hash),
+                                None,
+                            )
+                            .await?
+                            .with_context(|| {
+                                format!(
+                                    "NEAR credit outbox item {} disappeared before confirmed status update",
+                                    item.near_outbox_id
+                                )
+                            })?;
+                            anyhow::ensure!(
+                                updated.status == StorageTraceCreditSettlementNearStatus::Confirmed,
+                                "NEAR credit outbox item {} did not update to confirmed status",
+                                item.near_outbox_id
+                            );
+                            response.confirmed += 1;
+                            response.pending = response.pending.saturating_sub(1);
+                        }
+                        Err(error) => {
+                            let near_transaction_hash = item
+                                .near_transaction_hash
+                                .as_deref()
+                                .context("NEAR credit confirmation requires near_transaction_hash")
+                                .and_then(normalize_near_transaction_hash)?;
+                            let last_error_hash = sha256_prefixed(&safe_worker_error(&error));
+                            update_near_credit_outbox_item_status_with_db_mirror(
+                                state,
+                                tenant,
+                                item.near_outbox_id,
+                                StorageTraceCreditSettlementNearStatus::Submitted,
+                                Some(near_transaction_hash),
+                                Some(last_error_hash),
+                            )
+                            .await?
+                            .with_context(|| {
+                                format!(
+                                    "NEAR credit outbox item {} disappeared before confirmation error update",
+                                    item.near_outbox_id
+                                )
+                            })?;
+                            response.failed += 1;
+                        }
+                    }
                 }
                 TraceNearCreditConfirmationStatus::Failed => {
                     let error_detail = confirm_response
@@ -12315,6 +12349,61 @@ async fn run_near_credit_outbox_confirm_worker(
     }
     append_near_credit_outbox_confirm_audit(state, tenant, &response).await?;
     Ok(response)
+}
+
+fn confirmed_near_transaction_hash_for_outbox_item(
+    item: &TraceNearCreditOutboxItem,
+    response: &TraceNearCreditConfirmationResponse,
+) -> anyhow::Result<String> {
+    let submitted_hash = item
+        .near_transaction_hash
+        .as_deref()
+        .context("NEAR credit confirmation requires near_transaction_hash")
+        .and_then(normalize_near_transaction_hash)?;
+    let confirmed_hash = response
+        .near_transaction_hash
+        .as_deref()
+        .context("confirmed NEAR credit response requires near_transaction_hash")
+        .and_then(normalize_near_transaction_hash)?;
+    anyhow::ensure!(
+        confirmed_hash == submitted_hash,
+        "confirmed NEAR credit transaction hash does not match submitted outbox transaction"
+    );
+    Ok(submitted_hash)
+}
+
+fn ensure_near_status_transaction_hash_matches_existing(
+    item: &TraceNearCreditOutboxItem,
+    status: StorageTraceCreditSettlementNearStatus,
+    requested_hash: Option<&str>,
+) -> ApiResult<()> {
+    if !matches!(
+        status,
+        StorageTraceCreditSettlementNearStatus::Submitted
+            | StorageTraceCreditSettlementNearStatus::Confirmed
+    ) {
+        return Ok(());
+    }
+    let Some(existing_hash) = item.near_transaction_hash.as_deref() else {
+        return Ok(());
+    };
+    let requested_hash = requested_hash.ok_or_else(|| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "submitted or confirmed NEAR credit outbox status requires near_transaction_hash",
+        )
+    })?;
+    let existing_hash = normalize_near_transaction_hash(existing_hash)
+        .map_err(|error| api_error(StatusCode::CONFLICT, error.to_string()))?;
+    let requested_hash = normalize_near_transaction_hash(requested_hash)
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+    if existing_hash != requested_hash {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "confirmed NEAR credit transaction hash does not match submitted outbox transaction",
+        ));
+    }
+    Ok(())
 }
 
 fn near_credit_outbox_item_is_submit_candidate(item: &TraceNearCreditOutboxItem) -> bool {
@@ -39224,7 +39313,7 @@ fn update_near_credit_outbox_item_status(
             item.confirmed_at = None;
         }
         if status == StorageTraceCreditSettlementNearStatus::Submitted {
-            item.last_error_hash = None;
+            item.last_error_hash = last_error_hash.clone();
             item.confirmed_at = None;
         }
         updated = Some(item.clone());
@@ -72255,6 +72344,7 @@ mod tests {
         status: TraceNearCreditConfirmationStatus,
         failure: Option<String>,
         error_detail: Option<String>,
+        near_transaction_hash: Option<String>,
     }
 
     impl Default for FakeNearCreditConfirmer {
@@ -72264,6 +72354,7 @@ mod tests {
                 status: TraceNearCreditConfirmationStatus::Confirmed,
                 failure: None,
                 error_detail: None,
+                near_transaction_hash: None,
             }
         }
     }
@@ -72280,10 +72371,14 @@ mod tests {
             self.calls
                 .lock()
                 .expect("fake NEAR credit confirmer calls lock")
-                .push(request);
+                .push(request.clone());
             Ok(TraceNearCreditConfirmationResponse {
                 status: self.status,
-                near_transaction_hash: Some("near-worker-tx-confirmed-1".to_string()),
+                near_transaction_hash: Some(
+                    self.near_transaction_hash
+                        .clone()
+                        .unwrap_or(request.near_transaction_hash),
+                ),
                 error_detail: self.error_detail.clone(),
             })
         }
@@ -72949,6 +73044,97 @@ mod tests {
                 && item.confirmed_at.is_some()
                 && item.last_error_hash.is_none()
         }));
+    }
+
+    #[tokio::test]
+    async fn near_credit_outbox_confirm_worker_rejects_mismatched_transaction_hash() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).near_credit_confirmer = Some(Arc::new(FakeNearCreditConfirmer {
+            near_transaction_hash: Some("different-near-worker-tx-hash".to_string()),
+            ..FakeNearCreditConfirmer::default()
+        }));
+
+        let near_outbox_id = Uuid::new_v4();
+        let item =
+            submitted_near_credit_outbox_item(near_outbox_id, "near-worker-tx-hash-1", 1_000_000);
+        append_near_credit_outbox_item(temp.path(), "tenant-a", &item)
+            .expect("NEAR outbox file writes");
+
+        let Json(response) = near_credit_outbox_confirm_worker_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxConfirmWorkerRequest {
+                purpose: Some("confirm_near_receipts_mismatched_hash".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("mismatched confirmation response is recorded as an item failure");
+
+        assert_eq!(response.checked, 1);
+        assert_eq!(response.confirmed, 0);
+        assert_eq!(response.failed, 1);
+        assert_eq!(response.pending, 1);
+
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(
+            outbox[0].status,
+            StorageTraceCreditSettlementNearStatus::Submitted
+        );
+        assert_eq!(
+            outbox[0].near_transaction_hash.as_deref(),
+            Some("near-worker-tx-hash-1")
+        );
+        assert!(outbox[0].confirmed_at.is_none());
+        assert!(outbox[0].last_error_hash.is_some());
+    }
+
+    #[tokio::test]
+    async fn near_credit_outbox_mark_status_rejects_confirmed_transaction_hash_mismatch() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let near_outbox_id = Uuid::new_v4();
+        let item =
+            submitted_near_credit_outbox_item(near_outbox_id, "near-worker-tx-hash-1", 1_000_000);
+        append_near_credit_outbox_item(temp.path(), "tenant-a", &item)
+            .expect("NEAR outbox file writes");
+
+        let error = mark_near_credit_outbox_status_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxStatusRequest {
+                near_outbox_id,
+                status: StorageTraceCreditSettlementNearStatus::Confirmed,
+                near_transaction_hash: Some("different-near-worker-tx-hash".to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect_err("manual confirmation cannot switch transaction hashes");
+
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert!(
+            error
+                .1
+                .0
+                .error
+                .contains("does not match submitted outbox transaction")
+        );
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert_eq!(
+            outbox[0].status,
+            StorageTraceCreditSettlementNearStatus::Submitted
+        );
+        assert_eq!(
+            outbox[0].near_transaction_hash.as_deref(),
+            Some("near-worker-tx-hash-1")
+        );
+        assert!(outbox[0].confirmed_at.is_none());
     }
 
     #[tokio::test]

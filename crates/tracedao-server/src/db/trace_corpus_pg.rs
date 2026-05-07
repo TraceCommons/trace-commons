@@ -3928,7 +3928,8 @@ impl TraceCorpusStore for PgBackend {
                          END,
                          last_error_hash = CASE
                             WHEN $3 = 'failed' THEN $5
-                            WHEN $3 IN ('submitted', 'confirmed') THEN NULL
+                            WHEN $3 = 'submitted' THEN $5
+                            WHEN $3 = 'confirmed' THEN NULL
                             ELSE last_error_hash
                          END
                      WHERE tenant_id = $1 AND near_outbox_id = $2
