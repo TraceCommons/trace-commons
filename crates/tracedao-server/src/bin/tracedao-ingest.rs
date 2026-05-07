@@ -28477,6 +28477,10 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             "skipped_ineligible",
             response.ranking.worker_run_skipped_ineligible_total,
         ),
+        (
+            "pending_after",
+            response.ranking.worker_run_pending_after_total,
+        ),
     ] {
         push_prometheus_gauge(
             &mut body,
@@ -50579,6 +50583,7 @@ struct TraceOperationalRankingSummary {
     worker_run_skipped_existing_total: usize,
     worker_run_skipped_model_risk_total: usize,
     worker_run_skipped_ineligible_total: usize,
+    worker_run_pending_after_total: usize,
     worker_run_reason_counts: BTreeMap<String, usize>,
 }
 
@@ -50651,6 +50656,7 @@ impl TraceOperationalRankingSummary {
         let mut worker_run_skipped_existing_total = 0usize;
         let mut worker_run_skipped_model_risk_total = 0usize;
         let mut worker_run_skipped_ineligible_total = 0usize;
+        let mut worker_run_pending_after_total = 0usize;
         let mut worker_run_reason_counts: BTreeMap<String, usize> = BTreeMap::new();
         for worker_run in inputs.worker_runs {
             worker_run_checked_total =
@@ -50663,6 +50669,8 @@ impl TraceOperationalRankingSummary {
                 .saturating_add(worker_run.skipped_model_risk_count);
             worker_run_skipped_ineligible_total = worker_run_skipped_ineligible_total
                 .saturating_add(worker_run.skipped_ineligible_count);
+            worker_run_pending_after_total =
+                worker_run_pending_after_total.saturating_add(worker_run.pending_after_count);
             for (reason, count) in &worker_run.reason_counts {
                 let total = worker_run_reason_counts.entry(reason.clone()).or_insert(0);
                 *total = (*total).saturating_add(*count);
@@ -50710,6 +50718,7 @@ impl TraceOperationalRankingSummary {
             worker_run_skipped_existing_total,
             worker_run_skipped_model_risk_total,
             worker_run_skipped_ineligible_total,
+            worker_run_pending_after_total,
             worker_run_reason_counts,
         }
     }
@@ -85263,6 +85272,10 @@ mod tests {
             serde_json::json!(1)
         );
         assert_eq!(
+            operational_json["ranking"]["worker_run_pending_after_total"],
+            serde_json::json!(4)
+        );
+        assert_eq!(
             operational_json["ranking"]["worker_run_reason_counts"]["calibration_stale"],
             serde_json::json!(1)
         );
@@ -85302,6 +85315,9 @@ mod tests {
         )));
         assert!(body_text.contains(&format!(
             "tracedao_operational_ranking_worker_run_totals{{tenant_storage_ref=\"{tenant_ref}\",state=\"skipped_ineligible\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_ranking_worker_run_totals{{tenant_storage_ref=\"{tenant_ref}\",state=\"pending_after\"}} 4"
         )));
         assert!(body_text.contains(&format!(
             "tracedao_operational_ranking_worker_run_reason_counts{{tenant_storage_ref=\"{tenant_ref}\",reason=\"calibration_stale\"}} 1"
