@@ -174,7 +174,10 @@ or conflicting labels still need review.
 Registered calibration datasets marked `deprecated` or `archived` are retired
 and cannot feed new calibration runs for that target use and policy; promotion,
 dataset-readiness, and active-model risk surfaces also report retired registered
-holdouts as blockers.
+holdouts as blockers. Registered holdout metadata must also meet the configured
+label-source and label-actor diversity floor before it can feed a calibration
+run, so a thin manifest cannot become credit-bearing evidence merely because the
+current label rows pass local error thresholds.
 Production deployments can set
 `TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY=true` so
 calibration runs fail closed unless the requested model holdout hash has a

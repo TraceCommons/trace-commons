@@ -942,7 +942,12 @@ File-backed readers also fail closed if legacy JSONL history contains conflictin
 manifest rows for one holdout key.
 Calibration runs may use matching registry rows in `candidate` or `active`
 status, but reject matching `deprecated` or `archived` rows so retired holdout
-sets cannot keep model evidence alive after stewardship review.
+sets cannot keep model evidence alive after stewardship review. Matching
+registry rows must also report at least the configured
+`TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT` distinct label sources and label
+actors before they can feed calibration; otherwise the run fails closed with
+`calibration_dataset_label_source_count_underdiverse` or
+`calibration_dataset_label_actor_count_underdiverse`.
 
 Calibration sample counts use effective labels, not raw label rows. If the same
 label source writes multiple labels for the same submission and target use, the
