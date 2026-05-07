@@ -27220,6 +27220,18 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         &[("tenant_storage_ref", &response.tenant_storage_ref)],
         response.exports.job_count,
     );
+    body.push_str("# HELP trace_commons_operational_export_infrastructure Safe export-worker infrastructure readiness flags.\n");
+    body.push_str("# TYPE trace_commons_operational_export_infrastructure gauge\n");
+    push_prometheus_gauge(
+        &mut body,
+        &mut metric_count,
+        "trace_commons_operational_export_infrastructure",
+        &[
+            ("tenant_storage_ref", &response.tenant_storage_ref),
+            ("state", "scheduler_enabled"),
+        ],
+        usize::from(response.exports.scheduler_enabled),
+    );
     body.push_str("# HELP trace_commons_operational_retention_jobs_total Retention job rows visible to operational summary.\n");
     body.push_str("# TYPE trace_commons_operational_retention_jobs_total gauge\n");
     push_prometheus_gauge(
@@ -47734,8 +47746,11 @@ impl TraceOperationalSummaryResponse {
             TraceOperationalReviewSlaSummary::from_records(&inputs.records, inputs.generated_at);
         let delayed_credit =
             TraceOperationalDelayedCreditSummary::from_events(&inputs.credit_events);
-        let exports =
-            TraceOperationalExportSummary::from_db_summary(&inputs.db_summary, inputs.generated_at);
+        let exports = TraceOperationalExportSummary::from_db_summary(
+            &inputs.db_summary,
+            inputs.generated_at,
+            inputs.state,
+        );
         let retention = TraceOperationalRetentionSummary::from_db_summary(&inputs.db_summary);
         let analytics = TraceOperationalAnalyticsSummary::from_state(inputs.state);
         let object_store = TraceOperationalObjectStoreSummary::from_state(inputs.state);
@@ -48573,17 +48588,20 @@ struct TraceOperationalExportSummary {
     job_count: usize,
     jobs_by_status: BTreeMap<String, usize>,
     stale_running_job_count: usize,
+    scheduler_enabled: bool,
 }
 
 impl TraceOperationalExportSummary {
     fn from_db_summary(
         db_summary: &TraceOperationalDbSummary,
         generated_at: DateTime<Utc>,
+        state: &AppState,
     ) -> Self {
         let mut summary = Self {
             db_available: db_summary.db_available,
             manifest_count: db_summary.export_manifests.len(),
             job_count: db_summary.export_jobs.len(),
+            scheduler_enabled: state.export_job_scheduler.is_some(),
             ..Self::default()
         };
         for manifest in &db_summary.export_manifests {
@@ -60220,6 +60238,47 @@ mod tests {
         let body_text = std::str::from_utf8(&body).expect("body is utf8");
         assert!(body_text.contains("object_primary_object_store_missing"));
         assert!(!body_text.contains("admin-token-a"));
+    }
+
+    #[tokio::test]
+    async fn operational_summary_reports_export_scheduler_without_token_or_reason() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        {
+            let state = Arc::make_mut(&mut state);
+            state.export_job_scheduler = Some(TraceExportJobSchedulerConfig {
+                worker_token: SecretString::from("operational-summary-export-token".to_string()),
+                interval: StdDuration::from_secs(90),
+                dataset_kind: Some("ranker_training_candidates".to_string()),
+                run_queued_max_jobs: 3,
+                retry_failed_max_jobs: 2,
+                retry_failed_max_retry_count: 4,
+                retry_failed_base_delay_seconds: 5,
+                retry_failed_max_delay_seconds: 60,
+                retry_failed_reason: "do not expose raw export scheduler note".to_string(),
+            });
+        }
+
+        let Json(response) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect export infrastructure readiness");
+        let response_json = serde_json::to_value(&response).expect("response serializes");
+        assert_eq!(
+            response_json["exports"]["scheduler_enabled"],
+            serde_json::json!(true)
+        );
+        let response_text = serde_json::to_string(&response).expect("response serializes");
+        assert!(!response_text.contains("operational-summary-export-token"));
+        assert!(!response_text.contains("do not expose raw export scheduler note"));
+
+        let (metrics, _) = trace_operational_metrics_body(&response);
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_export_infrastructure{{tenant_storage_ref=\"{tenant_ref}\",state=\"scheduler_enabled\"}} 1"
+        )));
+        assert!(!metrics.contains("operational-summary-export-token"));
+        assert!(!metrics.contains("do not expose raw export scheduler note"));
     }
 
     #[tokio::test]
