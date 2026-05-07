@@ -35725,7 +35725,7 @@ async fn delete_object_payload_for_revocation_propagation(
     if !is_service_owned_trace_object_store(&object_ref.object_store) {
         return Ok(skipped_revocation_propagation_item(
             item,
-            "object payload deletion currently supports only enabled service-owned encrypted objects",
+            revocation_payload_delete_skip_reason_for_object_store(&object_ref.object_store),
         ));
     }
     ensure_local_trace_object_ref_key_ref(&object_ref, &tenant.tenant_id)?;
@@ -37538,6 +37538,14 @@ fn is_service_owned_trace_object_store(object_store: &str) -> bool {
         TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
             | TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE
     )
+}
+
+fn revocation_payload_delete_skip_reason_for_object_store(object_store: &str) -> &'static str {
+    if object_store == TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE {
+        "object payload deletion skipped because remote object-store IO is disabled"
+    } else {
+        "object payload deletion currently supports only enabled service-owned encrypted objects"
+    }
 }
 
 fn is_supported_service_owned_physical_delete_artifact_kind(
@@ -52723,6 +52731,20 @@ mod tests {
     }
 
     #[test]
+    fn revocation_payload_delete_skip_reason_names_disabled_remote_io() {
+        assert_eq!(
+            revocation_payload_delete_skip_reason_for_object_store(
+                TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE
+            ),
+            "object payload deletion skipped because remote object-store IO is disabled"
+        );
+        assert_eq!(
+            revocation_payload_delete_skip_reason_for_object_store(TRACE_COMMONS_FILE_OBJECT_STORE),
+            "object payload deletion currently supports only enabled service-owned encrypted objects"
+        );
+    }
+
+    #[test]
     fn remote_service_file_adapter_enables_object_io_without_plaintext_fallback() {
         let temp = tempfile::tempdir().expect("temp dir");
         let key = trace_commons_server::secrets::keychain::generate_master_key_hex();
@@ -64827,6 +64849,209 @@ mod tests {
                         })
                 })
         );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn revocation_worker_skips_disabled_remote_object_payload_without_secret_leaks() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("aws_s3"),
+            Some("trace-commons-prod-bucket-secret"),
+            Some("arn:aws:kms:us-west-2:123456789012:key/trace-commons-secret"),
+            Some("aws-iam-role:trace-commons-writer-secret"),
+        )
+        .expect("disabled remote config parses");
+        let artifact_store = ConfiguredTraceArtifactStore::remote_disabled(remote_config);
+        let mut state =
+            test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
+                temp.path().to_path_buf(),
+                Some(backend.clone()),
+                Some(artifact_store),
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                BTreeMap::new(),
+                false,
+                false,
+                true,
+                false,
+            );
+        Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission mirrors to DB");
+
+        let object_ref_id = deterministic_trace_uuid_for_external_ref(
+            "disabled-remote-revocation-object-ref",
+            "tenant-a",
+            submission_id,
+            "submitted-envelope",
+        );
+        let secret_object_key = format!(
+            "tenants/{}/trace-commons-prod-bucket-secret/disabled-payload-secret.json",
+            tenant_storage_ref("tenant-a")
+        );
+        backend
+            .append_trace_object_ref(StorageTraceObjectRefWrite {
+                object_ref_id,
+                tenant_id: "tenant-a".to_string(),
+                submission_id,
+                artifact_kind: StorageTraceObjectArtifactKind::SubmittedEnvelope,
+                object_store: TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE.to_string(),
+                object_key: secret_object_key.clone(),
+                content_sha256:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_string(),
+                encryption_key_ref: "arn:aws:kms:us-west-2:123456789012:key/trace-commons-secret"
+                    .to_string(),
+                size_bytes: 128,
+                compression: None,
+                created_by_job_id: None,
+            })
+            .await
+            .expect("disabled remote object ref writes");
+
+        let propagation_item_id = deterministic_trace_uuid_for_external_ref(
+            "disabled-remote-revocation-propagation-item",
+            "tenant-a",
+            submission_id,
+            &object_ref_id.to_string(),
+        );
+        backend
+            .upsert_trace_revocation_propagation_item(StorageTraceRevocationPropagationItemWrite {
+                tenant_id: "tenant-a".to_string(),
+                propagation_item_id,
+                source_submission_id: submission_id,
+                target: StorageTraceRevocationPropagationTarget::ObjectRef { object_ref_id },
+                action: StorageTraceRevocationPropagationAction::DeleteObjectPayload,
+                status: StorageTraceRevocationPropagationItemStatus::Pending,
+                idempotency_key: sha256_prefixed(&format!(
+                    "disabled-remote-object-delete:{submission_id}:{object_ref_id}"
+                )),
+                reason: "revoked trace disabled remote object payload deletion".to_string(),
+                attempt_count: 0,
+                last_error: None,
+                next_attempt_at: None,
+                completed_at: None,
+                evidence_hash: None,
+                metadata: BTreeMap::new(),
+            })
+            .await
+            .expect("disabled remote propagation item writes");
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/workers/revocation-propagation")
+                    .header(AUTHORIZATION, "Bearer revocation-worker-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "disabled remote revocation payload delete",
+                            "dry_run": false,
+                            "limit": 1
+                        })
+                        .to_string(),
+                    ))
+                    .expect("worker request builds"),
+            )
+            .await
+            .expect("revocation worker response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("worker response parses");
+        assert_eq!(value["checked"], serde_json::json!(1));
+        assert_eq!(value["completed"], serde_json::json!(0));
+        assert_eq!(value["failed"], serde_json::json!(0));
+        assert_eq!(value["skipped"], serde_json::json!(1));
+
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        for secret in [
+            "revocation-worker-token-a",
+            "trace-commons-prod-bucket-secret",
+            "trace-commons-secret",
+            "trace-commons-writer-secret",
+            "disabled-payload-secret",
+        ] {
+            assert!(!body_text.contains(secret), "response leaked {secret}");
+        }
+
+        let propagation_items = backend
+            .list_trace_revocation_propagation_items("tenant-a", submission_id)
+            .await
+            .expect("revocation propagation items read");
+        assert_eq!(propagation_items.len(), 1);
+        let skipped = propagation_items
+            .iter()
+            .find(|item| item.propagation_item_id == propagation_item_id)
+            .expect("disabled remote item remains");
+        assert_eq!(
+            skipped.status,
+            StorageTraceRevocationPropagationItemStatus::Skipped
+        );
+        assert_eq!(skipped.attempt_count, 1);
+        assert!(skipped.completed_at.is_some());
+        assert!(
+            skipped
+                .evidence_hash
+                .as_deref()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+        assert_eq!(
+            skipped.last_error.as_deref(),
+            Some("object payload deletion skipped because remote object-store IO is disabled")
+        );
+        let skipped_text = serde_json::to_string(skipped).expect("skipped item serializes");
+        for secret in [
+            "trace-commons-prod-bucket-secret",
+            "trace-commons-secret",
+            "trace-commons-writer-secret",
+            "disabled-payload-secret",
+        ] {
+            assert!(
+                !skipped_text.contains(secret),
+                "stored skip leaked {secret}"
+            );
+        }
+
+        let object_refs = backend
+            .list_trace_object_refs("tenant-a", submission_id)
+            .await
+            .expect("object refs read after skipped delete");
+        let object_ref = object_refs
+            .iter()
+            .find(|object_ref| object_ref.object_ref_id == object_ref_id)
+            .expect("disabled remote object ref remains");
+        assert!(object_ref.deleted_at.is_none());
+        assert_eq!(object_ref.object_key, secret_object_key);
+        assert!(!propagation_items.iter().any(|item| {
+            item.action == StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt
+        }));
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
