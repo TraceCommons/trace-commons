@@ -27826,6 +27826,20 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             value,
         );
     }
+    if let Some(object_store_name) = response.object_store.object_store_name.as_deref() {
+        body.push_str("# HELP tracedao_operational_object_store_alias Configured safe artifact object-store alias.\n");
+        body.push_str("# TYPE tracedao_operational_object_store_alias gauge\n");
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "tracedao_operational_object_store_alias",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("object_store", object_store_name),
+            ],
+            1,
+        );
+    }
     body.push_str("# HELP tracedao_operational_ranking_worker_actionable_skips Count of ranking worker risk or ineligible skips that need operator review.\n");
     body.push_str("# TYPE tracedao_operational_ranking_worker_actionable_skips gauge\n");
     push_prometheus_gauge(
@@ -85181,6 +85195,9 @@ mod tests {
         )));
         assert!(body_text.contains(&format!(
             "tracedao_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"object_primary_eligible\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_object_store_alias{{tenant_storage_ref=\"{tenant_ref}\",object_store=\"{TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE}\"}} 1"
         )));
         assert!(!body_text.contains("tenant-a"));
         assert!(!body_text.contains("admin-token-a"));
