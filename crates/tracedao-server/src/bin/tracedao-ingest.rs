@@ -3169,7 +3169,7 @@ fn validate_required_postgres_trace_rls_diagnostics(
         return Ok(());
     }
     anyhow::bail!(
-        "{TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY} requires complete Trace Commons RLS policy coverage, enabled RLS, FORCE ROW LEVEL SECURITY on every Trace Commons table, a non-bypassing runtime role, and transaction-local tenant context; expected_tables={}, policies={}, rls_enabled={}, force_rls_enabled={}, missing_policies={}, rls_disabled={}, force_rls_disabled={}, expression_mismatches={}, bypass_role={}, tenant_context_transaction_local={}",
+        "{TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY} requires complete Trace Commons RLS policy coverage, enabled RLS, FORCE ROW LEVEL SECURITY on every Trace Commons table, a non-bypassing non-owner runtime role, and transaction-local tenant context; expected_tables={}, policies={}, rls_enabled={}, force_rls_enabled={}, missing_policies={}, rls_disabled={}, force_rls_disabled={}, expression_mismatches={}, bypass_role={}, table_owner_role={}, tenant_context_transaction_local={}",
         diagnostics.expected_table_count,
         diagnostics.policy_installed_count,
         diagnostics.rls_enabled_count,
@@ -3179,6 +3179,7 @@ fn validate_required_postgres_trace_rls_diagnostics(
         diagnostics.force_rls_disabled_tables.len(),
         diagnostics.policy_expression_mismatch_tables.len(),
         diagnostics.current_role_bypasses_rls,
+        diagnostics.current_role_owns_trace_tables,
         diagnostics.tenant_context_transaction_local,
     )
 }
@@ -5441,6 +5442,7 @@ struct TraceCommonsRlsConfigStatus {
     force_rls_disabled_tables: Vec<String>,
     policy_expression_mismatch_tables: Vec<String>,
     current_role_bypasses_rls: bool,
+    current_role_owns_trace_tables: bool,
     tenant_context_transaction_local: bool,
 }
 
@@ -5459,6 +5461,7 @@ impl From<TraceCorpusRlsDiagnostics> for TraceCommonsRlsConfigStatus {
             force_rls_disabled_tables: diagnostics.force_rls_disabled_tables,
             policy_expression_mismatch_tables: diagnostics.policy_expression_mismatch_tables,
             current_role_bypasses_rls: diagnostics.current_role_bypasses_rls,
+            current_role_owns_trace_tables: diagnostics.current_role_owns_trace_tables,
             tenant_context_transaction_local: diagnostics.tenant_context_transaction_local,
         }
     }
@@ -24078,6 +24081,7 @@ struct TracePostgresRlsDrillResponse {
     force_rls_disabled_table_count: usize,
     policy_expression_mismatch_table_count: usize,
     current_role_bypasses_rls: bool,
+    current_role_owns_trace_tables: bool,
     tenant_context_transaction_local: bool,
     blocking_gaps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -25726,6 +25730,7 @@ async fn run_postgres_rls_drill(
         force_rls_disabled_table_count: diagnostics.force_rls_disabled_tables.len(),
         policy_expression_mismatch_table_count: diagnostics.policy_expression_mismatch_tables.len(),
         current_role_bypasses_rls: diagnostics.current_role_bypasses_rls,
+        current_role_owns_trace_tables: diagnostics.current_role_owns_trace_tables,
         tenant_context_transaction_local: diagnostics.tenant_context_transaction_local,
         blocking_gaps,
         recorded_evidence: None,
@@ -27114,6 +27119,11 @@ fn postgres_rls_readiness_blocking_gaps(diagnostics: &TraceCorpusRlsDiagnostics)
     );
     push_key_rotation_gap(
         &mut gaps,
+        "current_role_owns_trace_tables",
+        diagnostics.current_role_owns_trace_tables,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
         "tenant_context_not_transaction_local",
         !diagnostics.tenant_context_transaction_local,
     );
@@ -27142,6 +27152,7 @@ fn postgres_rls_drill_evidence_hash(
             "force_rls_disabled_table_count": diagnostics.force_rls_disabled_tables.len(),
             "policy_expression_mismatch_table_count": diagnostics.policy_expression_mismatch_tables.len(),
             "current_role_bypasses_rls": diagnostics.current_role_bypasses_rls,
+            "current_role_owns_trace_tables": diagnostics.current_role_owns_trace_tables,
             "tenant_context_transaction_local": diagnostics.tenant_context_transaction_local,
             "blocking_gaps": blocking_gaps,
         })
@@ -27713,6 +27724,13 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             usize::from(
                 postgres_rls_diagnostics_available
                     && !response.promotion_gates.current_role_bypasses_rls,
+            ),
+        ),
+        (
+            "runtime_role_not_table_owner",
+            usize::from(
+                postgres_rls_diagnostics_available
+                    && !response.promotion_gates.current_role_owns_trace_tables,
             ),
         ),
         (
@@ -49026,6 +49044,7 @@ struct TraceOperationalPromotionGateSummary {
     force_rls_disabled_table_count: usize,
     trace_corpus_rls_expression_mismatch_table_count: usize,
     current_role_bypasses_rls: bool,
+    current_role_owns_trace_tables: bool,
     tenant_context_transaction_local: bool,
     tenant_rollout_gate_count: usize,
     tenant_rollout_gate_counts: BTreeMap<String, usize>,
@@ -49170,6 +49189,10 @@ impl TraceOperationalPromotionGateSummary {
             .trace_corpus_rls
             .as_ref()
             .is_some_and(|diagnostics| diagnostics.current_role_bypasses_rls);
+        let current_role_owns_trace_tables = db_summary
+            .trace_corpus_rls
+            .as_ref()
+            .is_some_and(|diagnostics| diagnostics.current_role_owns_trace_tables);
         let tenant_context_transaction_local = db_summary
             .trace_corpus_rls
             .as_ref()
@@ -49347,6 +49370,7 @@ impl TraceOperationalPromotionGateSummary {
             force_rls_disabled_table_count,
             trace_corpus_rls_expression_mismatch_table_count,
             current_role_bypasses_rls,
+            current_role_owns_trace_tables,
             tenant_context_transaction_local,
             tenant_rollout_gate_count,
             tenant_rollout_gate_counts,
@@ -53436,12 +53460,13 @@ mod tests {
             force_rls_disabled_tables: Vec::new(),
             policy_expression_mismatch_tables: Vec::new(),
             current_role_bypasses_rls: false,
+            current_role_owns_trace_tables: false,
             tenant_context_transaction_local: true,
         }
     }
 
     #[test]
-    fn required_postgres_trace_rls_gate_requires_force_rls_and_non_bypassing_role() {
+    fn required_postgres_trace_rls_gate_requires_force_rls_and_non_owner_role() {
         validate_required_postgres_trace_rls_diagnostics(
             &production_ready_rls_diagnostics_for_tests(),
         )
@@ -53461,6 +53486,12 @@ mod tests {
         let error = validate_required_postgres_trace_rls_diagnostics(&bypassing_role)
             .expect_err("bypassing role blocks production gate");
         assert!(error.to_string().contains("bypass_role=true"));
+
+        let mut table_owner_role = production_ready_rls_diagnostics_for_tests();
+        table_owner_role.current_role_owns_trace_tables = true;
+        let error = validate_required_postgres_trace_rls_diagnostics(&table_owner_role)
+            .expect_err("Trace Commons table owner role blocks production gate");
+        assert!(error.to_string().contains("table_owner_role=true"));
 
         let mut sticky_tenant_context = production_ready_rls_diagnostics_for_tests();
         sticky_tenant_context.tenant_context_transaction_local = false;
@@ -64343,9 +64374,18 @@ mod tests {
             .expect("body reads");
         let value: serde_json::Value =
             serde_json::from_slice(&body).expect("PostgreSQL RLS drill response parses");
-        assert_eq!(value["ready"], serde_json::json!(true));
-        assert_eq!(value["production_ready"], serde_json::json!(true));
-        assert_eq!(value["rls_ready"], serde_json::json!(true));
+        let runtime_role_safe = !value["current_role_bypasses_rls"]
+            .as_bool()
+            .expect("bypass flag is bool")
+            && !value["current_role_owns_trace_tables"]
+                .as_bool()
+                .expect("owner flag is bool");
+        assert_eq!(value["ready"], serde_json::json!(runtime_role_safe));
+        assert_eq!(
+            value["production_ready"],
+            serde_json::json!(runtime_role_safe)
+        );
+        assert_eq!(value["rls_ready"], serde_json::json!(runtime_role_safe));
         assert_eq!(value["force_rls_ready"], serde_json::json!(true));
         assert_eq!(
             value["tenant_context_transaction_local"],
@@ -64357,14 +64397,29 @@ mod tests {
                 .expect("expected table count is numeric")
                 > 0
         );
-        assert_eq!(value["blocking_gaps"], serde_json::json!([]));
+        if runtime_role_safe {
+            assert_eq!(value["blocking_gaps"], serde_json::json!([]));
+        } else {
+            assert!(
+                value["blocking_gaps"]
+                    .as_array()
+                    .expect("blocking gaps is array")
+                    .iter()
+                    .any(|gap| gap == "current_role_bypasses_rls"
+                        || gap == "current_role_owns_trace_tables")
+            );
+        }
         assert_eq!(
             value["recorded_evidence"]["check_name"],
             serde_json::json!("postgres_rls_readiness")
         );
         assert_eq!(
             value["recorded_evidence"]["status"],
-            serde_json::json!("passed")
+            serde_json::json!(if runtime_role_safe {
+                "passed"
+            } else {
+                "failed"
+            })
         );
         assert!(
             value["evidence_hash"]
@@ -85273,6 +85328,7 @@ mod tests {
             .force_rls_disabled_tables
             .push("trace_object_refs".to_string());
         unsafe_rls.current_role_bypasses_rls = true;
+        unsafe_rls.current_role_owns_trace_tables = true;
         unsafe_rls.tenant_context_transaction_local = false;
 
         let response = TraceOperationalSummaryResponse::from_parts(TraceOperationalSummaryInputs {
@@ -85297,6 +85353,7 @@ mod tests {
         assert_eq!(response.promotion_gates.trace_corpus_rls_ready, Some(false));
         assert_eq!(response.promotion_gates.force_rls_disabled_table_count, 1);
         assert!(response.promotion_gates.current_role_bypasses_rls);
+        assert!(response.promotion_gates.current_role_owns_trace_tables);
         assert!(!response.promotion_gates.tenant_context_transaction_local);
         assert!(
             response
@@ -85310,6 +85367,9 @@ mod tests {
         assert!(metrics.contains("gate=\"postgres_trace_rls_not_ready\""));
         assert!(metrics.contains(&format!(
             "tracedao_operational_postgres_rls_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"runtime_role_non_bypassing\"}} 0"
+        )));
+        assert!(metrics.contains(&format!(
+            "tracedao_operational_postgres_rls_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"runtime_role_not_table_owner\"}} 0"
         )));
         assert!(metrics.contains(&format!(
             "tracedao_operational_postgres_rls_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"tenant_context_transaction_local\"}} 0"
@@ -85327,6 +85387,10 @@ mod tests {
         assert_eq!(
             response_json["promotion_gates"]["tenant_context_transaction_local"],
             serde_json::json!(false)
+        );
+        assert_eq!(
+            response_json["promotion_gates"]["current_role_owns_trace_tables"],
+            serde_json::json!(true)
         );
         assert!(!response_json.to_string().contains("trace_object_refs"));
     }
