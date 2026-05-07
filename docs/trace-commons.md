@@ -848,8 +848,10 @@ redacted-summary embedding fallback.
 
 Set `TRACE_COMMONS_VECTOR_SEARCH_URL` to point at a trusted private vector-search
 adapter for ANN/vector-store lookup; `TRACE_COMMONS_VECTOR_SEARCH_BEARER_TOKEN`
-adds bearer auth and `TRACE_COMMONS_VECTOR_SEARCH_TIMEOUT_MS` bounds calls. The
-search request contains only the target vector-entry id, redacted embedding
+adds bearer auth, `TRACE_COMMONS_VECTOR_SEARCH_TIMEOUT_MS` bounds calls, and
+`TRACE_COMMONS_VECTOR_SEARCH_REQUIRE_EXTERNAL=true` makes startup and the
+vector-index worker fail closed when no private search adapter is configured.
+The search request contains only the target vector-entry id, redacted embedding
 vector, embedding metadata, source hash, and purpose hash. Search responses only
 return candidate vector-entry ids plus scores; the server then revalidates every
 candidate against active tenant DB vector metadata, compatible
