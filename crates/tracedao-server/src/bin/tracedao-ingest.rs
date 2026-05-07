@@ -60073,6 +60073,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn operational_summary_reports_object_store_readiness_without_remote_secrets() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let remote_temp = tempfile::tempdir().expect("remote artifact temp dir");
+        let key = tracedao_server::secrets::keychain::generate_master_key_hex();
+        let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("file_system"),
+            Some(remote_temp.path().to_str().expect("utf8 temp path")),
+            Some("summary-test-kms-key-ref"),
+            Some("summary-test-credential-ref"),
+        )
+        .expect("filesystem remote config parses");
+        let artifact_store =
+            ConfiguredTraceArtifactStore::remote_service(remote_config, SecretString::from(key))
+                .expect("filesystem remote service store builds");
+        let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            None,
+            Some(artifact_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-summary")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("operational summary response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 128 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("operational summary parses");
+        assert_eq!(value["object_store"]["configured"], serde_json::json!(true));
+        assert_eq!(value["object_store"]["io_enabled"], serde_json::json!(true));
+        assert_eq!(
+            value["object_store"]["object_primary_eligible"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["object_store"]["plaintext_compatibility_allowed"],
+            serde_json::json!(false)
+        );
+
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("summary-test-kms-key-ref"));
+        assert!(!body_text.contains("summary-test-credential-ref"));
+        assert!(!body_text.contains(remote_temp.path().to_str().expect("utf8 temp path")));
+
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "read"
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("surface=operational_summary;"))
+        }));
+    }
+
+    #[tokio::test]
     async fn operational_summary_reports_private_vector_infrastructure_readiness() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
