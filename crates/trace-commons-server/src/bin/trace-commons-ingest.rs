@@ -27896,6 +27896,22 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         &[("tenant_storage_ref", &response.tenant_storage_ref)],
         response.rollout_smoke.stale_evidence_count,
     );
+    body.push_str("# HELP trace_commons_operational_rollout_smoke_check Latest rollout-smoke evidence state for each required check.\n");
+    body.push_str("# TYPE trace_commons_operational_rollout_smoke_check gauge\n");
+    for check_name in &response.rollout_smoke.required_checks {
+        let check_state = rollout_smoke_check_metric_state(&response.rollout_smoke, check_name);
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "trace_commons_operational_rollout_smoke_check",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("check_name", check_name),
+                ("state", check_state),
+            ],
+            1,
+        );
+    }
     body.push_str("# HELP trace_commons_operational_submissions_total Total tenant submissions visible to operational summary.\n");
     body.push_str("# TYPE trace_commons_operational_submissions_total gauge\n");
     push_prometheus_gauge(
@@ -28218,6 +28234,33 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         );
     }
     (body, metric_count)
+}
+
+fn rollout_smoke_check_metric_state(
+    rollout_smoke: &TraceOperationalRolloutSmokeSummary,
+    check_name: &str,
+) -> &'static str {
+    if rollout_smoke
+        .passed_evidence_checks
+        .iter()
+        .any(|check| check == check_name)
+    {
+        "passed"
+    } else if rollout_smoke
+        .failed_evidence_checks
+        .iter()
+        .any(|check| check == check_name)
+    {
+        "failed"
+    } else if rollout_smoke
+        .stale_evidence_checks
+        .iter()
+        .any(|check| check == check_name)
+    {
+        "stale"
+    } else {
+        "missing"
+    }
 }
 
 fn push_prometheus_gauge(
@@ -85426,6 +85469,9 @@ mod tests {
         )));
         assert!(body_text.contains(&format!(
             "trace_commons_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 22"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_rollout_smoke_check{{tenant_storage_ref=\"{tenant_ref}\",check_name=\"submit_status\",state=\"missing\"}} 1"
         )));
         assert!(body_text.contains(&format!(
             "trace_commons_operational_rollout_smoke_recorded_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 0"
