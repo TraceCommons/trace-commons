@@ -197,6 +197,10 @@ const TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_KEY: &str =
     "TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_KEY";
 const TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_MAX_DELTA: &str =
     "TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_MAX_DELTA";
+const TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_EPSILON_MICROS: &str =
+    "TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_EPSILON_MICROS";
+const TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_MAX_EPSILON_MICROS: &str =
+    "TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_MAX_EPSILON_MICROS";
 const TRACE_COMMONS_SIGNED_TOKEN_SECRET: &str = "TRACE_COMMONS_SIGNED_TOKEN_SECRET";
 const TRACE_COMMONS_SIGNED_TOKEN_SECRETS: &str = "TRACE_COMMONS_SIGNED_TOKEN_SECRETS";
 const TRACE_COMMONS_SIGNED_TOKEN_EDDSA_PUBLIC_KEY_PEM: &str =
@@ -473,6 +477,7 @@ struct AppState {
     max_export_items_per_request: usize,
     analytics_min_cell_count: usize,
     analytics_broad_release_noise: Option<TraceAnalyticsNoiseConfig>,
+    analytics_broad_release_privacy_accounting: Option<TraceAnalyticsPrivacyAccountingConfig>,
     credit_settlement_max_micros_per_account: Option<i64>,
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Arc<BTreeSet<String>>,
@@ -531,6 +536,12 @@ struct TraceExportJobSchedulerTickSummary {
 struct TraceAnalyticsNoiseConfig {
     key: SecretString,
     max_delta: usize,
+}
+
+#[derive(Clone, Copy)]
+struct TraceAnalyticsPrivacyAccountingConfig {
+    epsilon_micros_per_release: u64,
+    max_epsilon_micros: u64,
 }
 
 #[derive(Clone)]
@@ -1743,6 +1754,8 @@ impl AppState {
         let max_export_items_per_request = parse_max_export_items_per_request_from_env()?;
         let analytics_min_cell_count = parse_analytics_min_cell_count_from_env()?;
         let analytics_broad_release_noise = parse_analytics_noise_from_env()?;
+        let analytics_broad_release_privacy_accounting =
+            parse_analytics_privacy_accounting_from_env()?;
         let credit_settlement_max_micros_per_account =
             parse_credit_settlement_max_points_per_account_from_env()?;
         let submission_quota = parse_submission_quota_config_from_env()?;
@@ -1958,6 +1971,7 @@ impl AppState {
             max_export_items_per_request,
             analytics_min_cell_count,
             analytics_broad_release_noise,
+            analytics_broad_release_privacy_accounting,
             credit_settlement_max_micros_per_account,
             submission_quota,
             legal_hold_retention_policy_ids: Arc::new(legal_hold_retention_policy_ids),
@@ -4977,6 +4991,49 @@ fn parse_analytics_broad_release_noise_max_delta(configured: &str) -> anyhow::Re
     Ok(parsed)
 }
 
+fn parse_analytics_privacy_accounting_from_env()
+-> anyhow::Result<Option<TraceAnalyticsPrivacyAccountingConfig>> {
+    let epsilon = optional_trimmed_env(TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_EPSILON_MICROS)?;
+    let max_epsilon =
+        optional_trimmed_env(TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_MAX_EPSILON_MICROS)?;
+    match (epsilon, max_epsilon) {
+        (None, None) => Ok(None),
+        (Some(_), None) => anyhow::bail!(
+            "{TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_EPSILON_MICROS} requires {TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_MAX_EPSILON_MICROS}"
+        ),
+        (None, Some(_)) => anyhow::bail!(
+            "{TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_MAX_EPSILON_MICROS} requires {TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_EPSILON_MICROS}"
+        ),
+        (Some(epsilon), Some(max_epsilon)) => {
+            let epsilon_micros_per_release = parse_analytics_privacy_epsilon_micros(
+                &epsilon,
+                TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_EPSILON_MICROS,
+            )?;
+            let max_epsilon_micros = parse_analytics_privacy_epsilon_micros(
+                &max_epsilon,
+                TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_MAX_EPSILON_MICROS,
+            )?;
+            anyhow::ensure!(
+                epsilon_micros_per_release <= max_epsilon_micros,
+                "{TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_EPSILON_MICROS} must be less than or equal to {TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_MAX_EPSILON_MICROS}"
+            );
+            Ok(Some(TraceAnalyticsPrivacyAccountingConfig {
+                epsilon_micros_per_release,
+                max_epsilon_micros,
+            }))
+        }
+    }
+}
+
+fn parse_analytics_privacy_epsilon_micros(configured: &str, name: &str) -> anyhow::Result<u64> {
+    let parsed = configured
+        .trim()
+        .parse::<u64>()
+        .with_context(|| format!("{name} must be a positive integer"))?;
+    anyhow::ensure!(parsed > 0, "{name} must be greater than zero");
+    Ok(parsed)
+}
+
 fn parse_credit_settlement_max_points_per_account_from_env() -> anyhow::Result<Option<i64>> {
     match optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT)? {
         Some(configured) => parse_credit_settlement_max_points_per_account(&configured),
@@ -5383,6 +5440,9 @@ struct TraceCommonsConfigStatusResponse {
     analytics_min_cell_count: usize,
     analytics_broad_release_noise_configured: bool,
     analytics_broad_release_noise_max_delta: Option<usize>,
+    analytics_broad_release_privacy_accounting_configured: bool,
+    analytics_broad_release_epsilon_micros_per_release: Option<u64>,
+    analytics_broad_release_max_epsilon_micros: Option<u64>,
     credit_settlement_max_micros_per_account: Option<i64>,
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Vec<String>,
@@ -5554,6 +5614,15 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .analytics_broad_release_noise
             .as_ref()
             .map(|config| config.max_delta),
+        analytics_broad_release_privacy_accounting_configured: state
+            .analytics_broad_release_privacy_accounting
+            .is_some(),
+        analytics_broad_release_epsilon_micros_per_release: state
+            .analytics_broad_release_privacy_accounting
+            .map(|config| config.epsilon_micros_per_release),
+        analytics_broad_release_max_epsilon_micros: state
+            .analytics_broad_release_privacy_accounting
+            .map(|config| config.max_epsilon_micros),
         credit_settlement_max_micros_per_account: state.credit_settlement_max_micros_per_account,
         submission_quota: state.submission_quota,
         legal_hold_retention_policy_ids: state
@@ -6575,6 +6644,23 @@ async fn analytics_handler(
     if requests_broad_release && let Some(config) = state.analytics_broad_release_noise.as_ref() {
         response.apply_broad_release_noise(config);
     }
+    let privacy_ledger = if requests_broad_release {
+        if let Some(config) = state.analytics_broad_release_privacy_accounting {
+            let ledger =
+                analytics_broad_release_privacy_ledger(state.as_ref(), tenant.tenant_id(), config)
+                    .map_err(internal_error)?;
+            if ledger.remaining_before_release < config.epsilon_micros_per_release {
+                response
+                    .privacy_budget
+                    .block_broad_release("privacy_budget_exhausted");
+            }
+            Some((config, ledger))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     if requests_broad_release && !response.privacy_budget.broad_release_ready {
         return Err(api_error(
             StatusCode::CONFLICT,
@@ -6587,16 +6673,89 @@ async fn analytics_handler(
             ),
         ));
     }
+    if let Some((config, ledger)) = privacy_ledger {
+        response
+            .privacy_budget
+            .apply_privacy_accounting(config, ledger.spent_after_release);
+    }
+    let mut audit_event = tenant.read_audit_event("analytics_summary", response.submissions_total);
+    if let Some((config, ledger)) = privacy_ledger {
+        audit_event.reason = Some(trace_analytics_broad_release_audit_reason(
+            response.submissions_total,
+            config.epsilon_micros_per_release,
+            ledger.spent_after_release,
+            ledger.remaining_after_release,
+        ));
+    }
     append_audit_event_with_db_mirror(
         state.as_ref(),
         tenant.auth(),
-        tenant.read_audit_event("analytics_summary", response.submissions_total),
+        audit_event,
         StorageTraceAuditAction::Read,
         StorageTraceAuditSafeMetadata::Empty,
     )
     .await
     .map_err(internal_error)?;
     Ok(Json(response))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TraceAnalyticsPrivacyLedger {
+    spent_before_release: u64,
+    remaining_before_release: u64,
+    spent_after_release: u64,
+    remaining_after_release: u64,
+}
+
+fn analytics_broad_release_privacy_ledger(
+    state: &AppState,
+    tenant_id: &str,
+    config: TraceAnalyticsPrivacyAccountingConfig,
+) -> anyhow::Result<TraceAnalyticsPrivacyLedger> {
+    let spent_before_release =
+        analytics_broad_release_epsilon_spent_micros(&state.root, tenant_id)?;
+    let remaining_before_release = config
+        .max_epsilon_micros
+        .saturating_sub(spent_before_release);
+    let spent_after_release = spent_before_release
+        .saturating_add(config.epsilon_micros_per_release)
+        .min(config.max_epsilon_micros);
+    let remaining_after_release = config
+        .max_epsilon_micros
+        .saturating_sub(spent_after_release);
+    Ok(TraceAnalyticsPrivacyLedger {
+        spent_before_release,
+        remaining_before_release,
+        spent_after_release,
+        remaining_after_release,
+    })
+}
+
+fn analytics_broad_release_epsilon_spent_micros(
+    root: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<u64> {
+    read_all_audit_events(root, tenant_id)?
+        .iter()
+        .filter(|event| event.kind == "read")
+        .filter(|event| {
+            trace_audit_reason_value(event.reason.as_deref(), "surface")
+                == Some("analytics_summary")
+                && trace_audit_reason_value(event.reason.as_deref(), "release_scope")
+                    == Some("broad")
+        })
+        .try_fold(0u64, |accumulator, event| {
+            let epsilon = trace_audit_reason_u64(event.reason.as_deref(), "privacy_epsilon_micros")
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "analytics broad-release audit event {} is missing privacy_epsilon_micros",
+                        event.event_id
+                    )
+                })?;
+            accumulator
+                .checked_add(epsilon)
+                .ok_or_else(|| anyhow::anyhow!("analytics broad-release privacy ledger overflow"))
+        })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -6874,6 +7033,10 @@ fn trace_audit_reason_u32(reason: Option<&str>, key: &str) -> Option<u32> {
     trace_audit_reason_value(reason, key)?.parse::<u32>().ok()
 }
 
+fn trace_audit_reason_u64(reason: Option<&str>, key: &str) -> Option<u64> {
+    trace_audit_reason_value(reason, key)?.parse::<u64>().ok()
+}
+
 fn trace_audit_reason_enum<T>(reason: Option<&str>, key: &str) -> Option<T>
 where
     T: DeserializeOwned,
@@ -6890,6 +7053,17 @@ fn trace_audit_reason_is_rollout_smoke_evidence(reason: Option<&str>) -> bool {
 
 fn trace_read_audit_reason(surface: &str, item_count: usize) -> String {
     format!("surface={surface};item_count={item_count}")
+}
+
+fn trace_analytics_broad_release_audit_reason(
+    item_count: usize,
+    epsilon_micros: u64,
+    spent_after_release: u64,
+    remaining_after_release: u64,
+) -> String {
+    format!(
+        "surface=analytics_summary;item_count={item_count};release_scope=broad;privacy_epsilon_micros={epsilon_micros};privacy_epsilon_spent_micros={spent_after_release};privacy_epsilon_remaining_micros={remaining_after_release}"
+    )
 }
 
 fn trace_read_audit_metadata(surface: &str, item_count: usize) -> StorageTraceAuditSafeMetadata {
@@ -23897,6 +24071,15 @@ struct TraceAnalyticsReleaseDrillResponse {
     broad_release_noise_configured: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     broad_release_noise_max_delta: Option<usize>,
+    privacy_accounting_configured: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    epsilon_micros_per_release: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_epsilon_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    epsilon_spent_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    epsilon_remaining_micros: Option<u64>,
     released_cell_count: usize,
     suppressed_cell_count: usize,
     suppression_applied: bool,
@@ -25055,6 +25238,20 @@ async fn run_analytics_release_drill(
     if let Some(config) = state.analytics_broad_release_noise.as_ref() {
         analytics.apply_broad_release_noise(config);
     }
+    let privacy_ledger = if let Some(config) = state.analytics_broad_release_privacy_accounting {
+        let ledger = analytics_broad_release_privacy_ledger(state, &tenant.tenant_id, config)?;
+        if ledger.remaining_before_release < config.epsilon_micros_per_release {
+            analytics
+                .privacy_budget
+                .block_broad_release("privacy_budget_exhausted");
+        }
+        analytics
+            .privacy_budget
+            .apply_privacy_accounting(config, ledger.spent_before_release);
+        Some((config, ledger))
+    } else {
+        None
+    };
 
     let budget = analytics.privacy_budget.clone();
     let blocking_gaps = budget.broad_release_blocking_reasons.clone();
@@ -25079,6 +25276,12 @@ async fn run_analytics_release_drill(
             .analytics_broad_release_noise
             .as_ref()
             .map(|config| config.max_delta),
+        privacy_accounting_configured: privacy_ledger.is_some(),
+        epsilon_micros_per_release: privacy_ledger
+            .map(|(config, _)| config.epsilon_micros_per_release),
+        max_epsilon_micros: privacy_ledger.map(|(config, _)| config.max_epsilon_micros),
+        epsilon_spent_micros: privacy_ledger.map(|(_, ledger)| ledger.spent_before_release),
+        epsilon_remaining_micros: privacy_ledger.map(|(_, ledger)| ledger.remaining_before_release),
         released_cell_count: budget.released_cell_count,
         suppressed_cell_count: budget.suppressed_cell_count,
         suppression_applied: budget.suppression_applied,
@@ -26869,6 +27072,13 @@ fn analytics_release_drill_evidence_hash(
                 .analytics_broad_release_noise
                 .as_ref()
                 .map(|config| config.max_delta),
+            "privacy_accounting_configured": state
+                .analytics_broad_release_privacy_accounting
+                .is_some(),
+            "epsilon_micros_per_release": budget.epsilon_micros_per_release,
+            "max_epsilon_micros": budget.max_epsilon_micros,
+            "epsilon_spent_micros": budget.epsilon_spent_micros,
+            "epsilon_remaining_micros": budget.epsilon_remaining_micros,
             "released_cell_count": budget.released_cell_count,
             "suppressed_cell_count": budget.suppressed_cell_count,
             "suppression_applied": budget.suppression_applied,
@@ -47706,6 +47916,15 @@ struct TraceAnalyticsPrivacyBudget {
     strategy: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     min_cell_count: Option<usize>,
+    privacy_accounting_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    epsilon_micros_per_release: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_epsilon_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    epsilon_spent_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    epsilon_remaining_micros: Option<u64>,
     noise_applied: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     noise_max_delta: Option<usize>,
@@ -47722,6 +47941,11 @@ impl TraceAnalyticsPrivacyBudget {
         Self {
             strategy: "k_anonymity_min_cell".to_string(),
             min_cell_count: None,
+            privacy_accounting_enabled: false,
+            epsilon_micros_per_release: None,
+            max_epsilon_micros: None,
+            epsilon_spent_micros: None,
+            epsilon_remaining_micros: None,
             noise_applied: false,
             noise_max_delta: None,
             noisy_cell_count: 0,
@@ -47747,6 +47971,11 @@ impl TraceAnalyticsPrivacyBudget {
         Self {
             strategy: "k_anonymity_min_cell".to_string(),
             min_cell_count: Some(min_cell_count),
+            privacy_accounting_enabled: false,
+            epsilon_micros_per_release: None,
+            max_epsilon_micros: None,
+            epsilon_spent_micros: None,
+            epsilon_remaining_micros: None,
             noise_applied: false,
             noise_max_delta: None,
             noisy_cell_count: 0,
@@ -47774,6 +48003,19 @@ impl TraceAnalyticsPrivacyBudget {
         self.noise_applied = true;
         self.noise_max_delta = Some(max_delta);
         self.noisy_cell_count = noisy_cell_count;
+    }
+
+    fn apply_privacy_accounting(
+        &mut self,
+        config: TraceAnalyticsPrivacyAccountingConfig,
+        spent_micros: u64,
+    ) {
+        self.privacy_accounting_enabled = true;
+        self.epsilon_micros_per_release = Some(config.epsilon_micros_per_release);
+        self.max_epsilon_micros = Some(config.max_epsilon_micros);
+        self.epsilon_spent_micros = Some(spent_micros);
+        self.epsilon_remaining_micros =
+            Some(config.max_epsilon_micros.saturating_sub(spent_micros));
     }
 }
 
@@ -50454,6 +50696,7 @@ mod tests {
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
             analytics_min_cell_count: 0,
             analytics_broad_release_noise: None,
+            analytics_broad_release_privacy_accounting: None,
             credit_settlement_max_micros_per_account: None,
             submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
@@ -51856,6 +52099,38 @@ mod tests {
             parse_error
                 .to_string()
                 .contains(TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_MAX_DELTA)
+        );
+    }
+
+    #[test]
+    fn parses_analytics_privacy_epsilon_micros() {
+        assert_eq!(
+            parse_analytics_privacy_epsilon_micros(
+                "250",
+                TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_EPSILON_MICROS,
+            )
+            .expect("epsilon parses"),
+            250
+        );
+        let zero_error = parse_analytics_privacy_epsilon_micros(
+            "0",
+            TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_EPSILON_MICROS,
+        )
+        .expect_err("zero epsilon is invalid");
+        assert!(
+            zero_error
+                .to_string()
+                .contains(TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_EPSILON_MICROS)
+        );
+        let parse_error = parse_analytics_privacy_epsilon_micros(
+            "many",
+            TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_MAX_EPSILON_MICROS,
+        )
+        .expect_err("non-numeric epsilon is invalid");
+        assert!(
+            parse_error
+                .to_string()
+                .contains(TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_MAX_EPSILON_MICROS)
         );
     }
 
@@ -53296,10 +53571,18 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
-        Arc::make_mut(&mut state).analytics_broad_release_noise = Some(TraceAnalyticsNoiseConfig {
-            key: SecretString::from("config-status-analytics-noise-secret".to_string()),
-            max_delta: 3,
-        });
+        {
+            let state = Arc::make_mut(&mut state);
+            state.analytics_broad_release_noise = Some(TraceAnalyticsNoiseConfig {
+                key: SecretString::from("config-status-analytics-noise-secret".to_string()),
+                max_delta: 3,
+            });
+            state.analytics_broad_release_privacy_accounting =
+                Some(TraceAnalyticsPrivacyAccountingConfig {
+                    epsilon_micros_per_release: 250,
+                    max_epsilon_micros: 1_000,
+                });
+        }
 
         let response = app(state)
             .oneshot(
@@ -53324,6 +53607,18 @@ mod tests {
         assert_eq!(
             value["analytics_broad_release_noise_max_delta"],
             serde_json::json!(3)
+        );
+        assert_eq!(
+            value["analytics_broad_release_privacy_accounting_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["analytics_broad_release_epsilon_micros_per_release"],
+            serde_json::json!(250)
+        );
+        assert_eq!(
+            value["analytics_broad_release_max_epsilon_micros"],
+            serde_json::json!(1_000)
         );
         let object = value.as_object().expect("config status is object");
         assert!(!object.contains_key("analytics_broad_release_noise_key"));
@@ -54478,6 +54773,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn analytics_broad_release_fails_closed_when_epsilon_budget_exhausted() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        {
+            let state = Arc::make_mut(&mut state);
+            state.analytics_min_cell_count = 2;
+            state.analytics_broad_release_noise = Some(TraceAnalyticsNoiseConfig {
+                key: SecretString::from("privacy-ledger-analytics-secret".to_string()),
+                max_delta: 2,
+            });
+            state.analytics_broad_release_privacy_accounting =
+                Some(TraceAnalyticsPrivacyAccountingConfig {
+                    epsilon_micros_per_release: 100,
+                    max_epsilon_micros: 100,
+                });
+        }
+        for _ in 0..2 {
+            let envelope = sample_envelope().await;
+            let _ = submit_trace_handler(
+                State(state.clone()),
+                auth_headers("token-a"),
+                Json(envelope),
+            )
+            .await
+            .expect("submission succeeds");
+        }
+
+        let first = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/analytics/summary?release_scope=broad")
+                    .header(AUTHORIZATION, "Bearer review-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("first analytics response");
+        assert_eq!(first.status(), StatusCode::OK);
+        let first_body = axum::body::to_bytes(first.into_body(), 16 * 1024)
+            .await
+            .expect("first body reads");
+        let first_value: serde_json::Value =
+            serde_json::from_slice(&first_body).expect("first json parses");
+        assert_eq!(
+            first_value["privacy_budget"]["epsilon_spent_micros"],
+            serde_json::json!(100)
+        );
+        assert_eq!(
+            first_value["privacy_budget"]["epsilon_remaining_micros"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            first_value["privacy_budget"]["epsilon_micros_per_release"],
+            serde_json::json!(100)
+        );
+
+        let second = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/analytics/summary?release_scope=broad")
+                    .header(AUTHORIZATION, "Bearer review-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("second analytics response");
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+        let second_body = axum::body::to_bytes(second.into_body(), 16 * 1024)
+            .await
+            .expect("second body reads");
+        let second_value: serde_json::Value =
+            serde_json::from_slice(&second_body).expect("second json parses");
+        assert!(
+            second_value["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("privacy_budget_exhausted"))
+        );
+        let second_text = std::str::from_utf8(&second_body).expect("second body is utf8");
+        assert!(!second_text.contains("privacy-ledger-analytics-secret"));
+
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("file audit events read");
+        let broad_release_audits = audit_events
+            .iter()
+            .filter(|event| {
+                event.kind == "read"
+                    && event.reason.as_deref().is_some_and(|reason| {
+                        reason.contains("surface=analytics_summary")
+                            && reason.contains("release_scope=broad")
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(broad_release_audits.len(), 1);
+        let reason = broad_release_audits[0].reason.as_deref().expect("reason");
+        assert!(reason.contains("privacy_epsilon_micros=100"));
+        assert!(reason.contains("privacy_epsilon_remaining_micros=0"));
+    }
+
+    #[tokio::test]
     async fn analytics_release_drill_records_smoke_evidence_without_leaking_noise_key() {
         use axum::body::Body;
         use tower::ServiceExt;
@@ -54491,6 +54890,11 @@ mod tests {
                 key: SecretString::from("analytics-release-drill-secret".to_string()),
                 max_delta: 2,
             });
+            state.analytics_broad_release_privacy_accounting =
+                Some(TraceAnalyticsPrivacyAccountingConfig {
+                    epsilon_micros_per_release: 25,
+                    max_epsilon_micros: 100,
+                });
         }
         for _ in 0..2 {
             let envelope = sample_envelope().await;
@@ -54534,6 +54938,14 @@ mod tests {
             serde_json::json!(true)
         );
         assert_eq!(value["broad_release_noise_max_delta"], serde_json::json!(2));
+        assert_eq!(
+            value["privacy_accounting_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(value["epsilon_micros_per_release"], serde_json::json!(25));
+        assert_eq!(value["max_epsilon_micros"], serde_json::json!(100));
+        assert_eq!(value["epsilon_spent_micros"], serde_json::json!(0));
+        assert_eq!(value["epsilon_remaining_micros"], serde_json::json!(100));
         assert_eq!(value["noise_applied"], serde_json::json!(true));
         assert_eq!(value["blocking_gaps"], serde_json::json!([]));
         assert_eq!(
@@ -63015,6 +63427,7 @@ mod tests {
             max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
             analytics_min_cell_count: 0,
             analytics_broad_release_noise: None,
+            analytics_broad_release_privacy_accounting: None,
             credit_settlement_max_micros_per_account: None,
             submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::from([
