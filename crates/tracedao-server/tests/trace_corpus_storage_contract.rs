@@ -2,12 +2,16 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use tracedao_server::trace_corpus_storage::{
-    TenantScopedTraceObjectRef, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCreditEventType,
-    TraceDerivedRecord, TraceDerivedStatus, TraceExportManifestItemInvalidationReason,
+    TenantScopedTraceObjectRef, TraceAuditAction, TraceAuditSafeMetadata, TraceCorpusStatus,
+    TraceCreditAccountSettlementLineItem, TraceCreditEventType, TraceCreditHoldReason,
+    TraceCreditSettlementBatchStatus, TraceCreditSettlementNearStatus, TraceDerivedRecord,
+    TraceDerivedStatus, TraceExportJobStatus, TraceExportManifestItemInvalidationReason,
     TraceExportManifestItemRecord, TraceExportManifestRecord, TraceObjectArtifactKind,
-    TraceObjectRefRecord, TraceReviewLeaseAuditAction, TraceSubmissionWrite, TraceTombstoneRecord,
-    TraceVectorEntryRecord, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
-    TraceWorkerKind,
+    TraceObjectRefRecord, TraceRankingLabelOutcome, TraceRankingLabelSource,
+    TraceRankingModelStatus, TraceRankingUtilityCategory, TraceRankingWorkerRunKind,
+    TraceRankingWorkerRunStatus, TraceReviewLeaseAuditAction, TraceSubmissionWrite,
+    TraceTombstoneRecord, TraceVectorEntryRecord, TraceVectorEntrySourceProjection,
+    TraceVectorEntryStatus, TraceWorkerKind,
 };
 use uuid::Uuid;
 
@@ -81,6 +85,36 @@ fn audit_metadata_contract_is_typed_not_arbitrary_json() {
 }
 
 #[test]
+fn read_audit_metadata_is_typed_and_aggregate_only() {
+    let metadata = TraceAuditSafeMetadata::Read {
+        surface: "config_status".to_string(),
+        item_count: 1,
+    };
+    let json = serde_json::to_value(metadata).unwrap();
+
+    assert_eq!(json["kind"], "read");
+    assert_eq!(json["surface"], "config_status");
+    assert_eq!(json["item_count"], 1);
+    assert!(json.get("submission_ids").is_none());
+    assert!(json.get("request_body").is_none());
+    assert!(json.get("raw_reason").is_none());
+}
+
+#[test]
+fn revocation_audit_metadata_hashes_reason() {
+    let metadata = TraceAuditSafeMetadata::Revocation {
+        reason_hash: "sha256:operator-reason".to_string(),
+    };
+    let json = serde_json::to_value(metadata).unwrap();
+
+    assert_eq!(json["kind"], "revocation");
+    assert_eq!(json["reason_hash"], "sha256:operator-reason");
+    assert!(json.get("reason").is_none());
+    assert!(json.get("operator_note").is_none());
+    assert!(json.get("request_body").is_none());
+}
+
+#[test]
 fn review_lease_audit_metadata_is_typed_and_request_safe() {
     let metadata = TraceAuditSafeMetadata::ReviewLease {
         action: TraceReviewLeaseAuditAction::Claim,
@@ -115,6 +149,83 @@ fn credit_mutation_audit_metadata_hashes_sensitive_refs() {
 }
 
 #[test]
+fn ranking_worker_run_recovery_audit_metadata_is_hash_only() {
+    let metadata = TraceAuditSafeMetadata::RankingWorkerRunRecovery {
+        ranking_worker_run_id: Uuid::from_u128(0x44),
+        run_kind: TraceRankingWorkerRunKind::PredictionCredit,
+        recovered_status: TraceRankingWorkerRunStatus::Failed,
+        reason_hash: "sha256:operator-note".to_string(),
+    };
+    let json = serde_json::to_value(metadata).unwrap();
+
+    assert_eq!(
+        serde_json::to_value(TraceAuditAction::RankingWorkerRunRecovery).unwrap(),
+        "ranking_worker_run_recovery"
+    );
+    assert_eq!(json["kind"], "ranking_worker_run_recovery");
+    assert_eq!(
+        json["ranking_worker_run_id"],
+        Uuid::from_u128(0x44).to_string()
+    );
+    assert_eq!(json["run_kind"], "prediction_credit");
+    assert_eq!(json["recovered_status"], "failed");
+    assert_eq!(json["reason_hash"], "sha256:operator-note");
+    assert!(json.get("reason").is_none());
+    assert!(json.get("operator_note").is_none());
+    assert!(json.get("raw_error").is_none());
+}
+
+#[test]
+fn export_job_recovery_audit_metadata_is_hash_only() {
+    let metadata = TraceAuditSafeMetadata::ExportJobRecovery {
+        export_job_id: Uuid::from_u128(0x45),
+        recovered_status: TraceExportJobStatus::Expired,
+        reason_hash: "sha256:operator-note".to_string(),
+    };
+    let json = serde_json::to_value(metadata).unwrap();
+
+    assert_eq!(
+        serde_json::to_value(TraceAuditAction::ExportJobRecovery).unwrap(),
+        "export_job_recovery"
+    );
+    assert_eq!(json["kind"], "export_job_recovery");
+    assert_eq!(json["export_job_id"], Uuid::from_u128(0x45).to_string());
+    assert_eq!(json["recovered_status"], "expired");
+    assert_eq!(json["reason_hash"], "sha256:operator-note");
+    assert!(json.get("reason").is_none());
+    assert!(json.get("operator_note").is_none());
+    assert!(json.get("raw_error").is_none());
+}
+
+#[test]
+fn calibration_dataset_quarantine_audit_metadata_is_hash_only() {
+    let metadata = TraceAuditSafeMetadata::RankingCalibrationDatasetQuarantine {
+        calibration_dataset_hash: "sha256:holdout".to_string(),
+        target_use: "ranking_model_training".to_string(),
+        policy_version: "trace-credit-policy-v1".to_string(),
+        archived_source_manifest_hash: "sha256:manifest".to_string(),
+        conflict_key_hash: "sha256:conflict-key".to_string(),
+        reason_hash: "sha256:operator-reason".to_string(),
+    };
+    let json = serde_json::to_value(metadata).unwrap();
+
+    assert_eq!(
+        serde_json::to_value(TraceAuditAction::RankingCalibrationDatasetQuarantine).unwrap(),
+        "ranking_calibration_dataset_quarantine"
+    );
+    assert_eq!(json["kind"], "ranking_calibration_dataset_quarantine");
+    assert_eq!(json["calibration_dataset_hash"], "sha256:holdout");
+    assert_eq!(json["target_use"], "ranking_model_training");
+    assert_eq!(json["policy_version"], "trace-credit-policy-v1");
+    assert_eq!(json["archived_source_manifest_hash"], "sha256:manifest");
+    assert_eq!(json["conflict_key_hash"], "sha256:conflict-key");
+    assert_eq!(json["reason_hash"], "sha256:operator-reason");
+    assert!(json.get("reason").is_none());
+    assert!(json.get("operator_note").is_none());
+    assert!(json.get("raw_manifest").is_none());
+}
+
+#[test]
 fn process_evaluation_audit_metadata_is_hash_and_count_only() {
     let metadata = TraceAuditSafeMetadata::ProcessEvaluation {
         evaluator_version_hash: "sha256:evaluator-version".to_string(),
@@ -136,6 +247,73 @@ fn process_evaluation_audit_metadata_is_hash_and_count_only() {
     assert!(json.get("evaluator_version").is_none());
     assert!(json.get("labels").is_none());
     assert!(json.get("utility_external_ref").is_none());
+}
+
+#[test]
+fn credit_settlement_contract_uses_typed_states_and_hash_only_near_metadata() {
+    let line_item = TraceCreditAccountSettlementLineItem {
+        credit_account_ref: "principal_sha256:account".to_string(),
+        credit_account_hash: "sha256:account".to_string(),
+        settled_credit_delta_micros: 1_250_000,
+        source_credit_event_ids: vec![Uuid::from_u128(0x11)],
+        source_submission_ids: vec![Uuid::from_u128(0x12)],
+        source_list_hash: "sha256:sources".to_string(),
+        near_status: TraceCreditSettlementNearStatus::Pending,
+        near_outbox_id: Some(Uuid::from_u128(0x13)),
+    };
+    let json = serde_json::to_value(line_item).unwrap();
+
+    assert_eq!(json["near_status"], "pending");
+    assert_eq!(json["credit_account_hash"], "sha256:account");
+    assert!(json.get("raw_contributor_identity").is_none());
+    assert!(json.get("trace_body").is_none());
+
+    assert_eq!(
+        serde_json::to_value(TraceCreditSettlementBatchStatus::DryRun).unwrap(),
+        "dry_run"
+    );
+    assert_eq!(
+        serde_json::to_value(TraceCreditHoldReason::DuplicateClusterUnderReview).unwrap(),
+        "duplicate_cluster_under_review"
+    );
+}
+
+#[test]
+fn ranking_evidence_contract_uses_typed_enums_and_hash_only_outcomes() {
+    assert_eq!(
+        serde_json::to_value(TraceRankingModelStatus::Candidate).unwrap(),
+        "candidate"
+    );
+    assert_eq!(
+        serde_json::to_value(TraceRankingLabelSource::FrontierLab).unwrap(),
+        "frontier_lab"
+    );
+    assert_eq!(
+        serde_json::to_value(TraceRankingUtilityCategory::ModelTraining).unwrap(),
+        "model_training"
+    );
+    assert_eq!(
+        serde_json::to_value(TraceRankingLabelOutcome::Useful).unwrap(),
+        "useful"
+    );
+
+    let label_json = serde_json::json!({
+        "tenant_id": "tenant-a",
+        "submission_id": Uuid::from_u128(0x55),
+        "label_source": TraceRankingLabelSource::FrontierLab,
+        "utility_category": TraceRankingUtilityCategory::ModelTraining,
+        "label_outcome": TraceRankingLabelOutcome::Useful,
+        "utility_delta_micros": 2_500_000,
+        "evidence_hash": "sha256:evidence",
+        "external_ref_hash": "sha256:external-ref"
+    });
+
+    assert_eq!(label_json["label_source"], "frontier_lab");
+    assert_eq!(label_json["utility_category"], "model_training");
+    assert_eq!(label_json["label_outcome"], "useful");
+    assert!(label_json.get("external_ref").is_none());
+    assert!(label_json.get("lab_note").is_none());
+    assert!(label_json.get("trace_body").is_none());
 }
 
 #[test]

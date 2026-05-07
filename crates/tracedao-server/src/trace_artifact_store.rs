@@ -199,6 +199,14 @@ pub trait TraceArtifactStore: Send + Sync {
         expected_tenant_storage_ref: &str,
         receipt: &EncryptedTraceArtifactReceipt,
     ) -> anyhow::Result<bool>;
+
+    fn restore_deleted_artifact(
+        &self,
+        _expected_tenant_storage_ref: &str,
+        _receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        anyhow::bail!("trace artifact store does not support restore-after-delete")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -232,6 +240,219 @@ pub trait RemoteTraceArtifactProvider: Send + Sync {
         object_ref: &TraceArtifactObjectRef,
         deleted_at: DateTime<Utc>,
     ) -> anyhow::Result<bool>;
+
+    fn restore_deleted_encrypted_artifact(
+        &self,
+        _object_ref: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<bool> {
+        anyhow::bail!("remote trace artifact provider does not support restore-after-delete")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FileRemoteTraceArtifactProvider {
+    root: PathBuf,
+    versioned_deletes: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FileRemoteTraceArtifactRecord {
+    object_ref: TraceArtifactObjectRef,
+    artifact: EncryptedTraceArtifact,
+    invalidated_at: Option<DateTime<Utc>>,
+    invalidation_reason: Option<TraceArtifactInvalidationReason>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FileRemoteTraceArtifactDeletedVersion {
+    record: FileRemoteTraceArtifactRecord,
+    deleted_at: DateTime<Utc>,
+}
+
+impl FileRemoteTraceArtifactProvider {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            versioned_deletes: false,
+        }
+    }
+
+    pub fn versioned(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            versioned_deletes: true,
+        }
+    }
+
+    fn object_path(&self, object_ref: &TraceArtifactObjectRef) -> anyhow::Result<PathBuf> {
+        validate_file_remote_object_ref(object_ref)?;
+        let store_dir = self.root.join(&object_ref.object_store);
+        let path = store_dir.join(&object_ref.object_key);
+        anyhow::ensure!(
+            path.starts_with(&store_dir),
+            "remote trace artifact path escapes object-store directory"
+        );
+        Ok(path)
+    }
+
+    fn deleted_version_path(&self, object_ref: &TraceArtifactObjectRef) -> anyhow::Result<PathBuf> {
+        validate_file_remote_object_ref(object_ref)?;
+        let store_dir = self.root.join(&object_ref.object_store);
+        let version_dir = store_dir.join(".deleted_versions");
+        let version_key = sha256_text_hex(
+            &serde_json::json!({
+                "object_key": object_ref.object_key,
+                "ciphertext_sha256": object_ref.ciphertext_sha256,
+            })
+            .to_string(),
+        );
+        let path = version_dir.join(format!("{version_key}.json"));
+        anyhow::ensure!(
+            path.starts_with(&version_dir),
+            "remote trace artifact deleted-version path escapes object-store directory"
+        );
+        Ok(path)
+    }
+
+    fn read_record(
+        &self,
+        object_ref: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<FileRemoteTraceArtifactRecord> {
+        let path = self.object_path(object_ref)?;
+        let body = std::fs::read_to_string(&path).with_context(|| {
+            format!(
+                "failed to read remote trace artifact object {}",
+                path.display()
+            )
+        })?;
+        let record: FileRemoteTraceArtifactRecord =
+            serde_json::from_str(&body).context("failed to parse remote trace artifact record")?;
+        anyhow::ensure!(
+            record.object_ref == *object_ref,
+            "remote trace artifact object ref mismatch"
+        );
+        Ok(record)
+    }
+
+    fn write_record(&self, record: &FileRemoteTraceArtifactRecord) -> anyhow::Result<()> {
+        let path = self.object_path(&record.object_ref)?;
+        write_json_file(&path, record)
+    }
+
+    fn write_deleted_version(
+        &self,
+        record: FileRemoteTraceArtifactRecord,
+        deleted_at: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        let path = self.deleted_version_path(&record.object_ref)?;
+        let version = FileRemoteTraceArtifactDeletedVersion { record, deleted_at };
+        write_json_file(&path, &version)
+    }
+
+    fn read_deleted_version(
+        &self,
+        object_ref: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<Option<FileRemoteTraceArtifactDeletedVersion>> {
+        let path = self.deleted_version_path(object_ref)?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let body = std::fs::read_to_string(&path).with_context(|| {
+            format!(
+                "failed to read remote trace artifact deleted version {}",
+                path.display()
+            )
+        })?;
+        let version: FileRemoteTraceArtifactDeletedVersion = serde_json::from_str(&body)
+            .context("failed to parse remote trace artifact deleted version")?;
+        anyhow::ensure!(
+            version.record.object_ref == *object_ref,
+            "remote trace artifact deleted-version object ref mismatch"
+        );
+        Ok(Some(version))
+    }
+}
+
+impl RemoteTraceArtifactProvider for FileRemoteTraceArtifactProvider {
+    fn put_encrypted_artifact(
+        &self,
+        object_ref: TraceArtifactObjectRef,
+        artifact: EncryptedTraceArtifact,
+    ) -> anyhow::Result<()> {
+        validate_file_remote_object_ref(&object_ref)?;
+        let record = FileRemoteTraceArtifactRecord {
+            object_ref,
+            artifact,
+            invalidated_at: None,
+            invalidation_reason: None,
+        };
+        self.write_record(&record)
+    }
+
+    fn read_encrypted_artifact(
+        &self,
+        object_ref: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<RemoteTraceArtifactRecord> {
+        let record = self.read_record(object_ref)?;
+        Ok(RemoteTraceArtifactRecord {
+            object_ref: record.object_ref,
+            artifact: record.artifact,
+            invalidated_at: record.invalidated_at,
+        })
+    }
+
+    fn invalidate_encrypted_artifact(
+        &self,
+        object_ref: &TraceArtifactObjectRef,
+        reason: TraceArtifactInvalidationReason,
+        invalidated_at: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        let mut record = self.read_record(object_ref)?;
+        record.invalidated_at = Some(invalidated_at);
+        record.invalidation_reason = Some(reason);
+        self.write_record(&record)
+    }
+
+    fn delete_encrypted_artifact(
+        &self,
+        object_ref: &TraceArtifactObjectRef,
+        deleted_at: DateTime<Utc>,
+    ) -> anyhow::Result<bool> {
+        let path = self.object_path(object_ref)?;
+        if !path.exists() {
+            return Ok(false);
+        }
+        if self.versioned_deletes {
+            let record = self.read_record(object_ref)?;
+            self.write_deleted_version(record, deleted_at)?;
+        }
+        std::fs::remove_file(&path).with_context(|| {
+            format!(
+                "failed to delete remote trace artifact object {}",
+                path.display()
+            )
+        })?;
+        Ok(true)
+    }
+
+    fn restore_deleted_encrypted_artifact(
+        &self,
+        object_ref: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            self.versioned_deletes,
+            "remote trace artifact provider does not support restore-after-delete"
+        );
+        let path = self.object_path(object_ref)?;
+        if path.exists() {
+            return Ok(false);
+        }
+        let Some(version) = self.read_deleted_version(object_ref)? else {
+            return Ok(false);
+        };
+        self.write_record(&version.record)?;
+        Ok(true)
+    }
 }
 
 const TRACE_ARTIFACT_STORE_LEGACY_SUBMISSION_STORAGE_REF: &str = "trace-artifact-store-legacy";
@@ -380,6 +601,15 @@ impl<P: RemoteTraceArtifactProvider> ServiceOwnedTraceArtifactStore<P> {
         })
     }
 
+    pub fn restore_deleted_scoped_artifact(
+        &self,
+        expected_scope: &TraceArtifactScope,
+        object_ref: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<bool> {
+        validate_remote_object_ref(expected_scope, &self.config, object_ref)?;
+        self.provider.restore_deleted_encrypted_artifact(object_ref)
+    }
+
     fn validate_remote_config(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.config.kind == TraceArtifactProviderKind::ServiceOwnedRemote,
@@ -469,6 +699,20 @@ impl<P: RemoteTraceArtifactProvider> TraceArtifactStore for ServiceOwnedTraceArt
         let object_ref = legacy_remote_object_ref_from_receipt(&self.config, &scope, receipt)?;
         let delete_receipt = self.delete_scoped_artifact(&scope, &object_ref)?;
         Ok(delete_receipt.deleted)
+    }
+
+    fn restore_deleted_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            receipt.tenant_storage_ref == expected_tenant_storage_ref,
+            "trace artifact receipt tenant mismatch"
+        );
+        let scope = legacy_trace_artifact_scope(expected_tenant_storage_ref);
+        let object_ref = legacy_remote_object_ref_from_receipt(&self.config, &scope, receipt)?;
+        self.restore_deleted_scoped_artifact(&scope, &object_ref)
     }
 }
 
@@ -913,6 +1157,34 @@ fn validate_object_hash(value: &str) -> anyhow::Result<()> {
         "trace artifact ciphertext hash must be a 64-character hex digest"
     );
     Ok(())
+}
+
+fn validate_file_remote_object_ref(object_ref: &TraceArtifactObjectRef) -> anyhow::Result<()> {
+    validate_non_empty_ref(
+        "remote trace artifact object store",
+        &object_ref.object_store,
+    )?;
+    anyhow::ensure!(
+        object_ref
+            .object_store
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')),
+        "remote trace artifact object store contains unsupported characters"
+    );
+    validate_non_empty_ref(
+        "remote trace artifact tenant storage ref",
+        &object_ref.tenant_storage_ref,
+    )?;
+    validate_non_empty_ref(
+        "remote trace artifact submission storage ref",
+        &object_ref.submission_storage_ref,
+    )?;
+    anyhow::ensure!(
+        object_ref.provider_kind == TraceArtifactProviderKind::ServiceOwnedRemote,
+        "remote trace artifact provider kind mismatch"
+    );
+    validate_remote_object_key(&object_ref.object_key)?;
+    validate_object_hash(&object_ref.ciphertext_sha256)
 }
 
 fn validate_object_key(object_key: &str) -> anyhow::Result<()> {
@@ -1361,6 +1633,110 @@ mod tests {
             .expect("remote artifact delete is idempotent");
         assert_eq!(repeat_delete.object_ref, receipt.object_ref);
         assert!(!repeat_delete.deleted);
+    }
+
+    #[test]
+    fn file_remote_provider_persists_service_owned_remote_artifacts_across_instances() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let key = crate::secrets::keychain::generate_master_key_hex();
+        let config = TraceArtifactProviderConfig::service_owned_remote("trace-commons-prod")
+            .expect("remote provider config");
+        let store = ServiceOwnedTraceArtifactStore::new(
+            config.clone(),
+            SecretsCrypto::new(SecretString::from(key.clone())).expect("test crypto"),
+            FileRemoteTraceArtifactProvider::new(temp.path()),
+        );
+        let scope = TraceArtifactScope::new("tenant:sha256:alpha", "submission-alpha");
+
+        let receipt = store
+            .put_scoped_json(
+                &scope,
+                TraceArtifactKind::ContributionEnvelope,
+                "submitted-envelope",
+                &json!({"stored": "remote"}),
+            )
+            .expect("remote artifact writes");
+
+        let reopened = ServiceOwnedTraceArtifactStore::new(
+            config,
+            SecretsCrypto::new(SecretString::from(key)).expect("test crypto"),
+            FileRemoteTraceArtifactProvider::new(temp.path()),
+        );
+        let value: serde_json::Value = reopened
+            .read_scoped_json(&scope, &receipt.object_ref)
+            .expect("remote artifact reads after provider restart");
+        assert_eq!(value["stored"], "remote");
+
+        let invalidated = reopened
+            .invalidate_scoped_artifact(
+                &scope,
+                &receipt.object_ref,
+                TraceArtifactInvalidationReason::Revoked,
+            )
+            .expect("remote artifact invalidates");
+        assert_eq!(invalidated.object_ref, receipt.object_ref);
+        let invalidated_read =
+            reopened.read_scoped_json::<serde_json::Value>(&scope, &receipt.object_ref);
+        assert!(invalidated_read.is_err());
+
+        let deleted = reopened
+            .delete_scoped_artifact(&scope, &receipt.object_ref)
+            .expect("remote artifact deletes");
+        assert!(deleted.deleted);
+        let deleted_again = reopened
+            .delete_scoped_artifact(&scope, &receipt.object_ref)
+            .expect("remote artifact delete is idempotent");
+        assert!(!deleted_again.deleted);
+    }
+
+    #[test]
+    fn file_remote_provider_restores_versioned_delete_across_instances() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let key = crate::secrets::keychain::generate_master_key_hex();
+        let config = TraceArtifactProviderConfig::service_owned_remote("trace-commons-prod")
+            .expect("remote provider config");
+        let store = ServiceOwnedTraceArtifactStore::new(
+            config.clone(),
+            SecretsCrypto::new(SecretString::from(key.clone())).expect("test crypto"),
+            FileRemoteTraceArtifactProvider::versioned(temp.path()),
+        );
+        let scope = TraceArtifactScope::new("tenant:sha256:alpha", "submission-alpha");
+        let payload = json!({"stored": "versioned-remote"});
+
+        let receipt = store
+            .put_scoped_json(
+                &scope,
+                TraceArtifactKind::ContributionEnvelope,
+                "submitted-envelope",
+                &payload,
+            )
+            .expect("remote artifact writes");
+        let deleted = store
+            .delete_scoped_artifact(&scope, &receipt.object_ref)
+            .expect("remote artifact deletes into a recoverable version");
+        assert!(deleted.deleted);
+        let deleted_read = store.read_scoped_json::<serde_json::Value>(&scope, &receipt.object_ref);
+        assert!(deleted_read.is_err());
+
+        let reopened = ServiceOwnedTraceArtifactStore::new(
+            config,
+            SecretsCrypto::new(SecretString::from(key)).expect("test crypto"),
+            FileRemoteTraceArtifactProvider::versioned(temp.path()),
+        );
+        assert!(
+            reopened
+                .restore_deleted_scoped_artifact(&scope, &receipt.object_ref)
+                .expect("deleted remote artifact restores")
+        );
+        let restored: serde_json::Value = reopened
+            .read_scoped_json(&scope, &receipt.object_ref)
+            .expect("restored remote artifact reads");
+        assert_eq!(restored, payload);
+        assert!(
+            !reopened
+                .restore_deleted_scoped_artifact(&scope, &receipt.object_ref)
+                .expect("already-restored artifact restore is idempotent")
+        );
     }
 
     #[test]

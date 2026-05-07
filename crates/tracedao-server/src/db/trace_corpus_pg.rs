@@ -13,14 +13,28 @@ use crate::db::trace_corpus_common::{
 use crate::error::DatabaseError;
 use crate::trace_corpus_storage::{
     TenantScopedTraceObjectRef, TraceArtifactInvalidationCounts, TraceAuditEventRecord,
-    TraceAuditEventWrite, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCorpusStore,
-    TraceCreditEventRecord, TraceCreditEventWrite, TraceCreditSettlementState, TraceDerivedRecord,
-    TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportAccessGrantRecord,
+    TraceAuditEventWrite, TraceAuditSafeMetadata, TraceBenchmarkRegistryOutboxItemRecord,
+    TraceBenchmarkRegistryOutboxItemWrite, TraceBenchmarkRegistryOutboxStatus, TraceCorpusStatus,
+    TraceCorpusStore, TraceCreditEventRecord, TraceCreditEventType, TraceCreditEventWrite,
+    TraceCreditHoldReason, TraceCreditHoldRecord, TraceCreditHoldWrite,
+    TraceCreditSettlementBatchRecord, TraceCreditSettlementBatchStatus,
+    TraceCreditSettlementBatchWrite, TraceCreditSettlementNearStatus, TraceCreditSettlementState,
+    TraceDerivedRecord, TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportAccessGrantRecord,
     TraceExportAccessGrantStatus, TraceExportAccessGrantWrite, TraceExportJobRecord,
     TraceExportJobStatus, TraceExportJobStatusUpdate, TraceExportJobWrite,
     TraceExportManifestItemInvalidationReason, TraceExportManifestItemRecord,
     TraceExportManifestItemWrite, TraceExportManifestMirrorWrite, TraceExportManifestRecord,
-    TraceExportManifestWrite, TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
+    TraceExportManifestWrite, TraceNearCreditOutboxItemRecord, TraceNearCreditOutboxItemWrite,
+    TraceObjectArtifactKind, TraceObjectRefRecord, TraceObjectRefWrite,
+    TraceRankingCalibrationDatasetRecord, TraceRankingCalibrationDatasetStatus,
+    TraceRankingCalibrationDatasetStatusUpdate, TraceRankingCalibrationDatasetWrite,
+    TraceRankingCalibrationRunRecord, TraceRankingCalibrationRunWrite, TraceRankingFeatureRecord,
+    TraceRankingFeatureWrite, TraceRankingLabelOutcome, TraceRankingLabelRecord,
+    TraceRankingLabelSource, TraceRankingLabelWrite, TraceRankingModelStatus,
+    TraceRankingModelVersionRecord, TraceRankingModelVersionWrite, TraceRankingPredictionRecord,
+    TraceRankingPredictionWrite, TraceRankingPreferenceLabelRecord,
+    TraceRankingPreferenceLabelWrite, TraceRankingUtilityCategory, TraceRankingWorkerRunKind,
+    TraceRankingWorkerRunRecord, TraceRankingWorkerRunStatus, TraceRankingWorkerRunWrite,
     TraceRetentionJobItemAction, TraceRetentionJobItemRecord, TraceRetentionJobItemStatus,
     TraceRetentionJobItemWrite, TraceRetentionJobRecord, TraceRetentionJobStatus,
     TraceRetentionJobWrite, TraceRevocationPropagationAction, TraceRevocationPropagationItemRecord,
@@ -29,9 +43,9 @@ use crate::trace_corpus_storage::{
     TraceRevocationPropagationTargetKind, TraceSubmissionRecord, TraceSubmissionWrite,
     TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
     TraceTenantAccessGrantWrite, TraceTenantPolicyRecord, TraceTenantPolicyWrite,
-    TraceTombstoneRecord, TraceTombstoneWrite, TraceVectorEntryRecord,
-    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-    TraceWorkerKind,
+    TraceTombstoneRecord, TraceTombstoneWrite, TraceUtilityAttestationRecord,
+    TraceUtilityAttestationWrite, TraceVectorEntryRecord, TraceVectorEntrySourceProjection,
+    TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWorkerKind,
 };
 
 const TRACE_OBJECT_REF_COLUMNS: &str = "\
@@ -77,10 +91,85 @@ const TRACE_EXPORT_JOB_COLUMNS: &str = "\
     purpose, max_item_cap, status, requested_at, started_at, finished_at, expires_at, \
     result_manifest_id, item_count, last_error, metadata_json, created_at, updated_at";
 
+const TRACE_UTILITY_ATTESTATION_COLUMNS: &str = "\
+    tenant_id, attestation_id, event_type, use_category, policy_version, evidence_hash, \
+    external_ref_hash, source_submission_ids, actor_principal_ref, created_at";
+
+const TRACE_CREDIT_SETTLEMENT_BATCH_COLUMNS: &str = "\
+    tenant_id, settlement_batch_id, policy_version, status, reason_hash, \
+    source_credit_event_ids, source_submission_ids, source_list_hash, settled_credit_points, \
+    settled_credit_micros, line_items_json, near_contract_id, ranking_model_version, \
+    ranking_target_use, ranking_calibration_run_id, ranking_calibration_report_hash, \
+    ranking_calibration_joined_evidence_hash, ranking_credit_events_excluded_count, \
+    ranking_credit_events_excluded_reason_counts_json, actor_principal_ref, created_at";
+
+const TRACE_CREDIT_HOLD_COLUMNS: &str = "\
+    tenant_id, hold_id, credit_account_ref, credit_account_hash, reason, reason_hash, \
+    actor_principal_ref, created_at, released_at";
+
+const TRACE_NEAR_CREDIT_OUTBOX_COLUMNS: &str = "\
+    tenant_id, near_outbox_id, settlement_batch_id, credit_account_hash, near_call_json, \
+    status, created_at, submitted_at, near_transaction_hash, last_error_hash, confirmed_at";
+
+const TRACE_BENCHMARK_REGISTRY_OUTBOX_COLUMNS: &str = "\
+    tenant_id, benchmark_outbox_id, conversion_id, operation, registry_ref, \
+    artifact_payload_hash, source_submission_ids_hash, evaluator_ref, evaluation_score, \
+    status, created_at, submitted_at, external_receipt_ref, last_error_hash, confirmed_at";
+
 const TRACE_TENANT_ACCESS_GRANT_COLUMNS: &str = "\
     tenant_id, grant_id, principal_ref, role, status, allowed_consent_scopes, allowed_uses, \
     issuer, audience, subject, issued_at, expires_at, revoked_at, created_by_principal_ref, \
     revoked_by_principal_ref, reason, metadata_json, created_at, updated_at";
+
+const TRACE_RANKING_MODEL_VERSION_COLUMNS: &str = "\
+    tenant_id, model_version, feature_schema_version, policy_version, status, \
+    training_dataset_hash, calibration_dataset_hash, model_artifact_hash, \
+    actor_principal_ref, created_at";
+
+const TRACE_RANKING_CALIBRATION_DATASET_COLUMNS: &str = "\
+    tenant_id, calibration_dataset_hash, target_use, policy_version, source_manifest_hash, \
+    source_count, label_source_count, label_actor_count, status, actor_principal_ref, created_at";
+
+const TRACE_RANKING_FEATURE_COLUMNS: &str = "\
+    tenant_id, ranking_feature_id, submission_id, trace_id, target_use, \
+    feature_schema_version, feature_vector_hash, feature_names_hash, source_feature_hash, \
+    duplicate_score, novelty_score, privacy_risk_score, quality_score, coverage_tags, \
+    actor_principal_ref, created_at";
+
+const TRACE_RANKING_PREDICTION_COLUMNS: &str = "\
+    tenant_id, ranking_prediction_id, submission_id, trace_id, target_use, model_version, \
+    feature_schema_version, prediction_policy_version, feature_vector_hash, \
+    predicted_utility_micros, uncertainty_micros, confidence, risk_penalty_micros, \
+    novelty_bonus_micros, settlement_score_micros, explanation_codes, actor_principal_ref, \
+    created_at";
+
+const TRACE_RANKING_LABEL_COLUMNS: &str = "\
+    tenant_id, ranking_label_id, submission_id, trace_id, target_use, label_source, \
+    utility_category, label_outcome, utility_delta_micros, evidence_hash, external_ref_hash, \
+    actor_principal_ref, created_at";
+
+const TRACE_RANKING_PREFERENCE_LABEL_COLUMNS: &str = "\
+    tenant_id, preference_label_id, preferred_submission_id, preferred_trace_id, \
+    rejected_submission_id, rejected_trace_id, target_use, label_source, utility_category, \
+    preference_strength_micros, evidence_hash, external_ref_hash, actor_principal_ref, \
+    created_at";
+
+const TRACE_RANKING_CALIBRATION_RUN_COLUMNS: &str = "\
+    tenant_id, calibration_run_id, model_version, target_use, policy_version, \
+    evaluation_dataset_hash, prediction_count, label_count, joined_label_prediction_count, \
+    joined_label_source_count, joined_evidence_hash, \
+    average_predicted_utility_micros, average_label_utility_delta_micros, \
+    average_absolute_error_micros, max_label_source_average_absolute_error_micros, \
+    max_error_label_source, mean_signed_error_micros, low_confidence_prediction_count, \
+    confidence_threshold, min_label_count, min_label_source_count, \
+    max_average_absolute_error_micros, promotable, reason_codes, report_hash, actor_principal_ref, \
+    created_at";
+
+const TRACE_RANKING_WORKER_RUN_COLUMNS: &str = "\
+    tenant_id, ranking_worker_run_id, run_kind, status, dry_run, reason_hash, model_version, target_use, \
+    policy_version, limit_count, checked_count, succeeded_count, skipped_existing_count, \
+    skipped_model_risk_count, skipped_ineligible_count, pending_after_count, result_refs, \
+    reason_counts, actor_principal_ref, created_at, completed_at, last_error_hash";
 
 async fn ensure_pg_object_ref_belongs_to_submission(
     tx: &Transaction<'_>,
@@ -337,6 +426,136 @@ fn row_to_credit_event(row: &Row) -> Result<TraceCreditEventRecord, DatabaseErro
     })
 }
 
+fn row_to_utility_attestation(row: &Row) -> Result<TraceUtilityAttestationRecord, DatabaseError> {
+    let event_type: String = row.get("event_type");
+    Ok(TraceUtilityAttestationRecord {
+        tenant_id: row.get("tenant_id"),
+        attestation_id: row.get("attestation_id"),
+        event_type: enum_from_storage::<TraceCreditEventType>(&event_type, "TraceCreditEventType")?,
+        use_category: row.get("use_category"),
+        policy_version: row.get("policy_version"),
+        evidence_hash: row.get("evidence_hash"),
+        external_ref_hash: row.get("external_ref_hash"),
+        source_submission_ids: row.get("source_submission_ids"),
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn row_to_credit_settlement_batch(
+    row: &Row,
+) -> Result<TraceCreditSettlementBatchRecord, DatabaseError> {
+    let status: String = row.get("status");
+    let line_items_json: serde_json::Value = row.get("line_items_json");
+    let ranking_credit_events_excluded_reason_counts_json: serde_json::Value =
+        row.get("ranking_credit_events_excluded_reason_counts_json");
+    Ok(TraceCreditSettlementBatchRecord {
+        tenant_id: row.get("tenant_id"),
+        settlement_batch_id: row.get("settlement_batch_id"),
+        policy_version: row.get("policy_version"),
+        status: enum_from_storage::<TraceCreditSettlementBatchStatus>(
+            &status,
+            "TraceCreditSettlementBatchStatus",
+        )?,
+        reason_hash: row.get("reason_hash"),
+        source_credit_event_ids: row.get("source_credit_event_ids"),
+        source_submission_ids: row.get("source_submission_ids"),
+        source_list_hash: row.get("source_list_hash"),
+        settled_credit_points: row.get("settled_credit_points"),
+        settled_credit_micros: row.get("settled_credit_micros"),
+        line_items: serde_json::from_value(line_items_json).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace credit settlement line_items_json decode failed: {e}"
+            ))
+        })?,
+        near_contract_id: row.get("near_contract_id"),
+        ranking_model_version: row.get("ranking_model_version"),
+        ranking_target_use: row.get("ranking_target_use"),
+        ranking_calibration_run_id: row.get("ranking_calibration_run_id"),
+        ranking_calibration_report_hash: row.get("ranking_calibration_report_hash"),
+        ranking_calibration_joined_evidence_hash: row
+            .get("ranking_calibration_joined_evidence_hash"),
+        ranking_credit_events_excluded_count: row_i32_to_u32(
+            row,
+            "ranking_credit_events_excluded_count",
+        )?,
+        ranking_credit_events_excluded_reason_counts: serde_json::from_value(
+            ranking_credit_events_excluded_reason_counts_json,
+        )
+        .map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace credit settlement ranking exclusion reason counts decode failed: {e}"
+            ))
+        })?,
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn row_to_credit_hold(row: &Row) -> Result<TraceCreditHoldRecord, DatabaseError> {
+    let reason: String = row.get("reason");
+    Ok(TraceCreditHoldRecord {
+        tenant_id: row.get("tenant_id"),
+        hold_id: row.get("hold_id"),
+        credit_account_ref: row.get("credit_account_ref"),
+        credit_account_hash: row.get("credit_account_hash"),
+        reason: enum_from_storage::<TraceCreditHoldReason>(&reason, "TraceCreditHoldReason")?,
+        reason_hash: row.get("reason_hash"),
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
+        released_at: row.get("released_at"),
+    })
+}
+
+fn row_to_near_credit_outbox_item(
+    row: &Row,
+) -> Result<TraceNearCreditOutboxItemRecord, DatabaseError> {
+    let status: String = row.get("status");
+    Ok(TraceNearCreditOutboxItemRecord {
+        tenant_id: row.get("tenant_id"),
+        near_outbox_id: row.get("near_outbox_id"),
+        settlement_batch_id: row.get("settlement_batch_id"),
+        credit_account_hash: row.get("credit_account_hash"),
+        near_call_json: row.get("near_call_json"),
+        status: enum_from_storage::<TraceCreditSettlementNearStatus>(
+            &status,
+            "TraceCreditSettlementNearStatus",
+        )?,
+        created_at: row.get("created_at"),
+        submitted_at: row.get("submitted_at"),
+        near_transaction_hash: row.get("near_transaction_hash"),
+        last_error_hash: row.get("last_error_hash"),
+        confirmed_at: row.get("confirmed_at"),
+    })
+}
+
+fn row_to_benchmark_registry_outbox_item(
+    row: &Row,
+) -> Result<TraceBenchmarkRegistryOutboxItemRecord, DatabaseError> {
+    let operation: String = row.get("operation");
+    let status: String = row.get("status");
+    Ok(TraceBenchmarkRegistryOutboxItemRecord {
+        tenant_id: row.get("tenant_id"),
+        benchmark_outbox_id: row.get("benchmark_outbox_id"),
+        conversion_id: row.get("conversion_id"),
+        operation: enum_from_storage(&operation, "TraceBenchmarkRegistryOutboxOperation")?,
+        registry_ref: row.get("registry_ref"),
+        artifact_payload_hash: row.get("artifact_payload_hash"),
+        source_submission_ids_hash: row.get("source_submission_ids_hash"),
+        evaluator_ref: row.get("evaluator_ref"),
+        evaluation_score: row.get("evaluation_score"),
+        status: enum_from_storage::<TraceBenchmarkRegistryOutboxStatus>(
+            &status,
+            "TraceBenchmarkRegistryOutboxStatus",
+        )?,
+        created_at: row.get("created_at"),
+        submitted_at: row.get("submitted_at"),
+        external_receipt_ref: row.get("external_receipt_ref"),
+        last_error_hash: row.get("last_error_hash"),
+        confirmed_at: row.get("confirmed_at"),
+    })
+}
+
 fn row_to_derived_record(row: &Row) -> Result<TraceDerivedRecord, DatabaseError> {
     let status: String = row.get("status");
     let worker_kind: String = row.get("worker_kind");
@@ -410,6 +629,241 @@ fn row_to_vector_entry(row: &Row) -> Result<TraceVectorEntryRecord, DatabaseErro
         deleted_at: row.get("deleted_at"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+    })
+}
+
+fn row_to_ranking_model_version(
+    row: &Row,
+) -> Result<TraceRankingModelVersionRecord, DatabaseError> {
+    let status: String = row.get("status");
+    Ok(TraceRankingModelVersionRecord {
+        tenant_id: row.get("tenant_id"),
+        model_version: row.get("model_version"),
+        feature_schema_version: row.get("feature_schema_version"),
+        policy_version: row.get("policy_version"),
+        status: enum_from_storage::<TraceRankingModelStatus>(&status, "TraceRankingModelStatus")?,
+        training_dataset_hash: row.get("training_dataset_hash"),
+        calibration_dataset_hash: row.get("calibration_dataset_hash"),
+        model_artifact_hash: row.get("model_artifact_hash"),
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn row_to_ranking_calibration_dataset(
+    row: &Row,
+) -> Result<TraceRankingCalibrationDatasetRecord, DatabaseError> {
+    let status: String = row.get("status");
+    Ok(TraceRankingCalibrationDatasetRecord {
+        tenant_id: row.get("tenant_id"),
+        calibration_dataset_hash: row.get("calibration_dataset_hash"),
+        target_use: row.get("target_use"),
+        policy_version: row.get("policy_version"),
+        source_manifest_hash: row.get("source_manifest_hash"),
+        source_count: row_i32_to_u32(row, "source_count")?,
+        label_source_count: row_i32_to_u32(row, "label_source_count")?,
+        label_actor_count: row_i32_to_u32(row, "label_actor_count")?,
+        status: enum_from_storage::<TraceRankingCalibrationDatasetStatus>(
+            &status,
+            "TraceRankingCalibrationDatasetStatus",
+        )?,
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn row_to_ranking_feature(row: &Row) -> Result<TraceRankingFeatureRecord, DatabaseError> {
+    let coverage_tags: serde_json::Value = row.get("coverage_tags");
+    Ok(TraceRankingFeatureRecord {
+        tenant_id: row.get("tenant_id"),
+        ranking_feature_id: row.get("ranking_feature_id"),
+        submission_id: row.get("submission_id"),
+        trace_id: row.get("trace_id"),
+        target_use: row.get("target_use"),
+        feature_schema_version: row.get("feature_schema_version"),
+        feature_vector_hash: row.get("feature_vector_hash"),
+        feature_names_hash: row.get("feature_names_hash"),
+        source_feature_hash: row.get("source_feature_hash"),
+        duplicate_score: row.get("duplicate_score"),
+        novelty_score: row.get("novelty_score"),
+        privacy_risk_score: row.get("privacy_risk_score"),
+        quality_score: row.get("quality_score"),
+        coverage_tags: json_array_strings(coverage_tags, "ranking_features.coverage_tags")?,
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn row_to_ranking_prediction(row: &Row) -> Result<TraceRankingPredictionRecord, DatabaseError> {
+    let explanation_codes: serde_json::Value = row.get("explanation_codes");
+    Ok(TraceRankingPredictionRecord {
+        tenant_id: row.get("tenant_id"),
+        ranking_prediction_id: row.get("ranking_prediction_id"),
+        submission_id: row.get("submission_id"),
+        trace_id: row.get("trace_id"),
+        target_use: row.get("target_use"),
+        model_version: row.get("model_version"),
+        feature_schema_version: row.get("feature_schema_version"),
+        prediction_policy_version: row.get("prediction_policy_version"),
+        feature_vector_hash: row.get("feature_vector_hash"),
+        predicted_utility_micros: row.get("predicted_utility_micros"),
+        uncertainty_micros: row.get("uncertainty_micros"),
+        confidence: row.get("confidence"),
+        risk_penalty_micros: row.get("risk_penalty_micros"),
+        novelty_bonus_micros: row.get("novelty_bonus_micros"),
+        settlement_score_micros: row.get("settlement_score_micros"),
+        explanation_codes: json_array_strings(
+            explanation_codes,
+            "ranking_predictions.explanation_codes",
+        )?,
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn row_to_ranking_label(row: &Row) -> Result<TraceRankingLabelRecord, DatabaseError> {
+    let label_source: String = row.get("label_source");
+    let utility_category: String = row.get("utility_category");
+    let label_outcome: String = row.get("label_outcome");
+    Ok(TraceRankingLabelRecord {
+        tenant_id: row.get("tenant_id"),
+        ranking_label_id: row.get("ranking_label_id"),
+        submission_id: row.get("submission_id"),
+        trace_id: row.get("trace_id"),
+        target_use: row.get("target_use"),
+        label_source: enum_from_storage::<TraceRankingLabelSource>(
+            &label_source,
+            "TraceRankingLabelSource",
+        )?,
+        utility_category: enum_from_storage::<TraceRankingUtilityCategory>(
+            &utility_category,
+            "TraceRankingUtilityCategory",
+        )?,
+        label_outcome: enum_from_storage::<TraceRankingLabelOutcome>(
+            &label_outcome,
+            "TraceRankingLabelOutcome",
+        )?,
+        utility_delta_micros: row.get("utility_delta_micros"),
+        evidence_hash: row.get("evidence_hash"),
+        external_ref_hash: row.get("external_ref_hash"),
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn row_to_ranking_preference_label(
+    row: &Row,
+) -> Result<TraceRankingPreferenceLabelRecord, DatabaseError> {
+    let label_source: String = row.get("label_source");
+    let utility_category: String = row.get("utility_category");
+    Ok(TraceRankingPreferenceLabelRecord {
+        tenant_id: row.get("tenant_id"),
+        preference_label_id: row.get("preference_label_id"),
+        preferred_submission_id: row.get("preferred_submission_id"),
+        preferred_trace_id: row.get("preferred_trace_id"),
+        rejected_submission_id: row.get("rejected_submission_id"),
+        rejected_trace_id: row.get("rejected_trace_id"),
+        target_use: row.get("target_use"),
+        label_source: enum_from_storage::<TraceRankingLabelSource>(
+            &label_source,
+            "TraceRankingLabelSource",
+        )?,
+        utility_category: enum_from_storage::<TraceRankingUtilityCategory>(
+            &utility_category,
+            "TraceRankingUtilityCategory",
+        )?,
+        preference_strength_micros: row.get("preference_strength_micros"),
+        evidence_hash: row.get("evidence_hash"),
+        external_ref_hash: row.get("external_ref_hash"),
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn row_i32_to_u32(row: &Row, column: &str) -> Result<u32, DatabaseError> {
+    row.get::<_, i32>(column).try_into().map_err(|e| {
+        DatabaseError::Serialization(format!("invalid unsigned {column} column value: {e}"))
+    })
+}
+
+fn u32_to_pg_i32(value: u32, column: &str) -> Result<i32, DatabaseError> {
+    i32::try_from(value).map_err(|e| {
+        DatabaseError::Serialization(format!(
+            "trace {column} exceeds PostgreSQL integer range: {e}"
+        ))
+    })
+}
+
+fn row_to_ranking_calibration_run(
+    row: &Row,
+) -> Result<TraceRankingCalibrationRunRecord, DatabaseError> {
+    let reason_codes: serde_json::Value = row.get("reason_codes");
+    Ok(TraceRankingCalibrationRunRecord {
+        tenant_id: row.get("tenant_id"),
+        calibration_run_id: row.get("calibration_run_id"),
+        model_version: row.get("model_version"),
+        target_use: row.get("target_use"),
+        policy_version: row.get("policy_version"),
+        evaluation_dataset_hash: row.get("evaluation_dataset_hash"),
+        prediction_count: row_i32_to_u32(row, "prediction_count")?,
+        label_count: row_i32_to_u32(row, "label_count")?,
+        joined_label_prediction_count: row_i32_to_u32(row, "joined_label_prediction_count")?,
+        joined_label_source_count: row_i32_to_u32(row, "joined_label_source_count")?,
+        joined_evidence_hash: row.get("joined_evidence_hash"),
+        average_predicted_utility_micros: row.get("average_predicted_utility_micros"),
+        average_label_utility_delta_micros: row.get("average_label_utility_delta_micros"),
+        average_absolute_error_micros: row.get("average_absolute_error_micros"),
+        max_label_source_average_absolute_error_micros: row
+            .get("max_label_source_average_absolute_error_micros"),
+        max_error_label_source: row.get("max_error_label_source"),
+        mean_signed_error_micros: row.get("mean_signed_error_micros"),
+        low_confidence_prediction_count: row_i32_to_u32(row, "low_confidence_prediction_count")?,
+        confidence_threshold: row.get("confidence_threshold"),
+        min_label_count: row_i32_to_u32(row, "min_label_count")?,
+        min_label_source_count: row_i32_to_u32(row, "min_label_source_count")?,
+        max_average_absolute_error_micros: row.get("max_average_absolute_error_micros"),
+        promotable: row.get("promotable"),
+        reason_codes: json_array_strings(reason_codes, "ranking_calibration_runs.reason_codes")?,
+        report_hash: row.get("report_hash"),
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn row_to_ranking_worker_run(row: &Row) -> Result<TraceRankingWorkerRunRecord, DatabaseError> {
+    let run_kind: String = row.get("run_kind");
+    let status: String = row.get("status");
+    let result_refs: serde_json::Value = row.get("result_refs");
+    let reason_counts: serde_json::Value = row.get("reason_counts");
+    Ok(TraceRankingWorkerRunRecord {
+        tenant_id: row.get("tenant_id"),
+        ranking_worker_run_id: row.get("ranking_worker_run_id"),
+        run_kind: enum_from_storage::<TraceRankingWorkerRunKind>(
+            &run_kind,
+            "TraceRankingWorkerRunKind",
+        )?,
+        status: enum_from_storage::<TraceRankingWorkerRunStatus>(
+            &status,
+            "TraceRankingWorkerRunStatus",
+        )?,
+        dry_run: row.get("dry_run"),
+        reason_hash: row.get("reason_hash"),
+        model_version: row.get("model_version"),
+        target_use: row.get("target_use"),
+        policy_version: row.get("policy_version"),
+        limit: row_i32_to_u32(row, "limit_count")?,
+        checked_count: row_i32_to_u32(row, "checked_count")?,
+        succeeded_count: row_i32_to_u32(row, "succeeded_count")?,
+        skipped_existing_count: row_i32_to_u32(row, "skipped_existing_count")?,
+        skipped_model_risk_count: row_i32_to_u32(row, "skipped_model_risk_count")?,
+        skipped_ineligible_count: row_i32_to_u32(row, "skipped_ineligible_count")?,
+        pending_after_count: row_i32_to_u32(row, "pending_after_count")?,
+        result_refs: json_array_strings(result_refs, "ranking_worker_runs.result_refs")?,
+        reason_counts: json_u32_map(reason_counts, "ranking_worker_runs.reason_counts")?,
+        actor_principal_ref: row.get("actor_principal_ref"),
+        created_at: row.get("created_at"),
+        completed_at: row.get("completed_at"),
+        last_error_hash: row.get("last_error_hash"),
     })
 }
 
@@ -1650,6 +2104,825 @@ impl TraceCorpusStore for PgBackend {
         records
     }
 
+    async fn upsert_trace_ranking_model_version(
+        &self,
+        model_version: TraceRankingModelVersionWrite,
+    ) -> Result<TraceRankingModelVersionRecord, DatabaseError> {
+        self.ensure_trace_tenant(&model_version.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx =
+            Self::begin_trace_tenant_transaction(&mut client, &model_version.tenant_id).await?;
+        let status = enum_to_storage(model_version.status)?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_ranking_model_versions (
+                        tenant_id, model_version, feature_schema_version, policy_version,
+                        status, training_dataset_hash, calibration_dataset_hash,
+                        model_artifact_hash, actor_principal_ref
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                     ON CONFLICT (tenant_id, model_version) DO UPDATE SET
+                        feature_schema_version = excluded.feature_schema_version,
+                        policy_version = excluded.policy_version,
+                        status = excluded.status,
+                        training_dataset_hash = excluded.training_dataset_hash,
+                        calibration_dataset_hash = excluded.calibration_dataset_hash,
+                        model_artifact_hash = excluded.model_artifact_hash,
+                        actor_principal_ref = excluded.actor_principal_ref
+                     RETURNING {TRACE_RANKING_MODEL_VERSION_COLUMNS}"
+                ),
+                &[
+                    &model_version.tenant_id,
+                    &model_version.model_version,
+                    &model_version.feature_schema_version,
+                    &model_version.policy_version,
+                    &status,
+                    &model_version.training_dataset_hash,
+                    &model_version.calibration_dataset_hash,
+                    &model_version.model_artifact_hash,
+                    &model_version.actor_principal_ref,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_ranking_model_version(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_ranking_model_versions(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingModelVersionRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_RANKING_MODEL_VERSION_COLUMNS}
+                     FROM trace_ranking_model_versions
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, model_version ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_ranking_model_version).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_ranking_calibration_dataset(
+        &self,
+        dataset: TraceRankingCalibrationDatasetWrite,
+    ) -> Result<TraceRankingCalibrationDatasetRecord, DatabaseError> {
+        self.ensure_trace_tenant(&dataset.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &dataset.tenant_id).await?;
+        let source_count = u32_to_pg_i32(
+            dataset.source_count,
+            "ranking_calibration_datasets.source_count",
+        )?;
+        let label_source_count = u32_to_pg_i32(
+            dataset.label_source_count,
+            "ranking_calibration_datasets.label_source_count",
+        )?;
+        let label_actor_count = u32_to_pg_i32(
+            dataset.label_actor_count,
+            "ranking_calibration_datasets.label_actor_count",
+        )?;
+        let status = enum_to_storage(dataset.status)?;
+        let row = tx
+            .query_opt(
+                &format!(
+                    "INSERT INTO trace_ranking_calibration_datasets (
+                        tenant_id, calibration_dataset_hash, target_use, policy_version,
+                        source_manifest_hash, source_count, label_source_count,
+                        label_actor_count, status, actor_principal_ref
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                     ON CONFLICT (tenant_id, calibration_dataset_hash, target_use, policy_version)
+                     DO UPDATE SET
+                        status = excluded.status,
+                        actor_principal_ref = excluded.actor_principal_ref,
+                        created_at = NOW()
+                     WHERE trace_ranking_calibration_datasets.source_manifest_hash = excluded.source_manifest_hash
+                        AND trace_ranking_calibration_datasets.source_count = excluded.source_count
+                        AND trace_ranking_calibration_datasets.label_source_count = excluded.label_source_count
+                        AND trace_ranking_calibration_datasets.label_actor_count = excluded.label_actor_count
+                     RETURNING {TRACE_RANKING_CALIBRATION_DATASET_COLUMNS}"
+                ),
+                &[
+                    &dataset.tenant_id,
+                    &dataset.calibration_dataset_hash,
+                    &dataset.target_use,
+                    &dataset.policy_version,
+                    &dataset.source_manifest_hash,
+                    &source_count,
+                    &label_source_count,
+                    &label_actor_count,
+                    &status,
+                    &dataset.actor_principal_ref,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let row = row.ok_or_else(|| {
+            DatabaseError::Constraint(
+                "ranking calibration dataset manifest is immutable for this target use and policy"
+                    .to_string(),
+            )
+        })?;
+        let record = row_to_ranking_calibration_dataset(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn update_trace_ranking_calibration_dataset_status(
+        &self,
+        update: TraceRankingCalibrationDatasetStatusUpdate,
+    ) -> Result<TraceRankingCalibrationDatasetRecord, DatabaseError> {
+        self.ensure_trace_tenant(&update.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &update.tenant_id).await?;
+        let status = enum_to_storage(update.status)?;
+        let row = tx
+            .query_opt(
+                &format!(
+                    "UPDATE trace_ranking_calibration_datasets
+                     SET status = $5,
+                         actor_principal_ref = $6,
+                         created_at = NOW()
+                     WHERE tenant_id = $1
+                        AND calibration_dataset_hash = $2
+                        AND target_use = $3
+                        AND policy_version = $4
+                     RETURNING {TRACE_RANKING_CALIBRATION_DATASET_COLUMNS}"
+                ),
+                &[
+                    &update.tenant_id,
+                    &update.calibration_dataset_hash,
+                    &update.target_use,
+                    &update.policy_version,
+                    &status,
+                    &update.actor_principal_ref,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let row = row.ok_or_else(|| DatabaseError::NotFound {
+            entity: "trace_ranking_calibration_dataset".to_string(),
+            id: format!(
+                "{}:{}:{}:{}",
+                update.tenant_id,
+                update.calibration_dataset_hash,
+                update.target_use,
+                update.policy_version
+            ),
+        })?;
+        let record = row_to_ranking_calibration_dataset(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_ranking_calibration_datasets(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingCalibrationDatasetRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_RANKING_CALIBRATION_DATASET_COLUMNS}
+                     FROM trace_ranking_calibration_datasets
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, calibration_dataset_hash ASC, target_use ASC, policy_version ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows
+            .iter()
+            .map(row_to_ranking_calibration_dataset)
+            .collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_ranking_feature(
+        &self,
+        feature: TraceRankingFeatureWrite,
+    ) -> Result<TraceRankingFeatureRecord, DatabaseError> {
+        self.ensure_trace_tenant(&feature.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &feature.tenant_id).await?;
+        let coverage_tags = serde_json::to_value(&feature.coverage_tags).map_err(|e| {
+            DatabaseError::Serialization(format!("trace ranking coverage_tags encode failed: {e}"))
+        })?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_ranking_features (
+                        tenant_id, ranking_feature_id, submission_id, trace_id, target_use,
+                        feature_schema_version, feature_vector_hash, feature_names_hash,
+                        source_feature_hash, duplicate_score, novelty_score, privacy_risk_score,
+                        quality_score, coverage_tags, actor_principal_ref
+                     ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+                     )
+                     ON CONFLICT (tenant_id, ranking_feature_id) DO UPDATE SET
+                        submission_id = excluded.submission_id,
+                        trace_id = excluded.trace_id,
+                        target_use = excluded.target_use,
+                        feature_schema_version = excluded.feature_schema_version,
+                        feature_vector_hash = excluded.feature_vector_hash,
+                        feature_names_hash = excluded.feature_names_hash,
+                        source_feature_hash = excluded.source_feature_hash,
+                        duplicate_score = excluded.duplicate_score,
+                        novelty_score = excluded.novelty_score,
+                        privacy_risk_score = excluded.privacy_risk_score,
+                        quality_score = excluded.quality_score,
+                        coverage_tags = excluded.coverage_tags,
+                        actor_principal_ref = excluded.actor_principal_ref
+                     RETURNING {TRACE_RANKING_FEATURE_COLUMNS}"
+                ),
+                &[
+                    &feature.tenant_id,
+                    &feature.ranking_feature_id,
+                    &feature.submission_id,
+                    &feature.trace_id,
+                    &feature.target_use,
+                    &feature.feature_schema_version,
+                    &feature.feature_vector_hash,
+                    &feature.feature_names_hash,
+                    &feature.source_feature_hash,
+                    &feature.duplicate_score,
+                    &feature.novelty_score,
+                    &feature.privacy_risk_score,
+                    &feature.quality_score,
+                    &coverage_tags,
+                    &feature.actor_principal_ref,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_ranking_feature(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_ranking_features(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingFeatureRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_RANKING_FEATURE_COLUMNS}
+                     FROM trace_ranking_features
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, ranking_feature_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_ranking_feature).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_ranking_prediction(
+        &self,
+        prediction: TraceRankingPredictionWrite,
+    ) -> Result<TraceRankingPredictionRecord, DatabaseError> {
+        self.ensure_trace_tenant(&prediction.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &prediction.tenant_id).await?;
+        let explanation_codes =
+            serde_json::to_value(&prediction.explanation_codes).map_err(|e| {
+                DatabaseError::Serialization(format!(
+                    "trace ranking explanation_codes encode failed: {e}"
+                ))
+            })?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_ranking_predictions (
+                        tenant_id, ranking_prediction_id, submission_id, trace_id, target_use,
+                        model_version, feature_schema_version, prediction_policy_version,
+                        feature_vector_hash, predicted_utility_micros, uncertainty_micros,
+                        confidence, risk_penalty_micros, novelty_bonus_micros,
+                        settlement_score_micros, explanation_codes, actor_principal_ref
+                     ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+                     )
+                     ON CONFLICT (tenant_id, ranking_prediction_id) DO UPDATE SET
+                        submission_id = excluded.submission_id,
+                        trace_id = excluded.trace_id,
+                        target_use = excluded.target_use,
+                        model_version = excluded.model_version,
+                        feature_schema_version = excluded.feature_schema_version,
+                        prediction_policy_version = excluded.prediction_policy_version,
+                        feature_vector_hash = excluded.feature_vector_hash,
+                        predicted_utility_micros = excluded.predicted_utility_micros,
+                        uncertainty_micros = excluded.uncertainty_micros,
+                        confidence = excluded.confidence,
+                        risk_penalty_micros = excluded.risk_penalty_micros,
+                        novelty_bonus_micros = excluded.novelty_bonus_micros,
+                        settlement_score_micros = excluded.settlement_score_micros,
+                        explanation_codes = excluded.explanation_codes,
+                        actor_principal_ref = excluded.actor_principal_ref
+                     RETURNING {TRACE_RANKING_PREDICTION_COLUMNS}"
+                ),
+                &[
+                    &prediction.tenant_id,
+                    &prediction.ranking_prediction_id,
+                    &prediction.submission_id,
+                    &prediction.trace_id,
+                    &prediction.target_use,
+                    &prediction.model_version,
+                    &prediction.feature_schema_version,
+                    &prediction.prediction_policy_version,
+                    &prediction.feature_vector_hash,
+                    &prediction.predicted_utility_micros,
+                    &prediction.uncertainty_micros,
+                    &prediction.confidence,
+                    &prediction.risk_penalty_micros,
+                    &prediction.novelty_bonus_micros,
+                    &prediction.settlement_score_micros,
+                    &explanation_codes,
+                    &prediction.actor_principal_ref,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_ranking_prediction(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_ranking_predictions(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingPredictionRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_RANKING_PREDICTION_COLUMNS}
+                     FROM trace_ranking_predictions
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, ranking_prediction_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_ranking_prediction).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_ranking_label(
+        &self,
+        label: TraceRankingLabelWrite,
+    ) -> Result<TraceRankingLabelRecord, DatabaseError> {
+        self.ensure_trace_tenant(&label.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &label.tenant_id).await?;
+        let label_source = enum_to_storage(label.label_source)?;
+        let utility_category = enum_to_storage(label.utility_category)?;
+        let label_outcome = enum_to_storage(label.label_outcome)?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_ranking_labels (
+                        tenant_id, ranking_label_id, submission_id, trace_id, target_use,
+                        label_source, utility_category, label_outcome, utility_delta_micros,
+                        evidence_hash, external_ref_hash, actor_principal_ref
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                     ON CONFLICT (tenant_id, submission_id, target_use, label_source, external_ref_hash)
+                     DO UPDATE SET
+                        trace_id = excluded.trace_id,
+                        utility_category = excluded.utility_category,
+                        label_outcome = excluded.label_outcome,
+                        utility_delta_micros = excluded.utility_delta_micros,
+                        evidence_hash = excluded.evidence_hash,
+                        actor_principal_ref = excluded.actor_principal_ref
+                     RETURNING {TRACE_RANKING_LABEL_COLUMNS}"
+                ),
+                &[
+                    &label.tenant_id,
+                    &label.ranking_label_id,
+                    &label.submission_id,
+                    &label.trace_id,
+                    &label.target_use,
+                    &label_source,
+                    &utility_category,
+                    &label_outcome,
+                    &label.utility_delta_micros,
+                    &label.evidence_hash,
+                    &label.external_ref_hash,
+                    &label.actor_principal_ref,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_ranking_label(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_ranking_labels(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingLabelRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_RANKING_LABEL_COLUMNS}
+                     FROM trace_ranking_labels
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, ranking_label_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_ranking_label).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_ranking_preference_label(
+        &self,
+        preference: TraceRankingPreferenceLabelWrite,
+    ) -> Result<TraceRankingPreferenceLabelRecord, DatabaseError> {
+        self.ensure_trace_tenant(&preference.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &preference.tenant_id).await?;
+        let label_source = enum_to_storage(preference.label_source)?;
+        let utility_category = enum_to_storage(preference.utility_category)?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_ranking_preference_labels (
+                        tenant_id, preference_label_id, preferred_submission_id, preferred_trace_id,
+                        rejected_submission_id, rejected_trace_id, target_use, label_source,
+                        utility_category, preference_strength_micros, evidence_hash,
+                        external_ref_hash, actor_principal_ref
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                     ON CONFLICT (
+                        tenant_id, preferred_submission_id, rejected_submission_id, target_use,
+                        label_source, external_ref_hash
+                     )
+                     DO UPDATE SET
+                        preferred_trace_id = excluded.preferred_trace_id,
+                        rejected_trace_id = excluded.rejected_trace_id,
+                        utility_category = excluded.utility_category,
+                        preference_strength_micros = excluded.preference_strength_micros,
+                        evidence_hash = excluded.evidence_hash,
+                        actor_principal_ref = excluded.actor_principal_ref
+                     RETURNING {TRACE_RANKING_PREFERENCE_LABEL_COLUMNS}"
+                ),
+                &[
+                    &preference.tenant_id,
+                    &preference.preference_label_id,
+                    &preference.preferred_submission_id,
+                    &preference.preferred_trace_id,
+                    &preference.rejected_submission_id,
+                    &preference.rejected_trace_id,
+                    &preference.target_use,
+                    &label_source,
+                    &utility_category,
+                    &preference.preference_strength_micros,
+                    &preference.evidence_hash,
+                    &preference.external_ref_hash,
+                    &preference.actor_principal_ref,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_ranking_preference_label(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_ranking_preference_labels(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingPreferenceLabelRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_RANKING_PREFERENCE_LABEL_COLUMNS}
+                     FROM trace_ranking_preference_labels
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, preference_label_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_ranking_preference_label).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_ranking_calibration_run(
+        &self,
+        run: TraceRankingCalibrationRunWrite,
+    ) -> Result<TraceRankingCalibrationRunRecord, DatabaseError> {
+        self.ensure_trace_tenant(&run.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &run.tenant_id).await?;
+        let prediction_count = i32::try_from(run.prediction_count).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace ranking calibration prediction_count exceeds PostgreSQL integer range: {e}"
+            ))
+        })?;
+        let label_count = i32::try_from(run.label_count).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace ranking calibration label_count exceeds PostgreSQL integer range: {e}"
+            ))
+        })?;
+        let joined_label_prediction_count =
+            i32::try_from(run.joined_label_prediction_count).map_err(|e| {
+                DatabaseError::Serialization(format!(
+                    "trace ranking calibration joined_label_prediction_count exceeds PostgreSQL integer range: {e}"
+                ))
+            })?;
+        let joined_label_source_count =
+            i32::try_from(run.joined_label_source_count).map_err(|e| {
+                DatabaseError::Serialization(format!(
+                    "trace ranking calibration joined_label_source_count exceeds PostgreSQL integer range: {e}"
+                ))
+            })?;
+        let low_confidence_prediction_count =
+            i32::try_from(run.low_confidence_prediction_count).map_err(|e| {
+                DatabaseError::Serialization(format!(
+                    "trace ranking calibration low_confidence_prediction_count exceeds PostgreSQL integer range: {e}"
+                ))
+            })?;
+        let min_label_count = i32::try_from(run.min_label_count).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace ranking calibration min_label_count exceeds PostgreSQL integer range: {e}"
+            ))
+        })?;
+        let min_label_source_count = i32::try_from(run.min_label_source_count).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace ranking calibration min_label_source_count exceeds PostgreSQL integer range: {e}"
+            ))
+        })?;
+        let reason_codes = serde_json::to_value(&run.reason_codes).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace ranking calibration reason_codes encode failed: {e}"
+            ))
+        })?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_ranking_calibration_runs (
+                        tenant_id, calibration_run_id, model_version, target_use, policy_version,
+                        evaluation_dataset_hash, prediction_count, label_count,
+                        joined_label_prediction_count, joined_label_source_count,
+                        joined_evidence_hash, average_predicted_utility_micros,
+                        average_label_utility_delta_micros, average_absolute_error_micros,
+                        max_label_source_average_absolute_error_micros,
+                        max_error_label_source, mean_signed_error_micros,
+                        low_confidence_prediction_count, confidence_threshold, min_label_count,
+                        min_label_source_count, max_average_absolute_error_micros, promotable,
+                        reason_codes, report_hash, actor_principal_ref
+                     ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                        $17, $18, $19, $20, $21, $22, $23, $24, $25, $26
+                     )
+                     ON CONFLICT (tenant_id, calibration_run_id) DO UPDATE SET
+                        model_version = excluded.model_version,
+                        target_use = excluded.target_use,
+                        policy_version = excluded.policy_version,
+                        evaluation_dataset_hash = excluded.evaluation_dataset_hash,
+                        prediction_count = excluded.prediction_count,
+                        label_count = excluded.label_count,
+                        joined_label_prediction_count = excluded.joined_label_prediction_count,
+                        joined_label_source_count = excluded.joined_label_source_count,
+                        joined_evidence_hash = excluded.joined_evidence_hash,
+                        average_predicted_utility_micros = excluded.average_predicted_utility_micros,
+                        average_label_utility_delta_micros = excluded.average_label_utility_delta_micros,
+                        average_absolute_error_micros = excluded.average_absolute_error_micros,
+                        max_label_source_average_absolute_error_micros = excluded.max_label_source_average_absolute_error_micros,
+                        max_error_label_source = excluded.max_error_label_source,
+                        mean_signed_error_micros = excluded.mean_signed_error_micros,
+                        low_confidence_prediction_count = excluded.low_confidence_prediction_count,
+                        confidence_threshold = excluded.confidence_threshold,
+                        min_label_count = excluded.min_label_count,
+                        min_label_source_count = excluded.min_label_source_count,
+                        max_average_absolute_error_micros = excluded.max_average_absolute_error_micros,
+                        promotable = excluded.promotable,
+                        reason_codes = excluded.reason_codes,
+                        report_hash = excluded.report_hash,
+                        actor_principal_ref = excluded.actor_principal_ref
+                     RETURNING {TRACE_RANKING_CALIBRATION_RUN_COLUMNS}"
+                ),
+                &[
+                    &run.tenant_id,
+                    &run.calibration_run_id,
+                    &run.model_version,
+                    &run.target_use,
+                    &run.policy_version,
+                    &run.evaluation_dataset_hash,
+                    &prediction_count,
+                    &label_count,
+                    &joined_label_prediction_count,
+                    &joined_label_source_count,
+                    &run.joined_evidence_hash,
+                    &run.average_predicted_utility_micros,
+                    &run.average_label_utility_delta_micros,
+                    &run.average_absolute_error_micros,
+                    &run.max_label_source_average_absolute_error_micros,
+                    &run.max_error_label_source,
+                    &run.mean_signed_error_micros,
+                    &low_confidence_prediction_count,
+                    &run.confidence_threshold,
+                    &min_label_count,
+                    &min_label_source_count,
+                    &run.max_average_absolute_error_micros,
+                    &run.promotable,
+                    &reason_codes,
+                    &run.report_hash,
+                    &run.actor_principal_ref,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_ranking_calibration_run(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_ranking_calibration_runs(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingCalibrationRunRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_RANKING_CALIBRATION_RUN_COLUMNS}
+                     FROM trace_ranking_calibration_runs
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, calibration_run_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_ranking_calibration_run).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_ranking_worker_run(
+        &self,
+        run: TraceRankingWorkerRunWrite,
+    ) -> Result<TraceRankingWorkerRunRecord, DatabaseError> {
+        self.ensure_trace_tenant(&run.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &run.tenant_id).await?;
+        let run_kind = enum_to_storage(run.run_kind)?;
+        let status = enum_to_storage(run.status)?;
+        let limit = u32_to_pg_i32(run.limit, "ranking_worker_runs.limit")?;
+        let checked_count = u32_to_pg_i32(run.checked_count, "ranking_worker_runs.checked_count")?;
+        let succeeded_count =
+            u32_to_pg_i32(run.succeeded_count, "ranking_worker_runs.succeeded_count")?;
+        let skipped_existing_count = u32_to_pg_i32(
+            run.skipped_existing_count,
+            "ranking_worker_runs.skipped_existing_count",
+        )?;
+        let skipped_model_risk_count = u32_to_pg_i32(
+            run.skipped_model_risk_count,
+            "ranking_worker_runs.skipped_model_risk_count",
+        )?;
+        let skipped_ineligible_count = u32_to_pg_i32(
+            run.skipped_ineligible_count,
+            "ranking_worker_runs.skipped_ineligible_count",
+        )?;
+        let pending_after_count = u32_to_pg_i32(
+            run.pending_after_count,
+            "ranking_worker_runs.pending_after_count",
+        )?;
+        let result_refs = serde_json::to_value(&run.result_refs).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace ranking worker run result_refs encode failed: {e}"
+            ))
+        })?;
+        let reason_counts = serde_json::to_value(&run.reason_counts).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace ranking worker run reason_counts encode failed: {e}"
+            ))
+        })?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_ranking_worker_runs (
+                        tenant_id, ranking_worker_run_id, run_kind, status, dry_run, reason_hash,
+                        model_version, target_use, policy_version, limit_count, checked_count,
+                        succeeded_count, skipped_existing_count, skipped_model_risk_count,
+                        skipped_ineligible_count, pending_after_count, result_refs, reason_counts,
+                        actor_principal_ref, created_at, completed_at, last_error_hash
+                     ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                        $17, $18, $19, $20, $21, $22
+                     )
+                     ON CONFLICT (tenant_id, ranking_worker_run_id) DO UPDATE SET
+                        run_kind = excluded.run_kind,
+                        status = excluded.status,
+                        dry_run = excluded.dry_run,
+                        reason_hash = excluded.reason_hash,
+                        model_version = excluded.model_version,
+                        target_use = excluded.target_use,
+                        policy_version = excluded.policy_version,
+                        limit_count = excluded.limit_count,
+                        checked_count = excluded.checked_count,
+                        succeeded_count = excluded.succeeded_count,
+                        skipped_existing_count = excluded.skipped_existing_count,
+                        skipped_model_risk_count = excluded.skipped_model_risk_count,
+                        skipped_ineligible_count = excluded.skipped_ineligible_count,
+                        pending_after_count = excluded.pending_after_count,
+                        result_refs = excluded.result_refs,
+                        reason_counts = excluded.reason_counts,
+                        actor_principal_ref = excluded.actor_principal_ref,
+                        created_at = excluded.created_at,
+                        completed_at = excluded.completed_at,
+                        last_error_hash = excluded.last_error_hash
+                     RETURNING {TRACE_RANKING_WORKER_RUN_COLUMNS}"
+                ),
+                &[
+                    &run.tenant_id,
+                    &run.ranking_worker_run_id,
+                    &run_kind,
+                    &status,
+                    &run.dry_run,
+                    &run.reason_hash,
+                    &run.model_version,
+                    &run.target_use,
+                    &run.policy_version,
+                    &limit,
+                    &checked_count,
+                    &succeeded_count,
+                    &skipped_existing_count,
+                    &skipped_model_risk_count,
+                    &skipped_ineligible_count,
+                    &pending_after_count,
+                    &result_refs,
+                    &reason_counts,
+                    &run.actor_principal_ref,
+                    &run.created_at,
+                    &run.completed_at,
+                    &run.last_error_hash,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_ranking_worker_run(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_ranking_worker_runs(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceRankingWorkerRunRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_RANKING_WORKER_RUN_COLUMNS}
+                     FROM trace_ranking_worker_runs
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, ranking_worker_run_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_ranking_worker_run).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
     async fn upsert_trace_export_manifest(
         &self,
         manifest: TraceExportManifestWrite,
@@ -2249,6 +3522,38 @@ impl TraceCorpusStore for PgBackend {
         records
     }
 
+    async fn list_recent_trace_audit_events(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+    ) -> Result<Vec<TraceAuditEventRecord>, DatabaseError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = tx
+            .query(
+                "SELECT
+                    tenant_id, audit_sequence, audit_event_id, actor_principal_ref, actor_role,
+                    action, reason, request_id, submission_id, object_ref_id, export_manifest_id,
+                    decision_inputs_hash, previous_event_hash, event_hash, canonical_event_json,
+                    metadata_json,
+                    occurred_at
+                 FROM trace_audit_events
+                 WHERE tenant_id = $1
+                 ORDER BY audit_sequence DESC
+                 LIMIT $2",
+                &[&tenant_id, &limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_audit_event).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
     async fn append_trace_credit_event(
         &self,
         credit_event: TraceCreditEventWrite,
@@ -2283,6 +3588,494 @@ impl TraceCorpusStore for PgBackend {
         .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(())
+    }
+
+    async fn upsert_trace_utility_attestation(
+        &self,
+        attestation: TraceUtilityAttestationWrite,
+    ) -> Result<TraceUtilityAttestationRecord, DatabaseError> {
+        self.ensure_trace_tenant(&attestation.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &attestation.tenant_id).await?;
+        let event_type = enum_to_storage(attestation.event_type)?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_utility_attestations (
+                        tenant_id, attestation_id, event_type, use_category, policy_version,
+                        evidence_hash, external_ref_hash, source_submission_ids, actor_principal_ref
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                     ON CONFLICT (tenant_id, event_type, external_ref_hash) DO UPDATE SET
+                        use_category = excluded.use_category,
+                        policy_version = excluded.policy_version,
+                        evidence_hash = excluded.evidence_hash,
+                        source_submission_ids = excluded.source_submission_ids,
+                        actor_principal_ref = excluded.actor_principal_ref
+                     RETURNING {TRACE_UTILITY_ATTESTATION_COLUMNS}"
+                ),
+                &[
+                    &attestation.tenant_id,
+                    &attestation.attestation_id,
+                    &event_type,
+                    &attestation.use_category,
+                    &attestation.policy_version,
+                    &attestation.evidence_hash,
+                    &attestation.external_ref_hash,
+                    &attestation.source_submission_ids,
+                    &attestation.actor_principal_ref,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_utility_attestation(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_utility_attestations(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceUtilityAttestationRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_UTILITY_ATTESTATION_COLUMNS}
+                     FROM trace_utility_attestations
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, attestation_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_utility_attestation).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_credit_settlement_batch(
+        &self,
+        batch: TraceCreditSettlementBatchWrite,
+    ) -> Result<TraceCreditSettlementBatchRecord, DatabaseError> {
+        self.ensure_trace_tenant(&batch.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &batch.tenant_id).await?;
+        let status = enum_to_storage(batch.status)?;
+        let line_items_json = serde_json::to_value(&batch.line_items).map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace credit settlement line_items_json encode failed: {e}"
+            ))
+        })?;
+        let ranking_credit_events_excluded_count =
+            i32::try_from(batch.ranking_credit_events_excluded_count).map_err(|e| {
+                DatabaseError::Serialization(format!(
+                    "trace credit settlement excluded ranking count exceeds PostgreSQL integer range: {e}"
+                ))
+            })?;
+        let ranking_credit_events_excluded_reason_counts_json = serde_json::to_value(
+            &batch.ranking_credit_events_excluded_reason_counts,
+        )
+        .map_err(|e| {
+            DatabaseError::Serialization(format!(
+                "trace credit settlement ranking exclusion reason counts encode failed: {e}"
+            ))
+        })?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_credit_settlement_batches (
+                        tenant_id, settlement_batch_id, policy_version, status, reason_hash,
+                        source_credit_event_ids, source_submission_ids, source_list_hash,
+                        settled_credit_points, settled_credit_micros, line_items_json,
+                        near_contract_id, ranking_model_version, ranking_target_use,
+                        ranking_calibration_run_id, ranking_calibration_report_hash,
+                        ranking_calibration_joined_evidence_hash,
+                        ranking_credit_events_excluded_count,
+                        ranking_credit_events_excluded_reason_counts_json,
+                        actor_principal_ref
+                     ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                        $17, $18, $19, $20
+                     )
+                     ON CONFLICT (tenant_id, settlement_batch_id) DO UPDATE SET
+                        policy_version = excluded.policy_version,
+                        status = excluded.status,
+                        reason_hash = excluded.reason_hash,
+                        source_credit_event_ids = excluded.source_credit_event_ids,
+                        source_submission_ids = excluded.source_submission_ids,
+                        source_list_hash = excluded.source_list_hash,
+                        settled_credit_points = excluded.settled_credit_points,
+                        settled_credit_micros = excluded.settled_credit_micros,
+                        line_items_json = excluded.line_items_json,
+                        near_contract_id = excluded.near_contract_id,
+                        ranking_model_version = excluded.ranking_model_version,
+                        ranking_target_use = excluded.ranking_target_use,
+                        ranking_calibration_run_id = excluded.ranking_calibration_run_id,
+                        ranking_calibration_report_hash = excluded.ranking_calibration_report_hash,
+                        ranking_calibration_joined_evidence_hash = excluded.ranking_calibration_joined_evidence_hash,
+                        ranking_credit_events_excluded_count = excluded.ranking_credit_events_excluded_count,
+                        ranking_credit_events_excluded_reason_counts_json = excluded.ranking_credit_events_excluded_reason_counts_json,
+                        actor_principal_ref = excluded.actor_principal_ref
+                     RETURNING {TRACE_CREDIT_SETTLEMENT_BATCH_COLUMNS}"
+                ),
+                &[
+                    &batch.tenant_id,
+                    &batch.settlement_batch_id,
+                    &batch.policy_version,
+                    &status,
+                    &batch.reason_hash,
+                    &batch.source_credit_event_ids,
+                    &batch.source_submission_ids,
+                    &batch.source_list_hash,
+                    &batch.settled_credit_points,
+                    &batch.settled_credit_micros,
+                    &line_items_json,
+                    &batch.near_contract_id,
+                    &batch.ranking_model_version,
+                    &batch.ranking_target_use,
+                    &batch.ranking_calibration_run_id,
+                    &batch.ranking_calibration_report_hash,
+                    &batch.ranking_calibration_joined_evidence_hash,
+                    &ranking_credit_events_excluded_count,
+                    &ranking_credit_events_excluded_reason_counts_json,
+                    &batch.actor_principal_ref,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_credit_settlement_batch(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_credit_settlement_batches(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceCreditSettlementBatchRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_CREDIT_SETTLEMENT_BATCH_COLUMNS}
+                     FROM trace_credit_settlement_batches
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, settlement_batch_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_credit_settlement_batch).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_credit_hold(
+        &self,
+        hold: TraceCreditHoldWrite,
+    ) -> Result<TraceCreditHoldRecord, DatabaseError> {
+        self.ensure_trace_tenant(&hold.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &hold.tenant_id).await?;
+        let reason = enum_to_storage(hold.reason)?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_credit_holds (
+                        tenant_id, hold_id, credit_account_ref, credit_account_hash, reason,
+                        reason_hash, actor_principal_ref, released_at
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                     ON CONFLICT (tenant_id, hold_id) DO UPDATE SET
+                        credit_account_ref = excluded.credit_account_ref,
+                        credit_account_hash = excluded.credit_account_hash,
+                        reason = excluded.reason,
+                        reason_hash = excluded.reason_hash,
+                        actor_principal_ref = excluded.actor_principal_ref,
+                        released_at = excluded.released_at
+                     RETURNING {TRACE_CREDIT_HOLD_COLUMNS}"
+                ),
+                &[
+                    &hold.tenant_id,
+                    &hold.hold_id,
+                    &hold.credit_account_ref,
+                    &hold.credit_account_hash,
+                    &reason,
+                    &hold.reason_hash,
+                    &hold.actor_principal_ref,
+                    &hold.released_at,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_credit_hold(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_credit_holds(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceCreditHoldRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_CREDIT_HOLD_COLUMNS}
+                     FROM trace_credit_holds
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, hold_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_credit_hold).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn upsert_trace_near_credit_outbox_item(
+        &self,
+        item: TraceNearCreditOutboxItemWrite,
+    ) -> Result<TraceNearCreditOutboxItemRecord, DatabaseError> {
+        self.ensure_trace_tenant(&item.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &item.tenant_id).await?;
+        let status = enum_to_storage(item.status)?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_near_credit_outbox (
+                        tenant_id, near_outbox_id, settlement_batch_id, credit_account_hash,
+                        near_call_json, status
+                     ) VALUES ($1, $2, $3, $4, $5, $6)
+                     ON CONFLICT (tenant_id, near_outbox_id) DO UPDATE SET
+                        settlement_batch_id = excluded.settlement_batch_id,
+                        credit_account_hash = excluded.credit_account_hash,
+                        near_call_json = excluded.near_call_json,
+                        status = excluded.status
+                     RETURNING {TRACE_NEAR_CREDIT_OUTBOX_COLUMNS}"
+                ),
+                &[
+                    &item.tenant_id,
+                    &item.near_outbox_id,
+                    &item.settlement_batch_id,
+                    &item.credit_account_hash,
+                    &item.near_call_json,
+                    &status,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_near_credit_outbox_item(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_near_credit_outbox_items(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceNearCreditOutboxItemRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_NEAR_CREDIT_OUTBOX_COLUMNS}
+                     FROM trace_near_credit_outbox
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, near_outbox_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_near_credit_outbox_item).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn update_trace_near_credit_outbox_status(
+        &self,
+        tenant_id: &str,
+        near_outbox_id: Uuid,
+        status: TraceCreditSettlementNearStatus,
+        near_transaction_hash: Option<String>,
+        last_error_hash: Option<String>,
+    ) -> Result<Option<TraceNearCreditOutboxItemRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let status_storage = enum_to_storage(status)?;
+        let row = tx
+            .query_opt(
+                &format!(
+                    "UPDATE trace_near_credit_outbox
+                     SET status = $3,
+                         near_transaction_hash = COALESCE($4, near_transaction_hash),
+                         submitted_at = CASE
+                            WHEN submitted_at IS NULL AND $3 IN ('submitted', 'confirmed')
+                            THEN NOW()
+                            ELSE submitted_at
+                         END,
+                         confirmed_at = CASE
+                            WHEN $3 = 'confirmed' THEN NOW()
+                            WHEN $3 IN ('submitted', 'failed') THEN NULL
+                            ELSE confirmed_at
+                         END,
+                         last_error_hash = CASE
+                            WHEN $3 = 'failed' THEN $5
+                            WHEN $3 IN ('submitted', 'confirmed') THEN NULL
+                            ELSE last_error_hash
+                         END
+                     WHERE tenant_id = $1 AND near_outbox_id = $2
+                     RETURNING {TRACE_NEAR_CREDIT_OUTBOX_COLUMNS}"
+                ),
+                &[
+                    &tenant_id,
+                    &near_outbox_id,
+                    &status_storage,
+                    &near_transaction_hash,
+                    &last_error_hash,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row
+            .as_ref()
+            .map(row_to_near_credit_outbox_item)
+            .transpose()?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn upsert_trace_benchmark_registry_outbox_item(
+        &self,
+        item: TraceBenchmarkRegistryOutboxItemWrite,
+    ) -> Result<TraceBenchmarkRegistryOutboxItemRecord, DatabaseError> {
+        self.ensure_trace_tenant(&item.tenant_id).await?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &item.tenant_id).await?;
+        let operation = enum_to_storage(item.operation)?;
+        let status = enum_to_storage(item.status)?;
+        let row = tx
+            .query_one(
+                &format!(
+                    "INSERT INTO trace_benchmark_registry_outbox (
+                        tenant_id, benchmark_outbox_id, conversion_id, operation, registry_ref,
+                        artifact_payload_hash, source_submission_ids_hash, evaluator_ref,
+                        evaluation_score, status
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                     ON CONFLICT (tenant_id, benchmark_outbox_id) DO UPDATE SET
+                        conversion_id = excluded.conversion_id,
+                        operation = excluded.operation,
+                        registry_ref = excluded.registry_ref,
+                        artifact_payload_hash = excluded.artifact_payload_hash,
+                        source_submission_ids_hash = excluded.source_submission_ids_hash,
+                        evaluator_ref = excluded.evaluator_ref,
+                        evaluation_score = excluded.evaluation_score
+                     RETURNING {TRACE_BENCHMARK_REGISTRY_OUTBOX_COLUMNS}"
+                ),
+                &[
+                    &item.tenant_id,
+                    &item.benchmark_outbox_id,
+                    &item.conversion_id,
+                    &operation,
+                    &item.registry_ref,
+                    &item.artifact_payload_hash,
+                    &item.source_submission_ids_hash,
+                    &item.evaluator_ref,
+                    &item.evaluation_score,
+                    &status,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_benchmark_registry_outbox_item(&row)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn list_trace_benchmark_registry_outbox_items(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {TRACE_BENCHMARK_REGISTRY_OUTBOX_COLUMNS}
+                     FROM trace_benchmark_registry_outbox
+                     WHERE tenant_id = $1
+                     ORDER BY created_at ASC, benchmark_outbox_id ASC"
+                ),
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows
+            .iter()
+            .map(row_to_benchmark_registry_outbox_item)
+            .collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn update_trace_benchmark_registry_outbox_status(
+        &self,
+        tenant_id: &str,
+        benchmark_outbox_id: Uuid,
+        status: TraceBenchmarkRegistryOutboxStatus,
+        external_receipt_ref: Option<String>,
+        last_error_hash: Option<String>,
+    ) -> Result<Option<TraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let status_storage = enum_to_storage(status)?;
+        let row = tx
+            .query_opt(
+                &format!(
+                    "UPDATE trace_benchmark_registry_outbox
+                     SET status = $3,
+                         external_receipt_ref = COALESCE($4, external_receipt_ref),
+                         submitted_at = CASE
+                            WHEN submitted_at IS NULL AND $3 IN ('submitted', 'confirmed')
+                            THEN NOW()
+                            ELSE submitted_at
+                         END,
+                         confirmed_at = CASE
+                            WHEN $3 = 'confirmed' THEN NOW()
+                            WHEN $3 IN ('submitted', 'failed') THEN NULL
+                            ELSE confirmed_at
+                         END,
+                         last_error_hash = CASE
+                            WHEN $3 = 'failed' THEN $5
+                            WHEN $3 IN ('submitted', 'confirmed') THEN NULL
+                            ELSE last_error_hash
+                         END
+                     WHERE tenant_id = $1 AND benchmark_outbox_id = $2
+                     RETURNING {TRACE_BENCHMARK_REGISTRY_OUTBOX_COLUMNS}"
+                ),
+                &[
+                    &tenant_id,
+                    &benchmark_outbox_id,
+                    &status_storage,
+                    &external_receipt_ref,
+                    &last_error_hash,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row
+            .as_ref()
+            .map(row_to_benchmark_registry_outbox_item)
+            .transpose()?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
     }
 
     async fn write_trace_tombstone(
@@ -2753,6 +4546,196 @@ impl TraceCorpusStore for PgBackend {
                     &item_count,
                     &update.last_error,
                     &metadata_json,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row.as_ref().map(row_to_export_job).transpose()?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn claim_next_trace_export_job(
+        &self,
+        tenant_id: &str,
+        requested_dataset_kind: Option<&str>,
+        claim_at: DateTime<Utc>,
+        worker_principal_ref: &str,
+    ) -> Result<Option<TraceExportJobRecord>, DatabaseError> {
+        let dataset_kind = requested_dataset_kind.map(str::to_string);
+        let queued_status = enum_to_storage(TraceExportJobStatus::Queued)?;
+        let running_status = enum_to_storage(TraceExportJobStatus::Running)?;
+        let metadata_patch = serde_json::to_value(BTreeMap::from([
+            ("state".to_string(), "running".to_string()),
+            (
+                "claimed_by_principal_ref".to_string(),
+                worker_principal_ref.to_string(),
+            ),
+        ]))
+        .map_err(|e| {
+            DatabaseError::Serialization(format!("trace export job metadata encode failed: {e}"))
+        })?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                &format!(
+                    "WITH next_job AS (
+                        SELECT export_job_id
+                          FROM trace_export_jobs
+                         WHERE tenant_id = $1
+                           AND status = $2
+                           AND expires_at > $3
+                           AND ($4::TEXT IS NULL OR requested_dataset_kind = $4)
+                         ORDER BY requested_at ASC, created_at ASC
+                         LIMIT 1
+                         FOR UPDATE SKIP LOCKED
+                     )
+                     UPDATE trace_export_jobs AS job
+                        SET status = $5,
+                            started_at = $3,
+                            finished_at = NULL,
+                            last_error = NULL,
+                            metadata_json = job.metadata_json || $6::JSONB,
+                            updated_at = NOW()
+                       FROM next_job
+                      WHERE job.tenant_id = $1
+                        AND job.export_job_id = next_job.export_job_id
+                      RETURNING {TRACE_EXPORT_JOB_COLUMNS}"
+                ),
+                &[
+                    &tenant_id,
+                    &queued_status,
+                    &claim_at,
+                    &dataset_kind,
+                    &running_status,
+                    &metadata_patch,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row.as_ref().map(row_to_export_job).transpose()?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn recover_stale_trace_export_job(
+        &self,
+        tenant_id: &str,
+        export_job_id: Uuid,
+        stale_at: DateTime<Utc>,
+        update: TraceExportJobStatusUpdate,
+    ) -> Result<Option<TraceExportJobRecord>, DatabaseError> {
+        let item_count = update
+            .item_count
+            .map(|value| {
+                i32::try_from(value).map_err(|e| {
+                    DatabaseError::Constraint(format!(
+                        "trace export job item_count is too large: {e}"
+                    ))
+                })
+            })
+            .transpose()?;
+        let status = enum_to_storage(update.status)?;
+        let running_status = enum_to_storage(TraceExportJobStatus::Running)?;
+        let metadata_json = serde_json::to_value(&update.metadata).map_err(|e| {
+            DatabaseError::Serialization(format!("trace export job metadata encode failed: {e}"))
+        })?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                &format!(
+                    "UPDATE trace_export_jobs
+                     SET status = $3,
+                         started_at = $4,
+                         finished_at = $5,
+                         result_manifest_id = $6,
+                         item_count = $7,
+                         last_error = $8,
+                         metadata_json = $9,
+                         updated_at = NOW()
+                     WHERE tenant_id = $1
+                       AND export_job_id = $2
+                       AND status = $10
+                       AND expires_at <= $11
+                     RETURNING {TRACE_EXPORT_JOB_COLUMNS}"
+                ),
+                &[
+                    &tenant_id,
+                    &export_job_id,
+                    &status,
+                    &update.started_at,
+                    &update.finished_at,
+                    &update.result_manifest_id,
+                    &item_count,
+                    &update.last_error,
+                    &metadata_json,
+                    &running_status,
+                    &stale_at,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row.as_ref().map(row_to_export_job).transpose()?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
+    async fn retry_failed_trace_export_job(
+        &self,
+        tenant_id: &str,
+        export_job_id: Uuid,
+        retry_at: DateTime<Utc>,
+        update: TraceExportJobStatusUpdate,
+    ) -> Result<Option<TraceExportJobRecord>, DatabaseError> {
+        let item_count = update
+            .item_count
+            .map(|value| {
+                i32::try_from(value).map_err(|e| {
+                    DatabaseError::Constraint(format!(
+                        "trace export job item_count is too large: {e}"
+                    ))
+                })
+            })
+            .transpose()?;
+        let status = enum_to_storage(update.status)?;
+        let failed_status = enum_to_storage(TraceExportJobStatus::Failed)?;
+        let metadata_json = serde_json::to_value(&update.metadata).map_err(|e| {
+            DatabaseError::Serialization(format!("trace export job metadata encode failed: {e}"))
+        })?;
+        let mut client = self.pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                &format!(
+                    "UPDATE trace_export_jobs
+                     SET status = $3,
+                         started_at = $4,
+                         finished_at = $5,
+                         result_manifest_id = $6,
+                         item_count = $7,
+                         last_error = $8,
+                         metadata_json = $9,
+                         updated_at = NOW()
+                     WHERE tenant_id = $1
+                       AND export_job_id = $2
+                       AND status = $10
+                       AND expires_at > $11
+                     RETURNING {TRACE_EXPORT_JOB_COLUMNS}"
+                ),
+                &[
+                    &tenant_id,
+                    &export_job_id,
+                    &status,
+                    &update.started_at,
+                    &update.finished_at,
+                    &update.result_manifest_id,
+                    &item_count,
+                    &update.last_error,
+                    &metadata_json,
+                    &failed_status,
+                    &retry_at,
                 ],
             )
             .await

@@ -3,6 +3,7 @@
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod near_credit;
 pub mod secrets;
 pub mod trace_artifact_store;
 pub mod trace_corpus_storage;
