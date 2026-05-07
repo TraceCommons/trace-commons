@@ -1048,143 +1048,194 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
     }
 
     let credit_event_id = Uuid::new_v4();
-    backend
-        .append_trace_credit_event(TraceCreditEventWrite {
-            credit_event_id,
-            tenant_id: tenant_alpha.clone(),
-            submission_id,
-            trace_id,
-            credit_account_ref: "principal:settlement-account".to_string(),
-            event_type: TraceCreditEventType::RankingUtility,
-            points_delta: "1.250000".to_string(),
-            reason: "ranking settlement control-plane test".to_string(),
-            external_ref: Some("ranker:settlement-control-plane".to_string()),
-            actor_principal_ref: "principal:ranker-worker".to_string(),
-            actor_role: "utility_worker".to_string(),
-            settlement_state: TraceCreditSettlementState::Pending,
-        })
-        .await
-        .expect("insert settlement source credit event");
-
     let attestation_id = Uuid::new_v4();
-    let attestation = backend
-        .upsert_trace_utility_attestation(TraceUtilityAttestationWrite {
-            tenant_id: tenant_alpha.clone(),
-            attestation_id,
-            event_type: TraceCreditEventType::RankingUtility,
-            use_category: "ranking".to_string(),
-            policy_version: "trace-credit-policy-v3".to_string(),
-            evidence_hash: "sha256:settlement-attestation-evidence".to_string(),
-            external_ref_hash: "sha256:settlement-attestation-ref".to_string(),
-            source_submission_ids: vec![submission_id],
-            actor_principal_ref: "principal:ranker-worker".to_string(),
-        })
-        .await
-        .expect("upsert utility attestation");
-    assert_eq!(attestation.attestation_id, attestation_id);
-    assert_eq!(attestation.event_type, TraceCreditEventType::RankingUtility);
-
     let hold_id = Uuid::new_v4();
-    let hold = backend
-        .upsert_trace_credit_hold(TraceCreditHoldWrite {
-            tenant_id: tenant_alpha.clone(),
-            hold_id,
-            credit_account_ref: "principal:settlement-account".to_string(),
-            credit_account_hash: "sha256:settlement-account".to_string(),
-            reason: TraceCreditHoldReason::AttestationDispute,
-            reason_hash: "sha256:settlement-hold-reason".to_string(),
-            actor_principal_ref: "principal:admin".to_string(),
-            released_at: None,
-        })
-        .await
-        .expect("upsert credit hold");
-    assert_eq!(hold.hold_id, hold_id);
-    assert_eq!(hold.reason, TraceCreditHoldReason::AttestationDispute);
-
     let settlement_batch_id = Uuid::new_v4();
-    let source_list_hash = "sha256:settlement-source-list".to_string();
-    let settlement = backend
-        .upsert_trace_credit_settlement_batch(TraceCreditSettlementBatchWrite {
-            tenant_id: tenant_alpha.clone(),
-            settlement_batch_id,
-            policy_version: "trace-credit-policy-v3".to_string(),
-            status: TraceCreditSettlementBatchStatus::Finalized,
-            reason_hash: "sha256:settlement-reason".to_string(),
-            source_credit_event_ids: vec![credit_event_id],
-            source_submission_ids: vec![submission_id],
-            source_list_hash: source_list_hash.clone(),
-            settled_credit_points: "1.250000".to_string(),
-            settled_credit_micros: 1_250_000,
-            line_items: vec![TraceCreditAccountSettlementLineItem {
-                credit_account_ref: "principal:settlement-account".to_string(),
-                credit_account_hash: "sha256:settlement-account".to_string(),
-                settled_credit_delta_micros: 1_250_000,
+    let near_outbox_id = Uuid::new_v4();
+    let ranking_calibration_run_id = Uuid::new_v4();
+    let tenant_cases = [
+        (
+            &tenant_alpha,
+            "alpha",
+            "principal:settlement-alpha-account",
+            "sha256:settlement-alpha-account",
+            "sha256:settlement-alpha-attestation-evidence",
+            "sha256:settlement-alpha-attestation-ref",
+            "sha256:settlement-alpha-hold-reason",
+            "sha256:settlement-alpha-reason",
+            "sha256:settlement-alpha-source-list",
+            "sha256:settlement-alpha-near-call",
+            1_250_000,
+        ),
+        (
+            &tenant_beta,
+            "beta",
+            "principal:settlement-beta-account",
+            "sha256:settlement-beta-account",
+            "sha256:settlement-beta-attestation-evidence",
+            "sha256:settlement-beta-attestation-ref",
+            "sha256:settlement-beta-hold-reason",
+            "sha256:settlement-beta-reason",
+            "sha256:settlement-beta-source-list",
+            "sha256:settlement-beta-near-call",
+            2_500_000,
+        ),
+    ];
+
+    for (
+        tenant_id,
+        label,
+        account_ref,
+        account_hash,
+        evidence_hash,
+        external_ref_hash,
+        hold_reason_hash,
+        settlement_reason_hash,
+        source_list_hash,
+        idempotency_key,
+        settled_micros,
+    ) in tenant_cases
+    {
+        backend
+            .append_trace_credit_event(TraceCreditEventWrite {
+                credit_event_id,
+                tenant_id: tenant_id.clone(),
+                submission_id,
+                trace_id,
+                credit_account_ref: account_ref.to_string(),
+                event_type: TraceCreditEventType::RankingUtility,
+                points_delta: "1.250000".to_string(),
+                reason: format!("ranking settlement control-plane test {label}"),
+                external_ref: Some(format!("ranker:settlement-control-plane:{label}")),
+                actor_principal_ref: "principal:ranker-worker".to_string(),
+                actor_role: "utility_worker".to_string(),
+                settlement_state: TraceCreditSettlementState::Pending,
+            })
+            .await
+            .expect("insert tenant settlement source credit event");
+
+        let attestation = backend
+            .upsert_trace_utility_attestation(TraceUtilityAttestationWrite {
+                tenant_id: tenant_id.clone(),
+                attestation_id,
+                event_type: TraceCreditEventType::RankingUtility,
+                use_category: "ranking".to_string(),
+                policy_version: "trace-credit-policy-v3".to_string(),
+                evidence_hash: evidence_hash.to_string(),
+                external_ref_hash: external_ref_hash.to_string(),
+                source_submission_ids: vec![submission_id],
+                actor_principal_ref: "principal:ranker-worker".to_string(),
+            })
+            .await
+            .expect("upsert tenant utility attestation");
+        assert_eq!(attestation.tenant_id, *tenant_id);
+        assert_eq!(attestation.attestation_id, attestation_id);
+        assert_eq!(attestation.evidence_hash, evidence_hash);
+
+        let hold = backend
+            .upsert_trace_credit_hold(TraceCreditHoldWrite {
+                tenant_id: tenant_id.clone(),
+                hold_id,
+                credit_account_ref: account_ref.to_string(),
+                credit_account_hash: account_hash.to_string(),
+                reason: TraceCreditHoldReason::AttestationDispute,
+                reason_hash: hold_reason_hash.to_string(),
+                actor_principal_ref: "principal:admin".to_string(),
+                released_at: None,
+            })
+            .await
+            .expect("upsert tenant credit hold");
+        assert_eq!(hold.tenant_id, *tenant_id);
+        assert_eq!(hold.hold_id, hold_id);
+        assert_eq!(hold.credit_account_hash, account_hash);
+
+        let settlement = backend
+            .upsert_trace_credit_settlement_batch(TraceCreditSettlementBatchWrite {
+                tenant_id: tenant_id.clone(),
+                settlement_batch_id,
+                policy_version: "trace-credit-policy-v3".to_string(),
+                status: TraceCreditSettlementBatchStatus::Finalized,
+                reason_hash: settlement_reason_hash.to_string(),
                 source_credit_event_ids: vec![credit_event_id],
                 source_submission_ids: vec![submission_id],
-                source_list_hash: source_list_hash.clone(),
-                near_status: TraceCreditSettlementNearStatus::Pending,
-                near_outbox_id: Some(Uuid::nil()),
-            }],
-            near_contract_id: Some("trace-credits.testnet".to_string()),
-            ranking_model_version: Some("trace-ranker-settlement-v3".to_string()),
-            ranking_target_use: Some("ranking_model_training".to_string()),
-            ranking_calibration_run_id: Some(Uuid::new_v4()),
-            ranking_calibration_report_hash: Some(
-                "sha256:settlement-calibration-report".to_string(),
-            ),
-            ranking_calibration_joined_evidence_hash: Some(
-                "sha256:settlement-calibration-joined-evidence".to_string(),
-            ),
-            ranking_credit_events_excluded_count: 0,
-            ranking_credit_events_excluded_reason_counts: BTreeMap::from([(
-                "missing_prediction_ref".to_string(),
-                1,
-            )]),
-            actor_principal_ref: "principal:admin".to_string(),
-        })
-        .await
-        .expect("upsert settlement batch");
-    assert_eq!(settlement.settlement_batch_id, settlement_batch_id);
-    assert_eq!(settlement.line_items.len(), 1);
-    assert_eq!(
-        settlement.ranking_model_version.as_deref(),
-        Some("trace-ranker-settlement-v3")
-    );
-    assert_eq!(
-        settlement
-            .ranking_calibration_joined_evidence_hash
-            .as_deref(),
-        Some("sha256:settlement-calibration-joined-evidence")
-    );
-    assert_eq!(
-        settlement
-            .ranking_credit_events_excluded_reason_counts
-            .get("missing_prediction_ref"),
-        Some(&1)
-    );
+                source_list_hash: source_list_hash.to_string(),
+                settled_credit_points: "1.250000".to_string(),
+                settled_credit_micros: settled_micros,
+                line_items: vec![TraceCreditAccountSettlementLineItem {
+                    credit_account_ref: account_ref.to_string(),
+                    credit_account_hash: account_hash.to_string(),
+                    settled_credit_delta_micros: settled_micros,
+                    source_credit_event_ids: vec![credit_event_id],
+                    source_submission_ids: vec![submission_id],
+                    source_list_hash: source_list_hash.to_string(),
+                    near_status: TraceCreditSettlementNearStatus::Pending,
+                    near_outbox_id: Some(near_outbox_id),
+                }],
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: Some("trace-ranker-settlement-v3".to_string()),
+                ranking_target_use: Some("ranking_model_training".to_string()),
+                ranking_calibration_run_id: Some(ranking_calibration_run_id),
+                ranking_calibration_report_hash: Some(format!(
+                    "sha256:settlement-{label}-calibration-report"
+                )),
+                ranking_calibration_joined_evidence_hash: Some(format!(
+                    "sha256:settlement-{label}-calibration-joined-evidence"
+                )),
+                ranking_credit_events_excluded_count: 0,
+                ranking_credit_events_excluded_reason_counts: BTreeMap::from([(
+                    format!("missing_prediction_ref_{label}"),
+                    1,
+                )]),
+                actor_principal_ref: "principal:admin".to_string(),
+            })
+            .await
+            .expect("upsert tenant settlement batch");
+        assert_eq!(settlement.tenant_id, *tenant_id);
+        assert_eq!(settlement.settlement_batch_id, settlement_batch_id);
+        assert_eq!(settlement.source_list_hash, source_list_hash);
+        assert_eq!(settlement.line_items.len(), 1);
+        assert_eq!(settlement.line_items[0].credit_account_hash, account_hash);
+        assert_eq!(
+            settlement.ranking_model_version.as_deref(),
+            Some("trace-ranker-settlement-v3")
+        );
+        assert_eq!(
+            settlement
+                .ranking_calibration_joined_evidence_hash
+                .as_deref(),
+            Some(format!("sha256:settlement-{label}-calibration-joined-evidence").as_str())
+        );
+        assert_eq!(
+            settlement
+                .ranking_credit_events_excluded_reason_counts
+                .get(format!("missing_prediction_ref_{label}").as_str()),
+            Some(&1)
+        );
 
-    let near_outbox_id = Uuid::new_v4();
-    let near_item = backend
-        .upsert_trace_near_credit_outbox_item(TraceNearCreditOutboxItemWrite {
-            tenant_id: tenant_alpha.clone(),
-            near_outbox_id,
-            settlement_batch_id,
-            credit_account_hash: "sha256:settlement-account".to_string(),
-            near_call_json: serde_json::json!({
-                "contract_id": "trace-credits.testnet",
-                "method_name": "settle_credit_receipt",
-                "args": {
-                    "settlement_batch_id": settlement_batch_id,
-                    "credit_account_hash": "sha256:settlement-account"
-                },
-                "idempotency_key": "sha256:settlement-near-call"
-            }),
-            status: TraceCreditSettlementNearStatus::Pending,
-        })
-        .await
-        .expect("upsert NEAR outbox item");
-    assert_eq!(near_item.near_outbox_id, near_outbox_id);
-    assert_eq!(near_item.status, TraceCreditSettlementNearStatus::Pending);
+        let near_item = backend
+            .upsert_trace_near_credit_outbox_item(TraceNearCreditOutboxItemWrite {
+                tenant_id: tenant_id.clone(),
+                near_outbox_id,
+                settlement_batch_id,
+                credit_account_hash: account_hash.to_string(),
+                near_call_json: serde_json::json!({
+                    "contract_id": "trace-credits.testnet",
+                    "method_name": "settle_credit_receipt",
+                    "args": {
+                        "settlement_batch_id": settlement_batch_id,
+                        "credit_account_hash": account_hash
+                    },
+                    "idempotency_key": idempotency_key
+                }),
+                status: TraceCreditSettlementNearStatus::Pending,
+            })
+            .await
+            .expect("upsert tenant NEAR outbox item");
+        assert_eq!(near_item.tenant_id, *tenant_id);
+        assert_eq!(near_item.near_outbox_id, near_outbox_id);
+        assert_eq!(near_item.credit_account_hash, account_hash);
+        assert_eq!(near_item.status, TraceCreditSettlementNearStatus::Pending);
+    }
 
     let updated = backend
         .update_trace_near_credit_outbox_status(
@@ -1204,53 +1255,148 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
     );
     assert!(updated.submitted_at.is_some());
 
+    let alpha_events = backend
+        .list_trace_credit_events(&tenant_alpha)
+        .await
+        .expect("list alpha credit events");
+    assert_eq!(alpha_events.len(), 1);
+    assert_eq!(alpha_events[0].tenant_id, tenant_alpha);
+    assert_eq!(alpha_events[0].credit_event_id, credit_event_id);
     assert_eq!(
-        backend
-            .list_trace_utility_attestations(&tenant_alpha)
-            .await
-            .expect("list alpha attestations")
-            .len(),
-        1
+        alpha_events[0].credit_account_ref,
+        "principal:settlement-alpha-account"
+    );
+
+    let beta_events = backend
+        .list_trace_credit_events(&tenant_beta)
+        .await
+        .expect("list beta credit events");
+    assert_eq!(beta_events.len(), 1);
+    assert_eq!(beta_events[0].tenant_id, tenant_beta);
+    assert_eq!(beta_events[0].credit_event_id, credit_event_id);
+    assert_eq!(
+        beta_events[0].credit_account_ref,
+        "principal:settlement-beta-account"
+    );
+
+    let alpha_attestations = backend
+        .list_trace_utility_attestations(&tenant_alpha)
+        .await
+        .expect("list alpha attestations");
+    assert_eq!(alpha_attestations.len(), 1);
+    assert_eq!(alpha_attestations[0].tenant_id, tenant_alpha);
+    assert_eq!(alpha_attestations[0].attestation_id, attestation_id);
+    assert_eq!(
+        alpha_attestations[0].evidence_hash,
+        "sha256:settlement-alpha-attestation-evidence"
+    );
+
+    let beta_attestations = backend
+        .list_trace_utility_attestations(&tenant_beta)
+        .await
+        .expect("list beta attestations");
+    assert_eq!(beta_attestations.len(), 1);
+    assert_eq!(beta_attestations[0].tenant_id, tenant_beta);
+    assert_eq!(beta_attestations[0].attestation_id, attestation_id);
+    assert_eq!(
+        beta_attestations[0].evidence_hash,
+        "sha256:settlement-beta-attestation-evidence"
+    );
+
+    let alpha_holds = backend
+        .list_trace_credit_holds(&tenant_alpha)
+        .await
+        .expect("list alpha holds");
+    assert_eq!(alpha_holds.len(), 1);
+    assert_eq!(alpha_holds[0].tenant_id, tenant_alpha);
+    assert_eq!(alpha_holds[0].hold_id, hold_id);
+    assert_eq!(
+        alpha_holds[0].credit_account_hash,
+        "sha256:settlement-alpha-account"
+    );
+
+    let beta_holds = backend
+        .list_trace_credit_holds(&tenant_beta)
+        .await
+        .expect("list beta holds");
+    assert_eq!(beta_holds.len(), 1);
+    assert_eq!(beta_holds[0].tenant_id, tenant_beta);
+    assert_eq!(beta_holds[0].hold_id, hold_id);
+    assert_eq!(
+        beta_holds[0].credit_account_hash,
+        "sha256:settlement-beta-account"
+    );
+
+    let alpha_settlements = backend
+        .list_trace_credit_settlement_batches(&tenant_alpha)
+        .await
+        .expect("list alpha settlement batches");
+    assert_eq!(alpha_settlements.len(), 1);
+    assert_eq!(alpha_settlements[0].tenant_id, tenant_alpha);
+    assert_eq!(
+        alpha_settlements[0].settlement_batch_id,
+        settlement_batch_id
     );
     assert_eq!(
-        backend
-            .list_trace_credit_holds(&tenant_alpha)
-            .await
-            .expect("list alpha holds")
-            .len(),
-        1
+        alpha_settlements[0].source_list_hash,
+        "sha256:settlement-alpha-source-list"
     );
     assert_eq!(
-        backend
-            .list_trace_credit_settlement_batches(&tenant_alpha)
-            .await
-            .expect("list alpha settlement batches")
-            .len(),
-        1
+        alpha_settlements[0].line_items[0].credit_account_hash,
+        "sha256:settlement-alpha-account"
+    );
+
+    let beta_settlements = backend
+        .list_trace_credit_settlement_batches(&tenant_beta)
+        .await
+        .expect("list beta settlement batches");
+    assert_eq!(beta_settlements.len(), 1);
+    assert_eq!(beta_settlements[0].tenant_id, tenant_beta);
+    assert_eq!(beta_settlements[0].settlement_batch_id, settlement_batch_id);
+    assert_eq!(
+        beta_settlements[0].source_list_hash,
+        "sha256:settlement-beta-source-list"
     );
     assert_eq!(
-        backend
-            .list_trace_near_credit_outbox_items(&tenant_alpha)
-            .await
-            .expect("list alpha NEAR outbox")
-            .len(),
-        1
+        beta_settlements[0].line_items[0].credit_account_hash,
+        "sha256:settlement-beta-account"
     );
-    assert!(
-        backend
-            .list_trace_credit_settlement_batches(&tenant_beta)
-            .await
-            .expect("list beta settlement batches")
-            .is_empty(),
-        "settlement batches must stay tenant scoped"
+
+    let alpha_near = backend
+        .list_trace_near_credit_outbox_items(&tenant_alpha)
+        .await
+        .expect("list alpha NEAR outbox");
+    assert_eq!(alpha_near.len(), 1);
+    assert_eq!(alpha_near[0].tenant_id, tenant_alpha);
+    assert_eq!(alpha_near[0].near_outbox_id, near_outbox_id);
+    assert_eq!(
+        alpha_near[0].status,
+        TraceCreditSettlementNearStatus::Submitted
     );
-    assert!(
-        backend
-            .list_trace_near_credit_outbox_items(&tenant_beta)
-            .await
-            .expect("list beta NEAR outbox")
-            .is_empty(),
-        "NEAR outbox items must stay tenant scoped"
+    assert_eq!(
+        alpha_near[0].near_transaction_hash.as_deref(),
+        Some("near-public-tx-hash")
+    );
+    assert_eq!(
+        alpha_near[0].near_call_json["idempotency_key"].as_str(),
+        Some("sha256:settlement-alpha-near-call")
+    );
+
+    let beta_near = backend
+        .list_trace_near_credit_outbox_items(&tenant_beta)
+        .await
+        .expect("list beta NEAR outbox");
+    assert_eq!(beta_near.len(), 1);
+    assert_eq!(beta_near[0].tenant_id, tenant_beta);
+    assert_eq!(beta_near[0].near_outbox_id, near_outbox_id);
+    assert_eq!(
+        beta_near[0].status,
+        TraceCreditSettlementNearStatus::Pending
+    );
+    assert_eq!(beta_near[0].near_transaction_hash, None);
+    assert_eq!(
+        beta_near[0].near_call_json["idempotency_key"].as_str(),
+        Some("sha256:settlement-beta-near-call")
     );
 
     cleanup_tenant(&backend, &tenant_alpha).await;
