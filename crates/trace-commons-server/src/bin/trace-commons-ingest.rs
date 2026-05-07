@@ -3319,6 +3319,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(analytics_release_drill_handler),
         )
         .route(
+            "/v1/admin/benchmark-readiness-drill",
+            post(benchmark_readiness_drill_handler),
+        )
+        .route(
             "/v1/admin/revocation-propagation-drill",
             post(revocation_propagation_drill_handler),
         )
@@ -23452,6 +23456,19 @@ async fn analytics_release_drill_handler(
     Ok(Json(response))
 }
 
+async fn benchmark_readiness_drill_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceBenchmarkReadinessDrillRequest>,
+) -> ApiResult<Json<TraceBenchmarkReadinessDrillResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let response = run_benchmark_readiness_drill(state.as_ref(), tenant.auth(), request)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(response))
+}
+
 async fn revocation_propagation_drill_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -23658,6 +23675,22 @@ struct TraceAnalyticsReleaseDrillRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct TraceBenchmarkReadinessDrillRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default = "default_true")]
+    require_artifacts: bool,
+    #[serde(default = "default_true")]
+    require_external_evaluator: bool,
+    #[serde(default = "default_true")]
+    require_registry_submitter: bool,
+    #[serde(default = "default_true")]
+    require_registry_confirmer: bool,
+    #[serde(default)]
+    record_evidence: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct TraceRankingModelReadinessDrillRequest {
     #[serde(default)]
     purpose: Option<String>,
@@ -23856,6 +23889,42 @@ struct TraceAnalyticsReleaseDrillResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     noise_max_delta: Option<usize>,
     noisy_cell_count: usize,
+    blocking_gaps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceBenchmarkReadinessDrillResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose: String,
+    ready: bool,
+    evidence_hash: String,
+    require_artifacts: bool,
+    require_external_evaluator: bool,
+    require_registry_submitter: bool,
+    require_registry_confirmer: bool,
+    total_artifact_count: usize,
+    candidate_not_evaluated_count: usize,
+    evaluated_passed_unpublished_count: usize,
+    publishable_count: usize,
+    published_count: usize,
+    revoked_count: usize,
+    registry_submitter_configured: bool,
+    registry_confirmer_configured: bool,
+    external_evaluator_configured: bool,
+    registry_outbox_pending_count: usize,
+    registry_outbox_submitted_count: usize,
+    registry_outbox_confirmed_count: usize,
+    registry_outbox_failed_count: usize,
+    registry_outbox_pending_without_submitter_count: usize,
+    registry_outbox_submitted_without_confirmer_count: usize,
+    publishable_without_external_evaluator_count: usize,
+    external_registry_adapter_gap_count: usize,
+    external_registry_invalidation_gap_count: usize,
+    blocker_reasons: Vec<String>,
     blocking_gaps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
@@ -25018,6 +25087,98 @@ async fn run_analytics_release_drill(
     Ok(response)
 }
 
+async fn run_benchmark_readiness_drill(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceBenchmarkReadinessDrillRequest,
+) -> anyhow::Result<TraceBenchmarkReadinessDrillResponse> {
+    let generated_at = Utc::now();
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_benchmark_readiness_drill")
+        .to_string();
+    let artifacts = list_benchmark_conversion_artifacts_for_worker(state, tenant).await?;
+    let registry_outbox = read_benchmark_registry_outbox_items_for_admin(state, tenant).await?;
+    let summary = TraceOperationalBenchmarkSummary::from_artifacts_and_registry_outbox(
+        &artifacts,
+        &registry_outbox,
+        state.benchmark_registry_submitter.is_some(),
+        state.benchmark_registry_confirmer.is_some(),
+        state.benchmark_evaluator.is_some(),
+    );
+    let mut response = TraceBenchmarkReadinessDrillResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at,
+        purpose: purpose.clone(),
+        ready: false,
+        evidence_hash: String::new(),
+        require_artifacts: request.require_artifacts,
+        require_external_evaluator: request.require_external_evaluator,
+        require_registry_submitter: request.require_registry_submitter,
+        require_registry_confirmer: request.require_registry_confirmer,
+        total_artifact_count: summary.total_artifact_count,
+        candidate_not_evaluated_count: summary.candidate_not_evaluated_count,
+        evaluated_passed_unpublished_count: summary.evaluated_passed_unpublished_count,
+        publishable_count: summary.publishable_count,
+        published_count: summary.published_count,
+        revoked_count: summary.revoked_count,
+        registry_submitter_configured: summary.registry_submitter_configured,
+        registry_confirmer_configured: summary.registry_confirmer_configured,
+        external_evaluator_configured: summary.external_evaluator_configured,
+        registry_outbox_pending_count: summary.registry_outbox_pending_count,
+        registry_outbox_submitted_count: summary.registry_outbox_submitted_count,
+        registry_outbox_confirmed_count: summary.registry_outbox_confirmed_count,
+        registry_outbox_failed_count: summary.registry_outbox_failed_count,
+        registry_outbox_pending_without_submitter_count: summary
+            .registry_outbox_pending_without_submitter_count,
+        registry_outbox_submitted_without_confirmer_count: summary
+            .registry_outbox_submitted_without_confirmer_count,
+        publishable_without_external_evaluator_count: summary
+            .publishable_without_external_evaluator_count,
+        external_registry_adapter_gap_count: summary.external_registry_adapter_gap_count,
+        external_registry_invalidation_gap_count: summary.external_registry_invalidation_gap_count,
+        blocker_reasons: summary.blocker_reasons,
+        blocking_gaps: Vec::new(),
+        recorded_evidence: None,
+    };
+    response.blocking_gaps = benchmark_readiness_drill_blocking_gaps(&response);
+    response.ready = response.blocking_gaps.is_empty();
+    response.evidence_hash = benchmark_readiness_drill_evidence_hash(tenant, &response);
+
+    if request.record_evidence {
+        let evidence = TraceRolloutSmokeEvidenceResponse {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            check_name: "benchmark_pipeline".to_string(),
+            status: if response.ready {
+                TraceRolloutSmokeEvidenceStatus::Passed
+            } else {
+                TraceRolloutSmokeEvidenceStatus::Failed
+            },
+            evidence_hash: response.evidence_hash.clone(),
+            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            recorded_at: Utc::now(),
+        };
+        append_audit_event_with_db_mirror(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+            StorageTraceAuditAction::Read,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .await?;
+        response.recorded_evidence = Some(evidence);
+    }
+
+    Ok(response)
+}
+
 async fn run_ranking_model_readiness_drill(
     state: &AppState,
     tenant: &TenantAuth,
@@ -25963,6 +26124,34 @@ fn ranking_model_readiness_drill_blocking_gaps(
     gaps
 }
 
+fn benchmark_readiness_drill_blocking_gaps(
+    response: &TraceBenchmarkReadinessDrillResponse,
+) -> Vec<String> {
+    let mut gaps = Vec::new();
+    push_key_rotation_gap(
+        &mut gaps,
+        "benchmark_artifacts_missing",
+        response.require_artifacts && response.total_artifact_count == 0,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "external_benchmark_evaluator_missing",
+        response.require_external_evaluator && !response.external_evaluator_configured,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "benchmark_registry_submitter_missing",
+        response.require_registry_submitter && !response.registry_submitter_configured,
+    );
+    push_key_rotation_gap(
+        &mut gaps,
+        "benchmark_registry_confirmer_missing",
+        response.require_registry_confirmer && !response.registry_confirmer_configured,
+    );
+    gaps.extend(response.blocker_reasons.iter().cloned());
+    gaps
+}
+
 fn revocation_propagation_drill_blocking_gaps(
     response: &TraceRevocationPropagationWorkerResponse,
 ) -> Vec<String> {
@@ -26646,6 +26835,44 @@ fn analytics_release_drill_evidence_hash(
             "noise_max_delta": budget.noise_max_delta,
             "noisy_cell_count": budget.noisy_cell_count,
             "blocking_gaps": blocking_gaps,
+        })
+        .to_string(),
+    )
+}
+
+fn benchmark_readiness_drill_evidence_hash(
+    tenant: &TenantAuth,
+    response: &TraceBenchmarkReadinessDrillResponse,
+) -> String {
+    sha256_prefixed(
+        &serde_json::json!({
+            "schema": "trace_commons_benchmark_readiness_drill.v1",
+            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+            "actor_principal_ref": tenant.principal_ref,
+            "require_artifacts": response.require_artifacts,
+            "require_external_evaluator": response.require_external_evaluator,
+            "require_registry_submitter": response.require_registry_submitter,
+            "require_registry_confirmer": response.require_registry_confirmer,
+            "total_artifact_count": response.total_artifact_count,
+            "candidate_not_evaluated_count": response.candidate_not_evaluated_count,
+            "evaluated_passed_unpublished_count": response.evaluated_passed_unpublished_count,
+            "publishable_count": response.publishable_count,
+            "published_count": response.published_count,
+            "revoked_count": response.revoked_count,
+            "registry_submitter_configured": response.registry_submitter_configured,
+            "registry_confirmer_configured": response.registry_confirmer_configured,
+            "external_evaluator_configured": response.external_evaluator_configured,
+            "registry_outbox_pending_count": response.registry_outbox_pending_count,
+            "registry_outbox_submitted_count": response.registry_outbox_submitted_count,
+            "registry_outbox_confirmed_count": response.registry_outbox_confirmed_count,
+            "registry_outbox_failed_count": response.registry_outbox_failed_count,
+            "registry_outbox_pending_without_submitter_count": response.registry_outbox_pending_without_submitter_count,
+            "registry_outbox_submitted_without_confirmer_count": response.registry_outbox_submitted_without_confirmer_count,
+            "publishable_without_external_evaluator_count": response.publishable_without_external_evaluator_count,
+            "external_registry_adapter_gap_count": response.external_registry_adapter_gap_count,
+            "external_registry_invalidation_gap_count": response.external_registry_invalidation_gap_count,
+            "blocker_reasons": response.blocker_reasons,
+            "blocking_gaps": response.blocking_gaps,
         })
         .to_string(),
     )
@@ -47926,6 +48153,7 @@ const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "retention_dry_run",
     "vector_index",
     "analytics_release",
+    "benchmark_pipeline",
     "ranking_model_readiness",
     "credit_settlement",
     "object_primary_reads",
@@ -60408,6 +60636,116 @@ mod tests {
             persisted.registry.status,
             TraceBenchmarkRegistryStatus::Published
         );
+    }
+
+    #[tokio::test]
+    async fn admin_benchmark_readiness_drill_records_smoke_evidence_for_missing_adapters() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let contributor_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/benchmark-readiness-drill")
+                    .header(AUTHORIZATION, "Bearer token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("contributor response");
+        assert_eq!(contributor_response.status(), StatusCode::FORBIDDEN);
+
+        let admin_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/benchmark-readiness-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator benchmark readiness drill",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("admin response");
+        assert_eq!(admin_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(admin_response.into_body(), 16384)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("benchmark readiness drill parses");
+        assert_eq!(value["ready"], serde_json::json!(false));
+        assert_eq!(value["total_artifact_count"], serde_json::json!(0));
+        assert_eq!(
+            value["external_evaluator_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["registry_submitter_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["registry_confirmer_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["blocking_gaps"],
+            serde_json::json!([
+                "benchmark_artifacts_missing",
+                "external_benchmark_evaluator_missing",
+                "benchmark_registry_submitter_missing",
+                "benchmark_registry_confirmer_missing"
+            ])
+        );
+        assert!(
+            value["evidence_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+        assert_eq!(
+            value["recorded_evidence"]["check_name"],
+            serde_json::json!("benchmark_pipeline")
+        );
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("failed")
+        );
+        assert!(
+            value["recorded_evidence"]["evidence_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("admin-token-a"));
+
+        let Json(operational) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary");
+        assert!(
+            operational
+                .rollout_smoke
+                .failed_evidence_checks
+                .contains(&"benchmark_pipeline".to_string())
+        );
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "rollout_smoke_evidence"
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("check_name=benchmark_pipeline")
+                        && reason.contains("status=failed")
+                })
+        }));
     }
 
     #[tokio::test]
@@ -82317,11 +82655,11 @@ mod tests {
         );
         assert_eq!(
             operational_json["rollout_smoke"]["required_check_count"],
-            serde_json::json!(21)
+            serde_json::json!(22)
         );
         assert_eq!(
             operational_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(21)
+            serde_json::json!(22)
         );
         assert!(
             operational
@@ -82375,6 +82713,12 @@ mod tests {
             operational
                 .rollout_smoke
                 .required_checks
+                .contains(&"benchmark_pipeline".to_string())
+        );
+        assert!(
+            operational
+                .rollout_smoke
+                .required_checks
                 .contains(&"credit_settlement".to_string())
         );
         assert!(
@@ -82399,7 +82743,7 @@ mod tests {
             operational
                 .rollout_smoke
                 .blocker_reasons
-                .contains(&"smoke_rehearsal_evidence_missing=21".to_string())
+                .contains(&"smoke_rehearsal_evidence_missing=22".to_string())
         );
     }
 
@@ -82479,7 +82823,7 @@ mod tests {
         );
         assert_eq!(
             operational_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(20)
+            serde_json::json!(21)
         );
         assert!(
             !operational
@@ -82810,7 +83154,7 @@ mod tests {
         );
         assert_eq!(
             preflight_json["rollout_smoke"]["required_check_count"],
-            serde_json::json!(21)
+            serde_json::json!(22)
         );
         assert_eq!(
             preflight_json["rollout_smoke"]["recorded_evidence_count"],
@@ -82822,7 +83166,7 @@ mod tests {
         );
         assert_eq!(
             preflight_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(20)
+            serde_json::json!(21)
         );
         assert_eq!(
             preflight_json["latest_evidence"].as_array().map(Vec::len),
@@ -83300,7 +83644,7 @@ mod tests {
             "trace_commons_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"plaintext_compatibility_allowed\"}} 0"
         )));
         assert!(body_text.contains(&format!(
-            "trace_commons_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 21"
+            "trace_commons_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 22"
         )));
         assert!(body_text.contains(&format!(
             "trace_commons_operational_rollout_smoke_recorded_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 0"
