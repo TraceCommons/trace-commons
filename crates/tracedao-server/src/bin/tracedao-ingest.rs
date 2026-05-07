@@ -52521,6 +52521,50 @@ mod tests {
     }
 
     #[test]
+    fn near_credit_relayer_urls_require_https_or_loopback_http() {
+        let https = reqwest::Url::parse("https://near-relayer.example.com/v1/receipt")
+            .expect("https URL parses");
+        validate_trace_near_credit_submitter_url(&https)
+            .expect("submitter accepts HTTPS relayer URLs");
+        validate_trace_near_credit_confirmation_url(&https)
+            .expect("confirmer accepts HTTPS relayer URLs");
+
+        let localhost =
+            reqwest::Url::parse("http://localhost:3030/v1/receipt").expect("localhost URL parses");
+        validate_trace_near_credit_submitter_url(&localhost)
+            .expect("submitter accepts localhost HTTP relayers");
+        validate_trace_near_credit_confirmation_url(&localhost)
+            .expect("confirmer accepts localhost HTTP relayers");
+
+        let loopback =
+            reqwest::Url::parse("http://127.0.0.1:3030/v1/receipt").expect("loopback URL parses");
+        validate_trace_near_credit_submitter_url(&loopback)
+            .expect("submitter accepts loopback HTTP relayers");
+        validate_trace_near_credit_confirmation_url(&loopback)
+            .expect("confirmer accepts loopback HTTP relayers");
+
+        let remote_http = reqwest::Url::parse("http://near-relayer.example.com/v1/receipt")
+            .expect("remote HTTP URL parses");
+        let submitter_error = validate_trace_near_credit_submitter_url(&remote_http)
+            .expect_err("submitter rejects remote plaintext HTTP relayers");
+        assert!(submitter_error.to_string().contains("localhost loopback"));
+        let confirmer_error = validate_trace_near_credit_confirmation_url(&remote_http)
+            .expect_err("confirmer rejects remote plaintext HTTP relayers");
+        assert!(confirmer_error.to_string().contains("localhost loopback"));
+
+        let credentialed =
+            reqwest::Url::parse("https://user:pass@near-relayer.example.com/receipt")
+                .expect("credentialed URL parses");
+        assert!(validate_trace_near_credit_submitter_url(&credentialed).is_err());
+        assert!(validate_trace_near_credit_confirmation_url(&credentialed).is_err());
+
+        let with_query = reqwest::Url::parse("https://near-relayer.example.com/receipt?secret=1")
+            .expect("query URL parses");
+        assert!(validate_trace_near_credit_submitter_url(&with_query).is_err());
+        assert!(validate_trace_near_credit_confirmation_url(&with_query).is_err());
+    }
+
+    #[test]
     fn remote_trace_object_store_config_requires_complete_production_intent() {
         let missing = TraceRemoteObjectStoreConfig::from_parts(None, None, None, None)
             .expect_err("remote mode without production env fails closed");
