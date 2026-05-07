@@ -495,10 +495,11 @@ masquerade as promotion-ready.
 `POST /v1/admin/credit-settlement-drill` runs the Trace Credits settlement
 promotion check through the admin credit-risk summary plus the existing dry-run
 settlement selector. It validates a supplied NEAR contract id without writing
-settlement batches or NEAR outbox rows, returns only safe account hashes,
-aggregate risk counts, settlement exclusion reason counts, blocker codes, and a
-sha256-prefixed evidence hash, and can append `credit_settlement`
-rollout-smoke evidence directly.
+settlement batches or NEAR outbox rows, requires a configured per-account issuer
+cap by default unless `require_account_cap` is explicitly disabled, returns only
+safe account hashes, aggregate risk counts, settlement exclusion reason counts,
+blocker codes, and a sha256-prefixed evidence hash, and can append
+`credit_settlement` rollout-smoke evidence directly.
 Operators can still use `POST /v1/admin/rollout-smoke/evidence` for external
 manual evidence, while operational summary and metrics expose only readiness
 booleans, bounded max-delta metadata, and blocker reason codes.
@@ -578,12 +579,14 @@ history file-only.
 
 `TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT` optionally sets a
 per-account live-settlement cap in credit points. It defaults to unset for pilot
-compatibility; `0` also disables the cap. When configured, dry-run and live
-settlement responses report the cap in micros plus aggregate
-`settlement_policy_excluded_*` counts. Any account whose currently pending
-settlement-eligible positive credit exceeds the cap is excluded from that run
-without creating settlement batches or NEAR outbox rows, leaving the pending
-ledger visible for hold/review or a higher governed cap.
+compatibility; `0` also disables the cap. Production settlement drills now treat
+an unset cap as `settlement_account_cap_missing` unless the request explicitly
+sets `require_account_cap: false` for a non-production rehearsal. When
+configured, dry-run and live settlement responses report the cap in micros plus
+aggregate `settlement_policy_excluded_*` counts. Any account whose currently
+pending settlement-eligible positive credit exceeds the cap is excluded from
+that run without creating settlement batches or NEAR outbox rows, leaving the
+pending ledger visible for hold/review or a higher governed cap.
 Admins can inspect `GET /v1/admin/credit-risk-summary` before issuing credit to
 see tenant-scoped pending, held, and over-cap totals grouped by deterministic
 credit-account hash. The response is bounded by `limit` (default 100, max 500)
