@@ -510,6 +510,16 @@ impl Database for PgBackend {
                           AND c.relkind = 'r'
                           AND c.relname = ANY($1)
                           AND r.rolname = current_user
+                    ) AS owns_trace_tables,
+                    EXISTS (
+                        SELECT 1
+                        FROM pg_class c
+                        JOIN pg_namespace n ON n.oid = c.relnamespace
+                        JOIN pg_roles r ON r.oid = c.relowner
+                        WHERE n.nspname = current_schema()
+                          AND c.relkind = 'r'
+                          AND c.relname = ANY($1)
+                          AND r.rolname = current_user
                           AND NOT c.relforcerowsecurity
                     ) AS owns_unforced_trace_tables,
                     COALESCE((
@@ -572,6 +582,7 @@ impl Database for PgBackend {
         policy_expression_mismatch_tables.dedup();
 
         let owns_unforced_trace_tables: bool = current_role.get("owns_unforced_trace_tables");
+        let owns_trace_tables: bool = current_role.get("owns_trace_tables");
         let bypass_role: bool = current_role.get("bypass_role");
         let tenant_context_transaction_local =
             trace_tenant_context_is_transaction_local(&mut client).await?;
@@ -585,6 +596,7 @@ impl Database for PgBackend {
             force_rls_disabled_tables,
             policy_expression_mismatch_tables,
             current_role_bypasses_rls: owns_unforced_trace_tables || bypass_role,
+            current_role_owns_trace_tables: owns_trace_tables,
             tenant_context_transaction_local,
         }))
     }

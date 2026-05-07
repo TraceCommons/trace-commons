@@ -107,6 +107,7 @@ fn ready_rls_diagnostics() -> TraceCorpusRlsDiagnostics {
         force_rls_disabled_tables: Vec::new(),
         policy_expression_mismatch_tables: Vec::new(),
         current_role_bypasses_rls: false,
+        current_role_owns_trace_tables: false,
         tenant_context_transaction_local: true,
     }
 }
@@ -861,6 +862,11 @@ fn trace_corpus_rls_diagnostics_ready_requires_complete_safe_policy_state() {
     let mut bypass_role = ready_rls_diagnostics();
     bypass_role.current_role_bypasses_rls = true;
     assert!(!bypass_role.rls_ready());
+
+    let mut table_owner_role = ready_rls_diagnostics();
+    table_owner_role.current_role_owns_trace_tables = true;
+    assert!(!table_owner_role.rls_ready());
+    assert!(!table_owner_role.production_ready());
 
     let mut force_rls_disabled = ready_rls_diagnostics();
     force_rls_disabled.force_rls_enabled_count = 1;
@@ -2684,8 +2690,8 @@ async fn pg_trace_corpus_rls_diagnostics_report_policy_coverage() {
     );
     assert_eq!(
         diagnostics.rls_ready(),
-        !diagnostics.current_role_bypasses_rls,
-        "RLS readiness should be blocked only when the current test role bypasses RLS"
+        !diagnostics.current_role_bypasses_rls && !diagnostics.current_role_owns_trace_tables,
+        "RLS readiness should be blocked only by runtime-role safety once catalog coverage is complete"
     );
 }
 
