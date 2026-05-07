@@ -24261,6 +24261,7 @@ struct TraceObjectStoreMigrationDrillResponse {
     generated_at: DateTime<Utc>,
     purpose: String,
     ready: bool,
+    migration_manifest_hash: String,
     evidence_hash: String,
     object_store_configured: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -24665,6 +24666,7 @@ async fn run_object_store_migration_drill(
         generated_at,
         purpose: purpose.clone(),
         ready: false,
+        migration_manifest_hash: String::new(),
         evidence_hash: String::new(),
         object_store_configured,
         object_store_name,
@@ -24682,6 +24684,7 @@ async fn run_object_store_migration_drill(
     };
     response.blocking_gaps = object_store_migration_drill_blocking_gaps(&response);
     response.ready = response.blocking_gaps.is_empty();
+    response.migration_manifest_hash = object_store_migration_manifest_hash(tenant, &response);
     response.evidence_hash = object_store_migration_drill_evidence_hash(tenant, &response);
 
     if request.record_evidence {
@@ -24696,7 +24699,7 @@ async fn run_object_store_migration_drill(
                 TraceRolloutSmokeEvidenceStatus::Failed
             },
             evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
+            evidence_ref_hash: Some(response.migration_manifest_hash.clone()),
             actor_principal_ref: tenant.principal_ref.clone(),
             recorded_at: Utc::now(),
         };
@@ -27296,6 +27299,34 @@ fn object_store_migration_probe_ref_hash(
     )
 }
 
+fn object_store_migration_manifest_hash(
+    tenant: &TenantAuth,
+    response: &TraceObjectStoreMigrationDrillResponse,
+) -> String {
+    sha256_prefixed(
+        &serde_json::json!({
+            "schema": "trace_commons_object_store_migration_manifest.v1",
+            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+            "actor_principal_ref": tenant.principal_ref,
+            "generated_at": response.generated_at,
+            "purpose_hash": sha256_prefixed(&response.purpose),
+            "object_store_configured": response.object_store_configured,
+            "object_store_name": response.object_store_name,
+            "object_store_eligible": response.object_store_eligible,
+            "object_io_enabled": response.object_io_enabled,
+            "plaintext_compatibility_allowed": response.plaintext_compatibility_allowed,
+            "require_delete": response.require_delete,
+            "write_succeeded": response.write_succeeded,
+            "read_succeeded": response.read_succeeded,
+            "delete_succeeded": response.delete_succeeded,
+            "probe_object_ref_hash": response.probe_object_ref_hash,
+            "io_error_hashes": response.io_error_hashes,
+            "blocking_gaps": response.blocking_gaps,
+        })
+        .to_string(),
+    )
+}
+
 fn object_store_migration_drill_evidence_hash(
     tenant: &TenantAuth,
     response: &TraceObjectStoreMigrationDrillResponse,
@@ -27305,6 +27336,7 @@ fn object_store_migration_drill_evidence_hash(
             "schema": "trace_commons_object_store_migration_drill.v1",
             "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
             "actor_principal_ref": tenant.principal_ref,
+            "migration_manifest_hash": response.migration_manifest_hash,
             "object_store_configured": response.object_store_configured,
             "object_store_name": response.object_store_name,
             "object_store_eligible": response.object_store_eligible,
@@ -65005,6 +65037,11 @@ mod tests {
                 .as_str()
                 .is_some_and(|hash| hash.starts_with("sha256:"))
         );
+        assert!(
+            value["migration_manifest_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
         assert_eq!(
             value["recorded_evidence"]["check_name"],
             serde_json::json!("object_store_migration")
@@ -65012,6 +65049,10 @@ mod tests {
         assert_eq!(
             value["recorded_evidence"]["status"],
             serde_json::json!("passed")
+        );
+        assert_eq!(
+            value["recorded_evidence"]["evidence_ref_hash"],
+            value["migration_manifest_hash"]
         );
 
         let body_text = std::str::from_utf8(&body).expect("body is utf8");
