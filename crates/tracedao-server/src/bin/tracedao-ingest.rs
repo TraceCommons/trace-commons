@@ -156,6 +156,8 @@ const TRACE_COMMONS_REMOTE_OBJECT_STORE_KMS_KEY_ID: &str =
     "TRACE_COMMONS_REMOTE_OBJECT_STORE_KMS_KEY_ID";
 const TRACE_COMMONS_REMOTE_OBJECT_STORE_CREDENTIAL_REF: &str =
     "TRACE_COMMONS_REMOTE_OBJECT_STORE_CREDENTIAL_REF";
+const TRACE_COMMONS_REMOTE_OBJECT_STORE_FILE_SYSTEM_VERSIONING: &str =
+    "TRACE_COMMONS_REMOTE_OBJECT_STORE_FILE_SYSTEM_VERSIONING";
 const TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING: &str =
     "TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING";
 const TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW: &str =
@@ -891,22 +893,28 @@ impl ConfiguredTraceArtifactStore {
             "remote Trace Commons object store requires KMS and credential references"
         );
         let root = config.file_system_root()?;
+        let file_system_versioning = config.file_system_versioning;
         let crypto = SecretsCrypto::new(key)
             .context("failed to initialize Trace Commons remote artifact encryption")?;
         let provider_config = TraceArtifactProviderConfig::service_owned_remote(
             TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE,
         )?;
+        let provider = if file_system_versioning {
+            FileRemoteTraceArtifactProvider::versioned(root)
+        } else {
+            FileRemoteTraceArtifactProvider::new(root)
+        };
         Ok(Self {
             object_store_name: TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE.to_string(),
             store: Arc::new(ServiceOwnedTraceArtifactStore::new(
                 provider_config,
                 crypto,
-                FileRemoteTraceArtifactProvider::new(root),
+                provider,
             )),
             object_io_enabled: true,
             plaintext_compatibility_allowed: false,
-            object_versioning_supported: false,
-            restore_after_delete_supported: false,
+            object_versioning_supported: file_system_versioning,
+            restore_after_delete_supported: file_system_versioning,
         })
     }
 
@@ -985,6 +993,15 @@ impl ConfiguredTraceArtifactStore {
         self.store
             .delete_artifact(expected_tenant_storage_ref, receipt)
     }
+
+    fn restore_deleted_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        self.store
+            .restore_deleted_artifact(expected_tenant_storage_ref, receipt)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -993,6 +1010,7 @@ struct TraceRemoteObjectStoreConfig {
     bucket: String,
     kms_key_id: String,
     credential_ref: String,
+    file_system_versioning: bool,
 }
 
 impl TraceRemoteObjectStoreConfig {
@@ -1001,12 +1019,15 @@ impl TraceRemoteObjectStoreConfig {
         let bucket = std::env::var(TRACE_COMMONS_REMOTE_OBJECT_STORE_BUCKET).ok();
         let kms_key_id = std::env::var(TRACE_COMMONS_REMOTE_OBJECT_STORE_KMS_KEY_ID).ok();
         let credential_ref = std::env::var(TRACE_COMMONS_REMOTE_OBJECT_STORE_CREDENTIAL_REF).ok();
-        Self::from_parts(
+        let mut config = Self::from_parts(
             provider.as_deref(),
             bucket.as_deref(),
             kms_key_id.as_deref(),
             credential_ref.as_deref(),
-        )
+        )?;
+        config.file_system_versioning =
+            env_truthy(TRACE_COMMONS_REMOTE_OBJECT_STORE_FILE_SYSTEM_VERSIONING);
+        Ok(config)
     }
 
     fn from_parts(
@@ -1032,6 +1053,7 @@ impl TraceRemoteObjectStoreConfig {
             bucket: bucket.to_string(),
             kms_key_id: kms_key_id.to_string(),
             credential_ref: credential_ref.to_string(),
+            file_system_versioning: false,
         })
     }
 
@@ -24338,6 +24360,7 @@ struct TraceObjectStoreMigrationDrillResponse {
     write_succeeded: bool,
     read_succeeded: bool,
     delete_succeeded: bool,
+    restore_after_delete_succeeded: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     probe_object_ref_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -24679,6 +24702,7 @@ async fn run_object_store_migration_drill(
     let mut write_succeeded = false;
     let mut read_succeeded = false;
     let mut delete_succeeded = false;
+    let mut restore_after_delete_succeeded = false;
     let mut probe_object_ref_hash = None;
     let mut io_error_hashes = Vec::new();
 
@@ -24726,6 +24750,43 @@ async fn run_object_store_migration_drill(
                         io_error_hashes.push(sha256_prefixed(&error.to_string()));
                     }
                 }
+                if request.require_versioning && restore_after_delete_supported {
+                    match store.restore_deleted_artifact(&tenant_ref, &receipt) {
+                        Ok(restored) => {
+                            if restored {
+                                match store.get_json::<serde_json::Value>(&tenant_ref, &receipt) {
+                                    Ok(read_back) => {
+                                        restore_after_delete_succeeded = read_back == probe_payload;
+                                        if !restore_after_delete_succeeded {
+                                            io_error_hashes.push(sha256_prefixed(
+                                                "object store migration drill restored probe read mismatch",
+                                            ));
+                                        }
+                                    }
+                                    Err(error) => {
+                                        io_error_hashes.push(sha256_prefixed(&error.to_string()));
+                                    }
+                                }
+                                match store.delete_artifact(&tenant_ref, &receipt) {
+                                    Ok(deleted) => {
+                                        delete_succeeded = delete_succeeded && deleted;
+                                    }
+                                    Err(error) => {
+                                        delete_succeeded = false;
+                                        io_error_hashes.push(sha256_prefixed(&error.to_string()));
+                                    }
+                                }
+                            } else {
+                                io_error_hashes.push(sha256_prefixed(
+                                    "object store migration drill deleted probe did not restore",
+                                ));
+                            }
+                        }
+                        Err(error) => {
+                            io_error_hashes.push(sha256_prefixed(&error.to_string()));
+                        }
+                    }
+                }
             }
             Err(error) => {
                 io_error_hashes.push(sha256_prefixed(&error.to_string()));
@@ -24753,6 +24814,7 @@ async fn run_object_store_migration_drill(
         write_succeeded,
         read_succeeded,
         delete_succeeded,
+        restore_after_delete_succeeded,
         probe_object_ref_hash,
         io_error_hashes,
         blocking_gaps: Vec::new(),
@@ -26749,6 +26811,13 @@ fn object_store_migration_drill_blocking_gaps(
         "restore_after_delete_unsupported",
         response.require_versioning && !response.restore_after_delete_supported,
     );
+    push_key_rotation_gap(
+        &mut gaps,
+        "probe_restore_after_delete_failed",
+        response.require_versioning
+            && response.restore_after_delete_supported
+            && !response.restore_after_delete_succeeded,
+    );
     gaps
 }
 
@@ -27408,6 +27477,7 @@ fn object_store_migration_manifest_hash(
             "write_succeeded": response.write_succeeded,
             "read_succeeded": response.read_succeeded,
             "delete_succeeded": response.delete_succeeded,
+            "restore_after_delete_succeeded": response.restore_after_delete_succeeded,
             "probe_object_ref_hash": response.probe_object_ref_hash,
             "io_error_hashes": response.io_error_hashes,
             "blocking_gaps": response.blocking_gaps,
@@ -27438,6 +27508,7 @@ fn object_store_migration_drill_evidence_hash(
             "write_succeeded": response.write_succeeded,
             "read_succeeded": response.read_succeeded,
             "delete_succeeded": response.delete_succeeded,
+            "restore_after_delete_succeeded": response.restore_after_delete_succeeded,
             "probe_object_ref_hash": response.probe_object_ref_hash,
             "io_error_hashes": response.io_error_hashes,
             "blocking_gaps": response.blocking_gaps,
@@ -65538,6 +65609,94 @@ mod tests {
         let body_text = std::str::from_utf8(&body).expect("body is utf8");
         assert!(!body_text.contains("admin-token-a"));
         assert!(!body_text.contains("token-a"));
+    }
+
+    #[tokio::test]
+    async fn object_store_migration_drill_restores_versioned_filesystem_remote_probe() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let remote_temp = tempfile::tempdir().expect("remote artifact temp dir");
+        let key = tracedao_server::secrets::keychain::generate_master_key_hex();
+        let mut remote_config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("file_system"),
+            Some(remote_temp.path().to_str().expect("utf8 temp path")),
+            Some("test-kms-key-ref"),
+            Some("test-credential-ref"),
+        )
+        .expect("filesystem remote config parses");
+        remote_config.file_system_versioning = true;
+        let artifact_store =
+            ConfiguredTraceArtifactStore::remote_service(remote_config, SecretString::from(key))
+                .expect("versioned filesystem remote service store builds");
+        validate_required_object_store_versioning_config(true, Some(&artifact_store))
+            .expect("versioned filesystem remote satisfies startup guard");
+        let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            None,
+            Some(artifact_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/object-store-migration-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator versioned filesystem remote migration drill",
+                            "require_versioning": true,
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("admin request builds"),
+            )
+            .await
+            .expect("versioned filesystem remote migration drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("migration drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(true));
+        assert_eq!(value["require_versioning"], serde_json::json!(true));
+        assert_eq!(
+            value["object_versioning_supported"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["restore_after_delete_supported"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["restore_after_delete_succeeded"],
+            serde_json::json!(true)
+        );
+        assert_eq!(value["blocking_gaps"], serde_json::json!([]));
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("passed")
+        );
+
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("test-kms-key-ref"));
+        assert!(!body_text.contains("test-credential-ref"));
+        assert!(!body_text.contains("object-store-migration-drill-secret"));
     }
 
     #[tokio::test]
