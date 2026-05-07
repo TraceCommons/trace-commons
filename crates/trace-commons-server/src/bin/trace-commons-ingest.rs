@@ -9298,6 +9298,7 @@ struct ProcessEvaluationWorkerRunRequest {
 
 #[derive(Debug, Serialize)]
 struct ProcessEvaluationWorkerRunResponse {
+    ranking_worker_run_id: Uuid,
     tenant_id: String,
     tenant_storage_ref: String,
     dry_run: bool,
@@ -20577,7 +20578,9 @@ async fn run_process_evaluation_worker(
             )
         })
         .count();
+    let ranking_worker_run_id = Uuid::new_v4();
     let mut response = ProcessEvaluationWorkerRunResponse {
+        ranking_worker_run_id,
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         dry_run,
@@ -20597,7 +20600,7 @@ async fn run_process_evaluation_worker(
         skipped_reason_counts: BTreeMap::new(),
     };
     let mut worker_run = TraceRankingWorkerRunRecord {
-        ranking_worker_run_id: Uuid::new_v4(),
+        ranking_worker_run_id,
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         run_kind: TraceRankingWorkerRunKind::ProcessEvaluation,
@@ -58167,6 +58170,10 @@ mod tests {
         assert_eq!(
             worker_runs[0].run_kind,
             TraceRankingWorkerRunKind::ProcessEvaluation
+        );
+        assert_eq!(
+            worker_runs[0].ranking_worker_run_id,
+            response.ranking_worker_run_id
         );
         assert_eq!(
             worker_runs[0].status,
