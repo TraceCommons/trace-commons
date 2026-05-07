@@ -30275,6 +30275,7 @@ async fn collect_ranker_training_candidates(
             candidates.push(TraceRankerTrainingCandidate::from_records(&record, derived));
         }
     }
+    let mut candidates = dedupe_ranker_training_candidates_by_summary_hash(candidates);
     candidates.sort_by(|left, right| {
         right
             .ranker_score
@@ -30283,6 +30284,67 @@ async fn collect_ranker_training_candidates(
     });
     candidates.truncate(limit);
     Ok(candidates)
+}
+
+fn dedupe_ranker_training_candidates_by_summary_hash(
+    candidates: Vec<TraceRankerTrainingCandidate>,
+) -> Vec<TraceRankerTrainingCandidate> {
+    let mut keyed = BTreeMap::<String, TraceRankerTrainingCandidate>::new();
+    let mut unkeyed = Vec::new();
+    for candidate in candidates {
+        let Some(key) = trace_candidate_summary_dedupe_key(&candidate.canonical_summary_hash)
+        else {
+            unkeyed.push(candidate);
+            continue;
+        };
+        match keyed.entry(key) {
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                if ranker_training_candidate_replaces_summary_representative(
+                    &candidate,
+                    entry.get(),
+                ) {
+                    entry.insert(candidate);
+                }
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(candidate);
+            }
+        }
+    }
+    unkeyed.extend(keyed.into_values());
+    unkeyed
+}
+
+fn trace_candidate_summary_dedupe_key(canonical_summary_hash: &str) -> Option<String> {
+    let canonical_summary_hash = canonical_summary_hash.trim();
+    if canonical_summary_hash.starts_with("sha256:")
+        && canonical_summary_hash.len() == "sha256:".len() + 64
+    {
+        Some(canonical_summary_hash.to_string())
+    } else {
+        None
+    }
+}
+
+fn ranker_training_candidate_replaces_summary_representative(
+    candidate: &TraceRankerTrainingCandidate,
+    current: &TraceRankerTrainingCandidate,
+) -> bool {
+    let duplicate_cmp = candidate
+        .duplicate_score
+        .total_cmp(&current.duplicate_score);
+    if duplicate_cmp != std::cmp::Ordering::Equal {
+        return duplicate_cmp.is_lt();
+    }
+    let novelty_cmp = candidate.novelty_score.total_cmp(&current.novelty_score);
+    if novelty_cmp != std::cmp::Ordering::Equal {
+        return novelty_cmp.is_gt();
+    }
+    let ranker_cmp = candidate.ranker_score.total_cmp(&current.ranker_score);
+    if ranker_cmp != std::cmp::Ordering::Equal {
+        return ranker_cmp.is_gt();
+    }
+    (candidate.received_at, candidate.submission_id) < (current.received_at, current.submission_id)
 }
 
 fn ranker_consent_matches(scopes: &[ConsentScope], requested: Option<ConsentScope>) -> bool {
@@ -59935,6 +59997,15 @@ mod tests {
         tenant_a_lower.trace_card.consent_scope = ConsentScope::RankingTraining;
         tenant_a_lower.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
         tenant_a_lower.value.submission_score = 0.25;
+        for event in &mut tenant_a_lower.events {
+            if event.event_type
+                == trace_commons_protocol::trace_contribution::TraceContributionEventType::UserMessage
+            {
+                event.redacted_content =
+                    Some("Please inspect the lower-ranked ranker trace".to_string());
+                break;
+            }
+        }
         let tenant_a_lower_id = tenant_a_lower.submission_id;
         let mut tenant_a_quarantined = sample_envelope().await;
         tenant_a_quarantined.consent.scopes = vec![ConsentScope::RankingTraining];
@@ -60212,6 +60283,143 @@ mod tests {
         .await
         .expect_err("ranker exports require training consent");
         assert_eq!(debugging_scope_error.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn ranker_training_candidates_dedupe_exact_summary_duplicates_before_credit() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut original = sample_envelope().await;
+        make_metadata_only_low_risk(&mut original);
+        original.consent.scopes = vec![ConsentScope::RankingTraining];
+        original.trace_card.consent_scope = ConsentScope::RankingTraining;
+        original.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        let original_id = original.submission_id;
+
+        let mut duplicate = sample_envelope().await;
+        make_metadata_only_low_risk(&mut duplicate);
+        duplicate.consent.scopes = vec![ConsentScope::RankingTraining];
+        duplicate.trace_card.consent_scope = ConsentScope::RankingTraining;
+        duplicate.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        duplicate.value.submission_score = 0.99;
+        let duplicate_id = duplicate.submission_id;
+
+        let mut distinct = sample_envelope().await;
+        make_metadata_only_low_risk(&mut distinct);
+        distinct.consent.scopes = vec![ConsentScope::RankingTraining];
+        distinct.trace_card.consent_scope = ConsentScope::RankingTraining;
+        distinct.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        distinct.value.submission_score = 0.10;
+        for event in &mut distinct.events {
+            if event.event_type
+                == trace_commons_protocol::trace_contribution::TraceContributionEventType::UserMessage
+            {
+                event.redacted_content =
+                    Some("This ranker source is intentionally distinct".to_string());
+                break;
+            }
+        }
+        let distinct_id = distinct.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(original),
+        )
+        .await
+        .expect("original ranker submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(duplicate),
+        )
+        .await
+        .expect("duplicate ranker submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(distinct),
+        )
+        .await
+        .expect("distinct ranker submission succeeds");
+
+        let derived = read_all_derived_records(temp.path(), "tenant-a").expect("derived reads");
+        let original_hash = derived
+            .iter()
+            .find(|record| record.submission_id == original_id)
+            .expect("original derived exists")
+            .canonical_summary_hash
+            .clone();
+        let duplicate_derived = derived
+            .iter()
+            .find(|record| record.submission_id == duplicate_id)
+            .expect("duplicate derived exists");
+        let distinct_hash = derived
+            .iter()
+            .find(|record| record.submission_id == distinct_id)
+            .expect("distinct derived exists")
+            .canonical_summary_hash
+            .clone();
+        assert_eq!(duplicate_derived.canonical_summary_hash, original_hash);
+        assert!(duplicate_derived.duplicate_score > 0.99);
+        assert_ne!(distinct_hash, original_hash);
+
+        let Json(candidates) = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(2),
+                purpose: Some("ranker_dedupe_training_candidates".to_string()),
+                status: None,
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect("reviewer can export de-duplicated ranker candidates");
+
+        assert_eq!(candidates.item_count, 2);
+        assert!(
+            candidates
+                .candidates
+                .iter()
+                .any(|candidate| candidate.submission_id == original_id)
+        );
+        assert!(
+            candidates
+                .candidates
+                .iter()
+                .any(|candidate| candidate.submission_id == distinct_id)
+        );
+        assert!(
+            candidates
+                .candidates
+                .iter()
+                .all(|candidate| candidate.submission_id != duplicate_id)
+        );
+
+        let credit_events =
+            read_all_credit_events(temp.path(), "tenant-a").expect("credit events read");
+        let training_credit_events = credit_events
+            .iter()
+            .filter(|event| event.event_type == TraceCreditLedgerEventType::TrainingUtility)
+            .collect::<Vec<_>>();
+        assert_eq!(training_credit_events.len(), 2);
+        assert!(
+            training_credit_events
+                .iter()
+                .any(|event| event.submission_id == original_id)
+        );
+        assert!(
+            training_credit_events
+                .iter()
+                .any(|event| event.submission_id == distinct_id)
+        );
+        assert!(
+            training_credit_events
+                .iter()
+                .all(|event| event.submission_id != duplicate_id)
+        );
     }
 
     #[tokio::test]
@@ -76439,6 +76647,15 @@ mod tests {
         rejected.trace_card.consent_scope = ConsentScope::RankingTraining;
         rejected.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
         rejected.value.submission_score = 0.95;
+        for event in &mut rejected.events {
+            if event.event_type
+                == trace_commons_protocol::trace_contribution::TraceContributionEventType::UserMessage
+            {
+                event.redacted_content =
+                    Some("This explicit preference rejection is a distinct trace".to_string());
+                break;
+            }
+        }
         let rejected_submission_id = rejected.submission_id;
 
         let _ = submit_trace_handler(
