@@ -70995,6 +70995,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ranking_model_readiness_drill_fails_on_holdout_manifest_conflicts() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        append_legacy_calibration_dataset_manifest_conflict(
+            temp.path(),
+            "tenant-a",
+            "readiness-drill-conflict",
+        );
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/ranking/readiness-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator ranking readiness drill with holdout conflict",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("admin request builds"),
+            )
+            .await
+            .expect("readiness drill conflict response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("readiness drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(false));
+        assert_eq!(
+            value["calibration_dataset_manifest_conflict_count"],
+            serde_json::json!(1)
+        );
+        assert!(
+            value["blocking_gaps"]
+                .as_array()
+                .expect("blocking gaps are an array")
+                .contains(&serde_json::json!(
+                    "calibration_dataset_manifest_conflicts=1"
+                ))
+        );
+        assert_eq!(
+            value["recorded_evidence"]["check_name"],
+            serde_json::json!("ranking_model_readiness")
+        );
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("failed")
+        );
+        assert!(
+            value["recorded_evidence"]["evidence_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("readiness-drill-conflict-holdout-v1"));
+        assert!(!body_text.contains("readiness-drill-conflict-manifest-rewrite"));
+
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("file audit events read");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "rollout_smoke_evidence"
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("check_name=ranking_model_readiness")
+                        && reason.contains("status=failed")
+                })
+        }));
+    }
+
+    #[tokio::test]
     async fn ranking_feature_worker_creates_reserved_server_provenance_features() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());

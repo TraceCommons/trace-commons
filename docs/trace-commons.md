@@ -488,7 +488,10 @@ dataset-readiness, and ranking-credit readiness reports into one hash-only
 promotion proof. It returns only counts, blocker-code aggregates, and a
 sha256-prefixed evidence hash, and can append `ranking_model_readiness`
 rollout-smoke evidence without exposing model artifacts, trace bodies, raw lab
-notes, external refs, or prediction ids.
+notes, external refs, or prediction ids. Failed drill evidence is recorded when
+holdout manifest conflicts, active-model risk, blocked model targets, or blocked
+ranking credits remain, so a stale or conflicted ranking registry cannot
+masquerade as promotion-ready.
 `POST /v1/admin/credit-settlement-drill` runs the Trace Credits settlement
 promotion check through the admin credit-risk summary plus the existing dry-run
 settlement selector. It validates a supplied NEAR contract id without writing
