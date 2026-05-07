@@ -27369,7 +27369,17 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
     body.push_str("# TYPE tracedao_operational_benchmarks gauge\n");
     for (state, value) in [
         ("total", response.benchmarks.total_artifact_count),
+        (
+            "external_evaluator_configured",
+            usize::from(response.benchmarks.external_evaluator_configured),
+        ),
         ("publishable", response.benchmarks.publishable_count),
+        (
+            "publishable_without_external_evaluator",
+            response
+                .benchmarks
+                .publishable_without_external_evaluator_count,
+        ),
         ("published", response.benchmarks.published_count),
         ("revoked", response.benchmarks.revoked_count),
         (
@@ -47817,6 +47827,7 @@ impl TraceOperationalSummaryResponse {
         let benchmarks = TraceOperationalBenchmarkSummary::from_artifacts_and_registry_outbox(
             &inputs.benchmark_artifacts,
             &inputs.benchmark_registry_outbox,
+            inputs.state.benchmark_evaluator.is_some(),
         );
         let promotion_gates = TraceOperationalPromotionGateSummary::from_inputs(
             TraceOperationalPromotionGateInputs {
@@ -48261,6 +48272,7 @@ struct TraceOperationalPromotionGateSummary {
     stale_export_job_count: usize,
     failed_retention_job_count: usize,
     vector_missing_count: usize,
+    publishable_benchmark_without_external_evaluator_count: usize,
     published_benchmark_external_registry_gap_count: usize,
     revoked_benchmark_external_registry_invalidation_gap_count: usize,
     at_risk_ranking_model_count: usize,
@@ -48315,6 +48327,8 @@ impl TraceOperationalPromotionGateSummary {
             benchmarks.external_registry_adapter_gap_count;
         let revoked_benchmark_external_registry_invalidation_gap_count =
             benchmarks.external_registry_invalidation_gap_count;
+        let publishable_benchmark_without_external_evaluator_count =
+            benchmarks.publishable_without_external_evaluator_count;
         let at_risk_ranking_model_count = ranking.at_risk_model_count;
         let failing_ranking_model_backtest_count = ranking.failing_backtest_model_target_count;
         let ranking_adjudication_issue_count = ranking.adjudication_issue_group_count;
@@ -48494,6 +48508,11 @@ impl TraceOperationalPromotionGateSummary {
         );
         push_gap_count(
             &mut blocking_gates,
+            "publishable_benchmarks_without_external_evaluator",
+            publishable_benchmark_without_external_evaluator_count,
+        );
+        push_gap_count(
+            &mut blocking_gates,
             "revoked_benchmarks_waiting_for_external_registry_invalidation",
             revoked_benchmark_external_registry_invalidation_gap_count,
         );
@@ -48533,6 +48552,7 @@ impl TraceOperationalPromotionGateSummary {
             stale_export_job_count,
             failed_retention_job_count,
             vector_missing_count,
+            publishable_benchmark_without_external_evaluator_count,
             published_benchmark_external_registry_gap_count,
             revoked_benchmark_external_registry_invalidation_gap_count,
             at_risk_ranking_model_count,
@@ -48839,6 +48859,7 @@ impl TraceOperationalVectorSummary {
 #[derive(Debug, Default, Serialize)]
 struct TraceOperationalBenchmarkSummary {
     total_artifact_count: usize,
+    external_evaluator_configured: bool,
     by_registry_status: BTreeMap<String, usize>,
     by_evaluation_status: BTreeMap<String, usize>,
     candidate_not_evaluated_count: usize,
@@ -48847,6 +48868,7 @@ struct TraceOperationalBenchmarkSummary {
     evaluated_inconclusive_count: usize,
     incomplete_evaluator_metadata_count: usize,
     publishable_count: usize,
+    publishable_without_external_evaluator_count: usize,
     published_count: usize,
     revoked_count: usize,
     registry_outbox_pending_count: usize,
@@ -48862,9 +48884,11 @@ impl TraceOperationalBenchmarkSummary {
     fn from_artifacts_and_registry_outbox(
         artifacts: &[TraceBenchmarkConversionArtifact],
         registry_outbox: &[TraceBenchmarkRegistryOutboxItem],
+        external_evaluator_configured: bool,
     ) -> Self {
         let mut summary = Self {
             total_artifact_count: artifacts.len(),
+            external_evaluator_configured,
             ..Self::default()
         };
         let mut confirmed_publish_conversion_ids = BTreeSet::new();
@@ -48944,6 +48968,9 @@ impl TraceOperationalBenchmarkSummary {
                 summary.publishable_count += 1;
             }
         }
+        if !external_evaluator_configured {
+            summary.publishable_without_external_evaluator_count = summary.publishable_count;
+        }
         push_gap_count(
             &mut summary.blocker_reasons,
             "benchmark_evaluation_pending",
@@ -48953,6 +48980,11 @@ impl TraceOperationalBenchmarkSummary {
             &mut summary.blocker_reasons,
             "benchmark_registry_publication_pending",
             summary.publishable_count,
+        );
+        push_gap_count(
+            &mut summary.blocker_reasons,
+            "publishable_benchmarks_without_external_evaluator",
+            summary.publishable_without_external_evaluator_count,
         );
         push_gap_count(
             &mut summary.blocker_reasons,
@@ -60112,6 +60144,13 @@ mod tests {
         assert_eq!(before_eval.benchmarks.candidate_not_evaluated_count, 1);
         assert_eq!(before_eval.benchmarks.evaluated_passed_unpublished_count, 0);
         assert_eq!(before_eval.benchmarks.publishable_count, 0);
+        assert!(!before_eval.benchmarks.external_evaluator_configured);
+        assert_eq!(
+            before_eval
+                .benchmarks
+                .publishable_without_external_evaluator_count,
+            0
+        );
         assert_eq!(before_eval.benchmarks.published_count, 0);
 
         let _ = benchmark_evaluation_worker_run_handler(
@@ -60137,12 +60176,30 @@ mod tests {
         assert_eq!(after_eval.benchmarks.candidate_not_evaluated_count, 0);
         assert_eq!(after_eval.benchmarks.evaluated_passed_unpublished_count, 1);
         assert_eq!(after_eval.benchmarks.publishable_count, 1);
+        assert_eq!(
+            after_eval
+                .benchmarks
+                .publishable_without_external_evaluator_count,
+            1
+        );
         assert_eq!(after_eval.benchmarks.published_count, 0);
         assert!(
             after_eval
                 .benchmarks
                 .blocker_reasons
                 .contains(&"benchmark_registry_publication_pending=1".to_string())
+        );
+        assert!(
+            after_eval
+                .benchmarks
+                .blocker_reasons
+                .contains(&"publishable_benchmarks_without_external_evaluator=1".to_string())
+        );
+        assert!(
+            after_eval
+                .promotion_gates
+                .blocking_gates
+                .contains(&"publishable_benchmarks_without_external_evaluator=1".to_string())
         );
 
         let _ = benchmark_registry_publication_worker_run_handler(
@@ -60169,6 +60226,12 @@ mod tests {
             0
         );
         assert_eq!(after_publish.benchmarks.publishable_count, 0);
+        assert_eq!(
+            after_publish
+                .benchmarks
+                .publishable_without_external_evaluator_count,
+            0
+        );
         assert_eq!(after_publish.benchmarks.published_count, 1);
         assert_eq!(
             after_publish.benchmarks.external_registry_adapter_gap_count,
@@ -60184,6 +60247,12 @@ mod tests {
             after_publish.promotion_gates.blocking_gates.contains(
                 &"published_benchmarks_waiting_for_external_registry_adapter=1".to_string()
             )
+        );
+        assert!(
+            !after_publish
+                .promotion_gates
+                .blocking_gates
+                .contains(&"publishable_benchmarks_without_external_evaluator=1".to_string())
         );
 
         let persisted: TraceBenchmarkConversionArtifact = serde_json::from_str(
