@@ -417,10 +417,13 @@ credential, or path values, and operational metrics export the same finite
 object-store alias as a safe gauge label, latest revocation-propagation worker
 checked/completed/failed/skipped/pending counts, plus one finite per-check
 rollout-smoke state gauge for dashboarding missing, failed, stale, and passed
-rehearsal evidence. It also projects analytics broad-release min-cell and
-count-noise readiness, safe vector-infrastructure readiness booleans alongside
-vector coverage, ranking backtest pass/fail counts, label-adjudication issue
-counts, and reason-code totals into the ranking block and promotion gates, and
+rehearsal evidence. It also exports safe ranking model, backtest,
+label-adjudication, blocked ranking-credit, calibration manifest-conflict, and
+reason-code gauges for dashboards. Operational summary also projects analytics
+broad-release min-cell and count-noise readiness, safe vector-infrastructure
+readiness booleans alongside vector coverage, ranking backtest pass/fail
+counts, label-adjudication issue counts, and reason-code totals into the
+ranking block and promotion gates, and
 it includes a `rollout_smoke` preflight block that
 lists required canary smoke checks, including `tenant_canary_isolation`,
 `db_reconciliation_clean`, `rollback_flag_drill`, `key_rotation_drill`,

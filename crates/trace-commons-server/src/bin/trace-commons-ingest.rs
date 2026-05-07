@@ -28213,6 +28213,137 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             value,
         );
     }
+    body.push_str(
+        "# HELP trace_commons_operational_ranking_models Ranking model counts by readiness state.\n",
+    );
+    body.push_str("# TYPE trace_commons_operational_ranking_models gauge\n");
+    for (state, value) in [
+        ("active", response.ranking.active_model_count),
+        ("monitored", response.ranking.monitored_model_count),
+        ("at_risk", response.ranking.at_risk_model_count),
+    ] {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "trace_commons_operational_ranking_models",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("state", state),
+            ],
+            value,
+        );
+    }
+    body.push_str("# HELP trace_commons_operational_ranking_backtests Ranking model-target backtest counts by outcome.\n");
+    body.push_str("# TYPE trace_commons_operational_ranking_backtests gauge\n");
+    for (state, value) in [
+        ("evaluated", response.ranking.backtest_model_target_count),
+        (
+            "passing",
+            response.ranking.passing_backtest_model_target_count,
+        ),
+        (
+            "failing",
+            response.ranking.failing_backtest_model_target_count,
+        ),
+    ] {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "trace_commons_operational_ranking_backtests",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("state", state),
+            ],
+            value,
+        );
+    }
+    body.push_str(
+        "# HELP trace_commons_operational_ranking_adjudication Ranking label-adjudication issue counts.\n",
+    );
+    body.push_str("# TYPE trace_commons_operational_ranking_adjudication gauge\n");
+    for (state, value) in [
+        (
+            "issue_groups",
+            response.ranking.adjudication_issue_group_count,
+        ),
+        (
+            "disputed_label_groups",
+            response.ranking.unresolved_disputed_label_group_count,
+        ),
+        (
+            "absolute_conflicts",
+            response.ranking.conflicting_absolute_label_group_count,
+        ),
+        (
+            "preference_conflicts",
+            response.ranking.conflicting_preference_pair_count,
+        ),
+    ] {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "trace_commons_operational_ranking_adjudication",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("state", state),
+            ],
+            value,
+        );
+    }
+    body.push_str("# HELP trace_commons_operational_ranking_credit_readiness Ranking-derived credit event counts by readiness state.\n");
+    body.push_str("# TYPE trace_commons_operational_ranking_credit_readiness gauge\n");
+    for (state, value) in [
+        ("pending", response.ranking.pending_credit_event_count),
+        ("ready", response.ranking.ready_credit_event_count),
+        ("blocked", response.ranking.blocked_credit_event_count),
+    ] {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "trace_commons_operational_ranking_credit_readiness",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("state", state),
+            ],
+            value,
+        );
+    }
+    body.push_str("# HELP trace_commons_operational_ranking_calibration_dataset_manifest_conflicts Active ranking calibration dataset manifest conflict count.\n");
+    body.push_str(
+        "# TYPE trace_commons_operational_ranking_calibration_dataset_manifest_conflicts gauge\n",
+    );
+    push_prometheus_gauge(
+        &mut body,
+        &mut metric_count,
+        "trace_commons_operational_ranking_calibration_dataset_manifest_conflicts",
+        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        response.ranking.calibration_dataset_manifest_conflict_count,
+    );
+    body.push_str("# HELP trace_commons_operational_ranking_reason_counts Ranking readiness reason-code counts by report.\n");
+    body.push_str("# TYPE trace_commons_operational_ranking_reason_counts gauge\n");
+    for (report, reason_counts) in [
+        ("model_risk", &response.ranking.risk_code_counts),
+        ("backtest", &response.ranking.backtest_reason_counts),
+        ("adjudication", &response.ranking.adjudication_reason_counts),
+        (
+            "blocked_credit",
+            &response.ranking.blocked_credit_reason_counts,
+        ),
+    ] {
+        for (reason, value) in reason_counts {
+            push_prometheus_gauge(
+                &mut body,
+                &mut metric_count,
+                "trace_commons_operational_ranking_reason_counts",
+                &[
+                    ("tenant_storage_ref", &response.tenant_storage_ref),
+                    ("report", report),
+                    ("reason", reason),
+                ],
+                *value,
+            );
+        }
+    }
     body.push_str("# HELP trace_commons_operational_ranking_worker_runs Ranking worker-run counts by operational status.\n");
     body.push_str("# TYPE trace_commons_operational_ranking_worker_runs gauge\n");
     for (status, value) in [
@@ -85228,6 +85359,87 @@ mod tests {
     }
 
     #[test]
+    fn operational_metrics_body_exports_ranking_model_credit_readiness_gauges() {
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        let response = TraceOperationalSummaryResponse {
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_ref.clone(),
+            generated_at: Utc::now(),
+            promotion_gates: TraceOperationalPromotionGateSummary::default(),
+            object_store: TraceOperationalObjectStoreSummary::default(),
+            rollout_smoke: TraceOperationalRolloutSmokeSummary::default(),
+            revocation_propagation: TraceOperationalRevocationPropagationSummary::default(),
+            submissions: TraceOperationalSubmissionSummary::default(),
+            review_sla: TraceOperationalReviewSlaSummary::default(),
+            exports: TraceOperationalExportSummary::default(),
+            retention: TraceOperationalRetentionSummary::default(),
+            analytics: TraceOperationalAnalyticsSummary::default(),
+            vectors: TraceOperationalVectorSummary::default(),
+            benchmarks: TraceOperationalBenchmarkSummary::default(),
+            ranking: TraceOperationalRankingSummary {
+                active_model_count: 2,
+                monitored_model_count: 3,
+                at_risk_model_count: 1,
+                risk_code_counts: BTreeMap::from([(
+                    "joined_evidence_changed_since_calibration".to_string(),
+                    1,
+                )]),
+                backtest_model_target_count: 4,
+                passing_backtest_model_target_count: 3,
+                failing_backtest_model_target_count: 1,
+                backtest_reason_counts: BTreeMap::from([(
+                    "pairwise_accuracy_below_threshold".to_string(),
+                    1,
+                )]),
+                adjudication_issue_group_count: 2,
+                unresolved_disputed_label_group_count: 1,
+                conflicting_absolute_label_group_count: 1,
+                conflicting_preference_pair_count: 0,
+                adjudication_reason_counts: BTreeMap::from([(
+                    "absolute_label_outcome_conflict".to_string(),
+                    1,
+                )]),
+                pending_credit_event_count: 5,
+                ready_credit_event_count: 4,
+                blocked_credit_event_count: 1,
+                blocked_credit_reason_counts: BTreeMap::from([(
+                    "low_confidence_prediction".to_string(),
+                    1,
+                )]),
+                calibration_dataset_manifest_conflict_count: 1,
+                ..TraceOperationalRankingSummary::default()
+            },
+            delayed_credit: TraceOperationalDelayedCreditSummary::default(),
+        };
+
+        let (metrics, _) = trace_operational_metrics_body(&response);
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_ranking_models{{tenant_storage_ref=\"{tenant_ref}\",state=\"active\"}} 2"
+        )));
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_ranking_models{{tenant_storage_ref=\"{tenant_ref}\",state=\"at_risk\"}} 1"
+        )));
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_ranking_backtests{{tenant_storage_ref=\"{tenant_ref}\",state=\"failing\"}} 1"
+        )));
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_ranking_adjudication{{tenant_storage_ref=\"{tenant_ref}\",state=\"issue_groups\"}} 2"
+        )));
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_ranking_credit_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"blocked\"}} 1"
+        )));
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_ranking_calibration_dataset_manifest_conflicts{{tenant_storage_ref=\"{tenant_ref}\"}} 1"
+        )));
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_ranking_reason_counts{{tenant_storage_ref=\"{tenant_ref}\",report=\"model_risk\",reason=\"joined_evidence_changed_since_calibration\"}} 1"
+        )));
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_ranking_reason_counts{{tenant_storage_ref=\"{tenant_ref}\",report=\"blocked_credit\",reason=\"low_confidence_prediction\"}} 1"
+        )));
+    }
+
+    #[test]
     fn rollout_smoke_latest_evidence_uses_recorded_at_not_input_order() {
         let newer_passed = TraceRolloutSmokeEvidenceResponse {
             event_id: Uuid::new_v4(),
@@ -85962,6 +86174,12 @@ mod tests {
         )));
         assert!(body_text.contains(&format!(
             "trace_commons_operational_ranking_worker_runs{{tenant_storage_ref=\"{tenant_ref}\",status=\"failed\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_ranking_models{{tenant_storage_ref=\"{tenant_ref}\",state=\"active\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_ranking_credit_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"blocked\"}} 0"
         )));
         assert!(body_text.contains(&format!(
             "trace_commons_operational_delayed_credit_events_total{{tenant_storage_ref=\"{tenant_ref}\"}} 0"
