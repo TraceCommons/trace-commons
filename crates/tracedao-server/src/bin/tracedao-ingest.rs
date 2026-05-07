@@ -27074,6 +27074,31 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             value,
         );
     }
+    body.push_str("# HELP tracedao_operational_object_store_readiness Safe artifact object-store readiness flags.\n");
+    body.push_str("# TYPE tracedao_operational_object_store_readiness gauge\n");
+    for (state, value) in [
+        ("configured", usize::from(response.object_store.configured)),
+        ("io_enabled", usize::from(response.object_store.io_enabled)),
+        (
+            "object_primary_eligible",
+            usize::from(response.object_store.object_primary_eligible),
+        ),
+        (
+            "plaintext_compatibility_allowed",
+            usize::from(response.object_store.plaintext_compatibility_allowed),
+        ),
+    ] {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "tracedao_operational_object_store_readiness",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("state", state),
+            ],
+            value,
+        );
+    }
     body.push_str("# HELP tracedao_operational_ranking_worker_actionable_skips Count of ranking worker risk or ineligible skips that need operator review.\n");
     body.push_str("# TYPE tracedao_operational_ranking_worker_actionable_skips gauge\n");
     push_prometheus_gauge(
@@ -47666,6 +47691,7 @@ struct TraceOperationalSummaryResponse {
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
     promotion_gates: TraceOperationalPromotionGateSummary,
+    object_store: TraceOperationalObjectStoreSummary,
     rollout_smoke: TraceOperationalRolloutSmokeSummary,
     submissions: TraceOperationalSubmissionSummary,
     review_sla: TraceOperationalReviewSlaSummary,
@@ -47712,6 +47738,7 @@ impl TraceOperationalSummaryResponse {
             TraceOperationalExportSummary::from_db_summary(&inputs.db_summary, inputs.generated_at);
         let retention = TraceOperationalRetentionSummary::from_db_summary(&inputs.db_summary);
         let analytics = TraceOperationalAnalyticsSummary::from_state(inputs.state);
+        let object_store = TraceOperationalObjectStoreSummary::from_state(inputs.state);
         let vectors = TraceOperationalVectorSummary::from_records_and_db_summary(
             &inputs.derived,
             &inputs.db_summary,
@@ -47743,6 +47770,7 @@ impl TraceOperationalSummaryResponse {
             tenant_id: inputs.tenant_id,
             generated_at: inputs.generated_at,
             promotion_gates,
+            object_store,
             rollout_smoke,
             submissions,
             review_sla,
@@ -47753,6 +47781,28 @@ impl TraceOperationalSummaryResponse {
             benchmarks,
             ranking: inputs.ranking,
             delayed_credit,
+        }
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
+struct TraceOperationalObjectStoreSummary {
+    configured: bool,
+    io_enabled: bool,
+    object_primary_eligible: bool,
+    plaintext_compatibility_allowed: bool,
+}
+
+impl TraceOperationalObjectStoreSummary {
+    fn from_state(state: &AppState) -> Self {
+        let Some(store) = state.artifact_store.as_ref() else {
+            return Self::default();
+        };
+        Self {
+            configured: true,
+            io_enabled: store.object_io_enabled(),
+            object_primary_eligible: store.object_primary_eligible(),
+            plaintext_compatibility_allowed: store.plaintext_compatibility_allowed(),
         }
     }
 }
@@ -81934,7 +81984,32 @@ mod tests {
         use tower::ServiceExt;
 
         let temp = tempfile::tempdir().expect("temp dir");
-        let state = test_state(temp.path().to_path_buf());
+        let remote_temp = tempfile::tempdir().expect("remote artifact temp dir");
+        let key = tracedao_server::secrets::keychain::generate_master_key_hex();
+        let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("file_system"),
+            Some(remote_temp.path().to_str().expect("utf8 temp path")),
+            Some("test-kms-key-ref"),
+            Some("test-credential-ref"),
+        )
+        .expect("filesystem remote config parses");
+        let artifact_store =
+            ConfiguredTraceArtifactStore::remote_service(remote_config, SecretString::from(key))
+                .expect("filesystem remote service store builds");
+        let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            None,
+            Some(artifact_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
         append_ranking_worker_run(
             temp.path(),
             "tenant-a",
@@ -82017,6 +82092,18 @@ mod tests {
             "tracedao_operational_postgres_rls_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"tenant_context_transaction_local\"}} 0"
         )));
         assert!(body_text.contains(&format!(
+            "tracedao_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"configured\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"io_enabled\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"object_primary_eligible\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"plaintext_compatibility_allowed\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
             "tracedao_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 21"
         )));
         assert!(body_text.contains(&format!(
@@ -82038,6 +82125,9 @@ mod tests {
             "tracedao_operational_delayed_credit_events_total{{tenant_storage_ref=\"{tenant_ref}\"}} 0"
         )));
         assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("test-kms-key-ref"));
+        assert!(!body_text.contains("test-credential-ref"));
+        assert!(!body_text.contains(remote_temp.path().to_str().expect("utf8 temp path")));
         assert!(!body_text.contains("metrics route failed worker reason"));
 
         let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
@@ -82060,6 +82150,7 @@ mod tests {
                 ready: true,
                 ..TraceOperationalPromotionGateSummary::default()
             },
+            object_store: TraceOperationalObjectStoreSummary::default(),
             rollout_smoke: TraceOperationalRolloutSmokeSummary::default(),
             submissions: TraceOperationalSubmissionSummary::default(),
             review_sla: TraceOperationalReviewSlaSummary::default(),
@@ -82091,6 +82182,7 @@ mod tests {
                 ranking_worker_run_actionable_skip_count: 3,
                 ..TraceOperationalPromotionGateSummary::default()
             },
+            object_store: TraceOperationalObjectStoreSummary::default(),
             rollout_smoke: TraceOperationalRolloutSmokeSummary::default(),
             submissions: TraceOperationalSubmissionSummary::default(),
             review_sla: TraceOperationalReviewSlaSummary::default(),
@@ -82136,6 +82228,7 @@ mod tests {
                 ranking_worker_run_actionable_skip_count: 3,
                 ..TraceOperationalPromotionGateSummary::default()
             },
+            object_store: TraceOperationalObjectStoreSummary::default(),
             rollout_smoke: TraceOperationalRolloutSmokeSummary::default(),
             submissions: TraceOperationalSubmissionSummary::default(),
             review_sla: TraceOperationalReviewSlaSummary::default(),
