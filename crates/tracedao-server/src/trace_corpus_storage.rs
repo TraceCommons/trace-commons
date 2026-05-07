@@ -454,6 +454,7 @@ pub struct TraceRankingCalibrationRunWrite {
     pub label_count: u32,
     pub joined_label_prediction_count: u32,
     pub joined_label_source_count: u32,
+    pub joined_label_actor_count: u32,
     pub joined_evidence_hash: String,
     pub average_predicted_utility_micros: Option<i64>,
     pub average_label_utility_delta_micros: Option<i64>,
@@ -485,6 +486,8 @@ pub struct TraceRankingCalibrationRunRecord {
     pub joined_label_prediction_count: u32,
     #[serde(default)]
     pub joined_label_source_count: u32,
+    #[serde(default)]
+    pub joined_label_actor_count: u32,
     #[serde(default = "default_trace_ranking_joined_evidence_hash")]
     pub joined_evidence_hash: String,
     pub average_predicted_utility_micros: Option<i64>,
