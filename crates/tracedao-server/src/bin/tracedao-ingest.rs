@@ -82129,6 +82129,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_operational_metrics_route_exports_object_primary_object_store_blocker() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        {
+            let state = Arc::make_mut(&mut state);
+            state.object_primary_submit_review = true;
+        }
+
+        let admin_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-metrics")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("admin response");
+        assert_eq!(admin_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(admin_response.into_body(), 65536)
+            .await
+            .expect("body reads");
+        let body_text = std::str::from_utf8(&body).expect("metrics body is utf8");
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_promotion_ready{{tenant_storage_ref=\"{tenant_ref}\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"object_primary_storage_required_without_db_mirror\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"object_primary_object_store_missing\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"configured\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"object_primary_eligible\"}} 0"
+        )));
+        assert!(!body_text.contains("tenant-a"));
+        assert!(!body_text.contains("admin-token-a"));
+
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "read"
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("surface=operational_metrics;"))
+        }));
+    }
+
+    #[tokio::test]
     async fn admin_operational_metrics_route_exports_safe_promotion_gauges() {
         use axum::body::Body;
         use tower::ServiceExt;
