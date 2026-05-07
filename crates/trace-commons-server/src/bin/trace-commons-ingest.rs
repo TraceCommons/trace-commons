@@ -14161,6 +14161,24 @@ fn ranking_worker_run_active_conflict_message(run_kind: TraceRankingWorkerRunKin
     }
 }
 
+fn ranking_worker_run_kind_label(run_kind: TraceRankingWorkerRunKind) -> &'static str {
+    match run_kind {
+        TraceRankingWorkerRunKind::Calibration => "calibration",
+        TraceRankingWorkerRunKind::PredictionCredit => "prediction_credit",
+        TraceRankingWorkerRunKind::ModelPromotion => "model_promotion",
+        TraceRankingWorkerRunKind::CreditCycle => "credit_cycle",
+        TraceRankingWorkerRunKind::ProcessEvaluation => "process_evaluation",
+    }
+}
+
+fn ranking_worker_run_status_label(status: TraceRankingWorkerRunStatus) -> &'static str {
+    match status {
+        TraceRankingWorkerRunStatus::Running => "running",
+        TraceRankingWorkerRunStatus::Completed => "completed",
+        TraceRankingWorkerRunStatus::Failed => "failed",
+    }
+}
+
 fn update_calibration_worker_run_from_response(
     worker_run: &mut TraceRankingWorkerRunRecord,
     response: &TraceRankingCalibrationRunWorkerResponse,
@@ -28566,6 +28584,23 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             ],
             value,
         );
+    }
+    body.push_str("# HELP trace_commons_operational_ranking_worker_runs_by_kind Ranking worker-run counts by automation kind and operational status.\n");
+    body.push_str("# TYPE trace_commons_operational_ranking_worker_runs_by_kind gauge\n");
+    for (run_kind, status_counts) in &response.ranking.worker_run_kind_status_counts {
+        for (status, value) in status_counts {
+            push_prometheus_gauge(
+                &mut body,
+                &mut metric_count,
+                "trace_commons_operational_ranking_worker_runs_by_kind",
+                &[
+                    ("tenant_storage_ref", &response.tenant_storage_ref),
+                    ("run_kind", run_kind),
+                    ("status", status),
+                ],
+                *value,
+            );
+        }
     }
     body.push_str("# HELP trace_commons_operational_ranking_worker_run_totals Ranking worker-run aggregate item counts by state.\n");
     body.push_str("# TYPE trace_commons_operational_ranking_worker_run_totals gauge\n");
@@ -50686,6 +50721,7 @@ struct TraceOperationalRankingSummary {
     running_worker_run_count: usize,
     stale_running_worker_run_count: usize,
     failed_worker_run_count: usize,
+    worker_run_kind_status_counts: BTreeMap<String, BTreeMap<String, usize>>,
     worker_run_checked_total: usize,
     worker_run_succeeded_total: usize,
     worker_run_skipped_existing_total: usize,
@@ -50759,6 +50795,8 @@ impl TraceOperationalRankingSummary {
         let mut running_worker_run_count = 0;
         let mut stale_running_worker_run_count = 0;
         let mut failed_worker_run_count = 0;
+        let mut worker_run_kind_status_counts: BTreeMap<String, BTreeMap<String, usize>> =
+            BTreeMap::new();
         let mut worker_run_checked_total = 0usize;
         let mut worker_run_succeeded_total = 0usize;
         let mut worker_run_skipped_existing_total = 0usize;
@@ -50767,6 +50805,13 @@ impl TraceOperationalRankingSummary {
         let mut worker_run_pending_after_total = 0usize;
         let mut worker_run_reason_counts: BTreeMap<String, usize> = BTreeMap::new();
         for worker_run in inputs.worker_runs {
+            let kind_status_counts = worker_run_kind_status_counts
+                .entry(ranking_worker_run_kind_label(worker_run.run_kind).to_string())
+                .or_default();
+            let status_count = kind_status_counts
+                .entry(ranking_worker_run_status_label(worker_run.status).to_string())
+                .or_insert(0);
+            *status_count = (*status_count).saturating_add(1);
             worker_run_checked_total =
                 worker_run_checked_total.saturating_add(worker_run.checked_count);
             worker_run_succeeded_total =
@@ -50822,6 +50867,7 @@ impl TraceOperationalRankingSummary {
             running_worker_run_count,
             stale_running_worker_run_count,
             failed_worker_run_count,
+            worker_run_kind_status_counts,
             worker_run_checked_total,
             worker_run_succeeded_total,
             worker_run_skipped_existing_total,
@@ -85427,6 +85473,36 @@ mod tests {
             },
         )
         .expect("worker run writes");
+        append_ranking_worker_run(
+            temp.path(),
+            "tenant-a",
+            &TraceRankingWorkerRunRecord {
+                ranking_worker_run_id: Uuid::new_v4(),
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                run_kind: TraceRankingWorkerRunKind::ProcessEvaluation,
+                status: TraceRankingWorkerRunStatus::Completed,
+                dry_run: false,
+                reason_hash: sha256_prefixed("process evaluation telemetry reason"),
+                model_version: None,
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                policy_version: None,
+                limit: 10,
+                checked_count: 5,
+                succeeded_count: 4,
+                skipped_existing_count: 0,
+                skipped_model_risk_count: 0,
+                skipped_ineligible_count: 1,
+                pending_after_count: 2,
+                result_refs: Vec::new(),
+                reason_counts: BTreeMap::from([("evaluation_use_not_allowed".to_string(), 1)]),
+                actor_principal_ref: principal_storage_ref("process-eval-worker-token-a"),
+                created_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+                last_error_hash: None,
+            },
+        )
+        .expect("process evaluation worker run writes");
 
         let Json(operational) =
             operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
@@ -85436,11 +85512,11 @@ mod tests {
             serde_json::to_value(&operational).expect("operational summary serializes");
         assert_eq!(
             operational_json["ranking"]["worker_run_checked_total"],
-            serde_json::json!(9)
+            serde_json::json!(14)
         );
         assert_eq!(
             operational_json["ranking"]["worker_run_succeeded_total"],
-            serde_json::json!(2)
+            serde_json::json!(6)
         );
         assert_eq!(
             operational_json["ranking"]["worker_run_skipped_existing_total"],
@@ -85452,11 +85528,11 @@ mod tests {
         );
         assert_eq!(
             operational_json["ranking"]["worker_run_skipped_ineligible_total"],
-            serde_json::json!(1)
+            serde_json::json!(2)
         );
         assert_eq!(
             operational_json["ranking"]["worker_run_pending_after_total"],
-            serde_json::json!(4)
+            serde_json::json!(6)
         );
         assert_eq!(
             operational_json["ranking"]["worker_run_reason_counts"]["calibration_stale"],
@@ -85464,6 +85540,18 @@ mod tests {
         );
         assert_eq!(
             operational_json["ranking"]["worker_run_reason_counts"]["current_evidence_not_promotable"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["ranking"]["worker_run_reason_counts"]["evaluation_use_not_allowed"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["ranking"]["worker_run_kind_status_counts"]["prediction_credit"]["completed"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["ranking"]["worker_run_kind_status_counts"]["process_evaluation"]["completed"],
             serde_json::json!(1)
         );
 
@@ -85485,10 +85573,10 @@ mod tests {
         let body_text = std::str::from_utf8(&body).expect("metrics body is utf8");
         let tenant_ref = tenant_storage_ref("tenant-a");
         assert!(body_text.contains(&format!(
-            "trace_commons_operational_ranking_worker_run_totals{{tenant_storage_ref=\"{tenant_ref}\",state=\"checked\"}} 9"
+            "trace_commons_operational_ranking_worker_run_totals{{tenant_storage_ref=\"{tenant_ref}\",state=\"checked\"}} 14"
         )));
         assert!(body_text.contains(&format!(
-            "trace_commons_operational_ranking_worker_run_totals{{tenant_storage_ref=\"{tenant_ref}\",state=\"succeeded\"}} 2"
+            "trace_commons_operational_ranking_worker_run_totals{{tenant_storage_ref=\"{tenant_ref}\",state=\"succeeded\"}} 6"
         )));
         assert!(body_text.contains(&format!(
             "trace_commons_operational_ranking_worker_run_totals{{tenant_storage_ref=\"{tenant_ref}\",state=\"skipped_existing\"}} 3"
@@ -85497,16 +85585,25 @@ mod tests {
             "trace_commons_operational_ranking_worker_run_totals{{tenant_storage_ref=\"{tenant_ref}\",state=\"skipped_model_risk\"}} 2"
         )));
         assert!(body_text.contains(&format!(
-            "trace_commons_operational_ranking_worker_run_totals{{tenant_storage_ref=\"{tenant_ref}\",state=\"skipped_ineligible\"}} 1"
+            "trace_commons_operational_ranking_worker_run_totals{{tenant_storage_ref=\"{tenant_ref}\",state=\"skipped_ineligible\"}} 2"
         )));
         assert!(body_text.contains(&format!(
-            "trace_commons_operational_ranking_worker_run_totals{{tenant_storage_ref=\"{tenant_ref}\",state=\"pending_after\"}} 4"
+            "trace_commons_operational_ranking_worker_run_totals{{tenant_storage_ref=\"{tenant_ref}\",state=\"pending_after\"}} 6"
         )));
         assert!(body_text.contains(&format!(
             "trace_commons_operational_ranking_worker_run_reason_counts{{tenant_storage_ref=\"{tenant_ref}\",reason=\"calibration_stale\"}} 1"
         )));
         assert!(body_text.contains(&format!(
             "trace_commons_operational_ranking_worker_run_reason_counts{{tenant_storage_ref=\"{tenant_ref}\",reason=\"current_evidence_not_promotable\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_ranking_worker_run_reason_counts{{tenant_storage_ref=\"{tenant_ref}\",reason=\"evaluation_use_not_allowed\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_ranking_worker_runs_by_kind{{tenant_storage_ref=\"{tenant_ref}\",run_kind=\"prediction_credit\",status=\"completed\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_ranking_worker_runs_by_kind{{tenant_storage_ref=\"{tenant_ref}\",run_kind=\"process_evaluation\",status=\"completed\"}} 1"
         )));
     }
 
