@@ -7349,6 +7349,8 @@ struct TraceCreditSettlementDrillRequest {
     #[serde(default)]
     require_near_contract: Option<bool>,
     #[serde(default)]
+    require_account_cap: Option<bool>,
+    #[serde(default)]
     record_evidence: bool,
 }
 
@@ -8073,6 +8075,8 @@ struct TraceCreditSettlementDrillResponse {
     require_pending: bool,
     require_near_contract: bool,
     near_contract_configured: bool,
+    require_account_cap: bool,
+    settlement_account_cap_configured: bool,
     risk_summary: TraceCreditRiskSummaryResponse,
     settlement: TraceCreditSettlementRunResponse,
     blocking_gaps: Vec<String>,
@@ -10225,6 +10229,9 @@ async fn run_credit_settlement_drill(
     let account_limit = validate_credit_risk_summary_account_limit(request.account_limit)?;
     let require_pending = request.require_pending.unwrap_or(true);
     let require_near_contract = request.require_near_contract.unwrap_or(true);
+    let require_account_cap = request.require_account_cap.unwrap_or(true);
+    let settlement_account_cap_configured =
+        state.credit_settlement_max_micros_per_account.is_some();
     let near_contract_id = request
         .near_contract_id
         .as_deref()
@@ -10254,6 +10261,8 @@ async fn run_credit_settlement_drill(
         require_pending,
         require_near_contract,
         near_contract_id.is_some(),
+        require_account_cap,
+        settlement_account_cap_configured,
     );
     let evidence_hash =
         credit_settlement_drill_evidence_hash(TraceCreditSettlementDrillEvidenceHashInputs {
@@ -10262,6 +10271,8 @@ async fn run_credit_settlement_drill(
             require_pending,
             require_near_contract,
             near_contract_configured: near_contract_id.is_some(),
+            require_account_cap,
+            settlement_account_cap_configured,
             risk_summary: &risk_summary,
             settlement: &settlement,
             blocking_gaps: &blocking_gaps,
@@ -10276,6 +10287,8 @@ async fn run_credit_settlement_drill(
         require_pending,
         require_near_contract,
         near_contract_configured: near_contract_id.is_some(),
+        require_account_cap,
+        settlement_account_cap_configured,
         risk_summary,
         settlement,
         blocking_gaps,
@@ -10338,6 +10351,8 @@ fn credit_settlement_drill_blocking_gaps(
     require_pending: bool,
     require_near_contract: bool,
     near_contract_configured: bool,
+    require_account_cap: bool,
+    settlement_account_cap_configured: bool,
 ) -> Vec<String> {
     let mut blocking_gaps = Vec::new();
     if require_near_contract && !near_contract_configured {
@@ -10345,6 +10360,9 @@ fn credit_settlement_drill_blocking_gaps(
     }
     if require_pending && risk_summary.pending_credit_micros <= 0 {
         blocking_gaps.push("pending_credit_events_missing".to_string());
+    }
+    if require_account_cap && !settlement_account_cap_configured {
+        blocking_gaps.push("settlement_account_cap_missing".to_string());
     }
     push_gap_count(
         &mut blocking_gaps,
@@ -10378,6 +10396,8 @@ struct TraceCreditSettlementDrillEvidenceHashInputs<'a> {
     require_pending: bool,
     require_near_contract: bool,
     near_contract_configured: bool,
+    require_account_cap: bool,
+    settlement_account_cap_configured: bool,
     risk_summary: &'a TraceCreditRiskSummaryResponse,
     settlement: &'a TraceCreditSettlementRunResponse,
     blocking_gaps: &'a [String],
@@ -10392,6 +10412,8 @@ fn credit_settlement_drill_evidence_hash(
         require_pending,
         require_near_contract,
         near_contract_configured,
+        require_account_cap,
+        settlement_account_cap_configured,
         risk_summary,
         settlement,
         blocking_gaps,
@@ -10406,6 +10428,8 @@ fn credit_settlement_drill_evidence_hash(
             "require_pending": require_pending,
             "require_near_contract": require_near_contract,
             "near_contract_configured": near_contract_configured,
+            "require_account_cap": require_account_cap,
+            "settlement_account_cap_configured": settlement_account_cap_configured,
             "risk_account_count": risk_summary.account_count,
             "risk_pending_account_count": risk_summary.pending_account_count,
             "risk_held_account_count": risk_summary.held_account_count,
@@ -68494,6 +68518,137 @@ mod tests {
             .expect("credit summary succeeds");
         assert_eq!(credit.credit_points_pending_ledger, 1.75);
         assert_eq!(credit.credit_points_settled, 0.0);
+    }
+
+    #[tokio::test]
+    async fn credit_settlement_drill_requires_issuer_account_cap_by_default() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 0.75,
+                reason: Some("frontier lab settlement cap governance probe".to_string()),
+                external_ref: Some("lab-attestation:settlement-cap-governance".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+
+        let missing_cap_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlement-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "policy_version": "trace-credit-policy-v1",
+                            "near_contract_id": "trace-credits.testnet",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("missing cap drill request builds"),
+            )
+            .await
+            .expect("missing cap drill response");
+        assert_eq!(missing_cap_response.status(), StatusCode::OK);
+        let missing_cap_body = axum::body::to_bytes(missing_cap_response.into_body(), 16384)
+            .await
+            .expect("missing cap body reads");
+        let missing_cap: serde_json::Value =
+            serde_json::from_slice(&missing_cap_body).expect("missing cap json parses");
+        assert_eq!(missing_cap["ready"], serde_json::json!(false));
+        assert_eq!(missing_cap["require_account_cap"], serde_json::json!(true));
+        assert_eq!(
+            missing_cap["settlement_account_cap_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            missing_cap["blocking_gaps"],
+            serde_json::json!(["settlement_account_cap_missing"])
+        );
+        assert_eq!(
+            missing_cap["settlement"]["settled_source_event_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            missing_cap["recorded_evidence"]["status"],
+            serde_json::json!("failed")
+        );
+        let missing_cap_text =
+            std::str::from_utf8(&missing_cap_body).expect("missing cap response is utf8");
+        assert!(!missing_cap_text.contains("token-a"));
+        assert!(!missing_cap_text.contains(&event.event_id.to_string()));
+        assert!(!missing_cap_text.contains("frontier lab settlement cap governance probe"));
+        assert!(!missing_cap_text.contains("lab-attestation:settlement-cap-governance"));
+
+        let opt_out_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlement-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "policy_version": "trace-credit-policy-v1",
+                            "near_contract_id": "trace-credits.testnet",
+                            "require_account_cap": false
+                        })
+                        .to_string(),
+                    ))
+                    .expect("cap opt-out drill request builds"),
+            )
+            .await
+            .expect("cap opt-out drill response");
+        assert_eq!(opt_out_response.status(), StatusCode::OK);
+        let opt_out_body = axum::body::to_bytes(opt_out_response.into_body(), 16384)
+            .await
+            .expect("cap opt-out body reads");
+        let opt_out: serde_json::Value =
+            serde_json::from_slice(&opt_out_body).expect("cap opt-out json parses");
+        assert_eq!(opt_out["ready"], serde_json::json!(true));
+        assert_eq!(opt_out["require_account_cap"], serde_json::json!(false));
+        assert_eq!(
+            opt_out["settlement_account_cap_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(opt_out["blocking_gaps"], serde_json::json!([]));
+
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement reads")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
