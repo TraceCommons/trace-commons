@@ -27431,6 +27431,37 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         &[("tenant_storage_ref", &response.tenant_storage_ref)],
         response.delayed_credit.reversal_event_count,
     );
+    body.push_str("# HELP trace_commons_operational_credit_settlement_readiness Credit settlement governance readiness states.\n");
+    body.push_str("# TYPE trace_commons_operational_credit_settlement_readiness gauge\n");
+    for (state, value) in [
+        (
+            "account_cap_configured",
+            usize::from(
+                response
+                    .promotion_gates
+                    .credit_settlement_account_cap_configured,
+            ),
+        ),
+        (
+            "account_cap_missing",
+            usize::from(
+                response
+                    .promotion_gates
+                    .credit_settlement_account_cap_missing,
+            ),
+        ),
+    ] {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "trace_commons_operational_credit_settlement_readiness",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("state", state),
+            ],
+            value,
+        );
+    }
     (body, metric_count)
 }
 
@@ -47797,6 +47828,7 @@ impl TraceOperationalSummaryResponse {
                 vectors: &vectors,
                 benchmarks: &benchmarks,
                 ranking: &inputs.ranking,
+                delayed_credit: &delayed_credit,
             },
         );
         let rollout_smoke = TraceOperationalRolloutSmokeSummary::from_promotion_gates_and_evidence(
@@ -48240,6 +48272,8 @@ struct TraceOperationalPromotionGateSummary {
     failed_ranking_worker_run_count: usize,
     ranking_worker_run_actionable_skip_count: usize,
     ranking_worker_run_skip_reason_counts: BTreeMap<String, usize>,
+    credit_settlement_account_cap_configured: bool,
+    credit_settlement_account_cap_missing: bool,
 }
 
 struct TraceOperationalPromotionGateInputs<'a> {
@@ -48251,6 +48285,7 @@ struct TraceOperationalPromotionGateInputs<'a> {
     vectors: &'a TraceOperationalVectorSummary,
     benchmarks: &'a TraceOperationalBenchmarkSummary,
     ranking: &'a TraceOperationalRankingSummary,
+    delayed_credit: &'a TraceOperationalDelayedCreditSummary,
 }
 
 impl TraceOperationalPromotionGateSummary {
@@ -48263,6 +48298,7 @@ impl TraceOperationalPromotionGateSummary {
         let vectors = inputs.vectors;
         let benchmarks = inputs.benchmarks;
         let ranking = inputs.ranking;
+        let delayed_credit = inputs.delayed_credit;
         let db_mirror_configured = state.db_mirror.is_some();
         let tenant_rollout_gate_counts = state.tenant_rollout_gates.status_counts();
         let tenant_rollout_gate_count = tenant_rollout_gate_counts.values().sum();
@@ -48303,6 +48339,10 @@ impl TraceOperationalPromotionGateSummary {
             .worker_run_skipped_model_risk_total
             .saturating_add(ranking.worker_run_skipped_ineligible_total);
         let ranking_worker_run_skip_reason_counts = ranking.worker_run_reason_counts.clone();
+        let credit_settlement_account_cap_configured =
+            state.credit_settlement_max_micros_per_account.is_some();
+        let credit_settlement_account_cap_missing =
+            delayed_credit.points_positive > 0.0 && !credit_settlement_account_cap_configured;
         let trace_corpus_rls_ready = db_summary
             .trace_corpus_rls
             .as_ref()
@@ -48433,6 +48473,9 @@ impl TraceOperationalPromotionGateSummary {
             "failed_ranking_worker_runs",
             failed_ranking_worker_run_count,
         );
+        if credit_settlement_account_cap_missing {
+            blocking_gates.push("credit_settlement_account_cap_missing".to_string());
+        }
 
         push_gap_count(
             &mut warning_gates,
@@ -48501,6 +48544,8 @@ impl TraceOperationalPromotionGateSummary {
             failed_ranking_worker_run_count,
             ranking_worker_run_actionable_skip_count,
             ranking_worker_run_skip_reason_counts,
+            credit_settlement_account_cap_configured,
+            credit_settlement_account_cap_missing,
         }
     }
 }
@@ -68518,6 +68563,119 @@ mod tests {
             .expect("credit summary succeeds");
         assert_eq!(credit.credit_points_pending_ledger, 1.75);
         assert_eq!(credit.credit_points_settled, 0.0);
+    }
+
+    #[tokio::test]
+    async fn operational_summary_blocks_credit_settlement_without_account_cap() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 0.75,
+                reason: Some("frontier lab cap readiness probe".to_string()),
+                external_ref: Some("lab-attestation:operational-cap-readiness".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+
+        let summary_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-summary")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("summary request builds"),
+            )
+            .await
+            .expect("summary response");
+        assert_eq!(summary_response.status(), StatusCode::OK);
+        let summary_body = axum::body::to_bytes(summary_response.into_body(), 128 * 1024)
+            .await
+            .expect("summary body reads");
+        let summary: serde_json::Value =
+            serde_json::from_slice(&summary_body).expect("summary json parses");
+        assert_eq!(
+            summary["promotion_gates"]["ready"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            summary["promotion_gates"]["credit_settlement_account_cap_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            summary["promotion_gates"]["credit_settlement_account_cap_missing"],
+            serde_json::json!(true)
+        );
+        assert!(
+            summary["promotion_gates"]["blocking_gates"]
+                .as_array()
+                .expect("blocking gates are an array")
+                .contains(&serde_json::json!("credit_settlement_account_cap_missing"))
+        );
+        assert_eq!(
+            summary["delayed_credit"]["points_positive"],
+            serde_json::json!(0.75)
+        );
+        let summary_text = std::str::from_utf8(&summary_body).expect("summary body is utf8");
+        assert!(!summary_text.contains("admin-token-a"));
+        assert!(!summary_text.contains("token-a"));
+        assert!(!summary_text.contains(&event.event_id.to_string()));
+        assert!(!summary_text.contains("frontier lab cap readiness probe"));
+        assert!(!summary_text.contains("lab-attestation:operational-cap-readiness"));
+
+        let metrics_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-metrics")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("metrics request builds"),
+            )
+            .await
+            .expect("metrics response");
+        assert_eq!(metrics_response.status(), StatusCode::OK);
+        let metrics_body = axum::body::to_bytes(metrics_response.into_body(), 128 * 1024)
+            .await
+            .expect("metrics body reads");
+        let metrics_text = std::str::from_utf8(&metrics_body).expect("metrics body is utf8");
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(metrics_text.contains(&format!(
+            "trace_commons_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"credit_settlement_account_cap_missing\"}} 1"
+        )));
+        assert!(metrics_text.contains(&format!(
+            "trace_commons_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"account_cap_configured\"}} 0"
+        )));
+        assert!(metrics_text.contains(&format!(
+            "trace_commons_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"account_cap_missing\"}} 1"
+        )));
+        assert!(!metrics_text.contains("admin-token-a"));
+        assert!(!metrics_text.contains("frontier lab cap readiness probe"));
+        assert!(!metrics_text.contains("lab-attestation:operational-cap-readiness"));
     }
 
     #[tokio::test]
