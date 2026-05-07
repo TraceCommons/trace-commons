@@ -60609,6 +60609,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ranker_training_pairs_dedupe_exact_summary_duplicates_before_credit() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut original = sample_envelope().await;
+        make_metadata_only_low_risk(&mut original);
+        original.consent.scopes = vec![ConsentScope::RankingTraining];
+        original.trace_card.consent_scope = ConsentScope::RankingTraining;
+        original.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        original.value.submission_score = 0.90;
+        let original_id = original.submission_id;
+
+        let mut duplicate = sample_envelope().await;
+        make_metadata_only_low_risk(&mut duplicate);
+        duplicate.consent.scopes = vec![ConsentScope::RankingTraining];
+        duplicate.trace_card.consent_scope = ConsentScope::RankingTraining;
+        duplicate.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        duplicate.value.submission_score = 0.99;
+        let duplicate_id = duplicate.submission_id;
+
+        let mut distinct = sample_envelope().await;
+        make_metadata_only_low_risk(&mut distinct);
+        distinct.consent.scopes = vec![ConsentScope::RankingTraining];
+        distinct.trace_card.consent_scope = ConsentScope::RankingTraining;
+        distinct.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+        distinct.value.submission_score = 0.10;
+        for event in &mut distinct.events {
+            if event.event_type
+                == tracedao_protocol::trace_contribution::TraceContributionEventType::UserMessage
+            {
+                event.redacted_content =
+                    Some("This ranker pair source is intentionally distinct".to_string());
+                break;
+            }
+        }
+        let distinct_id = distinct.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(original),
+        )
+        .await
+        .expect("original ranker pair submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(duplicate),
+        )
+        .await
+        .expect("duplicate ranker pair submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(distinct),
+        )
+        .await
+        .expect("distinct ranker pair submission succeeds");
+
+        let derived = read_all_derived_records(temp.path(), "tenant-a").expect("derived reads");
+        let original_hash = derived
+            .iter()
+            .find(|record| record.submission_id == original_id)
+            .expect("original derived exists")
+            .canonical_summary_hash
+            .clone();
+        let duplicate_derived = derived
+            .iter()
+            .find(|record| record.submission_id == duplicate_id)
+            .expect("duplicate derived exists");
+        let distinct_hash = derived
+            .iter()
+            .find(|record| record.submission_id == distinct_id)
+            .expect("distinct derived exists")
+            .canonical_summary_hash
+            .clone();
+        assert_eq!(duplicate_derived.canonical_summary_hash, original_hash);
+        assert!(duplicate_derived.duplicate_score > 0.99);
+        assert_ne!(distinct_hash, original_hash);
+
+        let Json(pairs) = ranker_training_pairs_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(1),
+                purpose: Some("ranker_pair_dedupe_training_export".to_string()),
+                status: None,
+                consent_scope: Some("ranking-training".to_string()),
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect("reviewer can export de-duplicated ranker pairs");
+
+        assert_eq!(pairs.item_count, 1);
+        let pair = &pairs.pairs[0];
+        assert_eq!(pair.preferred_submission_id, original_id);
+        assert_eq!(pair.rejected_submission_id, distinct_id);
+        assert_ne!(pair.preferred_submission_id, duplicate_id);
+        assert_ne!(pair.rejected_submission_id, duplicate_id);
+
+        let credit_events =
+            read_all_credit_events(temp.path(), "tenant-a").expect("credit events read");
+        let ranking_credit_events = credit_events
+            .iter()
+            .filter(|event| event.event_type == TraceCreditLedgerEventType::RankingUtility)
+            .collect::<Vec<_>>();
+        assert_eq!(ranking_credit_events.len(), 2);
+        assert!(
+            ranking_credit_events
+                .iter()
+                .any(|event| event.submission_id == original_id)
+        );
+        assert!(
+            ranking_credit_events
+                .iter()
+                .any(|event| event.submission_id == distinct_id)
+        );
+        assert!(
+            ranking_credit_events
+                .iter()
+                .all(|event| event.submission_id != duplicate_id)
+        );
+    }
+
+    #[tokio::test]
     async fn ranker_exports_write_provenance_and_maintenance_invalidates_sources() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
