@@ -6,6 +6,7 @@ use trace_commons_server::config::{DatabaseConfig, SslMode};
 use trace_commons_server::db::{Database, postgres::PgBackend};
 use trace_commons_server::error::DatabaseError;
 use trace_commons_server::trace_corpus_storage::{
+    TraceAuditAction, TraceAuditEventWrite, TraceAuditSafeMetadata,
     TraceBenchmarkRegistryOutboxItemWrite, TraceBenchmarkRegistryOutboxOperation,
     TraceBenchmarkRegistryOutboxStatus, TraceCorpusStatus, TraceCorpusStore,
     TraceCreditAccountSettlementLineItem, TraceCreditEventType, TraceCreditEventWrite,
@@ -19,9 +20,12 @@ use trace_commons_server::trace_corpus_storage::{
     TraceRankingLabelSource, TraceRankingLabelWrite, TraceRankingModelStatus,
     TraceRankingModelVersionWrite, TraceRankingPredictionWrite, TraceRankingPreferenceLabelWrite,
     TraceRankingUtilityCategory, TraceRankingWorkerRunKind, TraceRankingWorkerRunStatus,
-    TraceRankingWorkerRunWrite, TraceSubmissionWrite, TraceUtilityAttestationWrite,
-    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-    TraceWorkerKind,
+    TraceRankingWorkerRunWrite, TraceRetentionJobItemAction, TraceRetentionJobItemStatus,
+    TraceRetentionJobItemWrite, TraceRetentionJobStatus, TraceRetentionJobWrite,
+    TraceSubmissionWrite, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
+    TraceTenantAccessGrantWrite, TraceTenantPolicyWrite, TraceTombstoneWrite,
+    TraceUtilityAttestationWrite, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
+    TraceVectorEntryWrite, TraceWorkerKind,
 };
 use uuid::Uuid;
 
@@ -497,6 +501,300 @@ async fn pg_store_export_manifest_mirror_is_tenant_scoped_with_overlapping_ids()
         1,
         "tenant-scoped export mirror delete must not remove beta refs with the same ids"
     );
+
+    cleanup_tenant(&backend, &tenant_alpha).await;
+    cleanup_tenant(&backend, &tenant_beta).await;
+}
+
+#[tokio::test]
+async fn pg_store_governance_and_retention_rows_are_tenant_scoped_with_overlapping_ids() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_alpha = format!("pg-governance-alpha-{}", Uuid::new_v4());
+    let tenant_beta = format!("pg-governance-beta-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    let trace_id = Uuid::new_v4();
+    let grant_id = Uuid::new_v4();
+    let audit_event_id = Uuid::new_v4();
+    let tombstone_id = Uuid::new_v4();
+    let retention_job_id = Uuid::new_v4();
+    let issued_at = Utc::now();
+    let active_at = issued_at + chrono::Duration::seconds(1);
+
+    for (tenant_id, label, item_status) in [
+        (&tenant_alpha, "alpha", TraceRetentionJobItemStatus::Done),
+        (&tenant_beta, "beta", TraceRetentionJobItemStatus::Pending),
+    ] {
+        let mut submission = sample_submission(tenant_id, submission_id);
+        submission.trace_id = trace_id;
+        submission.redaction_hash = format!("sha256:{label}-redaction");
+        backend
+            .upsert_trace_submission(submission)
+            .await
+            .expect("insert governance source submission");
+
+        let policy = backend
+            .upsert_trace_tenant_policy(TraceTenantPolicyWrite {
+                tenant_id: tenant_id.clone(),
+                policy_version: format!("policy-{label}-v1"),
+                allowed_consent_scopes: vec![format!("{label}_scope")],
+                allowed_uses: vec![format!("{label}_use")],
+                updated_by_principal_ref: format!("principal:{label}-admin"),
+            })
+            .await
+            .expect("upsert tenant policy");
+        assert_eq!(policy.tenant_id, *tenant_id);
+        assert_eq!(policy.allowed_uses, vec![format!("{label}_use")]);
+
+        let mut metadata = BTreeMap::new();
+        metadata.insert("tenant_marker".to_string(), label.to_string());
+        let grant = backend
+            .upsert_trace_tenant_access_grant(TraceTenantAccessGrantWrite {
+                tenant_id: tenant_id.clone(),
+                grant_id,
+                principal_ref: "principal:shared-worker".to_string(),
+                role: TraceTenantAccessGrantRole::RetentionWorker,
+                status: TraceTenantAccessGrantStatus::Active,
+                allowed_consent_scopes: vec![format!("{label}_scope")],
+                allowed_uses: vec![format!("{label}_use")],
+                issuer: Some(format!("issuer:{label}")),
+                audience: Some("trace-commons".to_string()),
+                subject: Some("shared-worker".to_string()),
+                issued_at,
+                expires_at: None,
+                revoked_at: None,
+                created_by_principal_ref: Some(format!("principal:{label}-admin")),
+                revoked_by_principal_ref: None,
+                reason: Some(format!("tenant {label} retention worker grant")),
+                metadata,
+            })
+            .await
+            .expect("upsert tenant access grant");
+        assert_eq!(grant.tenant_id, *tenant_id);
+        assert_eq!(grant.grant_id, grant_id);
+        assert_eq!(
+            grant.metadata.get("tenant_marker"),
+            Some(&label.to_string())
+        );
+
+        let mut audit_action_counts = BTreeMap::new();
+        audit_action_counts.insert(format!("{label}_retention"), 1);
+        backend
+            .append_trace_audit_event(TraceAuditEventWrite {
+                audit_event_id,
+                tenant_id: tenant_id.clone(),
+                actor_principal_ref: format!("principal:{label}-retention-worker"),
+                actor_role: "retention_worker".to_string(),
+                action: TraceAuditAction::Retain,
+                reason: Some(format!("retention audit {label}")),
+                request_id: Some(format!("request-{label}")),
+                submission_id: Some(submission_id),
+                object_ref_id: None,
+                export_manifest_id: None,
+                decision_inputs_hash: Some(format!("sha256:{label}-decision-inputs")),
+                previous_event_hash: None,
+                event_hash: Some(format!("sha256:{label}-audit-event")),
+                canonical_event_json: Some(format!("{{\"tenant\":\"{label}\"}}")),
+                metadata: TraceAuditSafeMetadata::Maintenance {
+                    dry_run: true,
+                    action_counts: audit_action_counts,
+                },
+            })
+            .await
+            .expect("append tenant audit event");
+
+        backend
+            .write_trace_tombstone(TraceTombstoneWrite {
+                tombstone_id,
+                tenant_id: tenant_id.clone(),
+                submission_id,
+                trace_id: Some(trace_id),
+                redaction_hash: Some(format!("sha256:{label}-redaction")),
+                canonical_summary_hash: Some(format!("sha256:{label}-summary")),
+                reason: format!("tenant {label} revocation"),
+                effective_at: Utc::now(),
+                retain_until: None,
+                created_by_principal_ref: format!("principal:{label}-admin"),
+            })
+            .await
+            .expect("write tenant tombstone");
+
+        let mut job_action_counts = BTreeMap::new();
+        job_action_counts.insert(format!("{label}_purge"), 1);
+        let job = backend
+            .upsert_trace_retention_job(TraceRetentionJobWrite {
+                tenant_id: tenant_id.clone(),
+                retention_job_id,
+                purpose: format!("tenant {label} retention dry run"),
+                dry_run: true,
+                status: TraceRetentionJobStatus::DryRun,
+                requested_by_principal_ref: format!("principal:{label}-admin"),
+                requested_by_role: "admin".to_string(),
+                purge_expired_before: Some(Utc::now()),
+                prune_export_cache: true,
+                max_export_age_hours: Some(24),
+                audit_event_id: Some(audit_event_id),
+                action_counts: job_action_counts,
+                selected_revoked_count: 1,
+                selected_expired_count: 0,
+                started_at: Some(Utc::now()),
+                completed_at: None,
+            })
+            .await
+            .expect("upsert tenant retention job");
+        assert_eq!(job.tenant_id, *tenant_id);
+        assert_eq!(job.retention_job_id, retention_job_id);
+
+        let mut item_action_counts = BTreeMap::new();
+        item_action_counts.insert(format!("{label}_item"), 1);
+        let item = backend
+            .upsert_trace_retention_job_item(TraceRetentionJobItemWrite {
+                tenant_id: tenant_id.clone(),
+                retention_job_id,
+                submission_id,
+                action: TraceRetentionJobItemAction::Purge,
+                status: item_status,
+                reason: format!("tenant {label} purge candidate"),
+                action_counts: item_action_counts,
+                verified_at: if item_status == TraceRetentionJobItemStatus::Done {
+                    Some(Utc::now())
+                } else {
+                    None
+                },
+            })
+            .await
+            .expect("upsert tenant retention item");
+        assert_eq!(item.tenant_id, *tenant_id);
+        assert_eq!(item.retention_job_id, retention_job_id);
+        assert_eq!(item.status, item_status);
+    }
+
+    let alpha_policy = backend
+        .get_trace_tenant_policy(&tenant_alpha)
+        .await
+        .expect("get alpha tenant policy")
+        .expect("alpha tenant policy exists");
+    assert_eq!(alpha_policy.allowed_uses, vec!["alpha_use"]);
+    let beta_policy = backend
+        .get_trace_tenant_policy(&tenant_beta)
+        .await
+        .expect("get beta tenant policy")
+        .expect("beta tenant policy exists");
+    assert_eq!(beta_policy.allowed_uses, vec!["beta_use"]);
+
+    let alpha_active_grants = backend
+        .list_active_trace_tenant_access_grants_for_principal(
+            &tenant_alpha,
+            "principal:shared-worker",
+            active_at,
+        )
+        .await
+        .expect("list alpha active grants");
+    assert_eq!(alpha_active_grants.len(), 1);
+    assert_eq!(alpha_active_grants[0].tenant_id, tenant_alpha);
+    assert_eq!(alpha_active_grants[0].grant_id, grant_id);
+    assert_eq!(
+        alpha_active_grants[0].metadata.get("tenant_marker"),
+        Some(&"alpha".to_string())
+    );
+    let beta_active_grants = backend
+        .list_active_trace_tenant_access_grants_for_principal(
+            &tenant_beta,
+            "principal:shared-worker",
+            active_at,
+        )
+        .await
+        .expect("list beta active grants");
+    assert_eq!(beta_active_grants.len(), 1);
+    assert_eq!(beta_active_grants[0].tenant_id, tenant_beta);
+    assert_eq!(beta_active_grants[0].grant_id, grant_id);
+    assert_eq!(
+        beta_active_grants[0].metadata.get("tenant_marker"),
+        Some(&"beta".to_string())
+    );
+
+    let alpha_audit = backend
+        .list_trace_audit_events(&tenant_alpha)
+        .await
+        .expect("list alpha audit events");
+    assert_eq!(alpha_audit.len(), 1);
+    assert_eq!(alpha_audit[0].tenant_id, tenant_alpha);
+    assert_eq!(alpha_audit[0].audit_event_id, audit_event_id);
+    assert_eq!(
+        alpha_audit[0].event_hash.as_deref(),
+        Some("sha256:alpha-audit-event")
+    );
+    let beta_recent_audit = backend
+        .list_recent_trace_audit_events(&tenant_beta, 1)
+        .await
+        .expect("list recent beta audit events");
+    assert_eq!(beta_recent_audit.len(), 1);
+    assert_eq!(beta_recent_audit[0].tenant_id, tenant_beta);
+    assert_eq!(beta_recent_audit[0].audit_event_id, audit_event_id);
+    assert_eq!(
+        beta_recent_audit[0].event_hash.as_deref(),
+        Some("sha256:beta-audit-event")
+    );
+
+    let alpha_tombstones = backend
+        .list_trace_tombstones(&tenant_alpha)
+        .await
+        .expect("list alpha tombstones");
+    assert_eq!(alpha_tombstones.len(), 1);
+    assert_eq!(alpha_tombstones[0].tenant_id, tenant_alpha);
+    assert_eq!(alpha_tombstones[0].tombstone_id, tombstone_id);
+    assert_eq!(
+        alpha_tombstones[0].redaction_hash.as_deref(),
+        Some("sha256:alpha-redaction")
+    );
+    let beta_tombstones = backend
+        .list_trace_tombstones(&tenant_beta)
+        .await
+        .expect("list beta tombstones");
+    assert_eq!(beta_tombstones.len(), 1);
+    assert_eq!(beta_tombstones[0].tenant_id, tenant_beta);
+    assert_eq!(beta_tombstones[0].tombstone_id, tombstone_id);
+    assert_eq!(
+        beta_tombstones[0].redaction_hash.as_deref(),
+        Some("sha256:beta-redaction")
+    );
+
+    let alpha_jobs = backend
+        .list_trace_retention_jobs(&tenant_alpha)
+        .await
+        .expect("list alpha retention jobs");
+    assert_eq!(alpha_jobs.len(), 1);
+    assert_eq!(alpha_jobs[0].tenant_id, tenant_alpha);
+    assert_eq!(alpha_jobs[0].retention_job_id, retention_job_id);
+    assert_eq!(alpha_jobs[0].action_counts.get("alpha_purge"), Some(&1));
+    let beta_jobs = backend
+        .list_trace_retention_jobs(&tenant_beta)
+        .await
+        .expect("list beta retention jobs");
+    assert_eq!(beta_jobs.len(), 1);
+    assert_eq!(beta_jobs[0].tenant_id, tenant_beta);
+    assert_eq!(beta_jobs[0].retention_job_id, retention_job_id);
+    assert_eq!(beta_jobs[0].action_counts.get("beta_purge"), Some(&1));
+
+    let alpha_items = backend
+        .list_trace_retention_job_items(&tenant_alpha, retention_job_id)
+        .await
+        .expect("list alpha retention items");
+    assert_eq!(alpha_items.len(), 1);
+    assert_eq!(alpha_items[0].tenant_id, tenant_alpha);
+    assert_eq!(alpha_items[0].submission_id, submission_id);
+    assert_eq!(alpha_items[0].status, TraceRetentionJobItemStatus::Done);
+    let beta_items = backend
+        .list_trace_retention_job_items(&tenant_beta, retention_job_id)
+        .await
+        .expect("list beta retention items");
+    assert_eq!(beta_items.len(), 1);
+    assert_eq!(beta_items[0].tenant_id, tenant_beta);
+    assert_eq!(beta_items[0].submission_id, submission_id);
+    assert_eq!(beta_items[0].status, TraceRetentionJobItemStatus::Pending);
 
     cleanup_tenant(&backend, &tenant_alpha).await;
     cleanup_tenant(&backend, &tenant_beta).await;
