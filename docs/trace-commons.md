@@ -649,6 +649,14 @@ run-specific floor, but they cannot lower the deployment floor. It defaults to
 issuers should raise it to match the smallest calibration cohort they are
 willing to treat as credit-bearing evidence.
 
+`TRACE_COMMONS_RANKING_REQUIRE_ACTIVE_CALIBRATION_DATASET=true` requires the
+registered holdout calibration dataset row to be `active` before it can feed
+new calibration runs, model promotion, active-model risk clearance, prediction
+credit, or ranking-utility settlement. This gives production issuers a simple
+curation/stewardship gate: admins can register immutable `candidate` holdout
+manifests for review, then append a status-only `active` row once the dataset is
+ready to back credit-bearing ranking evidence.
+
 `TRACE_COMMONS_RANKING_MIN_CONFIDENCE_THRESHOLD` sets a server-owned floor for
 the per-prediction confidence threshold used by calibration runs. Calibration
 workers may request a higher threshold, but not a lower one. It defaults to `0`
@@ -941,12 +949,15 @@ file-backed writes and PostgreSQL mirror writes reject those rewrites.
 File-backed readers also fail closed if legacy JSONL history contains conflicting
 manifest rows for one holdout key.
 Calibration runs may use matching registry rows in `candidate` or `active`
-status, but reject matching `deprecated` or `archived` rows so retired holdout
-sets cannot keep model evidence alive after stewardship review. Matching
-registry rows must also report at least the effective `min_label_count` source
-count and at least the configured `TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT`
-distinct label sources and label actors before they can feed calibration;
-otherwise the run fails closed with
+status by default, but reject matching `deprecated` or `archived` rows so
+retired holdout sets cannot keep model evidence alive after stewardship review.
+When `TRACE_COMMONS_RANKING_REQUIRE_ACTIVE_CALIBRATION_DATASET=true`, matching
+rows must be `active`; `candidate` rows remain visible but cannot feed
+calibration, promotion, or ranking-credit readiness. Matching registry rows
+must also report at least the effective `min_label_count` source count and at
+least the configured `TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT` distinct
+label sources and label actors before they can feed calibration; otherwise the
+run fails closed with `calibration_dataset_not_active`,
 `calibration_dataset_source_count_underdiverse`,
 `calibration_dataset_label_source_count_underdiverse`, or
 `calibration_dataset_label_actor_count_underdiverse`.
@@ -1076,6 +1087,7 @@ set cannot promote a credit-bearing model, then layer
 `TRACE_COMMONS_RANKING_MIN_CONFIDENCE_THRESHOLD`,
 `TRACE_COMMONS_RANKING_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS`,
 `TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT`,
+`TRACE_COMMONS_RANKING_REQUIRE_ACTIVE_CALIBRATION_DATASET`,
 `TRACE_COMMONS_RANKING_MIN_PAIRWISE_LABEL_COUNT`,
 `TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS`, and per-source cohort
 error gates on top so the sample is high-quality, broad enough across
