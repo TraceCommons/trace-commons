@@ -168,7 +168,9 @@ operators can spot noisy sources or reviewers without exposing raw external
 refs. Calibration runs also record `ranking_adjudication_issues_present` and
 remain non-promotable while unresolved adjudication issues exist for the target
 use, so stored calibration evidence cannot look credit-ready before review
-settles.
+settles. The admin ranking readiness drill includes the same clean-adjudication
+gate by default and records `ranking_adjudication_issues=<count>` when disputed
+or conflicting labels still need review.
 Registered calibration datasets marked `deprecated` or `archived` are retired
 and cannot feed new calibration runs for that target use and policy; promotion,
 dataset-readiness, and active-model risk surfaces also report retired registered

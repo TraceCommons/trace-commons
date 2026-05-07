@@ -509,11 +509,14 @@ promotion proof. It returns only counts, blocker-code aggregates, and a
 sha256-prefixed evidence hash, and can append `ranking_model_readiness`
 rollout-smoke evidence without exposing model artifacts, trace bodies, raw lab
 notes, external refs, or prediction ids. Failed drill evidence is recorded when
-holdout manifest conflicts, active-model risk, blocked model targets, or blocked
-ranking credits remain, so a stale or conflicted ranking registry cannot
-masquerade as promotion-ready. Set `require_process_evaluator=true` on the
-drill request to include configured process-evaluator adapter readiness in the
-same hash-only proof; missing evaluator configuration then records
+holdout manifest conflicts, unresolved ranking-label adjudication issues,
+active-model risk, blocked model targets, or blocked ranking credits remain, so
+a stale, conflicted, or disputed ranking registry cannot masquerade as
+promotion-ready. `require_clean_adjudication` defaults to `true` and records
+`ranking_adjudication_issues=<count>` when latest label evidence still has
+unresolved disputes or cross-source conflicts. Set `require_process_evaluator=true`
+on the drill request to include configured process-evaluator adapter readiness
+in the same hash-only proof; missing evaluator configuration then records
 `process_evaluator_missing` as a blocker without exposing the adapter URL or
 credentials.
 `POST /v1/admin/credit-settlement-drill` runs the Trace Credits settlement
