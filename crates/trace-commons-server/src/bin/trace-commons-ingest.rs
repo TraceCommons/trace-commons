@@ -82186,6 +82186,164 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_operational_metrics_route_exports_disabled_object_store_blocker() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("gcs"),
+            Some("trace-commons-prod-bucket"),
+            Some("projects/prod/locations/global/keyRings/traces/cryptoKeys/envelope"),
+            Some("secret-manager://trace-commons/remote-writer"),
+        )
+        .expect("disabled remote config parses");
+        let artifact_store = ConfiguredTraceArtifactStore::remote_disabled(remote_config);
+        let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            None,
+            Some(artifact_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+        {
+            let state = Arc::make_mut(&mut state);
+            state.object_primary_submit_review = true;
+        }
+
+        let admin_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-metrics")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("admin response");
+        assert_eq!(admin_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(admin_response.into_body(), 65536)
+            .await
+            .expect("body reads");
+        let body_text = std::str::from_utf8(&body).expect("metrics body is utf8");
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_promotion_ready{{tenant_storage_ref=\"{tenant_ref}\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"object_primary_object_store_io_disabled\"}} 1"
+        )));
+        assert!(!body_text.contains("gate=\"object_primary_object_store_missing\""));
+        assert!(!body_text.contains("gate=\"object_primary_object_store_not_eligible\""));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"configured\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"io_enabled\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"object_primary_eligible\"}} 0"
+        )));
+        assert!(!body_text.contains("tenant-a"));
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("secret-manager://trace-commons/remote-writer"));
+        assert!(
+            !body_text
+                .contains("projects/prod/locations/global/keyRings/traces/cryptoKeys/envelope")
+        );
+
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "read"
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("surface=operational_metrics;"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn admin_operational_metrics_route_exports_noneligible_object_store_blocker() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_store = ConfiguredTraceArtifactStore::legacy(test_artifact_store(temp.path()));
+        let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            None,
+            Some(artifact_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+        {
+            let state = Arc::make_mut(&mut state);
+            state.object_primary_submit_review = true;
+        }
+
+        let admin_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-metrics")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("admin response");
+        assert_eq!(admin_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(admin_response.into_body(), 65536)
+            .await
+            .expect("body reads");
+        let body_text = std::str::from_utf8(&body).expect("metrics body is utf8");
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_promotion_ready{{tenant_storage_ref=\"{tenant_ref}\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"object_primary_object_store_not_eligible\"}} 1"
+        )));
+        assert!(!body_text.contains("gate=\"object_primary_object_store_missing\""));
+        assert!(!body_text.contains("gate=\"object_primary_object_store_io_disabled\""));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"configured\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"io_enabled\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"object_primary_eligible\"}} 0"
+        )));
+        assert!(!body_text.contains("tenant-a"));
+        assert!(!body_text.contains("admin-token-a"));
+
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "read"
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("surface=operational_metrics;"))
+        }));
+    }
+
+    #[tokio::test]
     async fn admin_operational_metrics_route_exports_safe_promotion_gauges() {
         use axum::body::Body;
         use tower::ServiceExt;
