@@ -65648,6 +65648,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disabled_remote_object_store_migration_drill_fails_closed_without_secret_leaks() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("aws_s3"),
+            Some("trace-commons-prod-bucket-secret"),
+            Some("arn:aws:kms:us-west-2:123456789012:key/trace-commons-secret"),
+            Some("aws-iam-role:trace-commons-writer-secret"),
+        )
+        .expect("disabled remote config parses");
+        let artifact_store = ConfiguredTraceArtifactStore::remote_disabled(remote_config);
+        let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            None,
+            Some(artifact_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/object-store-migration-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator disabled remote migration drill",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("admin request builds"),
+            )
+            .await
+            .expect("disabled remote migration drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("migration drill response parses");
+
+        assert_eq!(value["ready"], serde_json::json!(false));
+        assert_eq!(value["object_store_configured"], serde_json::json!(true));
+        assert_eq!(
+            value["object_store_name"],
+            serde_json::json!(TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE)
+        );
+        assert_eq!(value["object_store_eligible"], serde_json::json!(false));
+        assert_eq!(value["object_io_enabled"], serde_json::json!(false));
+        assert_eq!(value["write_succeeded"], serde_json::json!(false));
+        assert_eq!(value["read_succeeded"], serde_json::json!(false));
+        assert_eq!(value["delete_succeeded"], serde_json::json!(false));
+        let blocking_gaps = value["blocking_gaps"]
+            .as_array()
+            .expect("blocking gaps are present");
+        for expected_gap in [
+            "object_store_io_disabled",
+            "object_store_not_migration_eligible",
+            "probe_write_failed",
+            "probe_read_failed",
+            "probe_delete_failed",
+        ] {
+            assert!(
+                blocking_gaps.contains(&serde_json::json!(expected_gap)),
+                "disabled remote migration drill reports {expected_gap}"
+            );
+        }
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("failed")
+        );
+
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("trace-commons-prod-bucket-secret"));
+        assert!(!body_text.contains("trace-commons-secret"));
+        assert!(!body_text.contains("trace-commons-writer-secret"));
+        assert!(!body_text.contains("object-store-migration-drill-secret"));
+
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("file audit events read");
+        assert!(audit_events.iter().any(|event| {
+            event.kind == "rollout_smoke_evidence"
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("check_name=object_store_migration")
+                        && reason.contains("status=failed")
+                })
+        }));
+    }
+
+    #[tokio::test]
     async fn object_store_migration_drill_blocks_when_versioning_required_without_support() {
         use axum::body::Body;
         use tower::ServiceExt;
