@@ -28460,6 +28460,49 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             value,
         );
     }
+    body.push_str("# HELP tracedao_operational_ranking_worker_run_totals Ranking worker-run aggregate item counts by state.\n");
+    body.push_str("# TYPE tracedao_operational_ranking_worker_run_totals gauge\n");
+    for (state, value) in [
+        ("checked", response.ranking.worker_run_checked_total),
+        ("succeeded", response.ranking.worker_run_succeeded_total),
+        (
+            "skipped_existing",
+            response.ranking.worker_run_skipped_existing_total,
+        ),
+        (
+            "skipped_model_risk",
+            response.ranking.worker_run_skipped_model_risk_total,
+        ),
+        (
+            "skipped_ineligible",
+            response.ranking.worker_run_skipped_ineligible_total,
+        ),
+    ] {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "tracedao_operational_ranking_worker_run_totals",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("state", state),
+            ],
+            value,
+        );
+    }
+    body.push_str("# HELP tracedao_operational_ranking_worker_run_reason_counts Ranking worker-run skip and blocker reason-code counts.\n");
+    body.push_str("# TYPE tracedao_operational_ranking_worker_run_reason_counts gauge\n");
+    for (reason, value) in &response.ranking.worker_run_reason_counts {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "tracedao_operational_ranking_worker_run_reason_counts",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("reason", reason),
+            ],
+            *value,
+        );
+    }
     body.push_str("# HELP tracedao_operational_near_credit_outbox NEAR non-transferable credit receipt outbox counts by operational state.\n");
     body.push_str("# TYPE tracedao_operational_near_credit_outbox gauge\n");
     for (state, value) in [
@@ -85154,6 +85197,9 @@ mod tests {
 
     #[tokio::test]
     async fn operational_summary_reports_ranking_worker_skip_totals() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
         append_ranking_worker_run(
@@ -85224,6 +85270,45 @@ mod tests {
             operational_json["ranking"]["worker_run_reason_counts"]["current_evidence_not_promotable"],
             serde_json::json!(1)
         );
+
+        let metrics_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-metrics")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("metrics response");
+        assert_eq!(metrics_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(metrics_response.into_body(), 65536)
+            .await
+            .expect("body reads");
+        let body_text = std::str::from_utf8(&body).expect("metrics body is utf8");
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_ranking_worker_run_totals{{tenant_storage_ref=\"{tenant_ref}\",state=\"checked\"}} 9"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_ranking_worker_run_totals{{tenant_storage_ref=\"{tenant_ref}\",state=\"succeeded\"}} 2"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_ranking_worker_run_totals{{tenant_storage_ref=\"{tenant_ref}\",state=\"skipped_existing\"}} 3"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_ranking_worker_run_totals{{tenant_storage_ref=\"{tenant_ref}\",state=\"skipped_model_risk\"}} 2"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_ranking_worker_run_totals{{tenant_storage_ref=\"{tenant_ref}\",state=\"skipped_ineligible\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_ranking_worker_run_reason_counts{{tenant_storage_ref=\"{tenant_ref}\",reason=\"calibration_stale\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_ranking_worker_run_reason_counts{{tenant_storage_ref=\"{tenant_ref}\",reason=\"current_evidence_not_promotable\"}} 1"
+        )));
     }
 
     #[tokio::test]
