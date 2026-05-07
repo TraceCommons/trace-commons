@@ -14154,6 +14154,9 @@ fn ranking_worker_run_active_conflict_message(run_kind: TraceRankingWorkerRunKin
         TraceRankingWorkerRunKind::CreditCycle => {
             "credit cycle worker run is already active for overlapping filters"
         }
+        TraceRankingWorkerRunKind::ProcessEvaluation => {
+            "process evaluation worker run is already active for overlapping filters"
+        }
     }
 }
 
@@ -14192,6 +14195,20 @@ fn update_model_promotion_worker_run_from_response(
         .filter(|promotion| promotion.promoted)
         .map(|promotion| format!("ranking_model:{}", promotion.model_version))
         .collect();
+    worker_run.reason_counts = response.skipped_reason_counts.clone();
+}
+
+fn update_process_evaluation_worker_run_from_response(
+    worker_run: &mut TraceRankingWorkerRunRecord,
+    response: &ProcessEvaluationWorkerRunResponse,
+    result_refs: &[String],
+) {
+    worker_run.checked_count = response.checked_count;
+    worker_run.succeeded_count = response.evaluated_count;
+    worker_run.skipped_existing_count = response.skipped_existing_count;
+    worker_run.skipped_ineligible_count = response.skipped_ineligible_count;
+    worker_run.pending_after_count = response.pending_after_count;
+    worker_run.result_refs = result_refs.to_vec();
     worker_run.reason_counts = response.skipped_reason_counts.clone();
 }
 
@@ -20515,6 +20532,16 @@ async fn run_process_evaluation_worker(
     } else {
         None
     };
+    ensure_no_overlapping_live_ranking_worker_run(
+        state,
+        tenant,
+        TraceRankingWorkerRunKind::ProcessEvaluation,
+        dry_run,
+        None,
+        target_use,
+        None,
+    )
+    .await?;
     let tenant_policy = tenant_process_evaluation_policy_for_request(state, tenant).await?;
     let view = read_reviewer_metadata_view(state, tenant)
         .await
@@ -20569,6 +20596,35 @@ async fn run_process_evaluation_worker(
         evaluated_submission_ids: Vec::new(),
         skipped_reason_counts: BTreeMap::new(),
     };
+    let mut worker_run = TraceRankingWorkerRunRecord {
+        ranking_worker_run_id: Uuid::new_v4(),
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        run_kind: TraceRankingWorkerRunKind::ProcessEvaluation,
+        status: TraceRankingWorkerRunStatus::Running,
+        dry_run: response.dry_run,
+        reason_hash: response.reason_hash.clone(),
+        model_version: None,
+        target_use: response.target_use,
+        policy_version: None,
+        limit: response.limit,
+        checked_count: 0,
+        succeeded_count: 0,
+        skipped_existing_count: 0,
+        skipped_model_risk_count: 0,
+        skipped_ineligible_count: 0,
+        pending_after_count: 0,
+        result_refs: Vec::new(),
+        reason_counts: BTreeMap::new(),
+        actor_principal_ref: tenant.principal_ref.clone(),
+        created_at: Utc::now(),
+        completed_at: None,
+        last_error_hash: None,
+    };
+    append_ranking_worker_run_with_db_mirror(state, tenant, &worker_run)
+        .await
+        .map_err(internal_error)?;
+    let mut result_refs = Vec::new();
 
     for record in view.records.iter().take(limit) {
         response.checked_count += 1;
@@ -20735,10 +20791,33 @@ async fn run_process_evaluation_worker(
                     ranking_label,
                 },
             )
-            .await?;
+            .await
+            .inspect_err(|_| {
+                update_process_evaluation_worker_run_from_response(
+                    &mut worker_run,
+                    &response,
+                    &result_refs,
+                );
+            });
+            let job_response = match job_response {
+                Ok(job_response) => job_response,
+                Err(error) => {
+                    let public_error = error.1.0.error.clone();
+                    finalize_failed_ranking_worker_run_with_db_mirror(
+                        state,
+                        tenant,
+                        &mut worker_run,
+                        error.0,
+                        &public_error,
+                    )
+                    .await?;
+                    return Err(error);
+                }
+            };
             response.ranking_label_appended_count += job_response.ranking_label_appended_count;
             response.ranking_label_skipped_existing_count +=
                 job_response.ranking_label_skipped_existing_count;
+            result_refs.push(process_evaluation_worker_result_ref(record.submission_id));
         }
         response.evaluated_count += 1;
         response.evaluated_submission_ids.push(record.submission_id);
@@ -20747,7 +20826,20 @@ async fn run_process_evaluation_worker(
         response.pending_after_count =
             initial_pending_count.saturating_sub(response.evaluated_count);
     }
+    update_process_evaluation_worker_run_from_response(&mut worker_run, &response, &result_refs);
+    worker_run.status = TraceRankingWorkerRunStatus::Completed;
+    worker_run.completed_at = Some(Utc::now());
+    append_ranking_worker_run_with_db_mirror(state, tenant, &worker_run)
+        .await
+        .map_err(internal_error)?;
     Ok(response)
+}
+
+fn process_evaluation_worker_result_ref(submission_id: Uuid) -> String {
+    format!(
+        "trace_submission_hash:{}",
+        sha256_prefixed(&submission_id.to_string())
+    )
 }
 
 fn validate_process_evaluation_worker_run_limit(limit: Option<usize>) -> ApiResult<usize> {
@@ -58065,6 +58157,46 @@ mod tests {
             !serde_json::to_string(&labels)
                 .expect("labels serialize")
                 .contains("process-eval-run:nightly-9")
+        );
+
+        let Json(worker_runs) =
+            ranking_worker_runs_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect process-evaluation worker run ledger");
+        assert_eq!(worker_runs.len(), 1);
+        assert_eq!(
+            worker_runs[0].run_kind,
+            TraceRankingWorkerRunKind::ProcessEvaluation
+        );
+        assert_eq!(
+            worker_runs[0].status,
+            TraceRankingWorkerRunStatus::Completed
+        );
+        assert_eq!(worker_runs[0].dry_run, response.dry_run);
+        assert_eq!(worker_runs[0].limit, response.limit);
+        assert_eq!(worker_runs[0].target_use, response.target_use);
+        assert_eq!(worker_runs[0].checked_count, response.checked_count);
+        assert_eq!(worker_runs[0].succeeded_count, response.evaluated_count);
+        assert_eq!(
+            worker_runs[0].skipped_existing_count,
+            response.skipped_existing_count
+        );
+        assert_eq!(
+            worker_runs[0].skipped_ineligible_count,
+            response.skipped_ineligible_count
+        );
+        assert_eq!(
+            worker_runs[0].pending_after_count,
+            response.pending_after_count
+        );
+        assert_eq!(worker_runs[0].reason_hash, response.reason_hash);
+        assert_eq!(worker_runs[0].result_refs.len(), 1);
+        assert!(worker_runs[0].result_refs[0].starts_with("trace_submission_hash:sha256:"));
+        assert!(
+            !worker_runs[0]
+                .result_refs
+                .iter()
+                .any(|result_ref| result_ref.contains(&submission_id.to_string()))
         );
 
         let Json(retry) = process_evaluation_worker_run_handler(
