@@ -24181,6 +24181,8 @@ struct TraceRankingModelReadinessDrillRequest {
     require_active_model: bool,
     #[serde(default = "default_true")]
     require_ready_credit: bool,
+    #[serde(default = "default_true")]
+    require_clean_adjudication: bool,
     #[serde(default)]
     require_process_evaluator: bool,
     #[serde(default)]
@@ -24439,6 +24441,7 @@ struct TraceRankingModelReadinessDrillResponse {
     evidence_hash: String,
     require_active_model: bool,
     require_ready_credit: bool,
+    require_clean_adjudication: bool,
     require_process_evaluator: bool,
     process_evaluator_configured: bool,
     active_model_count: usize,
@@ -24452,6 +24455,9 @@ struct TraceRankingModelReadinessDrillResponse {
     blocked_model_target_count: usize,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     dataset_reason_code_counts: BTreeMap<String, usize>,
+    adjudication_issue_group_count: usize,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    adjudication_reason_counts: BTreeMap<String, usize>,
     pending_ranking_credit_event_count: usize,
     ready_ranking_credit_event_count: usize,
     blocked_ranking_credit_event_count: usize,
@@ -25823,6 +25829,8 @@ async fn run_ranking_model_readiness_drill(
         calibration_dataset_manifest_conflict_count,
         calibration_runs: &calibration_runs,
     });
+    let adjudication_report =
+        ranking_adjudication_report(&tenant.tenant_id, &labels, &preference_labels);
     let credit_events = read_credit_events_for_admin(state, tenant).await?;
     let settlement_batches = read_credit_settlement_batches_for_admin(state, tenant).await?;
     let held_credit_accounts = active_credit_hold_account_refs_for_admin(state, tenant).await?;
@@ -25851,6 +25859,7 @@ async fn run_ranking_model_readiness_drill(
         evidence_hash: String::new(),
         require_active_model: request.require_active_model,
         require_ready_credit: request.require_ready_credit,
+        require_clean_adjudication: request.require_clean_adjudication,
         require_process_evaluator: request.require_process_evaluator,
         process_evaluator_configured: state.process_evaluator.is_some(),
         active_model_count: risk_report.active_model_count,
@@ -25863,6 +25872,8 @@ async fn run_ranking_model_readiness_drill(
         ready_model_target_count: dataset_report.ready_model_target_count,
         blocked_model_target_count: dataset_report.blocked_model_target_count,
         dataset_reason_code_counts: dataset_report.reason_code_counts,
+        adjudication_issue_group_count: adjudication_report.issue_group_count,
+        adjudication_reason_counts: adjudication_report.reason_code_counts,
         pending_ranking_credit_event_count: credit_report.pending_ranking_credit_event_count,
         ready_ranking_credit_event_count: credit_report.ready_count,
         blocked_ranking_credit_event_count: credit_report.blocked_count,
@@ -26713,6 +26724,13 @@ fn ranking_model_readiness_drill_blocking_gaps(
         "blocked_ranking_model_targets",
         response.blocked_model_target_count,
     );
+    if response.require_clean_adjudication {
+        push_rollback_gap_count(
+            &mut gaps,
+            "ranking_adjudication_issues",
+            response.adjudication_issue_group_count,
+        );
+    }
     push_key_rotation_gap(
         &mut gaps,
         "pending_ranking_credit_missing",
@@ -27531,6 +27549,7 @@ fn ranking_model_readiness_drill_evidence_hash(
             "actor_principal_ref": tenant.principal_ref,
             "require_active_model": response.require_active_model,
             "require_ready_credit": response.require_ready_credit,
+            "require_clean_adjudication": response.require_clean_adjudication,
             "require_process_evaluator": response.require_process_evaluator,
             "process_evaluator_configured": response.process_evaluator_configured,
             "active_model_count": response.active_model_count,
@@ -27542,6 +27561,8 @@ fn ranking_model_readiness_drill_evidence_hash(
             "ready_model_target_count": response.ready_model_target_count,
             "blocked_model_target_count": response.blocked_model_target_count,
             "dataset_reason_code_counts": response.dataset_reason_code_counts,
+            "adjudication_issue_group_count": response.adjudication_issue_group_count,
+            "adjudication_reason_counts": response.adjudication_reason_counts,
             "pending_ranking_credit_event_count": response.pending_ranking_credit_event_count,
             "ready_ranking_credit_event_count": response.ready_ranking_credit_event_count,
             "blocked_ranking_credit_event_count": response.blocked_ranking_credit_event_count,
@@ -74784,6 +74805,11 @@ mod tests {
             value["process_evaluator_configured"],
             serde_json::json!(true)
         );
+        assert_eq!(value["require_clean_adjudication"], serde_json::json!(true));
+        assert_eq!(
+            value["adjudication_issue_group_count"],
+            serde_json::json!(0)
+        );
         assert_eq!(value["blocking_gaps"], serde_json::json!([]));
         assert!(
             value["evidence_hash"]
@@ -74951,6 +74977,84 @@ mod tests {
             value["recorded_evidence"]["status"],
             serde_json::json!("failed")
         );
+    }
+
+    #[tokio::test]
+    async fn ranking_model_readiness_drill_blocks_unresolved_adjudication_issues() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let (_, prediction) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-readiness-adj-v1").await;
+        let Json(_) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: prediction.submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Rejected,
+                utility_delta_micros: -1_250_000,
+                evidence_hash: "sha256:readiness-adjudication-conflict-review".to_string(),
+                external_ref: "private-readiness-adjudication-conflict".to_string(),
+            }),
+        )
+        .await
+        .expect("reviewer can write readiness-conflicting label");
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/ranking/readiness-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator ranking adjudication readiness drill",
+                            "record_evidence": true,
+                            "require_active_model": false,
+                            "require_ready_credit": false,
+                            "require_clean_adjudication": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("admin request builds"),
+            )
+            .await
+            .expect("readiness drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("readiness drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(false));
+        assert_eq!(value["require_clean_adjudication"], serde_json::json!(true));
+        assert_eq!(
+            value["adjudication_issue_group_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            value["adjudication_reason_counts"]["absolute_label_outcome_conflict"],
+            serde_json::json!(1)
+        );
+        assert!(
+            value["blocking_gaps"]
+                .as_array()
+                .expect("blocking gaps are an array")
+                .contains(&serde_json::json!("ranking_adjudication_issues=1"))
+        );
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("failed")
+        );
+
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("private-readiness-adjudication-conflict"));
     }
 
     #[tokio::test]
