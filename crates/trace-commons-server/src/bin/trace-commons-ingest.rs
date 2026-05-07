@@ -48641,6 +48641,7 @@ impl TraceOperationalSummaryResponse {
 #[derive(Debug, Default, Serialize)]
 struct TraceOperationalObjectStoreSummary {
     configured: bool,
+    object_store_name: Option<String>,
     io_enabled: bool,
     object_primary_eligible: bool,
     plaintext_compatibility_allowed: bool,
@@ -48659,6 +48660,7 @@ impl TraceOperationalObjectStoreSummary {
         };
         Self {
             configured: true,
+            object_store_name: Some(store.object_store_name().to_string()),
             io_enabled: store.object_io_enabled(),
             object_primary_eligible: store.object_primary_eligible(),
             plaintext_compatibility_allowed: store.plaintext_compatibility_allowed(),
@@ -61785,6 +61787,77 @@ mod tests {
                     .as_deref()
                     .is_some_and(|reason| reason.starts_with("surface=operational_summary;"))
         }));
+    }
+
+    #[tokio::test]
+    async fn operational_summary_reports_disabled_remote_object_store_alias_without_secrets() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("azure_blob"),
+            Some("trace-commons-prod-container-secret"),
+            Some("azure-kms-key-ref-secret"),
+            Some("azure-managed-identity-secret"),
+        )
+        .expect("disabled remote config parses");
+        let artifact_store = ConfiguredTraceArtifactStore::remote_disabled(remote_config);
+        let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            None,
+            Some(artifact_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-summary")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("operational summary response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 128 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("operational summary parses");
+        assert_eq!(value["object_store"]["configured"], serde_json::json!(true));
+        assert_eq!(
+            value["object_store"]["object_store_name"],
+            serde_json::json!(TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE)
+        );
+        assert_eq!(
+            value["object_store"]["io_enabled"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["object_store"]["object_primary_eligible"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["object_store"]["plaintext_compatibility_allowed"],
+            serde_json::json!(false)
+        );
+
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("trace-commons-prod-container-secret"));
+        assert!(!body_text.contains("azure-kms-key-ref-secret"));
+        assert!(!body_text.contains("azure-managed-identity-secret"));
     }
 
     #[tokio::test]
