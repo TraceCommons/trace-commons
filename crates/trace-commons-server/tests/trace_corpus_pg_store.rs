@@ -462,6 +462,22 @@ async fn pg_store_round_trips_tenant_scoped_benchmark_registry_outbox() {
     assert_eq!(inserted.benchmark_outbox_id, benchmark_outbox_id);
     assert_eq!(inserted.status, TraceBenchmarkRegistryOutboxStatus::Pending);
 
+    backend
+        .upsert_trace_benchmark_registry_outbox_item(TraceBenchmarkRegistryOutboxItemWrite {
+            tenant_id: tenant_beta.clone(),
+            benchmark_outbox_id,
+            conversion_id,
+            operation: TraceBenchmarkRegistryOutboxOperation::Publish,
+            registry_ref: "benchmark-registry:tenant-beta:conversion".to_string(),
+            artifact_payload_hash: "sha256:benchmark-artifact-payload-beta".to_string(),
+            source_submission_ids_hash: "sha256:benchmark-sources-beta".to_string(),
+            evaluator_ref: Some("deterministic-benchmark-evaluator:v1".to_string()),
+            evaluation_score: Some(0.9),
+            status: TraceBenchmarkRegistryOutboxStatus::Pending,
+        })
+        .await
+        .expect("upsert beta benchmark registry outbox item with same ids");
+
     let submitted = backend
         .update_trace_benchmark_registry_outbox_status(
             &tenant_alpha,
@@ -483,21 +499,46 @@ async fn pg_store_round_trips_tenant_scoped_benchmark_registry_outbox() {
     );
     assert!(submitted.submitted_at.is_some());
 
+    let alpha_items = backend
+        .list_trace_benchmark_registry_outbox_items(&tenant_alpha)
+        .await
+        .expect("list alpha benchmark registry outbox");
+    assert_eq!(alpha_items.len(), 1);
+    assert_eq!(alpha_items[0].tenant_id, tenant_alpha);
+    assert_eq!(alpha_items[0].benchmark_outbox_id, benchmark_outbox_id);
+    assert_eq!(alpha_items[0].conversion_id, conversion_id);
     assert_eq!(
-        backend
-            .list_trace_benchmark_registry_outbox_items(&tenant_alpha)
-            .await
-            .expect("list alpha benchmark registry outbox")
-            .len(),
-        1
+        alpha_items[0].status,
+        TraceBenchmarkRegistryOutboxStatus::Submitted
+    );
+    assert_eq!(
+        alpha_items[0].artifact_payload_hash.as_str(),
+        "sha256:benchmark-artifact-payload"
+    );
+    assert_eq!(
+        alpha_items[0].external_receipt_ref.as_deref(),
+        Some("external-registry:submission:alpha")
+    );
+
+    let beta_items = backend
+        .list_trace_benchmark_registry_outbox_items(&tenant_beta)
+        .await
+        .expect("list beta benchmark registry outbox");
+    assert_eq!(beta_items.len(), 1);
+    assert_eq!(beta_items[0].tenant_id, tenant_beta);
+    assert_eq!(beta_items[0].benchmark_outbox_id, benchmark_outbox_id);
+    assert_eq!(beta_items[0].conversion_id, conversion_id);
+    assert_eq!(
+        beta_items[0].status,
+        TraceBenchmarkRegistryOutboxStatus::Pending
+    );
+    assert_eq!(
+        beta_items[0].artifact_payload_hash.as_str(),
+        "sha256:benchmark-artifact-payload-beta"
     );
     assert!(
-        backend
-            .list_trace_benchmark_registry_outbox_items(&tenant_beta)
-            .await
-            .expect("list beta benchmark registry outbox")
-            .is_empty(),
-        "benchmark registry outbox items must stay tenant scoped"
+        beta_items[0].external_receipt_ref.is_none(),
+        "benchmark registry outbox status updates must stay tenant scoped even when ids overlap"
     );
 
     cleanup_tenant(&backend, &tenant_alpha).await;
