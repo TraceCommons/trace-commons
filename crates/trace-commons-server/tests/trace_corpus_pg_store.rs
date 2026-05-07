@@ -1546,6 +1546,7 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
             label_count: 1,
             joined_label_prediction_count: 1,
             joined_label_source_count: 1,
+            joined_label_actor_count: 1,
             joined_evidence_hash: "sha256:ranking-calibration-joined-evidence".to_string(),
             average_predicted_utility_micros: Some(2_100_000),
             average_label_utility_delta_micros: Some(2_500_000),
@@ -1567,6 +1568,7 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
         .expect("upsert ranking calibration run");
     assert_eq!(calibration_run.calibration_run_id, calibration_run_id);
     assert_eq!(calibration_run.joined_label_source_count, 1);
+    assert_eq!(calibration_run.joined_label_actor_count, 1);
     assert_eq!(calibration_run.min_label_source_count, 1);
     assert_eq!(
         calibration_run.joined_evidence_hash,
@@ -1595,6 +1597,7 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
             label_count: 1,
             joined_label_prediction_count: 1,
             joined_label_source_count: 1,
+            joined_label_actor_count: 1,
             joined_evidence_hash: "sha256:ranking-calibration-joined-evidence-beta".to_string(),
             average_predicted_utility_micros: Some(1_800_000),
             average_label_utility_delta_micros: Some(1_900_000),

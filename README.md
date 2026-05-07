@@ -129,8 +129,8 @@ hash-only holdout calibration dataset manifests with source counts, label-source
 counts, label-actor counts, and lifecycle status, while workers can register
 feature hashes, model predictions, lab/reviewer/evaluator labels, and calibration
 runs that record aggregate error, confidence, threshold policy, per-source
-quality gates, joined-evidence hashes, reason codes, and a hash-only report
-digest.
+quality gates, joined label-source and label-actor diversity, joined-evidence
+hashes, reason codes, and a hash-only report digest.
 For an existing `(calibration_dataset_hash, target_use, policy_version)` holdout
 key, lifecycle status updates must keep the source manifest hash and count
 metadata unchanged; changing those manifest fields requires a new dataset hash
@@ -219,9 +219,10 @@ promotable calibration run before writing an active model status, so a candidate
 cannot activate after labels, predictions, or production thresholds drift under
 its calibration. The promotion dry-run response exposes the registered holdout
 calibration dataset hash, stored calibration joined-evidence/report hashes and
-counts, and the freshly recomputed current-evidence hash, report hash, counts,
-thresholds, error metrics, low-confidence count, promotability flag, and reason
-codes, giving operators a hash-only preflight record before activation.
+counts including distinct joined label actors, and the freshly recomputed
+current-evidence hash, report hash, counts including distinct joined label
+actors, thresholds, error metrics, low-confidence count, promotability flag, and
+reason codes, giving operators a hash-only preflight record before activation.
 Settlement excludes `ranking_utility` credit events unless the request names an
 active model version with a fresh promotable calibration run for the same policy,
 target use, and registered calibration dataset, and every credit event is bound
