@@ -52521,47 +52521,71 @@ mod tests {
     }
 
     #[test]
-    fn near_credit_relayer_urls_require_https_or_loopback_http() {
-        let https = reqwest::Url::parse("https://near-relayer.example.com/v1/receipt")
+    fn external_adapter_urls_require_https_or_loopback_http() {
+        let validators: [(&str, fn(&reqwest::Url) -> anyhow::Result<()>); 8] = [
+            ("near submitter", validate_trace_near_credit_submitter_url),
+            (
+                "near confirmer",
+                validate_trace_near_credit_confirmation_url,
+            ),
+            (
+                "benchmark registry submitter",
+                validate_trace_benchmark_registry_submitter_url,
+            ),
+            (
+                "benchmark registry confirmer",
+                validate_trace_benchmark_registry_confirmation_url,
+            ),
+            (
+                "benchmark evaluator",
+                validate_trace_benchmark_evaluator_url,
+            ),
+            ("process evaluator", validate_trace_process_evaluator_url),
+            ("vector embedder", validate_trace_vector_embedder_url),
+            ("vector searcher", validate_trace_vector_search_url),
+        ];
+
+        let https = reqwest::Url::parse("https://adapter.example.com/v1/request")
             .expect("https URL parses");
-        validate_trace_near_credit_submitter_url(&https)
-            .expect("submitter accepts HTTPS relayer URLs");
-        validate_trace_near_credit_confirmation_url(&https)
-            .expect("confirmer accepts HTTPS relayer URLs");
-
         let localhost =
-            reqwest::Url::parse("http://localhost:3030/v1/receipt").expect("localhost URL parses");
-        validate_trace_near_credit_submitter_url(&localhost)
-            .expect("submitter accepts localhost HTTP relayers");
-        validate_trace_near_credit_confirmation_url(&localhost)
-            .expect("confirmer accepts localhost HTTP relayers");
-
+            reqwest::Url::parse("http://localhost:3030/v1/request").expect("localhost URL parses");
         let loopback =
-            reqwest::Url::parse("http://127.0.0.1:3030/v1/receipt").expect("loopback URL parses");
-        validate_trace_near_credit_submitter_url(&loopback)
-            .expect("submitter accepts loopback HTTP relayers");
-        validate_trace_near_credit_confirmation_url(&loopback)
-            .expect("confirmer accepts loopback HTTP relayers");
-
-        let remote_http = reqwest::Url::parse("http://near-relayer.example.com/v1/receipt")
+            reqwest::Url::parse("http://127.0.0.1:3030/v1/request").expect("loopback URL parses");
+        let remote_http = reqwest::Url::parse("http://adapter.example.com/v1/request")
             .expect("remote HTTP URL parses");
-        let submitter_error = validate_trace_near_credit_submitter_url(&remote_http)
-            .expect_err("submitter rejects remote plaintext HTTP relayers");
-        assert!(submitter_error.to_string().contains("localhost loopback"));
-        let confirmer_error = validate_trace_near_credit_confirmation_url(&remote_http)
-            .expect_err("confirmer rejects remote plaintext HTTP relayers");
-        assert!(confirmer_error.to_string().contains("localhost loopback"));
-
-        let credentialed =
-            reqwest::Url::parse("https://user:pass@near-relayer.example.com/receipt")
-                .expect("credentialed URL parses");
-        assert!(validate_trace_near_credit_submitter_url(&credentialed).is_err());
-        assert!(validate_trace_near_credit_confirmation_url(&credentialed).is_err());
-
-        let with_query = reqwest::Url::parse("https://near-relayer.example.com/receipt?secret=1")
+        let credentialed = reqwest::Url::parse("https://user:pass@adapter.example.com/request")
+            .expect("credentialed URL parses");
+        let with_query = reqwest::Url::parse("https://adapter.example.com/request?secret=1")
             .expect("query URL parses");
-        assert!(validate_trace_near_credit_submitter_url(&with_query).is_err());
-        assert!(validate_trace_near_credit_confirmation_url(&with_query).is_err());
+
+        for (name, validator) in validators {
+            validator(&https)
+                .unwrap_or_else(|error| panic!("{name} accepts HTTPS adapter URLs: {error}"));
+            validator(&localhost).unwrap_or_else(|error| {
+                panic!("{name} accepts localhost HTTP adapter URLs: {error}")
+            });
+            validator(&loopback).unwrap_or_else(|error| {
+                panic!("{name} accepts loopback HTTP adapter URLs: {error}")
+            });
+
+            let remote_error = match validator(&remote_http) {
+                Ok(()) => panic!("{name} rejects remote plaintext HTTP adapters"),
+                Err(error) => error,
+            };
+            assert!(
+                remote_error.to_string().contains("localhost loopback"),
+                "{name} remote HTTP rejection should explain the loopback exception: {remote_error}"
+            );
+
+            assert!(
+                validator(&credentialed).is_err(),
+                "{name} rejects embedded credentials"
+            );
+            assert!(
+                validator(&with_query).is_err(),
+                "{name} rejects query strings"
+            );
+        }
     }
 
     #[test]
