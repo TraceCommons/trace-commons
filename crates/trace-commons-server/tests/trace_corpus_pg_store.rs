@@ -702,6 +702,21 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
         .expect("upsert ranking model version");
     assert_eq!(model.model_version, "trace-ranker-v2");
 
+    backend
+        .upsert_trace_ranking_model_version(TraceRankingModelVersionWrite {
+            tenant_id: tenant_beta.clone(),
+            model_version: model.model_version.clone(),
+            feature_schema_version: model.feature_schema_version.clone(),
+            policy_version: model.policy_version.clone(),
+            status: TraceRankingModelStatus::Candidate,
+            training_dataset_hash: "sha256:training-dataset-beta".to_string(),
+            calibration_dataset_hash: model.calibration_dataset_hash.clone(),
+            model_artifact_hash: "sha256:model-artifact-beta".to_string(),
+            actor_principal_ref: "principal:ranker-admin-beta".to_string(),
+        })
+        .await
+        .expect("upsert beta ranking model version with same model id");
+
     let calibration_dataset = backend
         .upsert_trace_ranking_calibration_dataset(TraceRankingCalibrationDatasetWrite {
             tenant_id: tenant_alpha.clone(),
@@ -725,6 +740,22 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
         calibration_dataset.status,
         TraceRankingCalibrationDatasetStatus::Candidate
     );
+
+    backend
+        .upsert_trace_ranking_calibration_dataset(TraceRankingCalibrationDatasetWrite {
+            tenant_id: tenant_beta.clone(),
+            calibration_dataset_hash: model.calibration_dataset_hash.clone(),
+            target_use: "model_training".to_string(),
+            policy_version: model.policy_version.clone(),
+            source_manifest_hash: "sha256:calibration-source-manifest-beta".to_string(),
+            source_count: 24,
+            label_source_count: 1,
+            label_actor_count: 1,
+            status: TraceRankingCalibrationDatasetStatus::Candidate,
+            actor_principal_ref: "principal:ranker-admin-beta".to_string(),
+        })
+        .await
+        .expect("upsert beta ranking calibration dataset with same dataset key");
 
     let feature_id = Uuid::new_v4();
     let feature = backend
@@ -753,6 +784,27 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
         vec!["tool:terminal", "outcome:success"]
     );
 
+    backend
+        .upsert_trace_ranking_feature(TraceRankingFeatureWrite {
+            tenant_id: tenant_beta.clone(),
+            ranking_feature_id: feature_id,
+            submission_id,
+            trace_id,
+            target_use: "model_training".to_string(),
+            feature_schema_version: model.feature_schema_version.clone(),
+            feature_vector_hash: "sha256:feature-vector-beta".to_string(),
+            feature_names_hash: "sha256:feature-names-beta".to_string(),
+            source_feature_hash: "sha256:redacted-summary-features-beta".to_string(),
+            duplicate_score: Some(0.12),
+            novelty_score: Some(0.81),
+            privacy_risk_score: Some(0.03),
+            quality_score: Some(0.77),
+            coverage_tags: vec!["tool:editor".to_string()],
+            actor_principal_ref: "principal:ranker-worker-beta".to_string(),
+        })
+        .await
+        .expect("upsert beta ranking feature with same id");
+
     let prediction_id = Uuid::new_v4();
     let prediction = backend
         .upsert_trace_ranking_prediction(TraceRankingPredictionWrite {
@@ -778,6 +830,29 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
         .expect("upsert ranking prediction");
     assert_eq!(prediction.ranking_prediction_id, prediction_id);
     assert_eq!(prediction.settlement_score_micros, 2_175_000);
+
+    backend
+        .upsert_trace_ranking_prediction(TraceRankingPredictionWrite {
+            tenant_id: tenant_beta.clone(),
+            ranking_prediction_id: prediction_id,
+            submission_id,
+            trace_id,
+            target_use: "model_training".to_string(),
+            model_version: model.model_version.clone(),
+            feature_schema_version: model.feature_schema_version.clone(),
+            prediction_policy_version: "trace-credit-policy-v2".to_string(),
+            feature_vector_hash: "sha256:feature-vector-beta".to_string(),
+            predicted_utility_micros: 1_800_000,
+            uncertainty_micros: 400_000,
+            confidence: 0.72,
+            risk_penalty_micros: 75_000,
+            novelty_bonus_micros: 50_000,
+            settlement_score_micros: 1_775_000,
+            explanation_codes: vec!["beta_tool_success".to_string()],
+            actor_principal_ref: "principal:ranker-worker-beta".to_string(),
+        })
+        .await
+        .expect("upsert beta ranking prediction with same id");
 
     let label = backend
         .upsert_trace_ranking_label(TraceRankingLabelWrite {
@@ -815,6 +890,24 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
         .expect("repeat ranking label upsert is idempotent");
     assert_eq!(idempotent_label.ranking_label_id, label.ranking_label_id);
 
+    backend
+        .upsert_trace_ranking_label(TraceRankingLabelWrite {
+            tenant_id: tenant_beta.clone(),
+            ranking_label_id: label.ranking_label_id,
+            submission_id,
+            trace_id,
+            target_use: "model_training".to_string(),
+            label_source: TraceRankingLabelSource::FrontierLab,
+            utility_category: TraceRankingUtilityCategory::ModelTraining,
+            label_outcome: TraceRankingLabelOutcome::Useful,
+            utility_delta_micros: 1_900_000,
+            evidence_hash: "sha256:frontier-evidence-beta".to_string(),
+            external_ref_hash: "sha256:frontier-private-ref".to_string(),
+            actor_principal_ref: "principal:ranker-worker-beta".to_string(),
+        })
+        .await
+        .expect("upsert beta ranking label with same idempotency key");
+
     let second_submission_id = Uuid::new_v4();
     let second_trace_id = Uuid::new_v4();
     backend
@@ -843,6 +936,32 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
         })
         .await
         .expect("insert second accepted ranking source");
+    backend
+        .upsert_trace_submission(TraceSubmissionWrite {
+            tenant_id: tenant_beta.clone(),
+            submission_id: second_submission_id,
+            trace_id: second_trace_id,
+            auth_principal_ref: "principal:contributor-beta".to_string(),
+            contributor_pseudonym: Some("contributor-2-beta".to_string()),
+            submitted_tenant_scope_ref: Some("tenant-scope-beta".to_string()),
+            schema_version: "ironclaw.trace_contribution.v1".to_string(),
+            consent_policy_version: "trace-credit-policy-v2".to_string(),
+            consent_scopes: vec!["ranking_training".to_string()],
+            allowed_uses: vec!["ranking_model_training".to_string()],
+            retention_policy_id: "private_corpus_revocable".to_string(),
+            status: TraceCorpusStatus::Accepted,
+            privacy_risk: "low".to_string(),
+            redaction_pipeline_version: "server-rescrub-v1".to_string(),
+            redaction_counts: BTreeMap::new(),
+            redaction_hash: "sha256:second-redaction-beta".to_string(),
+            canonical_summary_hash: Some("sha256:second-summary-beta".to_string()),
+            submission_score: Some(0.4),
+            credit_points_pending: Some(0.0),
+            credit_points_final: None,
+            expires_at: None,
+        })
+        .await
+        .expect("insert beta second accepted ranking source with same ids");
     let preference_label = backend
         .upsert_trace_ranking_preference_label(TraceRankingPreferenceLabelWrite {
             tenant_id: tenant_alpha.clone(),
@@ -883,6 +1002,25 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
         idempotent_preference.preference_label_id,
         preference_label.preference_label_id
     );
+
+    backend
+        .upsert_trace_ranking_preference_label(TraceRankingPreferenceLabelWrite {
+            tenant_id: tenant_beta.clone(),
+            preference_label_id: preference_label.preference_label_id,
+            preferred_submission_id: submission_id,
+            preferred_trace_id: trace_id,
+            rejected_submission_id: second_submission_id,
+            rejected_trace_id: second_trace_id,
+            target_use: "ranking_model_training".to_string(),
+            label_source: TraceRankingLabelSource::FrontierLab,
+            utility_category: TraceRankingUtilityCategory::RankingTraining,
+            preference_strength_micros: 650_000,
+            evidence_hash: "sha256:pairwise-frontier-evidence-beta".to_string(),
+            external_ref_hash: "sha256:frontier-private-pair-ref".to_string(),
+            actor_principal_ref: "principal:ranker-worker-beta".to_string(),
+        })
+        .await
+        .expect("upsert beta ranking preference label with same idempotency key");
 
     let calibration_run_id = Uuid::new_v4();
     let calibration_run = backend
@@ -934,6 +1072,38 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
     assert_eq!(calibration_run.mean_signed_error_micros, Some(-400_000));
     assert!(calibration_run.promotable);
 
+    backend
+        .upsert_trace_ranking_calibration_run(TraceRankingCalibrationRunWrite {
+            tenant_id: tenant_beta.clone(),
+            calibration_run_id,
+            model_version: model.model_version.clone(),
+            target_use: "model_training".to_string(),
+            policy_version: "trace-credit-policy-v2".to_string(),
+            evaluation_dataset_hash: "sha256:calibration-eval-dataset-beta".to_string(),
+            prediction_count: 1,
+            label_count: 1,
+            joined_label_prediction_count: 1,
+            joined_label_source_count: 1,
+            joined_evidence_hash: "sha256:ranking-calibration-joined-evidence-beta".to_string(),
+            average_predicted_utility_micros: Some(1_800_000),
+            average_label_utility_delta_micros: Some(1_900_000),
+            average_absolute_error_micros: Some(100_000),
+            max_label_source_average_absolute_error_micros: Some(100_000),
+            max_error_label_source: Some("frontier_lab".to_string()),
+            mean_signed_error_micros: Some(-100_000),
+            low_confidence_prediction_count: 0,
+            confidence_threshold: 0.5,
+            min_label_count: 1,
+            min_label_source_count: 1,
+            max_average_absolute_error_micros: 500_000,
+            promotable: true,
+            reason_codes: Vec::new(),
+            report_hash: "sha256:ranking-calibration-report-beta".to_string(),
+            actor_principal_ref: "principal:ranker-worker-beta".to_string(),
+        })
+        .await
+        .expect("upsert beta ranking calibration run with same id");
+
     let mut reason_counts = BTreeMap::new();
     reason_counts.insert("insufficient_labels".to_string(), 1);
     let worker_run_id = Uuid::new_v4();
@@ -981,6 +1151,36 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
         Some(&1)
     );
 
+    let mut beta_reason_counts = BTreeMap::new();
+    beta_reason_counts.insert("beta_pending".to_string(), 1);
+    backend
+        .upsert_trace_ranking_worker_run(TraceRankingWorkerRunWrite {
+            tenant_id: tenant_beta.clone(),
+            ranking_worker_run_id: worker_run_id,
+            run_kind: TraceRankingWorkerRunKind::ModelPromotion,
+            status: TraceRankingWorkerRunStatus::Running,
+            dry_run: false,
+            reason_hash: "sha256:ranking-worker-run-reason-beta".to_string(),
+            model_version: Some(model.model_version.clone()),
+            target_use: Some("model_training".to_string()),
+            policy_version: Some("trace-credit-policy-v2".to_string()),
+            limit: 10,
+            checked_count: 1,
+            succeeded_count: 0,
+            skipped_existing_count: 0,
+            skipped_model_risk_count: 0,
+            skipped_ineligible_count: 1,
+            pending_after_count: 1,
+            result_refs: vec![format!("ranking_model:{}", model.model_version)],
+            reason_counts: beta_reason_counts,
+            actor_principal_ref: "principal:ranker-worker-beta".to_string(),
+            created_at: Utc::now(),
+            completed_at: None,
+            last_error_hash: None,
+        })
+        .await
+        .expect("upsert beta ranking worker run with same id");
+
     let alpha_models = backend
         .list_trace_ranking_model_versions(&tenant_alpha)
         .await
@@ -1014,53 +1214,148 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
         .await
         .expect("list alpha ranking worker runs");
     assert_eq!(alpha_models.len(), 1);
+    assert_eq!(alpha_models[0].tenant_id, tenant_alpha);
+    assert_eq!(alpha_models[0].model_version, model.model_version);
+    assert_eq!(
+        alpha_models[0].model_artifact_hash.as_str(),
+        "sha256:model-artifact"
+    );
     assert_eq!(alpha_calibration_datasets.len(), 1);
+    assert_eq!(alpha_calibration_datasets[0].tenant_id, tenant_alpha);
+    assert_eq!(
+        alpha_calibration_datasets[0].source_manifest_hash.as_str(),
+        "sha256:calibration-source-manifest"
+    );
     assert_eq!(alpha_features.len(), 1);
+    assert_eq!(alpha_features[0].tenant_id, tenant_alpha);
+    assert_eq!(alpha_features[0].ranking_feature_id, feature_id);
+    assert_eq!(
+        alpha_features[0].feature_vector_hash.as_str(),
+        "sha256:feature-vector"
+    );
     assert_eq!(alpha_predictions.len(), 1);
+    assert_eq!(alpha_predictions[0].tenant_id, tenant_alpha);
+    assert_eq!(alpha_predictions[0].ranking_prediction_id, prediction_id);
+    assert_eq!(alpha_predictions[0].settlement_score_micros, 2_175_000);
     assert_eq!(alpha_labels.len(), 1);
+    assert_eq!(alpha_labels[0].tenant_id, tenant_alpha);
+    assert_eq!(alpha_labels[0].ranking_label_id, label.ranking_label_id);
+    assert_eq!(alpha_labels[0].utility_delta_micros, 2_500_000);
     assert_eq!(alpha_preference_labels.len(), 1);
+    assert_eq!(alpha_preference_labels[0].tenant_id, tenant_alpha);
+    assert_eq!(
+        alpha_preference_labels[0].preference_label_id,
+        preference_label.preference_label_id
+    );
+    assert_eq!(
+        alpha_preference_labels[0].preference_strength_micros,
+        850_000
+    );
     assert_eq!(alpha_calibration_runs.len(), 1);
+    assert_eq!(alpha_calibration_runs[0].tenant_id, tenant_alpha);
+    assert_eq!(
+        alpha_calibration_runs[0].calibration_run_id,
+        calibration_run_id
+    );
+    assert_eq!(
+        alpha_calibration_runs[0].report_hash.as_str(),
+        "sha256:ranking-calibration-report"
+    );
     assert_eq!(alpha_worker_runs.len(), 1);
+    assert_eq!(alpha_worker_runs[0].tenant_id, tenant_alpha);
+    assert_eq!(alpha_worker_runs[0].ranking_worker_run_id, worker_run_id);
+    assert_eq!(
+        alpha_worker_runs[0].status,
+        TraceRankingWorkerRunStatus::Completed
+    );
 
-    assert!(
-        backend
-            .list_trace_ranking_calibration_datasets(&tenant_beta)
-            .await
-            .expect("list beta ranking calibration datasets")
-            .is_empty(),
-        "ranking calibration datasets must stay tenant scoped"
+    let beta_models = backend
+        .list_trace_ranking_model_versions(&tenant_beta)
+        .await
+        .expect("list beta ranking models");
+    let beta_calibration_datasets = backend
+        .list_trace_ranking_calibration_datasets(&tenant_beta)
+        .await
+        .expect("list beta ranking calibration datasets");
+    let beta_features = backend
+        .list_trace_ranking_features(&tenant_beta)
+        .await
+        .expect("list beta ranking features");
+    let beta_predictions = backend
+        .list_trace_ranking_predictions(&tenant_beta)
+        .await
+        .expect("list beta ranking predictions");
+    let beta_labels = backend
+        .list_trace_ranking_labels(&tenant_beta)
+        .await
+        .expect("list beta ranking labels");
+    let beta_preference_labels = backend
+        .list_trace_ranking_preference_labels(&tenant_beta)
+        .await
+        .expect("list beta ranking preference labels");
+    let beta_calibration_runs = backend
+        .list_trace_ranking_calibration_runs(&tenant_beta)
+        .await
+        .expect("list beta ranking calibration runs");
+    let beta_worker_runs = backend
+        .list_trace_ranking_worker_runs(&tenant_beta)
+        .await
+        .expect("list beta ranking worker runs");
+    assert_eq!(beta_models.len(), 1);
+    assert_eq!(beta_models[0].tenant_id, tenant_beta);
+    assert_eq!(beta_models[0].model_version, model.model_version);
+    assert_eq!(
+        beta_models[0].model_artifact_hash.as_str(),
+        "sha256:model-artifact-beta"
     );
-    assert!(
-        backend
-            .list_trace_ranking_labels(&tenant_beta)
-            .await
-            .expect("list beta ranking labels")
-            .is_empty(),
-        "ranking evidence must stay tenant scoped"
+    assert_eq!(beta_calibration_datasets.len(), 1);
+    assert_eq!(beta_calibration_datasets[0].tenant_id, tenant_beta);
+    assert_eq!(
+        beta_calibration_datasets[0].source_manifest_hash.as_str(),
+        "sha256:calibration-source-manifest-beta"
     );
-    assert!(
-        backend
-            .list_trace_ranking_preference_labels(&tenant_beta)
-            .await
-            .expect("list beta ranking preference labels")
-            .is_empty(),
-        "ranking preference evidence must stay tenant scoped"
+    assert_eq!(beta_features.len(), 1);
+    assert_eq!(beta_features[0].tenant_id, tenant_beta);
+    assert_eq!(beta_features[0].ranking_feature_id, feature_id);
+    assert_eq!(
+        beta_features[0].feature_vector_hash.as_str(),
+        "sha256:feature-vector-beta"
     );
-    assert!(
-        backend
-            .list_trace_ranking_calibration_runs(&tenant_beta)
-            .await
-            .expect("list beta ranking calibration runs")
-            .is_empty(),
-        "ranking calibration runs must stay tenant scoped"
+    assert_eq!(beta_predictions.len(), 1);
+    assert_eq!(beta_predictions[0].tenant_id, tenant_beta);
+    assert_eq!(beta_predictions[0].ranking_prediction_id, prediction_id);
+    assert_eq!(beta_predictions[0].settlement_score_micros, 1_775_000);
+    assert_eq!(beta_labels.len(), 1);
+    assert_eq!(beta_labels[0].tenant_id, tenant_beta);
+    assert_eq!(beta_labels[0].ranking_label_id, label.ranking_label_id);
+    assert_eq!(beta_labels[0].utility_delta_micros, 1_900_000);
+    assert_eq!(beta_preference_labels.len(), 1);
+    assert_eq!(beta_preference_labels[0].tenant_id, tenant_beta);
+    assert_eq!(
+        beta_preference_labels[0].preference_label_id,
+        preference_label.preference_label_id
     );
-    assert!(
-        backend
-            .list_trace_ranking_worker_runs(&tenant_beta)
-            .await
-            .expect("list beta ranking worker runs")
-            .is_empty(),
-        "ranking worker runs must stay tenant scoped"
+    assert_eq!(
+        beta_preference_labels[0].preference_strength_micros,
+        650_000
+    );
+    assert_eq!(beta_calibration_runs.len(), 1);
+    assert_eq!(beta_calibration_runs[0].tenant_id, tenant_beta);
+    assert_eq!(
+        beta_calibration_runs[0].calibration_run_id,
+        calibration_run_id
+    );
+    assert_eq!(
+        beta_calibration_runs[0].report_hash.as_str(),
+        "sha256:ranking-calibration-report-beta"
+    );
+    assert_eq!(beta_worker_runs.len(), 1);
+    assert_eq!(beta_worker_runs[0].tenant_id, tenant_beta);
+    assert_eq!(beta_worker_runs[0].ranking_worker_run_id, worker_run_id);
+    assert_eq!(
+        beta_worker_runs[0].status,
+        TraceRankingWorkerRunStatus::Running,
+        "ranking worker-run status must stay tenant scoped even when ids overlap"
     );
 
     cleanup_tenant(&backend, &tenant_alpha).await;
