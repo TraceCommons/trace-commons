@@ -48248,6 +48248,18 @@ impl TraceOperationalPromotionGateSummary {
             ranking.calibration_dataset_manifest_conflict_count;
         let stale_ranking_worker_run_count = ranking.stale_running_worker_run_count;
         let failed_ranking_worker_run_count = ranking.failed_worker_run_count;
+        let artifact_object_store_configured = state.artifact_store.is_some();
+        let artifact_object_store_io_enabled = state
+            .artifact_store
+            .as_ref()
+            .is_some_and(|store| store.object_io_enabled());
+        let object_primary_object_store_eligible = state
+            .artifact_store
+            .as_ref()
+            .is_some_and(|store| store.object_primary_eligible());
+        let object_primary_enabled = state.object_primary_submit_review
+            || state.object_primary_replay_export
+            || state.object_primary_derived_exports;
         let ranking_worker_run_actionable_skip_count = ranking
             .worker_run_skipped_model_risk_total
             .saturating_add(ranking.worker_run_skipped_ineligible_total);
@@ -48321,6 +48333,13 @@ impl TraceOperationalPromotionGateSummary {
             && !db_mirror_configured
         {
             blocking_gates.push("object_primary_storage_required_without_db_mirror".to_string());
+        }
+        if object_primary_enabled && !artifact_object_store_configured {
+            blocking_gates.push("object_primary_object_store_missing".to_string());
+        } else if object_primary_enabled && !artifact_object_store_io_enabled {
+            blocking_gates.push("object_primary_object_store_io_disabled".to_string());
+        } else if object_primary_enabled && !object_primary_object_store_eligible {
+            blocking_gates.push("object_primary_object_store_not_eligible".to_string());
         }
         if db_summary.db_available {
             match trace_corpus_rls_ready {
@@ -60147,6 +60166,60 @@ mod tests {
                     .as_deref()
                     .is_some_and(|reason| reason.starts_with("surface=operational_summary;"))
         }));
+    }
+
+    #[tokio::test]
+    async fn operational_summary_blocks_object_primary_without_object_store() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        {
+            let state = Arc::make_mut(&mut state);
+            state.object_primary_submit_review = true;
+        }
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-summary")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("operational summary response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 128 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("operational summary parses");
+        assert_eq!(value["promotion_gates"]["ready"], serde_json::json!(false));
+        assert_eq!(
+            value["object_store"]["configured"],
+            serde_json::json!(false)
+        );
+        assert!(
+            value["promotion_gates"]["blocking_gates"]
+                .as_array()
+                .expect("blocking gates are an array")
+                .contains(&serde_json::json!(
+                    "object_primary_storage_required_without_db_mirror"
+                ))
+        );
+        assert!(
+            value["promotion_gates"]["blocking_gates"]
+                .as_array()
+                .expect("blocking gates are an array")
+                .contains(&serde_json::json!("object_primary_object_store_missing"))
+        );
+
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(body_text.contains("object_primary_object_store_missing"));
+        assert!(!body_text.contains("admin-token-a"));
     }
 
     #[tokio::test]
