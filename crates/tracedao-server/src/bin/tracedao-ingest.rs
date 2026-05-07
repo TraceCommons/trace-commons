@@ -23864,6 +23864,7 @@ struct TraceVectorIndexDrillResponse {
     skipped_existing_count: usize,
     pending_after_count: usize,
     candidate_count: usize,
+    nearest_neighbor_policy_gap_count: usize,
     blocking_gaps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
@@ -24928,20 +24929,14 @@ async fn run_vector_index_drill(
         .checked_count
         .saturating_add(worker.skipped_existing_count)
         .saturating_add(worker.pending_after_count);
+    let nearest_neighbor_policy_gap_count =
+        trace_vector_nearest_neighbor_policy_gap_count_for_tenant(state, tenant).await?;
     let blocking_gaps = vector_index_drill_blocking_gaps(
         state,
         candidate_count,
         worker.pending_after_count,
+        nearest_neighbor_policy_gap_count,
         &request,
-    );
-    let evidence_hash = vector_index_drill_evidence_hash(
-        tenant,
-        &worker,
-        candidate_count,
-        limit,
-        request.require_candidates,
-        &blocking_gaps,
-        state,
     );
     let mut response = TraceVectorIndexDrillResponse {
         tenant_id: tenant.tenant_id.clone(),
@@ -24949,7 +24944,7 @@ async fn run_vector_index_drill(
         generated_at,
         purpose: worker.purpose,
         ready: blocking_gaps.is_empty(),
-        evidence_hash,
+        evidence_hash: String::new(),
         dry_run: worker.dry_run,
         audit_event_id: worker.audit_event_id,
         limit,
@@ -24963,9 +24958,11 @@ async fn run_vector_index_drill(
         skipped_existing_count: worker.skipped_existing_count,
         pending_after_count: worker.pending_after_count,
         candidate_count,
+        nearest_neighbor_policy_gap_count,
         blocking_gaps,
         recorded_evidence: None,
     };
+    response.evidence_hash = vector_index_drill_evidence_hash(tenant, &response, state);
 
     if request.record_evidence {
         let evidence = TraceRolloutSmokeEvidenceResponse {
@@ -24995,6 +24992,26 @@ async fn run_vector_index_drill(
     }
 
     Ok(response)
+}
+
+async fn trace_vector_nearest_neighbor_policy_gap_count_for_tenant(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<usize> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(0);
+    };
+    let metadata = read_reviewer_metadata_view(state, tenant)
+        .await
+        .context("failed to read metadata for vector neighbor policy diagnostics")?;
+    let vector_entries = db
+        .list_trace_vector_entries(&tenant.tenant_id)
+        .await
+        .context("failed to read vector entries for vector neighbor policy diagnostics")?;
+    Ok(trace_vector_nearest_neighbor_policy_gap_count(
+        &metadata.derived,
+        &vector_entries,
+    ))
 }
 
 async fn run_analytics_release_drill(
@@ -26054,6 +26071,7 @@ fn vector_index_drill_blocking_gaps(
     state: &AppState,
     candidate_count: usize,
     pending_after_count: usize,
+    nearest_neighbor_policy_gap_count: usize,
     request: &TraceVectorIndexDrillRequest,
 ) -> Vec<String> {
     let mut gaps = Vec::new();
@@ -26071,6 +26089,11 @@ fn vector_index_drill_blocking_gaps(
         &mut gaps,
         "vector_index_pending_after_limit",
         pending_after_count,
+    );
+    push_rollback_gap_count(
+        &mut gaps,
+        "vector_nearest_neighbor_policy_gaps",
+        nearest_neighbor_policy_gap_count,
     );
     gaps
 }
@@ -26779,11 +26802,7 @@ fn retention_dry_run_drill_evidence_hash(
 
 fn vector_index_drill_evidence_hash(
     tenant: &TenantAuth,
-    response: &TraceVectorIndexResponse,
-    candidate_count: usize,
-    limit: usize,
-    require_candidates: bool,
-    blocking_gaps: &[String],
+    response: &TraceVectorIndexDrillResponse,
     state: &AppState,
 ) -> String {
     sha256_prefixed(
@@ -26792,8 +26811,8 @@ fn vector_index_drill_evidence_hash(
             "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
             "actor_principal_ref": tenant.principal_ref,
             "dry_run": response.dry_run,
-            "limit": limit,
-            "require_candidates": require_candidates,
+            "limit": response.limit,
+            "require_candidates": response.require_candidates,
             "private_embedder_configured": state.vector_embedder.is_some(),
             "private_embedder_required": state.require_external_vector_embedder,
             "private_searcher_configured": state.vector_searcher.is_some(),
@@ -26802,8 +26821,9 @@ fn vector_index_drill_evidence_hash(
             "vector_entries_indexed": response.vector_entries_indexed,
             "skipped_existing_count": response.skipped_existing_count,
             "pending_after_count": response.pending_after_count,
-            "candidate_count": candidate_count,
-            "blocking_gaps": blocking_gaps,
+            "candidate_count": response.candidate_count,
+            "nearest_neighbor_policy_gap_count": response.nearest_neighbor_policy_gap_count,
+            "blocking_gaps": response.blocking_gaps,
         })
         .to_string(),
     )
@@ -27546,6 +27566,10 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         (
             "accepted_current_with_active_vector",
             response.vectors.accepted_current_derived_with_active_vector,
+        ),
+        (
+            "nearest_neighbor_policy_gaps",
+            response.vectors.nearest_neighbor_policy_gap_count,
         ),
     ] {
         push_prometheus_gauge(
@@ -48522,6 +48546,7 @@ struct TraceOperationalPromotionGateSummary {
     stale_export_job_count: usize,
     failed_retention_job_count: usize,
     vector_missing_count: usize,
+    vector_nearest_neighbor_policy_gap_count: usize,
     benchmark_registry_outbox_pending_without_submitter_count: usize,
     benchmark_registry_outbox_submitted_without_confirmer_count: usize,
     publishable_benchmark_without_external_evaluator_count: usize,
@@ -48575,6 +48600,7 @@ impl TraceOperationalPromotionGateSummary {
         let vector_missing_count = vectors
             .accepted_current_derived
             .saturating_sub(vectors.accepted_current_derived_with_active_vector);
+        let vector_nearest_neighbor_policy_gap_count = vectors.nearest_neighbor_policy_gap_count;
         let published_benchmark_external_registry_gap_count =
             benchmarks.external_registry_adapter_gap_count;
         let revoked_benchmark_external_registry_invalidation_gap_count =
@@ -48710,6 +48736,11 @@ impl TraceOperationalPromotionGateSummary {
         }
         push_gap_count(
             &mut blocking_gates,
+            "vector_nearest_neighbor_policy_gaps",
+            vector_nearest_neighbor_policy_gap_count,
+        );
+        push_gap_count(
+            &mut blocking_gates,
             "at_risk_ranking_models",
             at_risk_ranking_model_count,
         );
@@ -48818,6 +48849,7 @@ impl TraceOperationalPromotionGateSummary {
             stale_export_job_count,
             failed_retention_job_count,
             vector_missing_count,
+            vector_nearest_neighbor_policy_gap_count,
             benchmark_registry_outbox_pending_without_submitter_count,
             benchmark_registry_outbox_submitted_without_confirmer_count,
             publishable_benchmark_without_external_evaluator_count,
@@ -49071,6 +49103,7 @@ struct TraceOperationalVectorSummary {
     deleted_entries: usize,
     accepted_current_derived: usize,
     accepted_current_derived_with_active_vector: usize,
+    nearest_neighbor_policy_gap_count: usize,
     active_coverage_percent: f32,
 }
 
@@ -49104,6 +49137,10 @@ impl TraceOperationalVectorSummary {
             entry_count: db_summary.vector_entries.len(),
             accepted_current_derived,
             accepted_current_derived_with_active_vector,
+            nearest_neighbor_policy_gap_count: trace_vector_nearest_neighbor_policy_gap_count(
+                derived,
+                &db_summary.vector_entries,
+            ),
             active_coverage_percent: if accepted_current_derived == 0 {
                 0.0
             } else {
@@ -49122,6 +49159,65 @@ impl TraceOperationalVectorSummary {
         }
         summary
     }
+}
+
+fn trace_vector_nearest_neighbor_policy_gap_count(
+    derived: &[TraceCommonsDerivedRecord],
+    vector_entries: &[StorageTraceVectorEntryRecord],
+) -> usize {
+    let trace_id_by_submission = derived
+        .iter()
+        .filter(|record| record.status == TraceCorpusStatus::Accepted)
+        .map(|record| (record.submission_id, record.trace_id.to_string()))
+        .collect::<BTreeMap<_, _>>();
+    let mut active_entries_by_trace_id: BTreeMap<String, Vec<&StorageTraceVectorEntryRecord>> =
+        BTreeMap::new();
+    for entry in vector_entries
+        .iter()
+        .filter(|entry| trace_vector_entry_is_active(entry))
+    {
+        if let Some(trace_id) = trace_id_by_submission.get(&entry.submission_id) {
+            active_entries_by_trace_id
+                .entry(trace_id.clone())
+                .or_default()
+                .push(entry);
+        }
+    }
+
+    vector_entries
+        .iter()
+        .filter(|entry| trace_vector_entry_is_active(entry))
+        .filter(|entry| {
+            let own_trace_id = trace_id_by_submission.get(&entry.submission_id);
+            entry.nearest_trace_ids.iter().any(|nearest_trace_id| {
+                own_trace_id.is_some_and(|own_trace_id| own_trace_id == nearest_trace_id)
+                    || !active_entries_by_trace_id
+                        .get(nearest_trace_id)
+                        .is_some_and(|neighbors| {
+                            neighbors.iter().any(|neighbor| {
+                                trace_vector_entries_are_policy_compatible(entry, neighbor)
+                            })
+                        })
+            })
+        })
+        .count()
+}
+
+fn trace_vector_entry_is_active(entry: &StorageTraceVectorEntryRecord) -> bool {
+    entry.status == StorageTraceVectorEntryStatus::Active
+        && entry.invalidated_at.is_none()
+        && entry.deleted_at.is_none()
+}
+
+fn trace_vector_entries_are_policy_compatible(
+    target: &StorageTraceVectorEntryRecord,
+    neighbor: &StorageTraceVectorEntryRecord,
+) -> bool {
+    target.vector_store == neighbor.vector_store
+        && target.embedding_model == neighbor.embedding_model
+        && target.embedding_dimension == neighbor.embedding_dimension
+        && target.embedding_version == neighbor.embedding_version
+        && target.source_projection == neighbor.source_projection
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -66615,6 +66711,168 @@ mod tests {
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
 
+    #[tokio::test]
+    async fn admin_vector_index_drill_records_neighbor_policy_gap_evidence() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+
+        for prompt in [
+            "Calendar OAuth refresh failed after timezone retry",
+            "Warehouse schema migration checksum repair",
+        ] {
+            let mut envelope = sample_envelope_with_user_input(prompt).await;
+            make_metadata_only_low_risk(&mut envelope);
+            envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+            envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+            envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+            let _ = submit_trace_handler(
+                State(state.clone()),
+                auth_headers("token-a"),
+                Json(envelope),
+            )
+            .await
+            .expect("vector source submission mirrors into DB");
+        }
+
+        let derived = backend
+            .list_trace_derived_records("tenant-a")
+            .await
+            .expect("derived records read");
+        assert_eq!(derived.len(), 2);
+        let target = &derived[0];
+        let neighbor = &derived[1];
+        let target_source_hash = target
+            .canonical_summary_hash
+            .as_deref()
+            .expect("target summary hash exists");
+        let neighbor_source_hash = neighbor
+            .canonical_summary_hash
+            .as_deref()
+            .expect("neighbor summary hash exists");
+        let target_vector_entry_id = deterministic_vector_entry_uuid(
+            "tenant-a",
+            target.submission_id,
+            target.derived_id,
+            target_source_hash,
+        );
+        let neighbor_vector_entry_id = deterministic_vector_entry_uuid(
+            "tenant-a",
+            neighbor.submission_id,
+            neighbor.derived_id,
+            neighbor_source_hash,
+        );
+        let now = Utc::now();
+        backend
+            .upsert_trace_vector_entry(StorageTraceVectorEntryWrite {
+                tenant_id: "tenant-a".to_string(),
+                submission_id: target.submission_id,
+                derived_id: target.derived_id,
+                vector_entry_id: target_vector_entry_id,
+                vector_store: "private-vector-adapter".to_string(),
+                embedding_model: "private-redacted-summary-embedder-v1".to_string(),
+                embedding_dimension: 4,
+                embedding_version: "2026-05-05".to_string(),
+                source_projection: StorageTraceVectorEntrySourceProjection::CanonicalSummary,
+                source_hash: target_source_hash.to_string(),
+                status: StorageTraceVectorEntryStatus::Active,
+                nearest_trace_ids: vec![neighbor.trace_id.to_string()],
+                cluster_id: Some("embedding:target".to_string()),
+                duplicate_score: Some(0.92),
+                novelty_score: Some(0.08),
+                indexed_at: Some(now),
+                invalidated_at: None,
+                deleted_at: None,
+            })
+            .await
+            .expect("target vector entry writes");
+        backend
+            .upsert_trace_vector_entry(StorageTraceVectorEntryWrite {
+                tenant_id: "tenant-a".to_string(),
+                submission_id: neighbor.submission_id,
+                derived_id: neighbor.derived_id,
+                vector_entry_id: neighbor_vector_entry_id,
+                vector_store: "other-vector-store".to_string(),
+                embedding_model: "private-redacted-summary-embedder-v1".to_string(),
+                embedding_dimension: 4,
+                embedding_version: "2026-05-05".to_string(),
+                source_projection: StorageTraceVectorEntrySourceProjection::CanonicalSummary,
+                source_hash: neighbor_source_hash.to_string(),
+                status: StorageTraceVectorEntryStatus::Active,
+                nearest_trace_ids: Vec::new(),
+                cluster_id: Some("embedding:neighbor".to_string()),
+                duplicate_score: Some(0.0),
+                novelty_score: Some(0.9),
+                indexed_at: Some(now),
+                invalidated_at: None,
+                deleted_at: None,
+            })
+            .await
+            .expect("neighbor vector entry writes");
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/vector-index-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator vector neighbor policy drill",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("vector drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("vector drill response parses");
+        assert_eq!(
+            value["nearest_neighbor_policy_gap_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(value["ready"], serde_json::json!(false));
+        assert!(
+            value["blocking_gaps"]
+                .as_array()
+                .expect("blocking gaps array")
+                .contains(&serde_json::json!("vector_nearest_neighbor_policy_gaps=1"))
+        );
+        assert_eq!(
+            value["recorded_evidence"]["check_name"],
+            serde_json::json!("vector_index")
+        );
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("failed")
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
     async fn overwrite_pg_derived_summary_for_test(
         backend: &PgBackend,
         tenant_id: &str,
@@ -82240,6 +82498,147 @@ mod tests {
         assert!(metrics.contains(
             "tracedao_operational_promotion_gate{tenant_storage_ref=\"tenant_sha256:80a707af7dc77ee1228f9127180f3964\",severity=\"blocking\",gate=\"stale_export_jobs\"} 1"
         ));
+    }
+
+    #[test]
+    fn operational_summary_blocks_vector_nearest_neighbor_policy_gaps() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let now = Utc::now();
+        let target_submission_id =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000101").expect("uuid parses");
+        let neighbor_submission_id =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000102").expect("uuid parses");
+        let target_trace_id =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000201").expect("uuid parses");
+        let neighbor_trace_id =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000202").expect("uuid parses");
+        let derived = vec![
+            TraceCommonsDerivedRecord {
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                derived_id: Some(Uuid::new_v4()),
+                submission_id: target_submission_id,
+                trace_id: target_trace_id,
+                status: TraceCorpusStatus::Accepted,
+                privacy_risk: ResidualPiiRisk::Low,
+                task_success: "success".to_string(),
+                canonical_summary: "target summary".to_string(),
+                canonical_summary_hash: "sha256:target".to_string(),
+                summary_model: "summary-model-v1".to_string(),
+                event_count: 1,
+                tool_sequence: Vec::new(),
+                tool_categories: Vec::new(),
+                coverage_tags: Vec::new(),
+                duplicate_score: 0.0,
+                novelty_score: 0.9,
+                created_at: now,
+            },
+            TraceCommonsDerivedRecord {
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                derived_id: Some(Uuid::new_v4()),
+                submission_id: neighbor_submission_id,
+                trace_id: neighbor_trace_id,
+                status: TraceCorpusStatus::Accepted,
+                privacy_risk: ResidualPiiRisk::Low,
+                task_success: "success".to_string(),
+                canonical_summary: "neighbor summary".to_string(),
+                canonical_summary_hash: "sha256:neighbor".to_string(),
+                summary_model: "summary-model-v1".to_string(),
+                event_count: 1,
+                tool_sequence: Vec::new(),
+                tool_categories: Vec::new(),
+                coverage_tags: Vec::new(),
+                duplicate_score: 0.1,
+                novelty_score: 0.8,
+                created_at: now,
+            },
+        ];
+        let response = TraceOperationalSummaryResponse::from_parts(TraceOperationalSummaryInputs {
+            state: state.as_ref(),
+            tenant_id: "tenant-a".to_string(),
+            records: Vec::new(),
+            derived,
+            credit_events: Vec::new(),
+            db_summary: TraceOperationalDbSummary {
+                db_available: true,
+                trace_corpus_rls: Some(production_ready_rls_diagnostics_for_tests()),
+                vector_entries: vec![
+                    StorageTraceVectorEntryRecord {
+                        tenant_id: "tenant-a".to_string(),
+                        submission_id: target_submission_id,
+                        derived_id: Uuid::new_v4(),
+                        vector_entry_id: Uuid::new_v4(),
+                        vector_store: "private-vector-adapter".to_string(),
+                        embedding_model: "private-redacted-summary-embedder-v1".to_string(),
+                        embedding_dimension: 4,
+                        embedding_version: "2026-05-05".to_string(),
+                        source_projection:
+                            StorageTraceVectorEntrySourceProjection::CanonicalSummary,
+                        source_hash: "sha256:target".to_string(),
+                        status: StorageTraceVectorEntryStatus::Active,
+                        nearest_trace_ids: vec![neighbor_trace_id.to_string()],
+                        cluster_id: Some("embedding:target".to_string()),
+                        duplicate_score: Some(0.92),
+                        novelty_score: Some(0.08),
+                        indexed_at: Some(now),
+                        invalidated_at: None,
+                        deleted_at: None,
+                        created_at: now,
+                        updated_at: now,
+                    },
+                    StorageTraceVectorEntryRecord {
+                        tenant_id: "tenant-a".to_string(),
+                        submission_id: neighbor_submission_id,
+                        derived_id: Uuid::new_v4(),
+                        vector_entry_id: Uuid::new_v4(),
+                        vector_store: "other-vector-store".to_string(),
+                        embedding_model: "private-redacted-summary-embedder-v1".to_string(),
+                        embedding_dimension: 4,
+                        embedding_version: "2026-05-05".to_string(),
+                        source_projection:
+                            StorageTraceVectorEntrySourceProjection::CanonicalSummary,
+                        source_hash: "sha256:neighbor".to_string(),
+                        status: StorageTraceVectorEntryStatus::Active,
+                        nearest_trace_ids: Vec::new(),
+                        cluster_id: Some("embedding:neighbor".to_string()),
+                        duplicate_score: Some(0.0),
+                        novelty_score: Some(0.9),
+                        indexed_at: Some(now),
+                        invalidated_at: None,
+                        deleted_at: None,
+                        created_at: now,
+                        updated_at: now,
+                    },
+                ],
+                ..TraceOperationalDbSummary::default()
+            },
+            benchmark_artifacts: Vec::new(),
+            benchmark_registry_outbox: Vec::new(),
+            ranking: TraceOperationalRankingSummary::default(),
+            rollout_smoke_evidence: Vec::new(),
+            generated_at: now,
+        });
+
+        assert_eq!(response.vectors.nearest_neighbor_policy_gap_count, 1);
+        assert_eq!(
+            response
+                .promotion_gates
+                .vector_nearest_neighbor_policy_gap_count,
+            1
+        );
+        assert!(
+            response
+                .promotion_gates
+                .blocking_gates
+                .contains(&"vector_nearest_neighbor_policy_gaps=1".to_string())
+        );
+        let (metrics, _) = trace_operational_metrics_body(&response);
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(metrics.contains(&format!(
+            "tracedao_operational_vector_entries{{tenant_storage_ref=\"{tenant_ref}\",state=\"nearest_neighbor_policy_gaps\"}} 1"
+        )));
     }
 
     #[tokio::test]
