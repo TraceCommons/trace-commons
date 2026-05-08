@@ -86471,6 +86471,156 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_credit_risk_summary_is_tenant_scoped() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let mut tenant_a_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_a_envelope);
+        tenant_a_envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        tenant_a_envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        tenant_a_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let tenant_a_submission_id = tenant_a_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(tenant_a_envelope),
+        )
+        .await
+        .expect("tenant-a submission succeeds");
+        let Json(tenant_a_event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(tenant_a_submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.25,
+                reason: Some("tenant-a pending utility".to_string()),
+                external_ref: Some("frontier:tenant-a-risk-boundary".to_string()),
+            }),
+        )
+        .await
+        .expect("tenant-a reviewer can append utility credit");
+
+        let mut tenant_b_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_b_envelope);
+        tenant_b_envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        tenant_b_envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        tenant_b_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let tenant_b_submission_id = tenant_b_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_envelope),
+        )
+        .await
+        .expect("tenant-b submission succeeds");
+        let Json(tenant_b_event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-b"),
+            AxumPath(tenant_b_submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 2.5,
+                reason: Some("tenant-b held utility".to_string()),
+                external_ref: Some("frontier:tenant-b-risk-boundary".to_string()),
+            }),
+        )
+        .await
+        .expect("tenant-b reviewer can append utility credit");
+        let Json(_) = credit_hold_handler(
+            State(state.clone()),
+            auth_headers("admin-token-b"),
+            Json(TraceCreditHoldRequest {
+                credit_account_ref: tenant_b_event.auth_principal_ref.clone(),
+                reason: StorageTraceCreditHoldReason::AttestationDispute,
+                reason_detail: "tenant-b hold remains tenant local".to_string(),
+            }),
+        )
+        .await
+        .expect("tenant-b admin can hold tenant-b account");
+
+        let tenant_a_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/credit-risk-summary")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("tenant-a risk request builds"),
+            )
+            .await
+            .expect("tenant-a risk response");
+        assert_eq!(tenant_a_response.status(), StatusCode::OK);
+        let tenant_a_body = axum::body::to_bytes(tenant_a_response.into_body(), 16384)
+            .await
+            .expect("tenant-a risk body reads");
+        let tenant_a_value: serde_json::Value =
+            serde_json::from_slice(&tenant_a_body).expect("tenant-a risk json parses");
+        assert_eq!(tenant_a_value["account_count"], serde_json::json!(1));
+        assert_eq!(
+            tenant_a_value["pending_credit_micros"],
+            serde_json::json!(1_250_000)
+        );
+        assert_eq!(tenant_a_value["held_credit_micros"], serde_json::json!(0));
+        assert_eq!(tenant_a_value["held_account_count"], serde_json::json!(0));
+        let tenant_a_accounts = tenant_a_value["accounts"]
+            .as_array()
+            .expect("tenant-a accounts array");
+        assert_eq!(tenant_a_accounts.len(), 1);
+        assert_eq!(
+            tenant_a_accounts[0]["credit_account_hash"],
+            serde_json::json!(sha256_prefixed(&tenant_a_event.auth_principal_ref))
+        );
+        let tenant_a_text = std::str::from_utf8(&tenant_a_body).expect("tenant-a body is utf8");
+        assert!(!tenant_a_text.contains(&sha256_prefixed(&tenant_b_event.auth_principal_ref)));
+        assert!(!tenant_a_text.contains("tenant-b held utility"));
+
+        let tenant_b_response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/credit-risk-summary")
+                    .header(AUTHORIZATION, "Bearer admin-token-b")
+                    .body(Body::empty())
+                    .expect("tenant-b risk request builds"),
+            )
+            .await
+            .expect("tenant-b risk response");
+        assert_eq!(tenant_b_response.status(), StatusCode::OK);
+        let tenant_b_body = axum::body::to_bytes(tenant_b_response.into_body(), 16384)
+            .await
+            .expect("tenant-b risk body reads");
+        let tenant_b_value: serde_json::Value =
+            serde_json::from_slice(&tenant_b_body).expect("tenant-b risk json parses");
+        assert_eq!(tenant_b_value["account_count"], serde_json::json!(1));
+        assert_eq!(
+            tenant_b_value["pending_credit_micros"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            tenant_b_value["held_credit_micros"],
+            serde_json::json!(2_500_000)
+        );
+        assert_eq!(tenant_b_value["held_account_count"], serde_json::json!(1));
+        let tenant_b_accounts = tenant_b_value["accounts"]
+            .as_array()
+            .expect("tenant-b accounts array");
+        assert_eq!(tenant_b_accounts.len(), 1);
+        assert_eq!(
+            tenant_b_accounts[0]["credit_account_hash"],
+            serde_json::json!(sha256_prefixed(&tenant_b_event.auth_principal_ref))
+        );
+        assert_eq!(tenant_b_accounts[0]["held"], serde_json::json!(true));
+        let tenant_b_text = std::str::from_utf8(&tenant_b_body).expect("tenant-b body is utf8");
+        assert!(!tenant_b_text.contains(&sha256_prefixed(&tenant_a_event.auth_principal_ref)));
+        assert!(!tenant_b_text.contains("tenant-a pending utility"));
+    }
+
+    #[tokio::test]
     async fn admin_credit_risk_summary_reports_hashed_pending_over_cap_accounts() {
         use axum::body::Body;
         use tower::ServiceExt;
