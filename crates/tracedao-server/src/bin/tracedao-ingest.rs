@@ -60235,6 +60235,26 @@ mod tests {
         .await
         .expect("accepted submission succeeds");
 
+        let mut tenant_b_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_b_envelope);
+        tenant_b_envelope.consent.scopes = vec![
+            ConsentScope::DebuggingEvaluation,
+            ConsentScope::RankingTraining,
+        ];
+        tenant_b_envelope.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        tenant_b_envelope.trace_card.allowed_uses = vec![
+            TraceAllowedUse::Evaluation,
+            TraceAllowedUse::RankingModelTraining,
+        ];
+        let tenant_b_submission_id = tenant_b_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_envelope),
+        )
+        .await
+        .expect("tenant-b accepted submission succeeds");
+
         let Json(response) = process_evaluation_worker_run_handler(
             State(state.clone()),
             auth_headers("process-eval-worker-token-a"),
@@ -60285,6 +60305,14 @@ mod tests {
         assert_eq!(process_eval.evaluator_version, "trajectory-judge:v3");
         assert_eq!(process_eval.overall_score, Some(0.88));
 
+        let tenant_b_record =
+            read_submission_record(temp.path(), "tenant-b", tenant_b_submission_id)
+                .expect("tenant-b record reads")
+                .expect("tenant-b record exists");
+        let tenant_b_stored = read_envelope_by_record(state.as_ref(), &tenant_b_record)
+            .expect("tenant-b envelope reads");
+        assert!(tenant_b_stored.process_evaluation.is_none());
+
         let labels = read_all_ranking_labels(temp.path(), "tenant-a").expect("labels read");
         assert_eq!(labels.len(), 1);
         assert_eq!(labels[0].submission_id, submission_id);
@@ -60298,6 +60326,11 @@ mod tests {
             !serde_json::to_string(&labels)
                 .expect("labels serialize")
                 .contains("process-eval-run:nightly-9")
+        );
+        assert!(
+            read_all_ranking_labels(temp.path(), "tenant-b")
+                .expect("tenant-b labels read")
+                .is_empty()
         );
 
         let Json(worker_runs) =
