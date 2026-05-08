@@ -649,7 +649,9 @@ the settlement batch and folded into newly queued NEAR receipt attestation and
 issuer-signature hashes. Dry-runs remain approval-free so operators can produce
 or inspect evidence before granting non-transferable credits; production
 credit-settlement drills report `issuer_approval_evidence_hash_missing` until
-the same hash is supplied for rehearsal.
+the same hash is supplied for rehearsal. Operational summary and metrics also
+surface `credit_settlement_issuer_approval_missing` when positive delayed credit
+exists while the central issuer approval gate is disabled.
 Admins can inspect `GET /v1/admin/credit-risk-summary` before issuing credit to
 see tenant-scoped pending, held, and over-cap totals grouped by deterministic
 credit-account hash. The response is bounded by `limit` (default 100, max 500)
