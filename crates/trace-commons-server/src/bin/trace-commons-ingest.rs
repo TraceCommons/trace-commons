@@ -90624,6 +90624,7 @@ mod tests {
             return;
         };
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_mirror: Arc<dyn Database> = backend.clone();
@@ -90660,6 +90661,27 @@ mod tests {
             })
             .await
             .expect("stale export job writes");
+        backend
+            .upsert_trace_export_job(StorageTraceExportJobWrite {
+                tenant_id: "tenant-b".to_string(),
+                export_job_id,
+                grant_id: Uuid::new_v4(),
+                caller_principal_ref: principal_storage_ref("review-token-b"),
+                requested_dataset_kind: "replay_dataset".to_string(),
+                purpose: "same_id_tenant_b_stale_replay_export".to_string(),
+                max_item_cap: Some(10),
+                status: StorageTraceExportJobStatus::Running,
+                requested_at: now - Duration::minutes(30),
+                started_at: Some(now - Duration::minutes(30)),
+                finished_at: None,
+                expires_at: now - Duration::minutes(2),
+                result_manifest_id: None,
+                item_count: None,
+                last_error: None,
+                metadata: BTreeMap::from([("state".to_string(), "started".to_string())]),
+            })
+            .await
+            .expect("tenant-b same-id stale export job writes");
 
         let utility_error = recover_stale_export_job_handler(
             State(state.clone()),
@@ -90752,6 +90774,18 @@ mod tests {
             .find(|job| job.export_job_id == fresh_export_job_id)
             .expect("fresh export job persisted");
         assert_eq!(fresh_db_job.status, StorageTraceExportJobStatus::Running);
+        let tenant_b_jobs = backend
+            .list_trace_export_jobs("tenant-b")
+            .await
+            .expect("tenant-b DB export jobs read");
+        let tenant_b_same_id_job = tenant_b_jobs
+            .iter()
+            .find(|job| job.export_job_id == export_job_id)
+            .expect("tenant-b same-id export job remains");
+        assert_eq!(
+            tenant_b_same_id_job.status,
+            StorageTraceExportJobStatus::Running
+        );
         assert!(db_job.last_error.as_deref().is_some_and(|error| {
             error.contains("stale_export_job_expired")
                 && error.contains(&recovery_reason_hash)
@@ -90804,6 +90838,7 @@ mod tests {
         );
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
     }
 
     #[tokio::test]
