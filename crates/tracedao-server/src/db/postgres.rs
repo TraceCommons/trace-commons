@@ -35,6 +35,7 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_credit_settlement_batches",
     "trace_credit_holds",
     "trace_near_credit_outbox",
+    "trace_near_credit_account_outbox",
     "trace_benchmark_registry_outbox",
     "trace_ranking_model_versions",
     "trace_ranking_calibration_datasets",
@@ -676,27 +677,34 @@ mod tests {
 
     #[test]
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {
-        let central_policy_migration =
-            include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql");
+        let central_policy_migrations = [
+            include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
+            include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
+        ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),
             include_str!("../../../../migrations/V14__trace_ranking_preference_labels.sql"),
             include_str!("../../../../migrations/V15__trace_benchmark_registry_outbox.sql"),
             include_str!("../../../../migrations/V16__trace_ranking_calibration_datasets.sql"),
+            include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {
             assert!(
-                central_policy_migration.contains(&format!(
-                    "DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON {table};"
-                )),
+                central_policy_migrations.iter().any(|migration| {
+                    migration.contains(&format!(
+                        "DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON {table};"
+                    ))
+                }),
                 "{table} is missing from the central RLS policy migration cleanup"
             );
             assert!(
-                central_policy_migration.contains(&format!(
-                    "CREATE POLICY trace_corpus_tenant_isolation ON {table}"
-                )),
+                central_policy_migrations.iter().any(|migration| {
+                    migration.contains(&format!(
+                        "CREATE POLICY trace_corpus_tenant_isolation ON {table}"
+                    ))
+                }),
                 "{table} is missing from the central RLS policy migration install"
             );
             assert!(
@@ -707,9 +715,14 @@ mod tests {
             );
         }
 
-        let central_policy_count = central_policy_migration
-            .matches("CREATE POLICY trace_corpus_tenant_isolation ON trace_")
-            .count();
+        let central_policy_count = central_policy_migrations
+            .iter()
+            .map(|migration| {
+                migration
+                    .matches("CREATE POLICY trace_corpus_tenant_isolation ON trace_")
+                    .count()
+            })
+            .sum::<usize>();
         assert_eq!(
             central_policy_count,
             TRACE_COMMONS_RLS_TABLES.len(),

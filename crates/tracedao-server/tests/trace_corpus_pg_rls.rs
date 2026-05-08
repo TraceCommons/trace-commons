@@ -137,6 +137,7 @@ fn expected_trace_rls_tables() -> Vec<&'static str> {
         "trace_credit_settlement_batches",
         "trace_credit_holds",
         "trace_near_credit_outbox",
+        "trace_near_credit_account_outbox",
         "trace_benchmark_registry_outbox",
         "trace_ranking_model_versions",
         "trace_ranking_calibration_datasets",
@@ -801,6 +802,10 @@ fn force_rls_migration_covers_every_trace_rls_table() {
         )
         .expect("read ranking calibration dataset production hardening migration"),
     );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V21__trace_near_credit_account_outbox.sql"))
+            .expect("read NEAR account outbox production hardening migration"),
+    );
     for table in expected_trace_rls_tables() {
         let statement = format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY;");
         assert!(
@@ -813,10 +818,14 @@ fn force_rls_migration_covers_every_trace_rls_table() {
 #[test]
 fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
     let migrations_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
-    let sql = std::fs::read_to_string(
+    let mut sql = std::fs::read_to_string(
         migrations_root.join("V18__trace_central_rls_tenant_predicate.sql"),
     )
     .expect("read central RLS tenant predicate migration");
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V21__trace_near_credit_account_outbox.sql"))
+            .expect("read NEAR account outbox central RLS policy migration"),
+    );
 
     assert!(sql.contains("CREATE OR REPLACE FUNCTION trace_current_tenant_id()"));
     assert!(sql.contains("RETURNS TEXT"));

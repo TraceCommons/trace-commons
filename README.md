@@ -72,8 +72,10 @@ items while contributor summaries stay principal-scoped. Admins can place and
 release credit holds around fraud/review investigations; active holds block
 settlement, and released holds project current state so later settlement resumes
 without exposing raw hold/release reason text. Hold placement and release also
-append hash-only credit-mutation audit rows. With the DB mirror configured,
-utility attestations, settlement batches, credit holds, and NEAR receipt outbox
+append hash-only credit-mutation audit rows. When a central NEAR contract is
+configured, those hold transitions enqueue account freeze/unfreeze outbox rows
+for the non-transferable contract. With the DB mirror configured, utility
+attestations, settlement batches, credit holds, and NEAR receipt/account outbox
 rows are dual-written to PostgreSQL;
 `TRACE_COMMONS_DB_REVIEWER_READS=true` serves the admin credit control-plane
 lists from the tenant-scoped DB mirror.
@@ -113,12 +115,15 @@ controlled by `TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN` and
 
 The NEAR path is intentionally an outbox of deterministic method-call payloads
 for a non-transferable receipt contract. The payload builder only emits
-`settle_credit_receipt`, `reverse_credit_receipt`, and `freeze_credit_account`
-calls, rejects malformed NEAR account ids, validates the method-specific
-hash-only argument shape, recomputes the idempotency key, and rejects any other
-NEAR credit method. Stored outbox calls are revalidated before submit or confirm
-workers hand them to a relayer, so tampered local/DB rows fail closed as
-retryable outbox failures instead of leaving the server boundary. Configure
+`settle_credit_receipt`, `reverse_credit_receipt`, `freeze_credit_account`, and
+`unfreeze_credit_account` calls, rejects malformed NEAR account ids, validates
+the method-specific hash-only argument shape, recomputes the idempotency key,
+and rejects any other NEAR credit method. Configured credit holds enqueue
+account-freeze rows when an account transitions from zero to one active holds
+and account-unfreeze rows when the last active hold is released. Stored outbox
+calls are revalidated before submit or confirm workers hand them to a relayer,
+so tampered local/DB rows fail closed as retryable outbox failures instead of
+leaving the server boundary. Configure
 `TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL` to let the scoped submit worker hand
 pending or failed-retry calls to an operator-owned NEAR relayer; the server then
 records the public 43-44 character base58 NEAR transaction hash or a hashed

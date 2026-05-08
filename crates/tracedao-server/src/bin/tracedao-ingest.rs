@@ -12253,9 +12253,28 @@ async fn credit_hold_handler(
         created_at: Utc::now(),
         released_at: None,
     };
+    let should_enqueue_near_freeze = if state.credit_settlement_near_contract_id.is_some() {
+        let existing_holds = read_credit_holds_for_admin(state.as_ref(), &tenant)
+            .await
+            .map_err(internal_error)?;
+        !active_credit_hold_exists_for_account(&existing_holds, &hold.credit_account_hash, None)
+    } else {
+        false
+    };
     append_credit_hold_with_db_mirror(state.as_ref(), &tenant, &hold)
         .await
         .map_err(internal_error)?;
+    if should_enqueue_near_freeze {
+        append_credit_hold_near_account_outbox_item(
+            state.as_ref(),
+            &tenant,
+            &hold,
+            true,
+            &hold.reason_hash,
+        )
+        .await
+        .map_err(internal_error)?;
+    }
     append_credit_hold_audit_event(
         state.as_ref(),
         &tenant,
@@ -12295,20 +12314,39 @@ async fn credit_hold_release_handler(
             "credit hold release requires reason_detail",
         ));
     }
-    let mut hold = read_credit_holds_for_admin(state.as_ref(), &tenant)
+    let holds = read_credit_holds_for_admin(state.as_ref(), &tenant)
         .await
-        .map_err(internal_error)?
-        .into_iter()
+        .map_err(internal_error)?;
+    let mut hold = holds
+        .iter()
         .find(|hold| hold.hold_id == hold_id)
+        .cloned()
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "credit hold not found"))?;
     if hold.released_at.is_some() {
         return Ok(Json(hold));
     }
     hold.released_at = Some(Utc::now());
     let release_reason_hash = sha256_prefixed(reason_detail);
+    let should_enqueue_near_unfreeze = state.credit_settlement_near_contract_id.is_some()
+        && !active_credit_hold_exists_for_account(
+            &holds,
+            &hold.credit_account_hash,
+            Some(hold.hold_id),
+        );
     append_credit_hold_with_db_mirror(state.as_ref(), &tenant, &hold)
         .await
         .map_err(internal_error)?;
+    if should_enqueue_near_unfreeze {
+        append_credit_hold_near_account_outbox_item(
+            state.as_ref(),
+            &tenant,
+            &hold,
+            false,
+            &release_reason_hash,
+        )
+        .await
+        .map_err(internal_error)?;
+    }
     append_credit_hold_audit_event(
         state.as_ref(),
         &tenant,
@@ -12336,6 +12374,60 @@ async fn append_credit_hold_audit_event(
         StorageTraceAuditSafeMetadata::Empty,
     )
     .await
+}
+
+fn active_credit_hold_exists_for_account(
+    holds: &[TraceCreditHoldRecord],
+    credit_account_hash: &str,
+    except_hold_id: Option<Uuid>,
+) -> bool {
+    holds.iter().any(|hold| {
+        hold.credit_account_hash == credit_account_hash
+            && hold.released_at.is_none()
+            && Some(hold.hold_id) != except_hold_id
+    })
+}
+
+async fn append_credit_hold_near_account_outbox_item(
+    state: &AppState,
+    tenant: &TenantAuth,
+    hold: &TraceCreditHoldRecord,
+    freeze: bool,
+    reason_hash: &str,
+) -> anyhow::Result<Option<Uuid>> {
+    let Some(contract_id) = state.credit_settlement_near_contract_id.as_deref() else {
+        return Ok(None);
+    };
+    let near_call = if freeze {
+        NearCreditReceiptCall::freeze_account(
+            contract_id,
+            hold.credit_account_hash.clone(),
+            reason_hash.to_string(),
+        )?
+    } else {
+        NearCreditReceiptCall::unfreeze_account(
+            contract_id,
+            hold.credit_account_hash.clone(),
+            reason_hash.to_string(),
+        )?
+    };
+    let near_outbox_id = Uuid::new_v4();
+    let item = TraceNearCreditOutboxItem {
+        near_outbox_id,
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        settlement_batch_id: hold.hold_id,
+        credit_account_hash: hold.credit_account_hash.clone(),
+        near_call,
+        status: StorageTraceCreditSettlementNearStatus::Pending,
+        created_at: Utc::now(),
+        submitted_at: None,
+        near_transaction_hash: None,
+        last_error_hash: None,
+        confirmed_at: None,
+    };
+    append_near_credit_outbox_item_with_db_mirror(state, tenant, &item).await?;
+    Ok(Some(near_outbox_id))
 }
 
 async fn credit_attestations_handler(
@@ -84435,6 +84527,106 @@ mod tests {
         assert_eq!(credit.credit_points_held, 0.0);
         assert_eq!(credit.credit_points_settled, 1.25);
         assert_eq!(credit.credit_points_total, 1.25);
+    }
+
+    #[tokio::test]
+    async fn admin_credit_holds_enqueue_near_account_freeze_transitions_when_configured() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_near_contract_id =
+            Some("trace-credits.testnet".to_string());
+
+        let Json(first_hold) = credit_hold_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditHoldRequest {
+                credit_account_ref: "principal:held-account".to_string(),
+                reason: StorageTraceCreditHoldReason::AttestationDispute,
+                reason_detail: "first account freeze reason".to_string(),
+            }),
+        )
+        .await
+        .expect("first hold freezes NEAR account");
+
+        let outbox_items =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("near outbox reads");
+        assert_eq!(outbox_items.len(), 1);
+        assert_eq!(outbox_items[0].settlement_batch_id, first_hold.hold_id);
+        assert_eq!(
+            outbox_items[0].credit_account_hash,
+            first_hold.credit_account_hash
+        );
+        assert_eq!(
+            outbox_items[0].near_call.method_name,
+            "freeze_credit_account"
+        );
+        assert_eq!(
+            outbox_items[0].near_call.args["credit_account_hash"],
+            serde_json::json!(first_hold.credit_account_hash)
+        );
+        assert_eq!(
+            outbox_items[0].near_call.args["reason_hash"],
+            serde_json::json!(first_hold.reason_hash)
+        );
+
+        let Json(second_hold) = credit_hold_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditHoldRequest {
+                credit_account_ref: "principal:held-account".to_string(),
+                reason: StorageTraceCreditHoldReason::AttestationDispute,
+                reason_detail: "second account freeze reason".to_string(),
+            }),
+        )
+        .await
+        .expect("second active hold reuses existing account freeze");
+        let outbox_items = read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+            .expect("near outbox reads after second hold");
+        assert_eq!(outbox_items.len(), 1);
+
+        let Json(_) = credit_hold_release_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            AxumPath(first_hold.hold_id),
+            Json(TraceCreditHoldReleaseRequest {
+                reason_detail: "first hold cleared but second remains".to_string(),
+            }),
+        )
+        .await
+        .expect("first release keeps account frozen");
+        let outbox_items = read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+            .expect("near outbox reads after first release");
+        assert_eq!(outbox_items.len(), 1);
+
+        let release_reason = "second hold cleared and account can unfreeze";
+        let Json(_) = credit_hold_release_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            AxumPath(second_hold.hold_id),
+            Json(TraceCreditHoldReleaseRequest {
+                reason_detail: release_reason.to_string(),
+            }),
+        )
+        .await
+        .expect("last release unfreezes NEAR account");
+        let outbox_items = read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+            .expect("near outbox reads after final release");
+        assert_eq!(outbox_items.len(), 2);
+        let unfreeze = &outbox_items[1];
+        assert_eq!(unfreeze.settlement_batch_id, second_hold.hold_id);
+        assert_eq!(
+            unfreeze.credit_account_hash,
+            second_hold.credit_account_hash
+        );
+        assert_eq!(unfreeze.near_call.method_name, "unfreeze_credit_account");
+        assert_eq!(
+            unfreeze.near_call.args["credit_account_hash"],
+            serde_json::json!(second_hold.credit_account_hash)
+        );
+        assert_eq!(
+            unfreeze.near_call.args["reason_hash"],
+            serde_json::json!(sha256_prefixed(release_reason))
+        );
     }
 
     #[tokio::test]

@@ -62,6 +62,12 @@ fn near_credit_receipt_call_rejects_unknown_credit_methods() {
         "sha256:freeze-reason",
     )
     .expect("freeze method is allowed");
+    NearCreditReceiptCall::unfreeze_account(
+        "trace-credits.testnet",
+        "sha256:account",
+        "sha256:unfreeze-reason",
+    )
+    .expect("unfreeze method is allowed");
 
     let error =
         NearCreditReceiptCall::raw("trace-credits.testnet", "mint_credit_receipt", json!({}))
