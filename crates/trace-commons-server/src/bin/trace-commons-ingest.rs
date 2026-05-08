@@ -361,6 +361,8 @@ const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT: u32 = 100;
 const TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT: u32 = 500;
 const TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_DEFAULT_LIMIT: u32 = 100;
 const TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_MAX_LIMIT: u32 = 500;
+const TRACE_NEAR_TRANSACTION_HASH_MIN_LEN: usize = 43;
+const TRACE_NEAR_TRANSACTION_HASH_MAX_LEN: usize = 44;
 const TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_DEFAULT_LIMIT: u32 = 100;
 const TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_MAX_LIMIT: u32 = 500;
 const TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_DEFAULT_LIMIT: u32 = 100;
@@ -13062,13 +13064,23 @@ fn near_credit_call_hash(call: &NearCreditReceiptCall) -> anyhow::Result<String>
 fn normalize_near_transaction_hash(hash: &str) -> anyhow::Result<String> {
     let hash = hash.trim();
     anyhow::ensure!(!hash.is_empty(), "near_transaction_hash is required");
-    anyhow::ensure!(hash.len() <= 256, "near_transaction_hash is too long");
     anyhow::ensure!(
-        hash.chars()
-            .all(|character| character.is_ascii_graphic() && character != '"' && character != '\\'),
-        "near_transaction_hash contains invalid characters"
+        (TRACE_NEAR_TRANSACTION_HASH_MIN_LEN..=TRACE_NEAR_TRANSACTION_HASH_MAX_LEN)
+            .contains(&hash.len()),
+        "near_transaction_hash must be a 43-44 character base58 NEAR transaction hash"
+    );
+    anyhow::ensure!(
+        hash.chars().all(is_near_base58_character),
+        "near_transaction_hash contains non-base58 characters"
     );
     Ok(hash.to_string())
+}
+
+fn is_near_base58_character(character: char) -> bool {
+    matches!(
+        character,
+        '1'..='9' | 'A'..='H' | 'J'..='N' | 'P'..='Z' | 'a'..='k' | 'm'..='z'
+    )
 }
 
 fn normalize_external_registry_receipt_ref(value: &str) -> anyhow::Result<String> {
@@ -71300,7 +71312,7 @@ mod tests {
             "tenant-a",
             near_outbox_id,
             StorageTraceCreditSettlementNearStatus::Submitted,
-            Some("near-backfilled-tx".to_string()),
+            Some(TEST_NEAR_TX_HASH_1.to_string()),
             None,
             Utc::now(),
         )
@@ -71341,7 +71353,7 @@ mod tests {
         );
         assert_eq!(
             db_outbox[0].near_transaction_hash.as_deref(),
-            Some("near-backfilled-tx")
+            Some(TEST_NEAR_TX_HASH_1)
         );
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
@@ -72761,7 +72773,7 @@ mod tests {
             Json(TraceNearCreditOutboxStatusRequest {
                 near_outbox_id: outbox[0].near_outbox_id,
                 status: StorageTraceCreditSettlementNearStatus::Submitted,
-                near_transaction_hash: Some("near-public-tx-hash-1".to_string()),
+                near_transaction_hash: Some(TEST_NEAR_TX_HASH_4.to_string()),
                 error_detail: None,
             }),
         )
@@ -72773,7 +72785,7 @@ mod tests {
         );
         assert_eq!(
             submitted.near_transaction_hash.as_deref(),
-            Some("near-public-tx-hash-1")
+            Some(TEST_NEAR_TX_HASH_4)
         );
         assert!(submitted.submitted_at.is_some());
     }
@@ -75189,6 +75201,13 @@ mod tests {
         assert_eq!(contributor_credit.credit_points_pending_ledger, 0.0);
     }
 
+    const TEST_NEAR_TX_HASH_1: &str = "11111111111111111111111111111111111111111111";
+    const TEST_NEAR_TX_HASH_2: &str = "22222222222222222222222222222222222222222222";
+    const TEST_NEAR_TX_HASH_3: &str = "33333333333333333333333333333333333333333333";
+    const TEST_NEAR_TX_HASH_4: &str = "44444444444444444444444444444444444444444444";
+    const TEST_NEAR_TX_HASH_5: &str = "55555555555555555555555555555555555555555555";
+    const TEST_NEAR_TX_HASH_6: &str = "66666666666666666666666666666666666666666666";
+
     #[derive(Clone, Default)]
     struct FakeNearCreditSubmitter {
         calls: Arc<std::sync::Mutex<Vec<TraceNearCreditSubmitterRequest>>>,
@@ -75209,7 +75228,7 @@ mod tests {
                 .expect("fake submitter calls lock")
                 .push(request);
             Ok(TraceNearCreditSubmitterResponse {
-                near_transaction_hash: "near-worker-tx-hash-1".to_string(),
+                near_transaction_hash: TEST_NEAR_TX_HASH_1.to_string(),
             })
         }
     }
@@ -75865,9 +75884,9 @@ mod tests {
         let first_outbox_id = Uuid::new_v4();
         let second_outbox_id = Uuid::new_v4();
         let first_item =
-            submitted_near_credit_outbox_item(first_outbox_id, "near-worker-tx-hash-1", 1_500_000);
+            submitted_near_credit_outbox_item(first_outbox_id, TEST_NEAR_TX_HASH_1, 1_500_000);
         let second_item =
-            submitted_near_credit_outbox_item(second_outbox_id, "near-worker-tx-hash-2", 2_500_000);
+            submitted_near_credit_outbox_item(second_outbox_id, TEST_NEAR_TX_HASH_2, 2_500_000);
         append_near_credit_outbox_item(temp.path(), "tenant-a", &first_item)
             .expect("first NEAR outbox file writes");
         append_near_credit_outbox_item(temp.path(), "tenant-a", &second_item)
@@ -75903,7 +75922,7 @@ mod tests {
         );
         assert_eq!(first_call.near_contract_id, "trace-credits.testnet");
         assert_eq!(first_call.near_method_name, "settle_credit_receipt");
-        assert_eq!(first_call.near_transaction_hash, "near-worker-tx-hash-1");
+        assert_eq!(first_call.near_transaction_hash, TEST_NEAR_TX_HASH_1);
         assert!(first_call.near_call_hash.starts_with("sha256:"));
         assert!(first_call.near_call_idempotency_key.starts_with("sha256:"));
         let call_json = serde_json::to_string(&calls[0]).expect("confirmation call serializes");
@@ -75927,13 +75946,13 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
         Arc::make_mut(&mut state).near_credit_confirmer = Some(Arc::new(FakeNearCreditConfirmer {
-            near_transaction_hash: Some("different-near-worker-tx-hash".to_string()),
+            near_transaction_hash: Some(TEST_NEAR_TX_HASH_3.to_string()),
             ..FakeNearCreditConfirmer::default()
         }));
 
         let near_outbox_id = Uuid::new_v4();
         let item =
-            submitted_near_credit_outbox_item(near_outbox_id, "near-worker-tx-hash-1", 1_000_000);
+            submitted_near_credit_outbox_item(near_outbox_id, TEST_NEAR_TX_HASH_1, 1_000_000);
         append_near_credit_outbox_item(temp.path(), "tenant-a", &item)
             .expect("NEAR outbox file writes");
 
@@ -75963,7 +75982,7 @@ mod tests {
         );
         assert_eq!(
             outbox[0].near_transaction_hash.as_deref(),
-            Some("near-worker-tx-hash-1")
+            Some(TEST_NEAR_TX_HASH_1)
         );
         assert!(outbox[0].confirmed_at.is_none());
         assert!(outbox[0].last_error_hash.is_some());
@@ -75975,7 +75994,7 @@ mod tests {
         let state = test_state(temp.path().to_path_buf());
         let near_outbox_id = Uuid::new_v4();
         let item =
-            submitted_near_credit_outbox_item(near_outbox_id, "near-worker-tx-hash-1", 1_000_000);
+            submitted_near_credit_outbox_item(near_outbox_id, TEST_NEAR_TX_HASH_1, 1_000_000);
         append_near_credit_outbox_item(temp.path(), "tenant-a", &item)
             .expect("NEAR outbox file writes");
 
@@ -75985,7 +76004,7 @@ mod tests {
             Json(TraceNearCreditOutboxStatusRequest {
                 near_outbox_id,
                 status: StorageTraceCreditSettlementNearStatus::Confirmed,
-                near_transaction_hash: Some("different-near-worker-tx-hash".to_string()),
+                near_transaction_hash: Some(TEST_NEAR_TX_HASH_3.to_string()),
                 error_detail: None,
             }),
         )
@@ -76008,9 +76027,46 @@ mod tests {
         );
         assert_eq!(
             outbox[0].near_transaction_hash.as_deref(),
-            Some("near-worker-tx-hash-1")
+            Some(TEST_NEAR_TX_HASH_1)
         );
         assert!(outbox[0].confirmed_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn near_credit_outbox_mark_status_rejects_malformed_transaction_hash() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let near_outbox_id = Uuid::new_v4();
+        let mut item =
+            submitted_near_credit_outbox_item(near_outbox_id, TEST_NEAR_TX_HASH_1, 1_000_000);
+        item.status = StorageTraceCreditSettlementNearStatus::Pending;
+        item.submitted_at = None;
+        item.near_transaction_hash = None;
+        append_near_credit_outbox_item(temp.path(), "tenant-a", &item)
+            .expect("NEAR outbox file writes");
+
+        let error = mark_near_credit_outbox_status_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxStatusRequest {
+                near_outbox_id,
+                status: StorageTraceCreditSettlementNearStatus::Submitted,
+                near_transaction_hash: Some("not-a-near-transaction-hash".to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect_err("manual status updates require NEAR-shaped transaction hashes");
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.0.error.contains("base58 NEAR transaction hash"));
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert_eq!(
+            outbox[0].status,
+            StorageTraceCreditSettlementNearStatus::Pending
+        );
+        assert!(outbox[0].near_transaction_hash.is_none());
     }
 
     #[tokio::test]
@@ -76018,7 +76074,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
         let item =
-            submitted_near_credit_outbox_item(Uuid::new_v4(), "near-worker-tx-hash-1", 1_000_000);
+            submitted_near_credit_outbox_item(Uuid::new_v4(), TEST_NEAR_TX_HASH_1, 1_000_000);
         append_near_credit_outbox_item(temp.path(), "tenant-a", &item)
             .expect("NEAR outbox file writes");
 
@@ -76151,7 +76207,7 @@ mod tests {
         );
         assert_eq!(
             outbox[0].near_transaction_hash.as_deref(),
-            Some("near-worker-tx-hash-1")
+            Some(TEST_NEAR_TX_HASH_1)
         );
     }
 
@@ -83452,7 +83508,7 @@ mod tests {
             Json(TraceNearCreditOutboxStatusRequest {
                 near_outbox_id: outbox[0].near_outbox_id,
                 status: StorageTraceCreditSettlementNearStatus::Submitted,
-                near_transaction_hash: Some("near-db-tx-hash-1".to_string()),
+                near_transaction_hash: Some(TEST_NEAR_TX_HASH_5.to_string()),
                 error_detail: None,
             }),
         )
@@ -89357,14 +89413,14 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
         let mut pending_item =
-            submitted_near_credit_outbox_item(Uuid::new_v4(), "near-route-tx-pending", 1_000_000);
+            submitted_near_credit_outbox_item(Uuid::new_v4(), TEST_NEAR_TX_HASH_4, 1_000_000);
         pending_item.status = StorageTraceCreditSettlementNearStatus::Pending;
         pending_item.submitted_at = None;
         pending_item.near_transaction_hash = None;
         let submitted_item =
-            submitted_near_credit_outbox_item(Uuid::new_v4(), "near-route-tx-submitted", 2_000_000);
+            submitted_near_credit_outbox_item(Uuid::new_v4(), TEST_NEAR_TX_HASH_5, 2_000_000);
         let mut failed_item =
-            submitted_near_credit_outbox_item(Uuid::new_v4(), "near-route-tx-failed", 3_000_000);
+            submitted_near_credit_outbox_item(Uuid::new_v4(), TEST_NEAR_TX_HASH_6, 3_000_000);
         failed_item.status = StorageTraceCreditSettlementNearStatus::Failed;
         failed_item.last_error_hash = Some(sha256_prefixed("route near credit failed"));
         for item in [&pending_item, &submitted_item, &failed_item] {
@@ -89468,7 +89524,7 @@ mod tests {
         assert!(body_text.contains(&format!(
             "trace_commons_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"near_credit_outbox_pending_without_submitter\"}} 1"
         )));
-        assert!(!body_text.contains("near-route-tx-submitted"));
+        assert!(!body_text.contains(TEST_NEAR_TX_HASH_5));
         assert!(!body_text.contains("route near credit failed"));
     }
 
