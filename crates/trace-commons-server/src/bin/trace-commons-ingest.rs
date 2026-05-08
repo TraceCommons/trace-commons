@@ -39393,6 +39393,7 @@ fn append_credit_event(
     tenant_id: &str,
     event: &TraceCommonsCreditLedgerRecord,
 ) -> anyhow::Result<()> {
+    ensure_credit_event_tenant(event, tenant_id)?;
     let path = credit_ledger_path(root, tenant_id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -39475,6 +39476,7 @@ fn append_utility_attestation(
     tenant_id: &str,
     attestation: &TraceUtilityAttestationRecord,
 ) -> anyhow::Result<()> {
+    ensure_utility_attestation_tenant(attestation, tenant_id)?;
     let path = utility_attestations_path(root, tenant_id);
     append_jsonl_record(&path, attestation, "utility attestation")
 }
@@ -39540,6 +39542,7 @@ fn append_credit_settlement_batch(
     tenant_id: &str,
     batch: &TraceCreditSettlementBatchRecord,
 ) -> anyhow::Result<()> {
+    ensure_credit_settlement_batch_tenant(batch, tenant_id)?;
     let path = credit_settlement_batches_path(root, tenant_id);
     append_jsonl_record(&path, batch, "credit settlement batch")
 }
@@ -39589,6 +39592,7 @@ fn append_credit_hold(
     tenant_id: &str,
     hold: &TraceCreditHoldRecord,
 ) -> anyhow::Result<()> {
+    ensure_credit_hold_tenant(hold, tenant_id)?;
     let path = credit_holds_path(root, tenant_id);
     append_jsonl_record(&path, hold, "credit hold")
 }
@@ -39666,6 +39670,7 @@ fn append_near_credit_outbox_item(
     tenant_id: &str,
     item: &TraceNearCreditOutboxItem,
 ) -> anyhow::Result<()> {
+    ensure_near_credit_outbox_item_tenant(item, tenant_id)?;
     let path = near_credit_outbox_path(root, tenant_id);
     append_jsonl_record(&path, item, "NEAR credit outbox item")
 }
@@ -39898,6 +39903,7 @@ fn append_ranking_model_version(
     tenant_id: &str,
     record: &TraceRankingModelVersionRecord,
 ) -> anyhow::Result<()> {
+    ensure_ranking_model_version_tenant(record, tenant_id)?;
     let path = ranking_model_versions_path(root, tenant_id);
     append_jsonl_record(&path, record, "ranking model version")
 }
@@ -39947,6 +39953,7 @@ fn append_ranking_calibration_dataset(
     tenant_id: &str,
     record: &TraceRankingCalibrationDatasetRecord,
 ) -> anyhow::Result<()> {
+    ensure_ranking_calibration_dataset_tenant(record, tenant_id)?;
     ensure_ranking_calibration_dataset_append_allowed(root, tenant_id, record)?;
     append_ranking_calibration_dataset_without_manifest_check(root, tenant_id, record)
 }
@@ -39956,6 +39963,7 @@ fn append_ranking_calibration_dataset_without_manifest_check(
     tenant_id: &str,
     record: &TraceRankingCalibrationDatasetRecord,
 ) -> anyhow::Result<()> {
+    ensure_ranking_calibration_dataset_tenant(record, tenant_id)?;
     let path = ranking_calibration_datasets_path(root, tenant_id);
     append_jsonl_record(&path, record, "ranking calibration dataset")
 }
@@ -40096,6 +40104,7 @@ fn append_ranking_feature(
     tenant_id: &str,
     record: &TraceRankingFeatureRecord,
 ) -> anyhow::Result<()> {
+    ensure_ranking_feature_tenant(record, tenant_id)?;
     let path = ranking_features_path(root, tenant_id);
     append_jsonl_record(&path, record, "ranking feature")
 }
@@ -40144,6 +40153,7 @@ fn append_ranking_prediction(
     tenant_id: &str,
     record: &TraceRankingPredictionRecord,
 ) -> anyhow::Result<()> {
+    ensure_ranking_prediction_tenant(record, tenant_id)?;
     let path = ranking_predictions_path(root, tenant_id);
     append_jsonl_record(&path, record, "ranking prediction")
 }
@@ -40193,6 +40203,7 @@ fn append_ranking_label(
     tenant_id: &str,
     record: &TraceRankingLabelRecord,
 ) -> anyhow::Result<()> {
+    ensure_ranking_label_tenant(record, tenant_id)?;
     let path = ranking_labels_path(root, tenant_id);
     append_jsonl_record(&path, record, "ranking label")
 }
@@ -40241,6 +40252,7 @@ fn append_ranking_preference_label(
     tenant_id: &str,
     record: &TraceRankingPreferenceLabelRecord,
 ) -> anyhow::Result<()> {
+    ensure_ranking_preference_label_tenant(record, tenant_id)?;
     let path = ranking_preference_labels_path(root, tenant_id);
     append_jsonl_record(&path, record, "ranking preference label")
 }
@@ -40290,6 +40302,7 @@ fn append_ranking_calibration_run(
     tenant_id: &str,
     record: &TraceRankingCalibrationRunRecord,
 ) -> anyhow::Result<()> {
+    ensure_ranking_calibration_run_tenant(record, tenant_id)?;
     let path = ranking_calibration_runs_path(root, tenant_id);
     append_jsonl_record(&path, record, "ranking calibration run")
 }
@@ -40339,6 +40352,7 @@ fn append_ranking_worker_run(
     tenant_id: &str,
     record: &TraceRankingWorkerRunRecord,
 ) -> anyhow::Result<()> {
+    ensure_ranking_worker_run_tenant(record, tenant_id)?;
     let path = ranking_worker_runs_path(root, tenant_id);
     append_jsonl_record(&path, record, "ranking worker run")
 }
@@ -40466,6 +40480,7 @@ fn append_audit_event(
     tenant_id: &str,
     mut event: TraceCommonsAuditEvent,
 ) -> anyhow::Result<TraceCommonsAuditEvent> {
+    ensure_audit_event_tenant(&event, tenant_id)?;
     let path = audit_events_path(root, tenant_id);
     let previous_event_hash = latest_audit_event_hash(&path, tenant_id)?
         .unwrap_or_else(|| TRACE_AUDIT_EVENT_GENESIS_HASH.to_string());
@@ -41093,6 +41108,7 @@ fn write_export_manifest(
     tenant_id: &str,
     manifest: &TraceReplayExportManifest,
 ) -> anyhow::Result<()> {
+    ensure_replay_export_manifest_tenant(manifest, tenant_id)?;
     let path = export_artifact_dir(root, tenant_id, manifest.export_id).join("manifest.json");
     write_json_file(&path, manifest, "trace replay export manifest")
 }
@@ -41165,6 +41181,7 @@ fn write_benchmark_artifact(
     tenant_id: &str,
     artifact: &TraceBenchmarkConversionArtifact,
 ) -> anyhow::Result<()> {
+    ensure_benchmark_artifact_tenant(artifact, tenant_id)?;
     let path = benchmark_artifact_path(root, tenant_id, artifact.conversion_id);
     write_json_file(&path, artifact, "trace benchmark conversion artifact")
 }
@@ -51320,6 +51337,59 @@ mod tests {
         tx.commit().await.expect("commit cleanup transaction");
     }
 
+    #[test]
+    fn file_backed_control_plane_appends_reject_cross_tenant_records_before_write() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let now = Utc::now();
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        let wrong_tenant = "tenant-b";
+
+        let credit_error = append_credit_event(
+            temp.path(),
+            "tenant-a",
+            &TraceCommonsCreditLedgerRecord {
+                event_id: Uuid::new_v4(),
+                tenant_id: wrong_tenant.to_string(),
+                tenant_storage_ref: tenant_storage_ref(wrong_tenant),
+                submission_id,
+                trace_id,
+                auth_principal_ref: "principal:wrong-tenant".to_string(),
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.0,
+                reason: Some("wrong tenant credit should not persist".to_string()),
+                external_ref: Some("lab-attestation:wrong-tenant".to_string()),
+                actor_role: TokenRole::Reviewer,
+                actor_principal_ref: "principal:reviewer".to_string(),
+                created_at: now,
+            },
+        )
+        .expect_err("credit ledger append must reject embedded tenant mismatch");
+        assert!(credit_error.to_string().contains("tenant mismatch"));
+        assert!(!credit_ledger_path(temp.path(), "tenant-a").exists());
+
+        let ranking_error = append_ranking_model_version(
+            temp.path(),
+            "tenant-a",
+            &TraceRankingModelVersionRecord {
+                tenant_id: wrong_tenant.to_string(),
+                tenant_storage_ref: tenant_storage_ref(wrong_tenant),
+                model_version: "wrong-tenant-ranker-v1".to_string(),
+                feature_schema_version: "wrong-tenant-features-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:wrong-tenant-training".to_string(),
+                calibration_dataset_hash: "sha256:wrong-tenant-calibration".to_string(),
+                model_artifact_hash: "sha256:wrong-tenant-model".to_string(),
+                actor_principal_ref: "principal:utility-worker".to_string(),
+                created_at: now,
+            },
+        )
+        .expect_err("ranking model append must reject embedded tenant mismatch");
+        assert!(ranking_error.to_string().contains("tenant mismatch"));
+        assert!(!ranking_model_versions_path(temp.path(), "tenant-a").exists());
+    }
+
     struct RankingBackfillFixture {
         feature_id: Uuid,
         prediction_id: Uuid,
@@ -52525,6 +52595,17 @@ mod tests {
         }
     }
 
+    fn set_metadata_only_user_message(envelope: &mut TraceContributionEnvelope, content: &str) {
+        for event in &mut envelope.events {
+            if event.event_type
+                == trace_commons_protocol::trace_contribution::TraceContributionEventType::UserMessage
+            {
+                event.redacted_content = Some(content.to_string());
+                return;
+            }
+        }
+    }
+
     #[tokio::test]
     async fn submit_rescrubs_and_stores_under_authenticated_tenant() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -52811,9 +52892,8 @@ mod tests {
         .await
         .expect("tenant-a submission succeeds");
 
-        append_credit_event(
-            temp.path(),
-            "tenant-a",
+        append_jsonl_record(
+            &credit_ledger_path(temp.path(), "tenant-a"),
             &TraceCommonsCreditLedgerRecord {
                 event_id: Uuid::new_v4(),
                 tenant_id: "tenant-b".to_string(),
@@ -52829,6 +52909,7 @@ mod tests {
                 actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
                 created_at: Utc::now(),
             },
+            "corrupt trace credit ledger",
         )
         .expect("corrupt credit ledger writes");
 
@@ -52853,10 +52934,9 @@ mod tests {
         .await
         .expect("tenant-a submission succeeds");
 
-        append_audit_event(
-            temp.path(),
-            "tenant-a",
-            TraceCommonsAuditEvent {
+        append_jsonl_record(
+            &audit_events_path(temp.path(), "tenant-a"),
+            &TraceCommonsAuditEvent {
                 event_id: Uuid::new_v4(),
                 tenant_id: "tenant-b".to_string(),
                 submission_id,
@@ -52872,6 +52952,7 @@ mod tests {
                 previous_event_hash: None,
                 event_hash: None,
             },
+            "corrupt trace audit event",
         )
         .expect("corrupt audit event writes");
 
@@ -52993,9 +53074,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
         let export_id = Uuid::new_v4();
-        write_export_manifest(
-            temp.path(),
-            "tenant-a",
+        write_json_file(
+            &export_artifact_dir(temp.path(), "tenant-a", export_id).join("manifest.json"),
             &TraceReplayExportManifest {
                 tenant_id: "tenant-b".to_string(),
                 tenant_storage_ref: tenant_storage_ref("tenant-b"),
@@ -53013,6 +53093,7 @@ mod tests {
                 generated_at: Utc::now(),
                 audit_event_id: Uuid::new_v4(),
             },
+            "corrupt trace replay export manifest",
         )
         .expect("corrupt replay manifest writes");
 
@@ -58962,6 +59043,10 @@ mod tests {
         for index in 0..3 {
             let mut envelope = sample_envelope().await;
             make_metadata_only_low_risk(&mut envelope);
+            set_metadata_only_user_message(
+                &mut envelope,
+                &format!("Capped export ranker source {index}"),
+            );
             envelope.consent.scopes = vec![
                 ConsentScope::DebuggingEvaluation,
                 ConsentScope::BenchmarkOnly,
@@ -59167,6 +59252,10 @@ mod tests {
         for index in 0..2 {
             let mut envelope = sample_envelope().await;
             make_metadata_only_low_risk(&mut envelope);
+            set_metadata_only_user_message(
+                &mut envelope,
+                &format!("Grant-gated ranker pair source {index}"),
+            );
             envelope.consent.scopes = vec![
                 ConsentScope::BenchmarkOnly,
                 ConsentScope::RankingTraining,
@@ -59943,6 +60032,10 @@ mod tests {
         let preferred_id = preferred.submission_id;
         let mut rejected = sample_envelope().await;
         make_metadata_only_low_risk(&mut rejected);
+        set_metadata_only_user_message(
+            &mut rejected,
+            "Rejected ranker provenance source is distinct",
+        );
         rejected.consent.scopes = vec![ConsentScope::RankingTraining];
         rejected.trace_card.consent_scope = ConsentScope::RankingTraining;
         rejected.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
@@ -63330,7 +63423,7 @@ mod tests {
             .await
             .expect("metrics response");
         assert_eq!(metrics_response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(metrics_response.into_body(), 16384)
+        let body = axum::body::to_bytes(metrics_response.into_body(), 65536)
             .await
             .expect("metrics body");
         let body_text = std::str::from_utf8(&body).expect("metrics body is utf8");
@@ -63956,6 +64049,10 @@ mod tests {
         let preferred_id = preferred.submission_id;
         let mut rejected = sample_envelope().await;
         make_metadata_only_low_risk(&mut rejected);
+        set_metadata_only_user_message(
+            &mut rejected,
+            "Rejected ranker provenance source is distinct",
+        );
         rejected.consent.scopes = vec![ConsentScope::RankingTraining];
         rejected.trace_card.consent_scope = ConsentScope::RankingTraining;
         rejected.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
@@ -87107,7 +87204,7 @@ mod tests {
             .await
             .expect("metrics response");
         assert_eq!(metrics_response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(metrics_response.into_body(), 16384)
+        let body = axum::body::to_bytes(metrics_response.into_body(), 65536)
             .await
             .expect("body reads");
         let body_text = std::str::from_utf8(&body).expect("metrics body is utf8");
@@ -87182,7 +87279,7 @@ mod tests {
             .await
             .expect("metrics response");
         assert_eq!(metrics_response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(metrics_response.into_body(), 16384)
+        let body = axum::body::to_bytes(metrics_response.into_body(), 65536)
             .await
             .expect("body reads");
         let body_text = std::str::from_utf8(&body).expect("metrics body is utf8");
