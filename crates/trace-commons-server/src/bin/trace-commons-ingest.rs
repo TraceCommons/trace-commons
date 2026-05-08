@@ -72668,10 +72668,10 @@ mod tests {
             settlement_batch_id,
             credit_account_hash: sha256_prefixed(&principal_storage_ref("token-a")),
             policy_version: "trace-credit-policy-v1".to_string(),
-            source_list_hash: "sha256:settlement-item-sources".to_string(),
-            attestation_hash: "sha256:settlement-attestation".to_string(),
+            source_list_hash: sha256_prefixed("settlement-item-sources"),
+            attestation_hash: sha256_prefixed("settlement-attestation"),
             amount_micros: 1_000_000,
-            issuer_signature_hash: "sha256:settlement-issuer-signature".to_string(),
+            issuer_signature_hash: sha256_prefixed("settlement-issuer-signature"),
         };
         append_near_credit_outbox_item(
             temp.path(),
@@ -72930,10 +72930,10 @@ mod tests {
             settlement_batch_id,
             credit_account_hash: sha256_prefixed(&principal_storage_ref("token-a")),
             policy_version: "trace-credit-policy-v1".to_string(),
-            source_list_hash: "sha256:settlement-item-sources".to_string(),
-            attestation_hash: "sha256:settlement-attestation".to_string(),
+            source_list_hash: sha256_prefixed("settlement-item-sources"),
+            attestation_hash: sha256_prefixed("settlement-attestation"),
             amount_micros: 1_000_000,
-            issuer_signature_hash: "sha256:settlement-issuer-signature".to_string(),
+            issuer_signature_hash: sha256_prefixed("settlement-issuer-signature"),
         };
         let batch = TraceCreditSettlementBatchRecord {
             settlement_batch_id,
@@ -79184,10 +79184,10 @@ mod tests {
             settlement_batch_id,
             credit_account_hash: sha256_prefixed(&principal_storage_ref("token-a")),
             policy_version: "trace-credit-policy-v1".to_string(),
-            source_list_hash: "sha256:settlement-worker-tampered-sources".to_string(),
-            attestation_hash: "sha256:settlement-worker-tampered-attestation".to_string(),
+            source_list_hash: sha256_prefixed("settlement-worker-tampered-sources"),
+            attestation_hash: sha256_prefixed("settlement-worker-tampered-attestation"),
             amount_micros: 1_000_000,
-            issuer_signature_hash: "sha256:settlement-worker-tampered-signature".to_string(),
+            issuer_signature_hash: sha256_prefixed("settlement-worker-tampered-signature"),
         };
         let mut near_call = NearCreditReceiptCall::settle("trace-credits.testnet", receipt.clone())
             .expect("NEAR call builds");
@@ -79259,10 +79259,10 @@ mod tests {
             settlement_batch_id,
             credit_account_hash: sha256_prefixed(&principal_storage_ref("token-a")),
             policy_version: "trace-credit-policy-v1".to_string(),
-            source_list_hash: "sha256:settlement-worker-retry-sources".to_string(),
-            attestation_hash: "sha256:settlement-worker-retry-attestation".to_string(),
+            source_list_hash: sha256_prefixed("settlement-worker-retry-sources"),
+            attestation_hash: sha256_prefixed("settlement-worker-retry-attestation"),
             amount_micros: 1_000_000,
-            issuer_signature_hash: "sha256:settlement-worker-retry-signature".to_string(),
+            issuer_signature_hash: sha256_prefixed("settlement-worker-retry-signature"),
         };
         append_near_credit_outbox_item(
             temp.path(),

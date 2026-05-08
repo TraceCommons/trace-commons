@@ -2,17 +2,30 @@ use serde_json::json;
 use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
 use uuid::Uuid;
 
+const ACCOUNT_HASH: &str =
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const SOURCE_LIST_HASH: &str =
+    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const ATTESTATION_HASH: &str =
+    "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const ISSUER_SIGNATURE_HASH: &str =
+    "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+const FREEZE_REASON_HASH: &str =
+    "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const UNFREEZE_REASON_HASH: &str =
+    "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+
 #[test]
 fn near_credit_receipt_call_is_hash_only_and_deterministic() {
     let batch_id = Uuid::from_u128(0x100);
     let receipt = NearCreditReceipt {
         settlement_batch_id: batch_id,
-        credit_account_hash: "sha256:account".to_string(),
+        credit_account_hash: ACCOUNT_HASH.to_string(),
         policy_version: "trace-credit-policy-v1".to_string(),
-        source_list_hash: "sha256:sources".to_string(),
-        attestation_hash: "sha256:attestation".to_string(),
+        source_list_hash: SOURCE_LIST_HASH.to_string(),
+        attestation_hash: ATTESTATION_HASH.to_string(),
         amount_micros: 1_750_000,
-        issuer_signature_hash: "sha256:issuer-signature".to_string(),
+        issuer_signature_hash: ISSUER_SIGNATURE_HASH.to_string(),
     };
 
     let call = NearCreditReceiptCall::settle("trace-credits.testnet", receipt.clone())
@@ -27,12 +40,12 @@ fn near_credit_receipt_call_is_hash_only_and_deterministic() {
         call.args,
         json!({
             "settlement_batch_id": batch_id,
-            "credit_account_hash": "sha256:account",
+            "credit_account_hash": ACCOUNT_HASH,
             "policy_version": "trace-credit-policy-v1",
-            "source_list_hash": "sha256:sources",
-            "attestation_hash": "sha256:attestation",
+            "source_list_hash": SOURCE_LIST_HASH,
+            "attestation_hash": ATTESTATION_HASH,
             "amount_micros": 1_750_000,
-            "issuer_signature_hash": "sha256:issuer-signature"
+            "issuer_signature_hash": ISSUER_SIGNATURE_HASH
         })
     );
     assert!(call.idempotency_key.starts_with("sha256:"));
@@ -58,14 +71,14 @@ fn near_credit_receipt_call_rejects_unknown_credit_methods() {
         .expect("reversal method is allowed");
     NearCreditReceiptCall::freeze_account(
         "trace-credits.testnet",
-        "sha256:account",
-        "sha256:freeze-reason",
+        ACCOUNT_HASH,
+        FREEZE_REASON_HASH,
     )
     .expect("freeze method is allowed");
     NearCreditReceiptCall::unfreeze_account(
         "trace-credits.testnet",
-        "sha256:account",
-        "sha256:unfreeze-reason",
+        ACCOUNT_HASH,
+        UNFREEZE_REASON_HASH,
     )
     .expect("unfreeze method is allowed");
 
@@ -82,7 +95,7 @@ fn near_credit_receipt_call_rejects_malformed_allowed_method_args() {
         "trace-credits.testnet",
         "settle_credit_receipt",
         json!({
-            "credit_account_hash": "sha256:account"
+            "credit_account_hash": ACCOUNT_HASH
         }),
     )
     .expect_err("settlement method requires the full receipt shape");
@@ -96,8 +109,8 @@ fn near_credit_receipt_call_rejects_malformed_allowed_method_args() {
         "trace-credits.testnet",
         "freeze_credit_account",
         json!({
-            "credit_account_hash": "sha256:account",
-            "reason_hash": "sha256:freeze-reason",
+            "credit_account_hash": ACCOUNT_HASH,
+            "reason_hash": FREEZE_REASON_HASH,
             "raw_reason": "do not store this"
         }),
     )
@@ -107,6 +120,25 @@ fn near_credit_receipt_call_rejects_malformed_allowed_method_args() {
             .to_string()
             .contains("invalid NEAR credit freeze")
     );
+}
+
+#[test]
+fn near_credit_receipt_call_rejects_non_canonical_hashes() {
+    let short_hash = NearCreditReceiptCall::freeze_account(
+        "trace-credits.testnet",
+        "sha256:account",
+        FREEZE_REASON_HASH,
+    )
+    .expect_err("short sha256 labels are not canonical payload hashes");
+    assert!(short_hash.to_string().contains("canonical sha256"));
+
+    let non_hex_hash = NearCreditReceiptCall::freeze_account(
+        "trace-credits.testnet",
+        "sha256:gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+        FREEZE_REASON_HASH,
+    )
+    .expect_err("sha256 payload hashes must be hex");
+    assert!(non_hex_hash.to_string().contains("canonical sha256"));
 }
 
 #[test]
@@ -149,11 +181,11 @@ fn near_credit_receipt_call_rejects_malformed_contract_ids() {
 fn sample_receipt(settlement_batch_id: Uuid) -> NearCreditReceipt {
     NearCreditReceipt {
         settlement_batch_id,
-        credit_account_hash: "sha256:account".to_string(),
+        credit_account_hash: ACCOUNT_HASH.to_string(),
         policy_version: "trace-credit-policy-v1".to_string(),
-        source_list_hash: "sha256:sources".to_string(),
-        attestation_hash: "sha256:attestation".to_string(),
+        source_list_hash: SOURCE_LIST_HASH.to_string(),
+        attestation_hash: ATTESTATION_HASH.to_string(),
         amount_micros: 1_750_000,
-        issuer_signature_hash: "sha256:issuer-signature".to_string(),
+        issuer_signature_hash: ISSUER_SIGNATURE_HASH.to_string(),
     }
 }
