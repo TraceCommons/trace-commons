@@ -62662,6 +62662,7 @@ mod tests {
             return;
         };
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_mirror: Arc<dyn Database> = backend.clone();
@@ -62679,6 +62680,8 @@ mod tests {
         let not_due_job_id = Uuid::new_v4();
         let limit_job_id = Uuid::new_v4();
         let unsafe_job_id = Uuid::new_v4();
+        let tenant_b_job_id = Uuid::new_v4();
+        let tenant_b_grant_id = Uuid::new_v4();
         for (export_job_id, purpose, finished_at, retry_count, replayable_metadata) in [
             (
                 retryable_job_id,
@@ -62769,6 +62772,58 @@ mod tests {
                 .await
                 .expect("failed export job writes");
         }
+        backend
+            .upsert_trace_export_access_grant(StorageTraceExportAccessGrantWrite {
+                tenant_id: "tenant-b".to_string(),
+                export_job_id: tenant_b_job_id,
+                grant_id: tenant_b_grant_id,
+                caller_principal_ref: principal_storage_ref("export-worker-token-b"),
+                requested_dataset_kind: TraceExportDatasetKind::ReplayDataset
+                    .storage_name()
+                    .to_string(),
+                purpose: "tenant-b retry due replay".to_string(),
+                max_item_cap: Some(5),
+                status: StorageTraceExportAccessGrantStatus::Active,
+                requested_at: now - Duration::minutes(15),
+                expires_at: now + Duration::minutes(30),
+                metadata: BTreeMap::from([("grant_type".to_string(), "queued".to_string())]),
+            })
+            .await
+            .expect("tenant-b export grant writes");
+        let mut tenant_b_metadata = export_job_request_metadata(
+            Some(5),
+            Some(TraceCorpusStatus::Accepted),
+            Some(ResidualPiiRisk::Low),
+            Some(ConsentScope::DebuggingEvaluation),
+            None,
+        );
+        tenant_b_metadata.insert("state".to_string(), "failed".to_string());
+        tenant_b_metadata.insert("retry_count".to_string(), "1".to_string());
+        backend
+            .upsert_trace_export_job(StorageTraceExportJobWrite {
+                tenant_id: "tenant-b".to_string(),
+                export_job_id: tenant_b_job_id,
+                grant_id: tenant_b_grant_id,
+                caller_principal_ref: principal_storage_ref("export-worker-token-b"),
+                requested_dataset_kind: TraceExportDatasetKind::ReplayDataset
+                    .storage_name()
+                    .to_string(),
+                purpose: "tenant-b retry due replay".to_string(),
+                max_item_cap: Some(5),
+                status: StorageTraceExportJobStatus::Failed,
+                requested_at: now - Duration::minutes(15),
+                started_at: Some(now - Duration::minutes(11)),
+                finished_at: Some(now - Duration::minutes(10)),
+                expires_at: now + Duration::minutes(30),
+                result_manifest_id: None,
+                item_count: None,
+                last_error: Some(
+                    "queued_export_job_execution_failed;reason_hash=sha256:tenant-b".to_string(),
+                ),
+                metadata: tenant_b_metadata,
+            })
+            .await
+            .expect("tenant-b failed export job writes");
 
         let Json(retry_response) = worker_export_jobs_retry_failed_handler(
             State(state.clone()),
@@ -62798,6 +62853,18 @@ mod tests {
                 .get("retry_count")
                 .map(String::as_str),
             Some("2")
+        );
+        let tenant_b_jobs_after_retry = backend
+            .list_trace_export_jobs("tenant-b")
+            .await
+            .expect("tenant-b jobs read after retry");
+        let tenant_b_job_after_retry = tenant_b_jobs_after_retry
+            .iter()
+            .find(|job| job.export_job_id == tenant_b_job_id)
+            .expect("tenant-b job remains after retry");
+        assert_eq!(
+            tenant_b_job_after_retry.status,
+            StorageTraceExportJobStatus::Failed
         );
 
         let Json(run_response) = worker_export_jobs_run_queued_handler(
@@ -62835,8 +62902,21 @@ mod tests {
             .find(|job| job.export_job_id == unsafe_job_id)
             .expect("unsafe job remains");
         assert_eq!(unsafe_job.status, StorageTraceExportJobStatus::Failed);
+        let tenant_b_jobs_after_run = backend
+            .list_trace_export_jobs("tenant-b")
+            .await
+            .expect("tenant-b jobs read after run");
+        let tenant_b_job_after_run = tenant_b_jobs_after_run
+            .iter()
+            .find(|job| job.export_job_id == tenant_b_job_id)
+            .expect("tenant-b job remains after run");
+        assert_eq!(
+            tenant_b_job_after_run.status,
+            StorageTraceExportJobStatus::Failed
+        );
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
     }
 
     #[tokio::test]
