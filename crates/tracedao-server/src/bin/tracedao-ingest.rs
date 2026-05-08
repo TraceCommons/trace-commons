@@ -77842,6 +77842,13 @@ mod tests {
         let item = pending_benchmark_registry_outbox_item(benchmark_outbox_id);
         upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &item)
             .expect("benchmark registry outbox file writes");
+        let tenant_b_benchmark_outbox_id = Uuid::new_v4();
+        let mut tenant_b_item =
+            pending_benchmark_registry_outbox_item(tenant_b_benchmark_outbox_id);
+        tenant_b_item.tenant_id = "tenant-b".to_string();
+        tenant_b_item.tenant_storage_ref = tenant_storage_ref("tenant-b");
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-b", &tenant_b_item)
+            .expect("tenant-b benchmark registry outbox file writes");
 
         let Json(response) = benchmark_registry_outbox_submit_worker_handler(
             State(state.clone()),
@@ -77893,6 +77900,14 @@ mod tests {
             outbox[0].external_receipt_ref.as_deref(),
             Some("external-registry:receipt:worker-1")
         );
+        let tenant_b_outbox = read_all_benchmark_registry_outbox_items(temp.path(), "tenant-b")
+            .expect("tenant-b benchmark registry outbox reads");
+        assert_eq!(tenant_b_outbox.len(), 1);
+        assert_eq!(
+            tenant_b_outbox[0].status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Pending
+        );
+        assert!(tenant_b_outbox[0].external_receipt_ref.is_none());
     }
 
     #[tokio::test]
@@ -78025,6 +78040,15 @@ mod tests {
             .expect("publish benchmark registry outbox file writes");
         upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &revoke_item)
             .expect("revoke benchmark registry outbox file writes");
+        let tenant_b_benchmark_outbox_id = Uuid::new_v4();
+        let mut tenant_b_item = submitted_benchmark_registry_outbox_item(
+            tenant_b_benchmark_outbox_id,
+            StorageTraceBenchmarkRegistryOutboxOperation::Publish,
+        );
+        tenant_b_item.tenant_id = "tenant-b".to_string();
+        tenant_b_item.tenant_storage_ref = tenant_storage_ref("tenant-b");
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-b", &tenant_b_item)
+            .expect("tenant-b benchmark registry outbox file writes");
 
         let Json(response) = benchmark_registry_outbox_confirm_worker_handler(
             State(state.clone()),
@@ -78067,6 +78091,11 @@ mod tests {
         let call_json = serde_json::to_string(&calls[0]).expect("confirmation call serializes");
         assert!(!call_json.contains("token-a"));
         assert!(!call_json.contains("raw benchmark summary"));
+        assert!(
+            !calls
+                .iter()
+                .any(|call| call.benchmark_outbox_id == tenant_b_benchmark_outbox_id)
+        );
 
         let outbox = read_all_benchmark_registry_outbox_items(temp.path(), "tenant-a")
             .expect("benchmark registry outbox reads");
@@ -78076,6 +78105,14 @@ mod tests {
                 && item.confirmed_at.is_some()
                 && item.last_error_hash.is_none()
         }));
+        let tenant_b_outbox = read_all_benchmark_registry_outbox_items(temp.path(), "tenant-b")
+            .expect("tenant-b benchmark registry outbox reads");
+        assert_eq!(tenant_b_outbox.len(), 1);
+        assert_eq!(
+            tenant_b_outbox[0].status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Submitted
+        );
+        assert!(tenant_b_outbox[0].confirmed_at.is_none());
     }
 
     #[tokio::test]
