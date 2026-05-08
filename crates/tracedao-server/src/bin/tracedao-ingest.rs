@@ -92726,6 +92726,7 @@ mod tests {
             return;
         };
         cleanup_pg_trace_tenant(&backend, "tenant-a").await;
+        cleanup_pg_trace_tenant(&backend, "tenant-b").await;
         assert!(
             backend
                 .list_trace_ranking_model_versions("tenant-a")
@@ -92784,6 +92785,23 @@ mod tests {
         )
         .await
         .expect("admin registers ranking model version");
+        let Json(other_model) = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-b"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: model.model_version.clone(),
+                feature_schema_version: "ranking-features-db-tenant-b-v1".to_string(),
+                policy_version: "trace-credit-policy-db-tenant-b-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:training-set-db-tenant-b".to_string(),
+                calibration_dataset_hash: "sha256:calibration-set-db-tenant-b".to_string(),
+                model_artifact_hash: "sha256:model-artifact-db-tenant-b".to_string(),
+            }),
+        )
+        .await
+        .expect("other tenant can register same ranking model version");
+        assert_eq!(other_model.tenant_id, "tenant-b");
+        assert_eq!(other_model.model_version, model.model_version);
         let Json(feature) = ranking_feature_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
@@ -92880,6 +92898,15 @@ mod tests {
         );
         assert_eq!(
             backend
+                .list_trace_ranking_model_versions("tenant-b")
+                .await
+                .expect("read other tenant DB ranking models")
+                .len(),
+            1,
+            "other tenant fixture must exist to prove DB reads stay tenant-scoped"
+        );
+        assert_eq!(
+            backend
                 .list_trace_ranking_labels("tenant-a")
                 .await
                 .expect("read DB ranking labels")
@@ -92899,6 +92926,8 @@ mod tests {
                 .await
                 .expect("admin lists DB ranking models");
         assert_eq!(models.len(), 1);
+        assert_eq!(models[0].tenant_id, "tenant-a");
+        assert_eq!(models[0].model_version, model.model_version);
         let Json(report) =
             ranking_calibration_report_handler(State(state.clone()), auth_headers("admin-token-a"))
                 .await
@@ -92914,6 +92943,7 @@ mod tests {
         assert!(operational.promotion_gates.ready);
 
         cleanup_pg_trace_tenant(&backend, "tenant-a").await;
+        cleanup_pg_trace_tenant(&backend, "tenant-b").await;
     }
 
     #[tokio::test]
