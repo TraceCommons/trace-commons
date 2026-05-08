@@ -57,7 +57,9 @@ produces the exact settlement source-list hash. Deployments that set
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` reject live
 settlement unless the supplied `issuer_approval_evidence_hash` matches a recorded
 approval for the tenant, policy version, source list, and evidence hash while
-still allowing dry-runs.
+still allowing dry-runs. Set
+`TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS` to make those
+central approvals expire for live issuance and settlement drills.
 The worker `POST /v1/workers/credit-cycle/run` route can run the production
 credit path in bounded steps for a single model/version:
 calibration, model promotion, prediction credit, settlement, then a NEAR outbox
@@ -144,7 +146,8 @@ path: whether a submitter is configured, the configured submit timeout, outbox
 submit bounds, whether a confirmer is configured, the configured confirmation
 timeout, outbox confirmation bounds, and the credit-cycle step count. It does
 not expose the relayer/confirmer URL, bearer token, hosts, or contributor
-identity.
+identity. It also exposes the configured issuer-approval max age as hours, never
+the approval reason or external evidence reference.
 
 Ranking evidence is stored separately from settlement. Admins can register
 hash-only holdout calibration dataset manifests with source counts, label-source
