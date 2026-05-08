@@ -74842,6 +74842,82 @@ mod tests {
                 .is_empty()
         );
 
+        let tenant_b_approval_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlement-approvals")
+                    .header(AUTHORIZATION, "Bearer admin-token-b")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "policy_version": "trace-credit-policy-v1",
+                            "source_list_hash": source_list_hash.clone(),
+                            "evidence_hash": "sha256:issuer-required-approval",
+                            "reason": "tenant-b approval must not unlock tenant-a settlement",
+                            "evidence_ref": "private-lab-review:tenant-b-wrong-tenant"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("tenant-b approval request builds"),
+            )
+            .await
+            .expect("tenant-b approval response");
+        assert_eq!(tenant_b_approval_response.status(), StatusCode::OK);
+
+        let tenant_b_approvals_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/credit-settlement-approvals")
+                    .header(AUTHORIZATION, "Bearer admin-token-b")
+                    .body(Body::empty())
+                    .expect("tenant-b approvals list request builds"),
+            )
+            .await
+            .expect("tenant-b approvals list response");
+        assert_eq!(tenant_b_approvals_response.status(), StatusCode::OK);
+        let tenant_b_approvals_body =
+            axum::body::to_bytes(tenant_b_approvals_response.into_body(), 16384)
+                .await
+                .expect("tenant-b approvals list body reads");
+        let tenant_b_approvals: serde_json::Value =
+            serde_json::from_slice(&tenant_b_approvals_body)
+                .expect("tenant-b approvals list json parses");
+        assert_eq!(
+            tenant_b_approvals
+                .as_array()
+                .expect("tenant-b approval list")
+                .len(),
+            1
+        );
+
+        let tenant_a_approvals_before_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/credit-settlement-approvals")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("tenant-a approvals list request builds"),
+            )
+            .await
+            .expect("tenant-a approvals list response");
+        assert_eq!(tenant_a_approvals_before_response.status(), StatusCode::OK);
+        let tenant_a_approvals_before_body =
+            axum::body::to_bytes(tenant_a_approvals_before_response.into_body(), 16384)
+                .await
+                .expect("tenant-a approvals before body reads");
+        let tenant_a_approvals_before: serde_json::Value =
+            serde_json::from_slice(&tenant_a_approvals_before_body)
+                .expect("tenant-a approvals before json parses");
+        assert!(
+            tenant_a_approvals_before
+                .as_array()
+                .expect("tenant-a approval list before")
+                .is_empty()
+        );
+
         let unrecorded_response = app(state.clone())
             .oneshot(
                 axum::http::Request::builder()
@@ -74868,6 +74944,11 @@ mod tests {
             .expect("unrecorded body reads");
         let unrecorded_text = std::str::from_utf8(&unrecorded_body).expect("body is utf8");
         assert!(unrecorded_text.contains("recorded issuer approval"));
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-b")
+                .expect("tenant-b settlement reads")
+                .is_empty()
+        );
         assert!(
             read_all_credit_settlement_batches(temp.path(), "tenant-a")
                 .expect("settlement reads")
