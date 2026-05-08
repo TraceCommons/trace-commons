@@ -7636,6 +7636,8 @@ struct TraceCreditSettlementDrillRequest {
     #[serde(default)]
     purpose: Option<String>,
     #[serde(default)]
+    issuer_approval_evidence_hash: Option<String>,
+    #[serde(default)]
     near_contract_id: Option<String>,
     #[serde(default)]
     ranking_model_version: Option<String>,
@@ -7649,6 +7651,8 @@ struct TraceCreditSettlementDrillRequest {
     require_near_contract: Option<bool>,
     #[serde(default)]
     require_account_cap: Option<bool>,
+    #[serde(default)]
+    require_issuer_approval: Option<bool>,
     #[serde(default)]
     record_evidence: bool,
 }
@@ -8383,6 +8387,8 @@ struct TraceCreditSettlementDrillResponse {
     near_contract_configured: bool,
     require_account_cap: bool,
     settlement_account_cap_configured: bool,
+    require_issuer_approval: bool,
+    issuer_approval_evidence_configured: bool,
     risk_summary: TraceCreditRiskSummaryResponse,
     settlement: TraceCreditSettlementRunResponse,
     blocking_gaps: Vec<String>,
@@ -10552,8 +10558,14 @@ async fn run_credit_settlement_drill(
     let require_pending = request.require_pending.unwrap_or(true);
     let require_near_contract = request.require_near_contract.unwrap_or(true);
     let require_account_cap = request.require_account_cap.unwrap_or(true);
+    let require_issuer_approval = request
+        .require_issuer_approval
+        .unwrap_or(state.credit_settlement_require_issuer_approval);
     let settlement_account_cap_configured =
         state.credit_settlement_max_micros_per_account.is_some();
+    let issuer_approval_evidence_hash = validate_credit_settlement_issuer_approval_evidence_hash(
+        request.issuer_approval_evidence_hash.as_deref(),
+    )?;
     let near_contract_id = request
         .near_contract_id
         .as_deref()
@@ -10570,7 +10582,7 @@ async fn run_credit_settlement_drill(
             dry_run: true,
             policy_version: request.policy_version,
             reason: purpose.clone(),
-            issuer_approval_evidence_hash: None,
+            issuer_approval_evidence_hash: issuer_approval_evidence_hash.clone(),
             near_contract_id: near_contract_id.clone(),
             ranking_model_version: request.ranking_model_version,
             ranking_target_use: request.ranking_target_use,
@@ -10578,24 +10590,22 @@ async fn run_credit_settlement_drill(
         None,
     )
     .await?;
-    let blocking_gaps = credit_settlement_drill_blocking_gaps(
-        &risk_summary,
-        &settlement,
+    let readiness = TraceCreditSettlementDrillReadiness {
         require_pending,
         require_near_contract,
-        near_contract_id.is_some(),
+        near_contract_configured: near_contract_id.is_some(),
         require_account_cap,
         settlement_account_cap_configured,
-    );
+        require_issuer_approval,
+        issuer_approval_evidence_configured: issuer_approval_evidence_hash.is_some(),
+    };
+    let blocking_gaps =
+        credit_settlement_drill_blocking_gaps(&risk_summary, &settlement, &readiness);
     let evidence_hash =
         credit_settlement_drill_evidence_hash(TraceCreditSettlementDrillEvidenceHashInputs {
             tenant,
             purpose: &purpose,
-            require_pending,
-            require_near_contract,
-            near_contract_configured: near_contract_id.is_some(),
-            require_account_cap,
-            settlement_account_cap_configured,
+            readiness,
             risk_summary: &risk_summary,
             settlement: &settlement,
             blocking_gaps: &blocking_gaps,
@@ -10607,11 +10617,13 @@ async fn run_credit_settlement_drill(
         purpose: purpose.clone(),
         ready: blocking_gaps.is_empty(),
         evidence_hash,
-        require_pending,
-        require_near_contract,
-        near_contract_configured: near_contract_id.is_some(),
-        require_account_cap,
-        settlement_account_cap_configured,
+        require_pending: readiness.require_pending,
+        require_near_contract: readiness.require_near_contract,
+        near_contract_configured: readiness.near_contract_configured,
+        require_account_cap: readiness.require_account_cap,
+        settlement_account_cap_configured: readiness.settlement_account_cap_configured,
+        require_issuer_approval: readiness.require_issuer_approval,
+        issuer_approval_evidence_configured: readiness.issuer_approval_evidence_configured,
         risk_summary,
         settlement,
         blocking_gaps,
@@ -10668,23 +10680,33 @@ fn validate_credit_settlement_drill_near_contract(near_contract_id: Option<&str>
         .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))
 }
 
-fn credit_settlement_drill_blocking_gaps(
-    risk_summary: &TraceCreditRiskSummaryResponse,
-    settlement: &TraceCreditSettlementRunResponse,
+#[derive(Clone, Copy)]
+struct TraceCreditSettlementDrillReadiness {
     require_pending: bool,
     require_near_contract: bool,
     near_contract_configured: bool,
     require_account_cap: bool,
     settlement_account_cap_configured: bool,
+    require_issuer_approval: bool,
+    issuer_approval_evidence_configured: bool,
+}
+
+fn credit_settlement_drill_blocking_gaps(
+    risk_summary: &TraceCreditRiskSummaryResponse,
+    settlement: &TraceCreditSettlementRunResponse,
+    readiness: &TraceCreditSettlementDrillReadiness,
 ) -> Vec<String> {
     let mut blocking_gaps = Vec::new();
-    if require_near_contract && !near_contract_configured {
+    if readiness.require_near_contract && !readiness.near_contract_configured {
         blocking_gaps.push("near_contract_id_missing".to_string());
     }
-    if require_pending && risk_summary.pending_credit_micros <= 0 {
+    if readiness.require_issuer_approval && !readiness.issuer_approval_evidence_configured {
+        blocking_gaps.push("issuer_approval_evidence_hash_missing".to_string());
+    }
+    if readiness.require_pending && risk_summary.pending_credit_micros <= 0 {
         blocking_gaps.push("pending_credit_events_missing".to_string());
     }
-    if require_account_cap && !settlement_account_cap_configured {
+    if readiness.require_account_cap && !readiness.settlement_account_cap_configured {
         blocking_gaps.push("settlement_account_cap_missing".to_string());
     }
     push_gap_count(
@@ -10716,11 +10738,7 @@ fn credit_settlement_drill_blocking_gaps(
 struct TraceCreditSettlementDrillEvidenceHashInputs<'a> {
     tenant: &'a TenantAuth,
     purpose: &'a str,
-    require_pending: bool,
-    require_near_contract: bool,
-    near_contract_configured: bool,
-    require_account_cap: bool,
-    settlement_account_cap_configured: bool,
+    readiness: TraceCreditSettlementDrillReadiness,
     risk_summary: &'a TraceCreditRiskSummaryResponse,
     settlement: &'a TraceCreditSettlementRunResponse,
     blocking_gaps: &'a [String],
@@ -10732,11 +10750,7 @@ fn credit_settlement_drill_evidence_hash(
     let TraceCreditSettlementDrillEvidenceHashInputs {
         tenant,
         purpose,
-        require_pending,
-        require_near_contract,
-        near_contract_configured,
-        require_account_cap,
-        settlement_account_cap_configured,
+        readiness,
         risk_summary,
         settlement,
         blocking_gaps,
@@ -10748,11 +10762,13 @@ fn credit_settlement_drill_evidence_hash(
             "actor_principal_ref": tenant.principal_ref,
             "purpose_hash": sha256_prefixed(purpose),
             "policy_version": &settlement.policy_version,
-            "require_pending": require_pending,
-            "require_near_contract": require_near_contract,
-            "near_contract_configured": near_contract_configured,
-            "require_account_cap": require_account_cap,
-            "settlement_account_cap_configured": settlement_account_cap_configured,
+            "require_pending": readiness.require_pending,
+            "require_near_contract": readiness.require_near_contract,
+            "near_contract_configured": readiness.near_contract_configured,
+            "require_account_cap": readiness.require_account_cap,
+            "settlement_account_cap_configured": readiness.settlement_account_cap_configured,
+            "require_issuer_approval": readiness.require_issuer_approval,
+            "issuer_approval_evidence_configured": readiness.issuer_approval_evidence_configured,
             "risk_account_count": risk_summary.account_count,
             "risk_pending_account_count": risk_summary.pending_account_count,
             "risk_held_account_count": risk_summary.held_account_count,
@@ -72825,6 +72841,152 @@ mod tests {
         );
         assert_eq!(opt_out["blocking_gaps"], serde_json::json!([]));
 
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement reads")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_settlement_drill_requires_central_issuer_approval_when_configured() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_max_micros_per_account = Some(2_000_000);
+        Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 0.75,
+                reason: Some("frontier lab central issuer drill probe".to_string()),
+                external_ref: Some("lab-attestation:issuer-drill".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+
+        let missing_approval_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlement-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "policy_version": "trace-credit-policy-v1",
+                            "near_contract_id": "trace-credits.testnet",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("missing approval drill request builds"),
+            )
+            .await
+            .expect("missing approval drill response");
+        assert_eq!(missing_approval_response.status(), StatusCode::OK);
+        let missing_body = axum::body::to_bytes(missing_approval_response.into_body(), 16384)
+            .await
+            .expect("missing approval body reads");
+        let missing: serde_json::Value =
+            serde_json::from_slice(&missing_body).expect("missing approval json parses");
+        assert_eq!(missing["ready"], serde_json::json!(false));
+        assert_eq!(missing["require_issuer_approval"], serde_json::json!(true));
+        assert_eq!(
+            missing["issuer_approval_evidence_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            missing["blocking_gaps"],
+            serde_json::json!(["issuer_approval_evidence_hash_missing"])
+        );
+        assert_eq!(
+            missing["settlement"]["settled_source_event_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            missing["settlement"]["issuer_approval_evidence_hash"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            missing["recorded_evidence"]["status"],
+            serde_json::json!("failed")
+        );
+
+        let approval_hash = "sha256:issuer-drill-approval";
+        let approved_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlement-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "policy_version": "trace-credit-policy-v1",
+                            "near_contract_id": "trace-credits.testnet",
+                            "issuer_approval_evidence_hash": approval_hash,
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("approved drill request builds"),
+            )
+            .await
+            .expect("approved drill response");
+        assert_eq!(approved_response.status(), StatusCode::OK);
+        let approved_body = axum::body::to_bytes(approved_response.into_body(), 16384)
+            .await
+            .expect("approved body reads");
+        let approved: serde_json::Value =
+            serde_json::from_slice(&approved_body).expect("approved json parses");
+        assert_eq!(approved["ready"], serde_json::json!(true));
+        assert_eq!(
+            approved["issuer_approval_evidence_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(approved["blocking_gaps"], serde_json::json!([]));
+        assert_eq!(
+            approved["settlement"]["issuer_approval_evidence_hash"],
+            serde_json::json!(approval_hash)
+        );
+        assert_eq!(
+            approved["recorded_evidence"]["status"],
+            serde_json::json!("passed")
+        );
+
+        let body_text = std::str::from_utf8(&approved_body).expect("approved response is utf8");
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("token-a"));
+        assert!(!body_text.contains(&event.event_id.to_string()));
+        assert!(!body_text.contains("frontier lab central issuer drill probe"));
+        assert!(!body_text.contains("lab-attestation:issuer-drill"));
         assert!(
             read_all_credit_settlement_batches(temp.path(), "tenant-a")
                 .expect("settlement reads")
