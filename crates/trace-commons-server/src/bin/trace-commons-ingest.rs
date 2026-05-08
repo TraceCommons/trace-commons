@@ -87073,6 +87073,36 @@ mod tests {
         .await
         .expect("submission succeeds");
 
+        let tenant_b_attestation_error = utility_attestation_handler(
+            State(state.clone()),
+            auth_headers("admin-token-b"),
+            Json(TraceUtilityAttestationRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 2.0,
+                use_category: "frontier_lab_training".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                evidence_hash:
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_string(),
+                reason: "tenant-b cannot attest tenant-a source".to_string(),
+                external_ref: "frontier-lab:tenant-b-cross-tenant-attestation".to_string(),
+                source_submission_ids: vec![submission_id],
+            }),
+        )
+        .await
+        .expect_err("tenant-b admin cannot attest tenant-a source");
+        assert_eq!(tenant_b_attestation_error.0, StatusCode::NOT_FOUND);
+        assert!(
+            read_all_utility_attestations(temp.path(), "tenant-b")
+                .expect("tenant-b attestations read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-b")
+                .expect("tenant-b credit reads")
+                .is_empty()
+        );
+
         let Json(attestation) = utility_attestation_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
