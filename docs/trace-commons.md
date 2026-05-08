@@ -888,7 +888,9 @@ When `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH=true`, the manual
 `POST /v1/workers/near-credit-outbox/mark-status` fallback also requires the
 matching submitter or confirmation adapter plus bearer-token readiness before
 marking an item submitted or confirmed; failed marks remain available for
-recovery without granting credit.
+recovery without granting credit. Manual confirmation still requires the item to
+already be submitted with a transaction hash, and confirmed items cannot be
+downgraded through the fallback route.
 
 Credit-hold release is admin-only through
 `POST /v1/admin/credit-holds/{hold_id}/release`. The route requires a non-empty
