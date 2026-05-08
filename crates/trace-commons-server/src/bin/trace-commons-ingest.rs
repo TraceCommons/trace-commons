@@ -12413,6 +12413,7 @@ async fn mark_near_credit_outbox_status_handler(
         .into_iter()
         .find(|item| item.near_outbox_id == body.near_outbox_id)
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "NEAR credit outbox item not found"))?;
+    ensure_near_manual_status_transition(&existing, status)?;
     ensure_near_status_transaction_hash_matches_existing(
         &existing,
         status,
@@ -12460,6 +12461,42 @@ fn require_near_credit_manual_status_adapter_auth(
         }
         _ => Ok(()),
     }
+}
+
+fn ensure_near_manual_status_transition(
+    item: &TraceNearCreditOutboxItem,
+    status: StorageTraceCreditSettlementNearStatus,
+) -> ApiResult<()> {
+    let valid = match status {
+        StorageTraceCreditSettlementNearStatus::Submitted => matches!(
+            item.status,
+            StorageTraceCreditSettlementNearStatus::Pending
+                | StorageTraceCreditSettlementNearStatus::Failed
+                | StorageTraceCreditSettlementNearStatus::Submitted
+        ),
+        StorageTraceCreditSettlementNearStatus::Confirmed => {
+            matches!(
+                item.status,
+                StorageTraceCreditSettlementNearStatus::Submitted
+                    | StorageTraceCreditSettlementNearStatus::Confirmed
+            ) && item.near_transaction_hash.is_some()
+        }
+        StorageTraceCreditSettlementNearStatus::Failed => matches!(
+            item.status,
+            StorageTraceCreditSettlementNearStatus::Pending
+                | StorageTraceCreditSettlementNearStatus::Submitted
+                | StorageTraceCreditSettlementNearStatus::Failed
+        ),
+        StorageTraceCreditSettlementNearStatus::Pending
+        | StorageTraceCreditSettlementNearStatus::Disabled => false,
+    };
+    if valid {
+        return Ok(());
+    }
+    Err(api_error(
+        StatusCode::CONFLICT,
+        "manual NEAR credit outbox status update is not valid for the current item state",
+    ))
 }
 
 async fn mark_benchmark_registry_outbox_status_handler(
@@ -76658,6 +76695,72 @@ mod tests {
             StorageTraceCreditSettlementNearStatus::Pending
         );
         assert!(outbox[0].near_transaction_hash.is_none());
+    }
+
+    #[tokio::test]
+    async fn near_credit_outbox_mark_status_rejects_invalid_lifecycle_transitions() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let pending_outbox_id = Uuid::new_v4();
+        let mut pending_item =
+            submitted_near_credit_outbox_item(pending_outbox_id, TEST_NEAR_TX_HASH_1, 1_000_000);
+        pending_item.status = StorageTraceCreditSettlementNearStatus::Pending;
+        pending_item.submitted_at = None;
+        pending_item.near_transaction_hash = None;
+        let confirmed_outbox_id = Uuid::new_v4();
+        let mut confirmed_item =
+            submitted_near_credit_outbox_item(confirmed_outbox_id, TEST_NEAR_TX_HASH_2, 1_000_000);
+        confirmed_item.status = StorageTraceCreditSettlementNearStatus::Confirmed;
+        confirmed_item.confirmed_at = Some(Utc::now());
+        append_near_credit_outbox_item(temp.path(), "tenant-a", &pending_item)
+            .expect("pending NEAR outbox file writes");
+        append_near_credit_outbox_item(temp.path(), "tenant-a", &confirmed_item)
+            .expect("confirmed NEAR outbox file writes");
+
+        let confirm_pending_error = mark_near_credit_outbox_status_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxStatusRequest {
+                near_outbox_id: pending_outbox_id,
+                status: StorageTraceCreditSettlementNearStatus::Confirmed,
+                near_transaction_hash: Some(TEST_NEAR_TX_HASH_1.to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect_err("manual confirmation cannot skip submitted state");
+        assert_eq!(confirm_pending_error.0, StatusCode::CONFLICT);
+
+        let downgrade_confirmed_error = mark_near_credit_outbox_status_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxStatusRequest {
+                near_outbox_id: confirmed_outbox_id,
+                status: StorageTraceCreditSettlementNearStatus::Failed,
+                near_transaction_hash: None,
+                error_detail: Some("operator should not downgrade confirmed credit".to_string()),
+            }),
+        )
+        .await
+        .expect_err("manual failure cannot downgrade confirmed credit");
+        assert_eq!(downgrade_confirmed_error.0, StatusCode::CONFLICT);
+
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert!(outbox.iter().any(|item| {
+            item.near_outbox_id == pending_outbox_id
+                && item.status == StorageTraceCreditSettlementNearStatus::Pending
+                && item.submitted_at.is_none()
+                && item.near_transaction_hash.is_none()
+                && item.confirmed_at.is_none()
+        }));
+        assert!(outbox.iter().any(|item| {
+            item.near_outbox_id == confirmed_outbox_id
+                && item.status == StorageTraceCreditSettlementNearStatus::Confirmed
+                && item.near_transaction_hash.as_deref() == Some(TEST_NEAR_TX_HASH_2)
+                && item.confirmed_at.is_some()
+                && item.last_error_hash.is_none()
+        }));
     }
 
     #[tokio::test]
