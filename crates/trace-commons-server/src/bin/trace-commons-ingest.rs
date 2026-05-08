@@ -1946,8 +1946,13 @@ impl AppState {
         let ranking_min_label_count = parse_ranking_min_label_count_from_env()?;
         let ranking_min_label_source_count = parse_ranking_min_label_source_count_from_env()?;
         let ranking_min_pairwise_label_count = parse_ranking_min_pairwise_label_count_from_env()?;
-        let ranking_min_pairwise_accuracy_micros =
+        let (ranking_min_pairwise_accuracy_micros, ranking_min_pairwise_accuracy_configured) =
             parse_ranking_min_pairwise_accuracy_micros_from_env()?;
+        validate_ranking_pairwise_threshold_config(
+            ranking_min_pairwise_label_count,
+            ranking_min_pairwise_accuracy_micros,
+            ranking_min_pairwise_accuracy_configured,
+        )?;
         let object_primary_submit_review = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW);
         let object_primary_replay_export = env_truthy(TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT);
         let object_primary_derived_exports =
@@ -5423,10 +5428,10 @@ fn parse_ranking_min_pairwise_label_count(configured: &str) -> anyhow::Result<us
     Ok(parsed)
 }
 
-fn parse_ranking_min_pairwise_accuracy_micros_from_env() -> anyhow::Result<i64> {
+fn parse_ranking_min_pairwise_accuracy_micros_from_env() -> anyhow::Result<(i64, bool)> {
     match optional_trimmed_env(TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS)? {
-        Some(value) => parse_ranking_min_pairwise_accuracy_micros(&value),
-        None => Ok(DEFAULT_TRACE_RANKING_MIN_PAIRWISE_ACCURACY_MICROS),
+        Some(value) => Ok((parse_ranking_min_pairwise_accuracy_micros(&value)?, true)),
+        None => Ok((DEFAULT_TRACE_RANKING_MIN_PAIRWISE_ACCURACY_MICROS, false)),
     }
 }
 
@@ -5439,6 +5444,22 @@ fn parse_ranking_min_pairwise_accuracy_micros(configured: &str) -> anyhow::Resul
         "{TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS} must be between 0 and {MAX_TRACE_RANKING_PAIRWISE_ACCURACY_MICROS}"
     );
     Ok(parsed)
+}
+
+fn validate_ranking_pairwise_threshold_config(
+    ranking_min_pairwise_label_count: usize,
+    ranking_min_pairwise_accuracy_micros: i64,
+    ranking_min_pairwise_accuracy_configured: bool,
+) -> anyhow::Result<()> {
+    if ranking_min_pairwise_accuracy_configured
+        && ranking_min_pairwise_accuracy_micros > 0
+        && ranking_min_pairwise_label_count == 0
+    {
+        anyhow::bail!(
+            "{TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS} requires {TRACE_COMMONS_RANKING_MIN_PAIRWISE_LABEL_COUNT} to be greater than zero when configured"
+        );
+    }
+    Ok(())
 }
 
 fn validate_retention_policy_id(policy_id: &str) -> anyhow::Result<()> {
@@ -54735,6 +54756,22 @@ mod tests {
                 .to_string()
                 .contains(TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS)
         );
+    }
+
+    #[test]
+    fn pairwise_accuracy_floor_requires_pairwise_evidence_floor_when_configured() {
+        validate_ranking_pairwise_threshold_config(0, 500_000, false)
+            .expect("default pairwise accuracy stays inert without evidence floor");
+        validate_ranking_pairwise_threshold_config(0, 0, true)
+            .expect("explicit zero disables pairwise accuracy floor");
+        validate_ranking_pairwise_threshold_config(10, 500_000, true)
+            .expect("pairwise accuracy floor is valid with evidence floor");
+
+        let error = validate_ranking_pairwise_threshold_config(0, 500_000, true)
+            .expect_err("configured pairwise accuracy needs evidence floor");
+        let error = error.to_string();
+        assert!(error.contains(TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS));
+        assert!(error.contains(TRACE_COMMONS_RANKING_MIN_PAIRWISE_LABEL_COUNT));
     }
 
     #[test]
