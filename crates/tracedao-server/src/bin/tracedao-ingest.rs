@@ -78149,6 +78149,13 @@ mod tests {
             .expect("first NEAR outbox file writes");
         append_near_credit_outbox_item(temp.path(), "tenant-a", &second_item)
             .expect("second NEAR outbox file writes");
+        let tenant_b_outbox_id = Uuid::new_v4();
+        let mut tenant_b_item =
+            submitted_near_credit_outbox_item(tenant_b_outbox_id, TEST_NEAR_TX_HASH_3, 3_500_000);
+        tenant_b_item.tenant_id = "tenant-b".to_string();
+        tenant_b_item.tenant_storage_ref = tenant_storage_ref("tenant-b");
+        append_near_credit_outbox_item(temp.path(), "tenant-b", &tenant_b_item)
+            .expect("tenant-b NEAR outbox file writes");
 
         let Json(response) = near_credit_outbox_confirm_worker_handler(
             State(state.clone()),
@@ -78188,6 +78195,11 @@ mod tests {
         assert!(!call_json.contains("amount_micros"));
         assert!(!call_json.contains("issuer_signature_hash"));
         assert!(!call_json.contains("source_list_hash"));
+        assert!(
+            !calls
+                .iter()
+                .any(|call| call.near_outbox_id == tenant_b_outbox_id)
+        );
 
         let outbox =
             read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
@@ -78197,6 +78209,18 @@ mod tests {
                 && item.confirmed_at.is_some()
                 && item.last_error_hash.is_none()
         }));
+        let tenant_b_outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-b")
+            .expect("tenant-b outbox reads");
+        assert_eq!(tenant_b_outbox.len(), 1);
+        assert_eq!(
+            tenant_b_outbox[0].status,
+            StorageTraceCreditSettlementNearStatus::Submitted
+        );
+        assert!(tenant_b_outbox[0].confirmed_at.is_none());
+        assert_eq!(
+            tenant_b_outbox[0].near_transaction_hash.as_deref(),
+            Some(TEST_NEAR_TX_HASH_3)
+        );
     }
 
     #[tokio::test]
