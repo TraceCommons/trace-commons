@@ -814,6 +814,115 @@ async fn assert_raw_sql_rls_filters_by_tenant_context(
     assert_eq!(tenant_b_count, 1);
 }
 
+async fn assert_raw_sql_tenants_visible_only_with_matching_tenant_context(
+    database_url: &str,
+    tenant_a: &str,
+    tenant_b: &str,
+) {
+    let (mut client, connection) = match tokio_postgres::connect(database_url, NoTls).await {
+        Ok(parts) => parts,
+        Err(e) => {
+            eprintln!("skipping raw tenant RLS assertion: database unavailable ({e})");
+            return;
+        }
+    };
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    match current_role_bypasses_trace_rls(&mut client).await {
+        Ok(true) => {
+            eprintln!("skipping raw tenant RLS assertion: current role bypasses RLS");
+            return;
+        }
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("skipping raw tenant RLS assertion: could not inspect role ({e})");
+            return;
+        }
+    }
+
+    let tx = client
+        .transaction()
+        .await
+        .expect("start raw tenant no-context assertion transaction");
+    let no_context_count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_tenants WHERE tenant_id = $1 OR tenant_id = $2",
+            &[&tenant_a, &tenant_b],
+        )
+        .await
+        .expect("count tenants without context")
+        .get(0);
+    assert_eq!(
+        no_context_count, 0,
+        "tenant rows must be invisible without tenant context"
+    );
+    tx.commit()
+        .await
+        .expect("commit raw tenant no-context assertion");
+
+    let tx = client
+        .transaction()
+        .await
+        .expect("start raw tenant A assertion transaction");
+    tx.execute(
+        "SELECT set_config('tracedao.trace_tenant_id', $1, true)",
+        &[&tenant_a],
+    )
+    .await
+    .expect("set tenant A context");
+    let tenant_a_visible_count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_tenants WHERE tenant_id = $1 OR tenant_id = $2",
+            &[&tenant_a, &tenant_b],
+        )
+        .await
+        .expect("count tenants for tenant A")
+        .get(0);
+    let tenant_b_from_a_count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_tenants WHERE tenant_id = $1",
+            &[&tenant_b],
+        )
+        .await
+        .expect("count tenant B from tenant A context")
+        .get(0);
+    assert_eq!(tenant_a_visible_count, 1);
+    assert_eq!(tenant_b_from_a_count, 0);
+    tx.commit().await.expect("commit raw tenant A assertion");
+
+    let tx = client
+        .transaction()
+        .await
+        .expect("start raw tenant B assertion transaction");
+    tx.execute(
+        "SELECT set_config('tracedao.trace_tenant_id', $1, true)",
+        &[&tenant_b],
+    )
+    .await
+    .expect("set tenant B context");
+    let tenant_b_visible_count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_tenants WHERE tenant_id = $1 OR tenant_id = $2",
+            &[&tenant_a, &tenant_b],
+        )
+        .await
+        .expect("count tenants for tenant B")
+        .get(0);
+    let tenant_a_from_b_count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_tenants WHERE tenant_id = $1",
+            &[&tenant_a],
+        )
+        .await
+        .expect("count tenant A from tenant B context")
+        .get(0);
+    assert_eq!(tenant_b_visible_count, 1);
+    assert_eq!(tenant_a_from_b_count, 0);
+    tx.commit().await.expect("commit raw tenant B assertion");
+}
+
 async fn raw_trace_rls_counts(
     tx: &tokio_postgres::Transaction<'_>,
     ids: RawTraceRlsIds,
@@ -3586,6 +3695,12 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
     assert_ne!(tenant_b_tombstones[0].tombstone_id, tenant_a_tombstone_id);
 
     if let Some(config) = postgres_test_config() {
+        assert_raw_sql_tenants_visible_only_with_matching_tenant_context(
+            config.url.expose_secret(),
+            &tenant_a,
+            &tenant_b,
+        )
+        .await;
         assert_raw_sql_trace_rows_visible_only_with_matching_tenant_context(
             config.url.expose_secret(),
             &tenant_a,
