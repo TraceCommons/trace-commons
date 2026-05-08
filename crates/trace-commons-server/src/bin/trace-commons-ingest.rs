@@ -77831,6 +77831,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn benchmark_registry_outbox_mark_status_is_tenant_scoped() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let benchmark_outbox_id = Uuid::new_v4();
+        let item = pending_benchmark_registry_outbox_item(benchmark_outbox_id);
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &item)
+            .expect("benchmark registry outbox file writes");
+
+        let tenant_b_benchmark_outbox_id = Uuid::new_v4();
+        let mut tenant_b_item =
+            pending_benchmark_registry_outbox_item(tenant_b_benchmark_outbox_id);
+        tenant_b_item.tenant_id = "tenant-b".to_string();
+        tenant_b_item.tenant_storage_ref = tenant_storage_ref("tenant-b");
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-b", &tenant_b_item)
+            .expect("tenant-b benchmark registry outbox file writes");
+
+        let Json(submitted) = mark_benchmark_registry_outbox_status_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxStatusRequest {
+                benchmark_outbox_id,
+                status: StorageTraceBenchmarkRegistryOutboxStatus::Submitted,
+                external_receipt_ref: Some("external-registry:tenant-a-submit".to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect("benchmark worker can mark tenant-a registry outbox submitted");
+        assert_eq!(
+            submitted.status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Submitted
+        );
+        assert_eq!(
+            submitted.external_receipt_ref.as_deref(),
+            Some("external-registry:tenant-a-submit")
+        );
+
+        let tenant_b_error = mark_benchmark_registry_outbox_status_handler(
+            State(state),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxStatusRequest {
+                benchmark_outbox_id: tenant_b_benchmark_outbox_id,
+                status: StorageTraceBenchmarkRegistryOutboxStatus::Submitted,
+                external_receipt_ref: Some("external-registry:tenant-b-submit".to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect_err("tenant-a benchmark worker cannot mark tenant-b outbox status");
+        assert_eq!(tenant_b_error.0, StatusCode::NOT_FOUND);
+
+        let tenant_b_outbox = read_all_benchmark_registry_outbox_items(temp.path(), "tenant-b")
+            .expect("tenant-b benchmark registry outbox reads");
+        assert_eq!(tenant_b_outbox.len(), 1);
+        assert_eq!(
+            tenant_b_outbox[0].status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Pending
+        );
+        assert!(tenant_b_outbox[0].external_receipt_ref.is_none());
+    }
+
+    #[tokio::test]
     async fn benchmark_registry_outbox_submit_worker_sends_pending_items_and_marks_submitted() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
