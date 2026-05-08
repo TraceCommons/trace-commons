@@ -8,11 +8,14 @@ use tracedao_server::config::{DatabaseConfig, SslMode};
 use tracedao_server::db::{Database, TraceCorpusRlsDiagnostics, postgres::PgBackend};
 use tracedao_server::trace_corpus_storage::{
     TenantScopedTraceObjectRef, TraceAuditAction, TraceAuditEventWrite, TraceAuditSafeMetadata,
-    TraceCorpusStatus, TraceCorpusStore, TraceCreditEventType, TraceCreditEventWrite,
-    TraceCreditSettlementState, TraceDerivedRecordWrite, TraceDerivedStatus,
-    TraceExportAccessGrantStatus, TraceExportAccessGrantWrite, TraceExportJobStatus,
-    TraceExportJobStatusUpdate, TraceExportJobWrite, TraceExportManifestItemInvalidationReason,
-    TraceExportManifestItemWrite, TraceExportManifestWrite, TraceObjectArtifactKind,
+    TraceCorpusStatus, TraceCorpusStore, TraceCreditAccountSettlementLineItem,
+    TraceCreditEventType, TraceCreditEventWrite, TraceCreditHoldReason, TraceCreditHoldWrite,
+    TraceCreditSettlementBatchStatus, TraceCreditSettlementBatchWrite,
+    TraceCreditSettlementNearStatus, TraceCreditSettlementState, TraceDerivedRecordWrite,
+    TraceDerivedStatus, TraceExportAccessGrantStatus, TraceExportAccessGrantWrite,
+    TraceExportJobStatus, TraceExportJobStatusUpdate, TraceExportJobWrite,
+    TraceExportManifestItemInvalidationReason, TraceExportManifestItemWrite,
+    TraceExportManifestWrite, TraceNearCreditOutboxItemWrite, TraceObjectArtifactKind,
     TraceObjectRefWrite, TraceRankingFeatureWrite, TraceRankingModelStatus,
     TraceRankingModelVersionWrite, TraceRankingPredictionWrite, TraceRankingWorkerRunKind,
     TraceRankingWorkerRunStatus, TraceRankingWorkerRunWrite, TraceRetentionJobItemAction,
@@ -21,8 +24,9 @@ use tracedao_server::trace_corpus_storage::{
     TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget, TraceSubmissionWrite,
     TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus, TraceTenantAccessGrantWrite,
-    TraceTenantPolicyWrite, TraceTombstoneWrite, TraceVectorEntrySourceProjection,
-    TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWorkerKind,
+    TraceTenantPolicyWrite, TraceTombstoneWrite, TraceUtilityAttestationWrite,
+    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
+    TraceWorkerKind,
 };
 use uuid::Uuid;
 
@@ -225,11 +229,25 @@ fn sample_credit_event(
 }
 
 #[derive(Clone, Copy)]
+struct RawCreditControlPlaneIds {
+    utility_attestation_id: Uuid,
+    settlement_batch_id: Uuid,
+    credit_hold_id: Uuid,
+    near_outbox_id: Uuid,
+    near_account_outbox_id: Uuid,
+}
+
+#[derive(Clone, Copy)]
 struct RawTraceRlsIds {
     submission_id: Uuid,
     object_ref_id: Uuid,
     export_manifest_id: Uuid,
     credit_event_id: Uuid,
+    utility_attestation_id: Uuid,
+    settlement_batch_id: Uuid,
+    credit_hold_id: Uuid,
+    near_outbox_id: Uuid,
+    near_account_outbox_id: Uuid,
     tombstone_id: Uuid,
     retention_job_id: Uuid,
     propagation_item_id: Uuid,
@@ -242,6 +260,11 @@ struct RawTraceRlsCounts {
     export_manifests: i64,
     export_manifest_items: i64,
     credit_events: i64,
+    utility_attestations: i64,
+    credit_settlement_batches: i64,
+    credit_holds: i64,
+    near_credit_outbox: i64,
+    near_credit_account_outbox: i64,
     tombstones: i64,
     retention_jobs: i64,
     retention_job_items: i64,
@@ -256,6 +279,11 @@ impl RawTraceRlsCounts {
             export_manifests: count,
             export_manifest_items: count,
             credit_events: count,
+            utility_attestations: count,
+            credit_settlement_batches: count,
+            credit_holds: count,
+            near_credit_outbox: count,
+            near_credit_account_outbox: count,
             tombstones: count,
             retention_jobs: count,
             retention_job_items: count,
@@ -287,6 +315,119 @@ fn sample_revocation_propagation_item(
         evidence_hash: None,
         metadata: BTreeMap::new(),
     }
+}
+
+async fn write_sample_credit_control_plane_rows(
+    backend: &PgBackend,
+    tenant_id: &str,
+    submission_id: Uuid,
+    credit_event_id: Uuid,
+    ids: RawCreditControlPlaneIds,
+    label: &str,
+) {
+    let credit_account_ref = format!("credit-account:{tenant_id}");
+    let credit_account_hash = format!("sha256:{tenant_id}:credit-account");
+    let source_list_hash = format!("sha256:{tenant_id}:settlement-sources");
+    backend
+        .upsert_trace_utility_attestation(TraceUtilityAttestationWrite {
+            tenant_id: tenant_id.to_string(),
+            attestation_id: ids.utility_attestation_id,
+            event_type: TraceCreditEventType::TrainingUtility,
+            use_category: "model_training".to_string(),
+            policy_version: "trace-credit-policy-rls".to_string(),
+            evidence_hash: format!("sha256:{tenant_id}:utility-evidence"),
+            external_ref_hash: format!("sha256:{tenant_id}:utility-ref"),
+            source_submission_ids: vec![submission_id],
+            actor_principal_ref: format!("principal:{tenant_id}:utility-worker"),
+        })
+        .await
+        .expect("write tenant utility attestation");
+    backend
+        .upsert_trace_credit_hold(TraceCreditHoldWrite {
+            tenant_id: tenant_id.to_string(),
+            hold_id: ids.credit_hold_id,
+            credit_account_ref: credit_account_ref.clone(),
+            credit_account_hash: credit_account_hash.clone(),
+            reason: TraceCreditHoldReason::AttestationDispute,
+            reason_hash: format!("sha256:{tenant_id}:hold-reason"),
+            actor_principal_ref: format!("principal:{tenant_id}:admin"),
+            released_at: None,
+        })
+        .await
+        .expect("write tenant credit hold");
+    backend
+        .upsert_trace_credit_settlement_batch(TraceCreditSettlementBatchWrite {
+            tenant_id: tenant_id.to_string(),
+            settlement_batch_id: ids.settlement_batch_id,
+            policy_version: "trace-credit-policy-rls".to_string(),
+            status: TraceCreditSettlementBatchStatus::Finalized,
+            reason_hash: format!("sha256:{tenant_id}:settlement-reason"),
+            issuer_approval_evidence_hash: Some(format!("sha256:{tenant_id}:issuer-approval")),
+            source_credit_event_ids: vec![credit_event_id],
+            source_submission_ids: vec![submission_id],
+            source_list_hash: source_list_hash.clone(),
+            settled_credit_points: "1.000000".to_string(),
+            settled_credit_micros: 1_000_000,
+            line_items: vec![TraceCreditAccountSettlementLineItem {
+                credit_account_ref: credit_account_ref.clone(),
+                credit_account_hash: credit_account_hash.clone(),
+                settled_credit_delta_micros: 1_000_000,
+                source_credit_event_ids: vec![credit_event_id],
+                source_submission_ids: vec![submission_id],
+                source_list_hash: source_list_hash.clone(),
+                near_status: TraceCreditSettlementNearStatus::Pending,
+                near_outbox_id: Some(ids.near_outbox_id),
+            }],
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+            ranking_calibration_run_id: None,
+            ranking_calibration_report_hash: None,
+            ranking_calibration_joined_evidence_hash: None,
+            ranking_credit_events_excluded_count: 0,
+            ranking_credit_events_excluded_reason_counts: BTreeMap::new(),
+            actor_principal_ref: format!("principal:{tenant_id}:admin"),
+        })
+        .await
+        .expect("write tenant settlement batch");
+    backend
+        .upsert_trace_near_credit_outbox_item(TraceNearCreditOutboxItemWrite {
+            tenant_id: tenant_id.to_string(),
+            near_outbox_id: ids.near_outbox_id,
+            settlement_batch_id: ids.settlement_batch_id,
+            credit_account_hash: credit_account_hash.clone(),
+            near_call_json: serde_json::json!({
+                "contract_id": "trace-credits.testnet",
+                "method_name": "settle_credit_receipt",
+                "args": {
+                    "settlement_batch_id": ids.settlement_batch_id,
+                    "credit_account_hash": credit_account_hash
+                },
+                "idempotency_key": format!("sha256:{label}:settle")
+            }),
+            status: TraceCreditSettlementNearStatus::Pending,
+        })
+        .await
+        .expect("write tenant NEAR receipt outbox");
+    backend
+        .upsert_trace_near_credit_outbox_item(TraceNearCreditOutboxItemWrite {
+            tenant_id: tenant_id.to_string(),
+            near_outbox_id: ids.near_account_outbox_id,
+            settlement_batch_id: ids.credit_hold_id,
+            credit_account_hash: format!("sha256:{tenant_id}:credit-account"),
+            near_call_json: serde_json::json!({
+                "contract_id": "trace-credits.testnet",
+                "method_name": "freeze_credit_account",
+                "args": {
+                    "credit_account_hash": format!("sha256:{tenant_id}:credit-account"),
+                    "reason_hash": format!("sha256:{tenant_id}:hold-reason")
+                },
+                "idempotency_key": format!("sha256:{label}:freeze")
+            }),
+            status: TraceCreditSettlementNearStatus::Pending,
+        })
+        .await
+        .expect("write tenant NEAR account outbox");
 }
 
 async fn current_role_bypasses_trace_rls(
@@ -393,15 +534,25 @@ async fn raw_trace_rls_counts(
                 (SELECT COUNT(*) FROM trace_export_manifests WHERE export_manifest_id = $3) AS export_manifests,
                 (SELECT COUNT(*) FROM trace_export_manifest_items WHERE export_manifest_id = $3) AS export_manifest_items,
                 (SELECT COUNT(*) FROM trace_credit_ledger WHERE credit_event_id = $4) AS credit_events,
-                (SELECT COUNT(*) FROM trace_tombstones WHERE tombstone_id = $5) AS tombstones,
-                (SELECT COUNT(*) FROM trace_retention_jobs WHERE retention_job_id = $6) AS retention_jobs,
-                (SELECT COUNT(*) FROM trace_retention_job_items WHERE retention_job_id = $6) AS retention_job_items,
-                (SELECT COUNT(*) FROM trace_revocation_propagation_items WHERE propagation_item_id = $7) AS revocation_propagation_items",
+                (SELECT COUNT(*) FROM trace_utility_attestations WHERE attestation_id = $5) AS utility_attestations,
+                (SELECT COUNT(*) FROM trace_credit_settlement_batches WHERE settlement_batch_id = $6) AS credit_settlement_batches,
+                (SELECT COUNT(*) FROM trace_credit_holds WHERE hold_id = $7) AS credit_holds,
+                (SELECT COUNT(*) FROM trace_near_credit_outbox WHERE near_outbox_id = $8) AS near_credit_outbox,
+                (SELECT COUNT(*) FROM trace_near_credit_account_outbox WHERE near_outbox_id = $9) AS near_credit_account_outbox,
+                (SELECT COUNT(*) FROM trace_tombstones WHERE tombstone_id = $10) AS tombstones,
+                (SELECT COUNT(*) FROM trace_retention_jobs WHERE retention_job_id = $11) AS retention_jobs,
+                (SELECT COUNT(*) FROM trace_retention_job_items WHERE retention_job_id = $11) AS retention_job_items,
+                (SELECT COUNT(*) FROM trace_revocation_propagation_items WHERE propagation_item_id = $12) AS revocation_propagation_items",
             &[
                 &ids.submission_id,
                 &ids.object_ref_id,
                 &ids.export_manifest_id,
                 &ids.credit_event_id,
+                &ids.utility_attestation_id,
+                &ids.settlement_batch_id,
+                &ids.credit_hold_id,
+                &ids.near_outbox_id,
+                &ids.near_account_outbox_id,
                 &ids.tombstone_id,
                 &ids.retention_job_id,
                 &ids.propagation_item_id,
@@ -416,6 +567,11 @@ async fn raw_trace_rls_counts(
         export_manifests: row.get("export_manifests"),
         export_manifest_items: row.get("export_manifest_items"),
         credit_events: row.get("credit_events"),
+        utility_attestations: row.get("utility_attestations"),
+        credit_settlement_batches: row.get("credit_settlement_batches"),
+        credit_holds: row.get("credit_holds"),
+        near_credit_outbox: row.get("near_credit_outbox"),
+        near_credit_account_outbox: row.get("near_credit_account_outbox"),
         tombstones: row.get("tombstones"),
         retention_jobs: row.get("retention_jobs"),
         retention_job_items: row.get("retention_job_items"),
@@ -2633,6 +2789,39 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
         .await
         .expect("append tenant B credit event");
 
+    let tenant_a_credit_control_ids = RawCreditControlPlaneIds {
+        utility_attestation_id: Uuid::new_v4(),
+        settlement_batch_id: Uuid::new_v4(),
+        credit_hold_id: Uuid::new_v4(),
+        near_outbox_id: Uuid::new_v4(),
+        near_account_outbox_id: Uuid::new_v4(),
+    };
+    write_sample_credit_control_plane_rows(
+        &backend,
+        &tenant_a,
+        tenant_a_submission_id,
+        tenant_a_credit_event_id,
+        tenant_a_credit_control_ids,
+        "raw-a",
+    )
+    .await;
+    let tenant_b_credit_control_ids = RawCreditControlPlaneIds {
+        utility_attestation_id: Uuid::new_v4(),
+        settlement_batch_id: Uuid::new_v4(),
+        credit_hold_id: Uuid::new_v4(),
+        near_outbox_id: Uuid::new_v4(),
+        near_account_outbox_id: Uuid::new_v4(),
+    };
+    write_sample_credit_control_plane_rows(
+        &backend,
+        &tenant_b,
+        tenant_b_submission_id,
+        tenant_b_credit_event_id,
+        tenant_b_credit_control_ids,
+        "raw-b",
+    )
+    .await;
+
     let effective_at = DateTime::parse_from_rfc3339("2026-04-25T12:00:00Z")
         .expect("parse effective timestamp")
         .with_timezone(&Utc);
@@ -2824,6 +3013,11 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
                 object_ref_id: tenant_a_object_ref_id,
                 export_manifest_id: tenant_a_export_manifest_id,
                 credit_event_id: tenant_a_credit_event_id,
+                utility_attestation_id: tenant_a_credit_control_ids.utility_attestation_id,
+                settlement_batch_id: tenant_a_credit_control_ids.settlement_batch_id,
+                credit_hold_id: tenant_a_credit_control_ids.credit_hold_id,
+                near_outbox_id: tenant_a_credit_control_ids.near_outbox_id,
+                near_account_outbox_id: tenant_a_credit_control_ids.near_account_outbox_id,
                 tombstone_id: tenant_a_tombstone_id,
                 retention_job_id: tenant_a_retention_job_id,
                 propagation_item_id: tenant_a_propagation_item_id,
@@ -2833,6 +3027,11 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
                 object_ref_id: tenant_b_object_ref_id,
                 export_manifest_id: tenant_b_export_manifest_id,
                 credit_event_id: tenant_b_credit_event_id,
+                utility_attestation_id: tenant_b_credit_control_ids.utility_attestation_id,
+                settlement_batch_id: tenant_b_credit_control_ids.settlement_batch_id,
+                credit_hold_id: tenant_b_credit_control_ids.credit_hold_id,
+                near_outbox_id: tenant_b_credit_control_ids.near_outbox_id,
+                near_account_outbox_id: tenant_b_credit_control_ids.near_account_outbox_id,
                 tombstone_id: tenant_b_tombstone_id,
                 retention_job_id: tenant_b_retention_job_id,
                 propagation_item_id: tenant_b_propagation_item_id,
