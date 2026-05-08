@@ -67461,6 +67461,7 @@ mod tests {
             return;
         };
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_mirror: Arc<dyn Database> = backend.clone();
@@ -67486,6 +67487,20 @@ mod tests {
         )
         .await
         .expect("vector drill source mirrors into DB");
+
+        let mut tenant_b_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_b_envelope);
+        tenant_b_envelope.consent.scopes = vec![ConsentScope::RankingTraining];
+        tenant_b_envelope.trace_card.consent_scope = ConsentScope::RankingTraining;
+        tenant_b_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_envelope),
+        )
+        .await
+        .expect("tenant-b vector drill source mirrors into DB");
 
         let response = app(state.clone())
             .oneshot(
@@ -67545,6 +67560,14 @@ mod tests {
             vector_entries.is_empty(),
             "vector-index drill must not write vector entries"
         );
+        let tenant_b_vector_entries = backend
+            .list_trace_vector_entries("tenant-b")
+            .await
+            .expect("tenant-b vector entries list after tenant-a dry-run drill");
+        assert!(
+            tenant_b_vector_entries.is_empty(),
+            "tenant-a vector-index drill must not write tenant-b vector entries"
+        );
         let audit_events =
             read_all_audit_events(temp.path(), "tenant-a").expect("file audit events read");
         assert!(audit_events.iter().any(|event| {
@@ -67560,8 +67583,21 @@ mod tests {
                     reason.contains("check_name=vector_index") && reason.contains("status=passed")
                 })
         }));
+        let tenant_b_audit_events =
+            read_all_audit_events(temp.path(), "tenant-b").expect("tenant-b audit events read");
+        assert!(
+            !tenant_b_audit_events
+                .iter()
+                .any(|event| event.kind == "vector_index")
+        );
+        assert!(
+            !tenant_b_audit_events
+                .iter()
+                .any(|event| event.kind == "rollout_smoke_evidence")
+        );
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
     }
 
     #[tokio::test]
