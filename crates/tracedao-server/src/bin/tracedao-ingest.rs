@@ -12719,7 +12719,29 @@ async fn run_near_credit_outbox_submit_worker(
         .context("NEAR credit outbox submitter is not configured")?
         .clone();
     for item in candidates {
-        let submit_request = near_credit_submitter_request_from_outbox_item(&item);
+        let submit_request = match near_credit_submitter_request_from_outbox_item(&item) {
+            Ok(request) => request,
+            Err(error) => {
+                let last_error_hash = sha256_prefixed(&safe_worker_error(&error));
+                update_near_credit_outbox_item_status_with_db_mirror(
+                    state,
+                    tenant,
+                    item.near_outbox_id,
+                    StorageTraceCreditSettlementNearStatus::Failed,
+                    None,
+                    Some(last_error_hash),
+                )
+                .await?
+                .with_context(|| {
+                    format!(
+                        "NEAR credit outbox item {} disappeared before invalid-call status update",
+                        item.near_outbox_id
+                    )
+                })?;
+                response.failed += 1;
+                continue;
+            }
+        };
         match submitter.submit(submit_request).await {
             Ok(submit_response) => {
                 let near_transaction_hash =
@@ -12987,19 +13009,31 @@ fn near_credit_outbox_item_is_confirm_candidate(item: &TraceNearCreditOutboxItem
 
 fn near_credit_submitter_request_from_outbox_item(
     item: &TraceNearCreditOutboxItem,
-) -> TraceNearCreditSubmitterRequest {
-    TraceNearCreditSubmitterRequest {
+) -> anyhow::Result<TraceNearCreditSubmitterRequest> {
+    item.near_call.validate().with_context(|| {
+        format!(
+            "NEAR credit outbox item {} has invalid method-call payload",
+            item.near_outbox_id
+        )
+    })?;
+    Ok(TraceNearCreditSubmitterRequest {
         tenant_storage_ref: item.tenant_storage_ref.clone(),
         near_outbox_id: item.near_outbox_id,
         settlement_batch_id: item.settlement_batch_id,
         credit_account_hash: item.credit_account_hash.clone(),
         near_call: item.near_call.clone(),
-    }
+    })
 }
 
 fn near_credit_confirmation_request_from_outbox_item(
     item: &TraceNearCreditOutboxItem,
 ) -> anyhow::Result<TraceNearCreditConfirmationRequest> {
+    item.near_call.validate().with_context(|| {
+        format!(
+            "NEAR credit outbox item {} has invalid method-call payload",
+            item.near_outbox_id
+        )
+    })?;
     let near_transaction_hash = item
         .near_transaction_hash
         .as_deref()
@@ -13019,6 +13053,7 @@ fn near_credit_confirmation_request_from_outbox_item(
 }
 
 fn near_credit_call_hash(call: &NearCreditReceiptCall) -> anyhow::Result<String> {
+    call.validate()?;
     let canonical_call =
         serde_json::to_string(call).context("failed to serialize NEAR credit call for hash")?;
     Ok(sha256_prefixed(&canonical_call))
@@ -76118,6 +76153,81 @@ mod tests {
             outbox[0].near_transaction_hash.as_deref(),
             Some("near-worker-tx-hash-1")
         );
+    }
+
+    #[tokio::test]
+    async fn near_credit_outbox_submit_worker_rejects_tampered_method_call_before_relayer() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let fake_submitter = FakeNearCreditSubmitter::default();
+        let submitted_calls = fake_submitter.calls.clone();
+        Arc::make_mut(&mut state).near_credit_submitter = Some(Arc::new(fake_submitter));
+
+        let settlement_batch_id = Uuid::new_v4();
+        let near_outbox_id = Uuid::new_v4();
+        let receipt = NearCreditReceipt {
+            settlement_batch_id,
+            credit_account_hash: sha256_prefixed(&principal_storage_ref("token-a")),
+            policy_version: "trace-credit-policy-v1".to_string(),
+            source_list_hash: "sha256:settlement-worker-tampered-sources".to_string(),
+            attestation_hash: "sha256:settlement-worker-tampered-attestation".to_string(),
+            amount_micros: 1_000_000,
+            issuer_signature_hash: "sha256:settlement-worker-tampered-signature".to_string(),
+        };
+        let mut near_call = NearCreditReceiptCall::settle("trace-credits.testnet", receipt.clone())
+            .expect("NEAR call builds");
+        near_call.idempotency_key = "sha256:tampered".to_string();
+        append_near_credit_outbox_item(
+            temp.path(),
+            "tenant-a",
+            &TraceNearCreditOutboxItem {
+                near_outbox_id,
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                settlement_batch_id,
+                credit_account_hash: receipt.credit_account_hash,
+                near_call,
+                status: StorageTraceCreditSettlementNearStatus::Pending,
+                created_at: Utc::now(),
+                submitted_at: None,
+                near_transaction_hash: None,
+                last_error_hash: None,
+                confirmed_at: None,
+            },
+        )
+        .expect("outbox file writes");
+
+        let Json(response) = near_credit_outbox_submit_worker_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxSubmitWorkerRequest {
+                purpose: Some("submit_near_tampered_receipt".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("invalid stored NEAR call is recorded as a worker item failure");
+
+        assert_eq!(response.checked, 1);
+        assert_eq!(response.submitted, 0);
+        assert_eq!(response.failed, 1);
+        assert_eq!(response.pending, 1);
+        assert!(
+            submitted_calls
+                .lock()
+                .expect("fake submitter calls lock")
+                .is_empty(),
+            "tampered method call must not reach the NEAR relayer"
+        );
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert_eq!(
+            outbox[0].status,
+            StorageTraceCreditSettlementNearStatus::Failed
+        );
+        assert!(outbox[0].near_transaction_hash.is_none());
+        assert!(outbox[0].last_error_hash.is_some());
     }
 
     #[tokio::test]

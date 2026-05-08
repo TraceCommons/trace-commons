@@ -51,10 +51,13 @@ Trace Credits are non-transferable account credits backed by reviewed utility
 evidence. Uploads and ranker scores do not settle credit directly. Utility
 workers record hash-only attestations for accepted traces, admins run settlement
 batches, and optional NEAR receipt calls are queued only after off-chain
-settlement finalizes. Operators can pass a hash-only
-`issuer_approval_evidence_hash` on final settlement batches; deployments that
-set `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` reject live
-settlement without that central approval evidence while still allowing dry-runs.
+settlement finalizes. Operators record a hash-only central issuer approval
+through `GET|POST /v1/admin/credit-settlement-approvals` after a dry-run
+produces the exact settlement source-list hash. Deployments that set
+`TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` reject live
+settlement unless the supplied `issuer_approval_evidence_hash` matches a recorded
+approval for the tenant, policy version, source list, and evidence hash while
+still allowing dry-runs.
 The worker `POST /v1/workers/credit-cycle/run` route can run the production
 credit path in bounded steps for a single model/version:
 calibration, model promotion, prediction credit, settlement, then a NEAR outbox
@@ -108,8 +111,11 @@ controlled by `TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN` and
 The NEAR path is intentionally an outbox of deterministic method-call payloads
 for a non-transferable receipt contract. The payload builder only emits
 `settle_credit_receipt`, `reverse_credit_receipt`, and `freeze_credit_account`
-calls, rejects malformed NEAR account ids, and rejects any other NEAR credit
-method. Configure
+calls, rejects malformed NEAR account ids, validates the method-specific
+hash-only argument shape, recomputes the idempotency key, and rejects any other
+NEAR credit method. Stored outbox calls are revalidated before submit or confirm
+workers hand them to a relayer, so tampered local/DB rows fail closed as
+retryable outbox failures instead of leaving the server boundary. Configure
 `TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL` to let the scoped submit worker hand
 pending or failed-retry calls to an operator-owned NEAR relayer; the server then
 records the public transaction hash or a hashed failure. Configure

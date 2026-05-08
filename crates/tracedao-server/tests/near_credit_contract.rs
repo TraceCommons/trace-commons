@@ -51,14 +51,17 @@ fn near_credit_receipt_call_rejects_transfer_methods() {
 
 #[test]
 fn near_credit_receipt_call_rejects_unknown_credit_methods() {
-    for method_name in [
-        "settle_credit_receipt",
-        "reverse_credit_receipt",
-        "freeze_credit_account",
-    ] {
-        NearCreditReceiptCall::raw("trace-credits.testnet", method_name, json!({}))
-            .expect("known non-transferable credit method is allowed");
-    }
+    let receipt = sample_receipt(Uuid::from_u128(0x150));
+    NearCreditReceiptCall::settle("trace-credits.testnet", receipt.clone())
+        .expect("settlement method is allowed");
+    NearCreditReceiptCall::reverse("trace-credits.testnet", receipt)
+        .expect("reversal method is allowed");
+    NearCreditReceiptCall::freeze_account(
+        "trace-credits.testnet",
+        "sha256:account",
+        "sha256:freeze-reason",
+    )
+    .expect("freeze method is allowed");
 
     let error =
         NearCreditReceiptCall::raw("trace-credits.testnet", "mint_credit_receipt", json!({}))
@@ -68,16 +71,57 @@ fn near_credit_receipt_call_rejects_unknown_credit_methods() {
 }
 
 #[test]
+fn near_credit_receipt_call_rejects_malformed_allowed_method_args() {
+    let missing_args = NearCreditReceiptCall::raw(
+        "trace-credits.testnet",
+        "settle_credit_receipt",
+        json!({
+            "credit_account_hash": "sha256:account"
+        }),
+    )
+    .expect_err("settlement method requires the full receipt shape");
+    assert!(
+        missing_args
+            .to_string()
+            .contains("invalid NEAR credit receipt")
+    );
+
+    let extra_args = NearCreditReceiptCall::raw(
+        "trace-credits.testnet",
+        "freeze_credit_account",
+        json!({
+            "credit_account_hash": "sha256:account",
+            "reason_hash": "sha256:freeze-reason",
+            "raw_reason": "do not store this"
+        }),
+    )
+    .expect_err("freeze method rejects unexpected raw fields");
+    assert!(
+        extra_args
+            .to_string()
+            .contains("invalid NEAR credit freeze")
+    );
+}
+
+#[test]
+fn near_credit_receipt_call_validate_rejects_tampered_idempotency_key() {
+    let mut call = NearCreditReceiptCall::settle(
+        "trace-credits.testnet",
+        sample_receipt(Uuid::from_u128(0x175)),
+    )
+    .expect("settlement call builds");
+    call.idempotency_key = "sha256:tampered".to_string();
+
+    let error = call
+        .validate()
+        .expect_err("tampered NEAR outbox calls are rejected before relayer submit");
+
+    assert!(error.to_string().contains("idempotency key"));
+}
+
+#[test]
 fn near_credit_receipt_call_rejects_malformed_contract_ids() {
-    let receipt = NearCreditReceipt {
-        settlement_batch_id: Uuid::from_u128(0x200),
-        credit_account_hash: "sha256:account".to_string(),
-        policy_version: "trace-credit-policy-v1".to_string(),
-        source_list_hash: "sha256:sources".to_string(),
-        attestation_hash: "sha256:attestation".to_string(),
-        amount_micros: 1_750_000,
-        issuer_signature_hash: "sha256:issuer-signature".to_string(),
-    };
+    let receipt = sample_receipt(Uuid::from_u128(0x200));
 
     for contract_id in [
         " Trace-Credits.testnet",
@@ -93,5 +137,17 @@ fn near_credit_receipt_call_rejects_malformed_contract_ids() {
             error.to_string().contains("NEAR contract id"),
             "unexpected error for {contract_id}: {error}"
         );
+    }
+}
+
+fn sample_receipt(settlement_batch_id: Uuid) -> NearCreditReceipt {
+    NearCreditReceipt {
+        settlement_batch_id,
+        credit_account_hash: "sha256:account".to_string(),
+        policy_version: "trace-credit-policy-v1".to_string(),
+        source_list_hash: "sha256:sources".to_string(),
+        attestation_hash: "sha256:attestation".to_string(),
+        amount_micros: 1_750_000,
+        issuer_signature_hash: "sha256:issuer-signature".to_string(),
     }
 }

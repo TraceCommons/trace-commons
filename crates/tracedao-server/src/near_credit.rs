@@ -30,6 +30,25 @@ pub struct NearCreditReceiptCall {
     pub idempotency_key: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NearCreditReceiptArgs {
+    settlement_batch_id: Uuid,
+    credit_account_hash: String,
+    policy_version: String,
+    source_list_hash: String,
+    attestation_hash: String,
+    amount_micros: i64,
+    issuer_signature_hash: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NearCreditFreezeAccountArgs {
+    credit_account_hash: String,
+    reason_hash: String,
+}
+
 impl NearCreditReceiptCall {
     pub fn settle(
         contract_id: impl Into<String>,
@@ -96,8 +115,9 @@ impl NearCreditReceiptCall {
         args: Value,
     ) -> anyhow::Result<Self> {
         let contract_id = validate_near_contract_id(contract_id.into())?;
-        let method_name = method_name.into();
+        let method_name = method_name.into().trim().to_string();
         ensure_non_transferable_method(&method_name)?;
+        validate_method_args(&method_name, &args)?;
         let canonical_args =
             serde_json::to_string(&args).context("failed to serialize NEAR call args")?;
         let idempotency_key =
@@ -108,6 +128,35 @@ impl NearCreditReceiptCall {
             args,
             idempotency_key,
         })
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let contract_id = validate_near_contract_id(self.contract_id.clone())?;
+        anyhow::ensure!(
+            contract_id == self.contract_id,
+            "NEAR credit call contract id is not canonical"
+        );
+        let method_name = self.method_name.trim();
+        ensure_non_transferable_method(method_name)?;
+        anyhow::ensure!(
+            method_name == self.method_name,
+            "NEAR credit call method name is not canonical"
+        );
+        validate_method_args(method_name, &self.args)?;
+        let canonical_args = serde_json::to_string(&self.args)
+            .context("failed to serialize NEAR call args for validation")?;
+        let expected_idempotency_key = sha256_prefixed(
+            format!(
+                "{}\n{}\n{}",
+                self.contract_id, self.method_name, canonical_args
+            )
+            .as_bytes(),
+        );
+        anyhow::ensure!(
+            self.idempotency_key == expected_idempotency_key,
+            "NEAR credit call idempotency key does not match canonical payload"
+        );
+        Ok(())
     }
 }
 
@@ -124,6 +173,32 @@ fn validate_receipt(receipt: &NearCreditReceipt) -> anyhow::Result<()> {
         receipt.amount_micros > 0,
         "settled NEAR credit amount must be positive"
     );
+    Ok(())
+}
+
+fn validate_method_args(method_name: &str, args: &Value) -> anyhow::Result<()> {
+    match method_name {
+        "settle_credit_receipt" | "reverse_credit_receipt" => {
+            let args: NearCreditReceiptArgs = serde_json::from_value(args.clone())
+                .context("invalid NEAR credit receipt method args")?;
+            validate_receipt(&NearCreditReceipt {
+                settlement_batch_id: args.settlement_batch_id,
+                credit_account_hash: args.credit_account_hash,
+                policy_version: args.policy_version,
+                source_list_hash: args.source_list_hash,
+                attestation_hash: args.attestation_hash,
+                amount_micros: args.amount_micros,
+                issuer_signature_hash: args.issuer_signature_hash,
+            })?;
+        }
+        "freeze_credit_account" => {
+            let args: NearCreditFreezeAccountArgs = serde_json::from_value(args.clone())
+                .context("invalid NEAR credit freeze method args")?;
+            ensure_hash_like("credit_account_hash", &args.credit_account_hash)?;
+            ensure_hash_like("reason_hash", &args.reason_hash)?;
+        }
+        _ => ensure_non_transferable_method(method_name)?,
+    }
     Ok(())
 }
 
