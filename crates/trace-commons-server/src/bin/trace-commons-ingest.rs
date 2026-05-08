@@ -248,6 +248,10 @@ const TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL";
+const TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID";
+const TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_NEAR_CONTRACT: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_NEAR_CONTRACT";
 const TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL: &str = "TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL";
 const TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN: &str =
     "TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN";
@@ -488,6 +492,8 @@ struct AppState {
     analytics_broad_release_privacy_accounting: Option<TraceAnalyticsPrivacyAccountingConfig>,
     credit_settlement_max_micros_per_account: Option<i64>,
     credit_settlement_require_issuer_approval: bool,
+    credit_settlement_near_contract_id: Option<String>,
+    credit_settlement_require_near_contract: bool,
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Arc<BTreeSet<String>>,
     artifact_store: Option<ConfiguredTraceArtifactStore>,
@@ -1807,6 +1813,15 @@ impl AppState {
             parse_credit_settlement_max_points_per_account_from_env()?;
         let credit_settlement_require_issuer_approval =
             env_truthy(TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL);
+        let credit_settlement_near_contract_id =
+            parse_credit_settlement_near_contract_id_from_env()?;
+        let credit_settlement_require_near_contract =
+            env_truthy(TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_NEAR_CONTRACT);
+        if credit_settlement_require_near_contract && credit_settlement_near_contract_id.is_none() {
+            anyhow::bail!(
+                "{TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_NEAR_CONTRACT} requires {TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID}"
+            );
+        }
         let submission_quota = parse_submission_quota_config_from_env()?;
         let legal_hold_retention_policy_ids = parse_legal_hold_retention_policy_ids_from_env()?;
         let artifact_store = trace_artifact_store_from_env(&root)?;
@@ -2031,6 +2046,8 @@ impl AppState {
             analytics_broad_release_privacy_accounting,
             credit_settlement_max_micros_per_account,
             credit_settlement_require_issuer_approval,
+            credit_settlement_near_contract_id,
+            credit_settlement_require_near_contract,
             submission_quota,
             legal_hold_retention_policy_ids: Arc::new(legal_hold_retention_policy_ids),
             artifact_store,
@@ -5139,6 +5156,35 @@ fn parse_credit_settlement_max_points_per_account(configured: &str) -> anyhow::R
     }
 }
 
+fn parse_credit_settlement_near_contract_id_from_env() -> anyhow::Result<Option<String>> {
+    optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID)?
+        .map(|configured| validate_credit_settlement_near_contract_id(&configured))
+        .transpose()
+}
+
+fn validate_credit_settlement_near_contract_id(near_contract_id: &str) -> anyhow::Result<String> {
+    let near_contract_id = near_contract_id.trim();
+    anyhow::ensure!(
+        !near_contract_id.is_empty(),
+        "NEAR contract id cannot be empty ({TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID})"
+    );
+    let validation_hash =
+        sha256_prefixed("trace_commons_credit_settlement_near_contract_validation");
+    let receipt = NearCreditReceipt {
+        settlement_batch_id: Uuid::nil(),
+        credit_account_hash: validation_hash.clone(),
+        policy_version: "trace-credit-settlement-contract-validation".to_string(),
+        source_list_hash: validation_hash.clone(),
+        attestation_hash: validation_hash.clone(),
+        amount_micros: 1,
+        issuer_signature_hash: validation_hash,
+    };
+    NearCreditReceiptCall::settle(near_contract_id, receipt).with_context(|| {
+        format!("NEAR contract id is invalid ({TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID})")
+    })?;
+    Ok(near_contract_id.to_string())
+}
+
 fn parse_submission_quota_config_from_env() -> anyhow::Result<TraceSubmissionQuotaConfig> {
     Ok(TraceSubmissionQuotaConfig {
         max_per_tenant_per_hour: parse_submission_quota_limit_from_env(
@@ -5530,6 +5576,8 @@ struct TraceCommonsConfigStatusResponse {
     analytics_broad_release_max_epsilon_micros: Option<u64>,
     credit_settlement_max_micros_per_account: Option<i64>,
     credit_settlement_require_issuer_approval: bool,
+    credit_settlement_near_contract_configured: bool,
+    credit_settlement_require_near_contract: bool,
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Vec<String>,
     ranking_calibration_max_age_hours: Option<i64>,
@@ -5715,6 +5763,10 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .map(|config| config.max_epsilon_micros),
         credit_settlement_max_micros_per_account: state.credit_settlement_max_micros_per_account,
         credit_settlement_require_issuer_approval: state.credit_settlement_require_issuer_approval,
+        credit_settlement_near_contract_configured: state
+            .credit_settlement_near_contract_id
+            .is_some(),
+        credit_settlement_require_near_contract: state.credit_settlement_require_near_contract,
         submission_quota: state.submission_quota,
         legal_hold_retention_policy_ids: state
             .legal_hold_retention_policy_ids
@@ -9849,12 +9901,11 @@ async fn credit_cycle_scheduler_run_handler(
     let limit = validate_credit_cycle_scheduler_limit(body.limit)?;
     let model_version = optional_ranking_identifier(body.model_version, "model_version")?;
     let policy_version = optional_ranking_identifier(body.policy_version, "policy_version")?;
-    let near_contract_id = body
-        .near_contract_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|contract_id| !contract_id.is_empty())
-        .map(ToOwned::to_owned);
+    let near_contract_id = resolve_credit_settlement_near_contract_id(
+        state.as_ref(),
+        body.dry_run || body.preflight_only,
+        body.near_contract_id.as_deref(),
+    )?;
 
     let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
         .await
@@ -10240,12 +10291,11 @@ async fn credit_cycle_worker_run_handler(
         body.dry_run,
         issuer_approval_evidence_hash.as_deref(),
     )?;
-    let near_contract_id = body
-        .near_contract_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|contract_id| !contract_id.is_empty())
-        .map(ToOwned::to_owned);
+    let near_contract_id = resolve_credit_settlement_near_contract_id(
+        state.as_ref(),
+        body.dry_run,
+        body.near_contract_id.as_deref(),
+    )?;
 
     ensure_no_overlapping_live_ranking_worker_run(
         state.as_ref(),
@@ -10582,13 +10632,11 @@ async fn run_credit_settlement_drill(
     let issuer_approval_evidence_hash = validate_credit_settlement_issuer_approval_evidence_hash(
         request.issuer_approval_evidence_hash.as_deref(),
     )?;
-    let near_contract_id = request
-        .near_contract_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|contract_id| !contract_id.is_empty())
-        .map(ToOwned::to_owned);
-    validate_credit_settlement_drill_near_contract(near_contract_id.as_deref())?;
+    let near_contract_id = resolve_credit_settlement_near_contract_id(
+        state,
+        true,
+        request.near_contract_id.as_deref(),
+    )?;
 
     let risk_summary = build_credit_risk_summary(state, tenant, account_limit).await?;
     let settlement = run_credit_settlement(
@@ -10683,25 +10731,6 @@ async fn run_credit_settlement_drill(
     }
 
     Ok(response)
-}
-
-fn validate_credit_settlement_drill_near_contract(near_contract_id: Option<&str>) -> ApiResult<()> {
-    let Some(near_contract_id) = near_contract_id else {
-        return Ok(());
-    };
-    let validation_hash = sha256_prefixed("trace_commons_credit_settlement_drill_validation");
-    let receipt = NearCreditReceipt {
-        settlement_batch_id: Uuid::nil(),
-        credit_account_hash: validation_hash.clone(),
-        policy_version: "trace-credit-settlement-drill".to_string(),
-        source_list_hash: validation_hash.clone(),
-        attestation_hash: validation_hash.clone(),
-        amount_micros: 1,
-        issuer_signature_hash: validation_hash,
-    };
-    NearCreditReceiptCall::settle(near_contract_id, receipt)
-        .map(|_| ())
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))
 }
 
 #[derive(Clone, Copy)]
@@ -10861,12 +10890,11 @@ async fn run_credit_settlement(
         body.dry_run,
         issuer_approval_evidence_hash.as_deref(),
     )?;
-    let near_contract_id = body
-        .near_contract_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|contract_id| !contract_id.is_empty())
-        .map(ToOwned::to_owned);
+    let near_contract_id = resolve_credit_settlement_near_contract_id(
+        state,
+        body.dry_run,
+        body.near_contract_id.as_deref(),
+    )?;
     let ranking_model_version = match body.ranking_model_version.as_deref().map(str::trim) {
         Some("") => {
             return Err(api_error(
@@ -11426,6 +11454,40 @@ fn require_credit_settlement_issuer_approval_if_configured(
         ));
     }
     Ok(())
+}
+
+fn resolve_credit_settlement_near_contract_id(
+    state: &AppState,
+    dry_run: bool,
+    requested_near_contract_id: Option<&str>,
+) -> ApiResult<Option<String>> {
+    let requested_near_contract_id = requested_near_contract_id
+        .map(str::trim)
+        .filter(|contract_id| !contract_id.is_empty())
+        .map(validate_credit_settlement_near_contract_id)
+        .transpose()
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+    if let (Some(configured), Some(requested)) = (
+        state.credit_settlement_near_contract_id.as_deref(),
+        requested_near_contract_id.as_deref(),
+    ) && configured != requested
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit settlement near_contract_id must match the configured settlement contract",
+        ));
+    }
+    let near_contract_id = state
+        .credit_settlement_near_contract_id
+        .clone()
+        .or(requested_near_contract_id);
+    if !dry_run && state.credit_settlement_require_near_contract && near_contract_id.is_none() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "live credit settlement requires configured near_contract_id",
+        ));
+    }
+    Ok(near_contract_id)
 }
 
 fn near_credit_reversal_outbox_item_from_settled_credit_event(
@@ -29014,6 +29076,30 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
                 response
                     .promotion_gates
                     .credit_settlement_account_cap_missing,
+            ),
+        ),
+        (
+            "near_contract_required",
+            usize::from(
+                response
+                    .promotion_gates
+                    .credit_settlement_near_contract_required,
+            ),
+        ),
+        (
+            "near_contract_configured",
+            usize::from(
+                response
+                    .promotion_gates
+                    .credit_settlement_near_contract_configured,
+            ),
+        ),
+        (
+            "near_contract_missing",
+            usize::from(
+                response
+                    .promotion_gates
+                    .credit_settlement_near_contract_missing,
             ),
         ),
         (
@@ -50111,6 +50197,9 @@ struct TraceOperationalPromotionGateSummary {
     revocation_propagation_latest_skipped_count: usize,
     credit_settlement_account_cap_configured: bool,
     credit_settlement_account_cap_missing: bool,
+    credit_settlement_near_contract_required: bool,
+    credit_settlement_near_contract_configured: bool,
+    credit_settlement_near_contract_missing: bool,
     credit_settlement_near_submitter_configured: bool,
     credit_settlement_near_submitter_missing: bool,
     credit_settlement_near_confirmer_configured: bool,
@@ -50218,6 +50307,13 @@ impl TraceOperationalPromotionGateSummary {
             state.credit_settlement_max_micros_per_account.is_some();
         let credit_settlement_account_cap_missing =
             delayed_credit.points_positive > 0.0 && !credit_settlement_account_cap_configured;
+        let credit_settlement_near_contract_required =
+            state.credit_settlement_require_near_contract;
+        let credit_settlement_near_contract_configured =
+            state.credit_settlement_near_contract_id.is_some();
+        let credit_settlement_near_contract_missing = delayed_credit.points_positive > 0.0
+            && credit_settlement_near_contract_required
+            && !credit_settlement_near_contract_configured;
         let credit_settlement_near_submitter_configured = near_credit.submitter_configured;
         let credit_settlement_near_submitter_missing =
             delayed_credit.points_positive > 0.0 && !credit_settlement_near_submitter_configured;
@@ -50396,6 +50492,9 @@ impl TraceOperationalPromotionGateSummary {
         if credit_settlement_account_cap_missing {
             blocking_gates.push("credit_settlement_account_cap_missing".to_string());
         }
+        if credit_settlement_near_contract_missing {
+            blocking_gates.push("credit_settlement_near_contract_missing".to_string());
+        }
         if credit_settlement_near_submitter_missing {
             blocking_gates.push("credit_settlement_near_submitter_missing".to_string());
         }
@@ -50511,6 +50610,9 @@ impl TraceOperationalPromotionGateSummary {
             revocation_propagation_latest_skipped_count,
             credit_settlement_account_cap_configured,
             credit_settlement_account_cap_missing,
+            credit_settlement_near_contract_required,
+            credit_settlement_near_contract_configured,
+            credit_settlement_near_contract_missing,
             credit_settlement_near_submitter_configured,
             credit_settlement_near_submitter_missing,
             credit_settlement_near_confirmer_configured,
@@ -52215,6 +52317,8 @@ mod tests {
             analytics_broad_release_privacy_accounting: None,
             credit_settlement_max_micros_per_account: None,
             credit_settlement_require_issuer_approval: false,
+            credit_settlement_near_contract_id: None,
+            credit_settlement_require_near_contract: false,
             submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::new()),
             artifact_store,
@@ -53686,6 +53790,22 @@ mod tests {
     }
 
     #[test]
+    fn validates_configured_credit_settlement_near_contract_id() {
+        assert_eq!(
+            validate_credit_settlement_near_contract_id(" trace-credits.testnet ")
+                .expect("contract id validates"),
+            "trace-credits.testnet"
+        );
+        let error = validate_credit_settlement_near_contract_id("Trace Credits.testnet")
+            .expect_err("malformed contract id is invalid");
+        assert!(
+            error
+                .to_string()
+                .contains(TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID)
+        );
+    }
+
+    #[test]
     fn parses_submission_quota_limits() {
         assert_eq!(
             parse_submission_quota_limit(TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR, "25")
@@ -55022,6 +55142,14 @@ mod tests {
         );
         assert_eq!(
             value["credit_settlement_require_issuer_approval"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["credit_settlement_near_contract_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["credit_settlement_require_near_contract"],
             serde_json::json!(false)
         );
         assert_eq!(
@@ -65550,6 +65678,8 @@ mod tests {
             analytics_broad_release_privacy_accounting: None,
             credit_settlement_max_micros_per_account: None,
             credit_settlement_require_issuer_approval: false,
+            credit_settlement_near_contract_id: None,
+            credit_settlement_require_near_contract: false,
             submission_quota: TraceSubmissionQuotaConfig::default(),
             legal_hold_retention_policy_ids: Arc::new(BTreeSet::from([
                 "private_corpus_revocable".to_string()
@@ -72180,6 +72310,193 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn credit_settlement_uses_configured_near_contract_and_rejects_drift() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_near_contract_id =
+            Some("trace-credits.testnet".to_string());
+        Arc::make_mut(&mut state).credit_settlement_require_near_contract = true;
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.25,
+                reason: Some("central issuer configured contract probe".to_string()),
+                external_ref: Some("lab-attestation:configured-contract".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+
+        let drift_error = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "attempt settlement on wrong contract".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: Some("other-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect_err("configured contract rejects caller drift");
+        assert_eq!(drift_error.0, StatusCode::BAD_REQUEST);
+        assert!(
+            drift_error
+                .1
+                .0
+                .error
+                .contains("configured settlement contract")
+        );
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement reads")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads")
+                .is_empty()
+        );
+
+        let Json(finalized) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "settle through configured central issuer contract".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("admin can finalize through configured contract");
+        assert_eq!(finalized.settled_source_event_count, 1);
+        assert_eq!(finalized.near_outbox_item_count, 1);
+
+        let batches =
+            read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].source_credit_event_ids, vec![event.event_id]);
+        assert_eq!(
+            batches[0].near_contract_id.as_deref(),
+            Some("trace-credits.testnet")
+        );
+
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox[0].near_call.contract_id, "trace-credits.testnet");
+        let outbox_text = serde_json::to_string(&outbox[0]).expect("outbox serializes");
+        assert!(!outbox_text.contains("central issuer configured contract probe"));
+        assert!(!outbox_text.contains("lab-attestation:configured-contract"));
+    }
+
+    #[tokio::test]
+    async fn credit_settlement_required_near_contract_blocks_live_without_config() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_require_near_contract = true;
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(_) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 0.5,
+                reason: Some("central issuer missing contract probe".to_string()),
+                external_ref: Some("lab-attestation:missing-contract".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+
+        let Json(dry_run) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: true,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "dry-run without configured near contract".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("dry-run can inspect pending credit before contract config");
+        assert_eq!(dry_run.settled_source_event_count, 1);
+        assert_eq!(dry_run.near_outbox_item_count, 0);
+
+        let live_error = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "live settlement without configured near contract".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect_err("live settlement requires configured contract");
+        assert_eq!(live_error.0, StatusCode::BAD_REQUEST);
+        assert!(live_error.1.0.error.contains("near_contract_id"));
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement reads")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn admin_credit_settlement_persists_central_issuer_approval_hash() {
         use axum::body::Body;
         use tower::ServiceExt;
@@ -72972,6 +73289,7 @@ mod tests {
         let mut state = test_state(temp.path().to_path_buf());
         Arc::make_mut(&mut state).credit_settlement_max_micros_per_account = Some(2_000_000);
         Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
+        Arc::make_mut(&mut state).credit_settlement_require_near_contract = true;
         let mut envelope = sample_envelope().await;
         make_metadata_only_low_risk(&mut envelope);
         envelope.consent.scopes = vec![ConsentScope::ModelTraining];
@@ -73027,6 +73345,18 @@ mod tests {
             serde_json::json!(false)
         );
         assert_eq!(
+            summary["promotion_gates"]["credit_settlement_near_contract_required"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            summary["promotion_gates"]["credit_settlement_near_contract_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            summary["promotion_gates"]["credit_settlement_near_contract_missing"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
             summary["promotion_gates"]["credit_settlement_near_submitter_missing"],
             serde_json::json!(true)
         );
@@ -73045,6 +73375,14 @@ mod tests {
         assert_eq!(
             summary["promotion_gates"]["credit_settlement_issuer_approval_missing"],
             serde_json::json!(false)
+        );
+        assert!(
+            summary["promotion_gates"]["blocking_gates"]
+                .as_array()
+                .expect("blocking gates are an array")
+                .contains(&serde_json::json!(
+                    "credit_settlement_near_contract_missing"
+                ))
         );
         assert!(
             summary["promotion_gates"]["blocking_gates"]
@@ -73087,10 +73425,22 @@ mod tests {
         let metrics_text = std::str::from_utf8(&metrics_body).expect("metrics body is utf8");
         let tenant_ref = tenant_storage_ref("tenant-a");
         assert!(metrics_text.contains(&format!(
+            "trace_commons_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"credit_settlement_near_contract_missing\"}} 1"
+        )));
+        assert!(metrics_text.contains(&format!(
             "trace_commons_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"credit_settlement_near_submitter_missing\"}} 1"
         )));
         assert!(metrics_text.contains(&format!(
             "trace_commons_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"credit_settlement_near_confirmer_missing\"}} 1"
+        )));
+        assert!(metrics_text.contains(&format!(
+            "trace_commons_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"near_contract_required\"}} 1"
+        )));
+        assert!(metrics_text.contains(&format!(
+            "trace_commons_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"near_contract_configured\"}} 0"
+        )));
+        assert!(metrics_text.contains(&format!(
+            "trace_commons_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"near_contract_missing\"}} 1"
         )));
         assert!(metrics_text.contains(&format!(
             "trace_commons_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"near_submitter_missing\"}} 1"
