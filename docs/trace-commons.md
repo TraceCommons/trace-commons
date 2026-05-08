@@ -529,9 +529,10 @@ in the same hash-only proof; missing evaluator configuration then records
 credentials.
 `POST /v1/admin/credit-settlement-drill` runs the Trace Credits settlement
 promotion check through the admin credit-risk summary plus the existing dry-run
-settlement selector. It validates a supplied NEAR contract id without writing
-settlement batches or NEAR outbox rows, requires the NEAR submitter and
-confirmer adapters by default when the contract check is required unless
+settlement selector. It validates the supplied or centrally configured NEAR
+contract id without writing settlement batches or NEAR outbox rows, requires the
+NEAR submitter and confirmer adapters by default when the contract check is
+required unless
 `require_near_submitter` or `require_near_confirmer` is explicitly disabled for
 a pilot rehearsal, requires a configured per-account issuer cap by default
 unless `require_account_cap` is explicitly disabled, and requires a
@@ -547,6 +548,12 @@ the batch to a central operator approval artifact. Set
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` to reject live
 settlement without that hash; dry-runs remain non-mutating, and the drill now
 fails readiness until the approval-evidence hash is present.
+Set `TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID` to bind live issuance to
+one central non-transferable credit contract, and
+`TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_NEAR_CONTRACT=true` to reject live
+settlement when that contract is not configured. When a central contract is
+configured, request-supplied `near_contract_id` values must match it; omitting
+`near_contract_id` uses the configured contract.
 Operators can still use `POST /v1/admin/rollout-smoke/evidence` for external
 manual evidence, while operational summary and metrics expose only readiness
 booleans, bounded max-delta metadata, and blocker reason codes.
@@ -591,8 +598,11 @@ and automation gates: `ranking_min_label_count`,
 `ranking_min_confidence_threshold`,
 `ranking_max_average_absolute_error_micros`, and
 `ranking_worker_run_stale_after_hours`. It reports
-`credit_settlement_require_issuer_approval` so operators can see whether live
-settlement requires central approval evidence. It also reports safe NEAR
+`credit_settlement_require_issuer_approval`,
+`credit_settlement_near_contract_configured`, and
+`credit_settlement_require_near_contract` so operators can see whether live
+settlement requires central approval evidence and a centrally configured NEAR
+contract without exposing that contract id. It also reports safe NEAR
 settlement readiness fields: `near_credit_submitter_configured`,
 `near_credit_submitter_timeout_ms`, `near_credit_outbox_submit_default_limit`,
 `near_credit_outbox_submit_max_limit`,
@@ -653,10 +663,15 @@ the settlement batch and folded into newly queued NEAR receipt attestation and
 issuer-signature hashes. Dry-runs remain approval-free so operators can produce
 or inspect evidence before granting non-transferable credits; production
 credit-settlement drills report `issuer_approval_evidence_hash_missing` until
-the same hash is supplied for rehearsal. Operational summary and metrics also
-surface missing credit-settlement cap, NEAR submitter/confirmer adapter, and
-central issuer approval gates when positive delayed credit exists, even before
-any NEAR outbox side effect has been created.
+the same hash is supplied for rehearsal.
+`TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID` configures the central
+non-transferable NEAR credit contract, and
+`TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_NEAR_CONTRACT=true` makes live
+settlement fail closed unless that configured contract is available. Operational
+summary and metrics also surface missing credit-settlement cap, required NEAR
+contract, NEAR submitter/confirmer adapter, and central issuer approval gates
+when positive delayed credit exists, even before any NEAR outbox side effect has
+been created.
 Admins can inspect `GET /v1/admin/credit-risk-summary` before issuing credit to
 see tenant-scoped pending, held, and over-cap totals grouped by deterministic
 credit-account hash. The response is bounded by `limit` (default 100, max 500)
@@ -1544,7 +1559,9 @@ or minting credits from stale/drifted ranking evidence.
 Production credit schedulers that want the full ranking-to-settlement sequence
 can call `POST /v1/workers/credit-cycle/run` with a non-empty `reason`, one
 `model_version`, one `policy_version`, one `target_use`, optional per-step
-limits, optional calibration thresholds, and optional `near_contract_id`. The
+limits, optional calibration thresholds, and optional `near_contract_id`; when
+`TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID` is configured, the optional
+request value must match that configured contract and may be omitted. The
 coordinator requires a utility worker, then delegates to the existing bounded
 calibration-run, model-promotion, prediction-credit, credit-settlement, and NEAR
 outbox submit/confirm workers in that order. It records its own `credit_cycle`
@@ -1627,7 +1644,8 @@ codes. Finalized batches record the calibration run id plus the calibration
 report hash and joined-evidence hash used for the gate.
 When a settlement request includes `near_contract_id`, the NEAR payload builder
 validates it as a lowercase NEAR account id before any settlement batch or
-outbox row is persisted.
+outbox row is persisted; if a central contract is configured, mismatched request
+contracts fail closed before side effects.
 
 Production settlement schedulers should use
 `POST /v1/workers/credit-settlements/run` rather than the admin settlement
