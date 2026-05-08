@@ -53658,7 +53658,9 @@ mod tests {
 
     #[test]
     fn external_adapter_urls_require_https_or_loopback_http() {
-        let validators: [(&str, fn(&reqwest::Url) -> anyhow::Result<()>); 8] = [
+        type AdapterUrlValidator = fn(&reqwest::Url) -> anyhow::Result<()>;
+
+        let validators: [(&str, AdapterUrlValidator); 8] = [
             ("near submitter", validate_trace_near_credit_submitter_url),
             (
                 "near confirmer",
@@ -55221,6 +55223,123 @@ mod tests {
         }
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn postgres_rls_hides_same_submission_id_across_tenant_contexts() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        for (tenant_id, principal_ref, canonical_summary_hash, score) in [
+            (
+                "tenant-a",
+                principal_storage_ref("token-a"),
+                "sha256:tenant-a-summary",
+                Some(0.81),
+            ),
+            (
+                "tenant-b",
+                principal_storage_ref("token-b"),
+                "sha256:tenant-b-summary",
+                Some(0.42),
+            ),
+        ] {
+            backend
+                .upsert_trace_submission(StorageTraceSubmissionWrite {
+                    tenant_id: tenant_id.to_string(),
+                    submission_id,
+                    trace_id,
+                    auth_principal_ref: principal_ref,
+                    contributor_pseudonym: Some("shared-pseudonym".to_string()),
+                    submitted_tenant_scope_ref: Some(tenant_storage_ref(tenant_id)),
+                    schema_version: "trace_contribution.v1".to_string(),
+                    consent_policy_version: "trace-consent-v1".to_string(),
+                    consent_scopes: vec!["debugging_evaluation".to_string()],
+                    allowed_uses: vec!["evaluation".to_string()],
+                    retention_policy_id: "retention-debugging-evaluation-v1".to_string(),
+                    status: StorageTraceCorpusStatus::Accepted,
+                    privacy_risk: "low".to_string(),
+                    redaction_pipeline_version: "test-redactor-v1".to_string(),
+                    redaction_counts: BTreeMap::from([("email".to_string(), 0)]),
+                    redaction_hash: sha256_prefixed(&format!("{tenant_id}:{submission_id}")),
+                    canonical_summary_hash: Some(canonical_summary_hash.to_string()),
+                    submission_score: score,
+                    credit_points_pending: Some(1.0),
+                    credit_points_final: None,
+                    expires_at: None,
+                })
+                .await
+                .expect("tenant-scoped submission writes");
+        }
+
+        let diagnostics = backend
+            .trace_corpus_rls_diagnostics()
+            .await
+            .expect("RLS diagnostics read")
+            .expect("PostgreSQL RLS diagnostics available");
+        if diagnostics.current_role_bypasses_rls
+            || diagnostics.current_role_owns_trace_tables
+            || !diagnostics.tenant_context_transaction_local
+        {
+            eprintln!(
+                "skipping raw RLS visibility assertion: unsafe runtime role or sticky tenant context"
+            );
+            cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+            cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+            return;
+        }
+
+        for (tenant_id, expected_hash, hidden_tenant) in [
+            ("tenant-a", "sha256:tenant-a-summary", "tenant-b"),
+            ("tenant-b", "sha256:tenant-b-summary", "tenant-a"),
+        ] {
+            let mut client = backend.pool().get().await.expect("get raw RLS client");
+            let tx = client.transaction().await.expect("start raw RLS tx");
+            tx.execute(
+                "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+                &[&tenant_id],
+            )
+            .await
+            .expect("set transaction-local tenant context");
+            let rows = tx
+                .query(
+                    "SELECT tenant_id, canonical_summary_hash
+                     FROM trace_submissions
+                     WHERE submission_id = $1
+                     ORDER BY tenant_id",
+                    &[&submission_id],
+                )
+                .await
+                .expect("raw RLS-scoped rows query succeeds");
+            assert_eq!(rows.len(), 1, "{tenant_id} context sees only its row");
+            let visible_tenant: String = rows[0].get("tenant_id");
+            let visible_hash: Option<String> = rows[0].get("canonical_summary_hash");
+            assert_eq!(visible_tenant, tenant_id);
+            assert_eq!(visible_hash.as_deref(), Some(expected_hash));
+
+            let hidden_row = tx
+                .query_opt(
+                    "SELECT tenant_id
+                     FROM trace_submissions
+                     WHERE tenant_id = $1 AND submission_id = $2",
+                    &[&hidden_tenant, &submission_id],
+                )
+                .await
+                .expect("raw cross-tenant row query succeeds");
+            assert!(
+                hidden_row.is_none(),
+                "{tenant_id} context must not see {hidden_tenant} row with the same submission id"
+            );
+            tx.commit().await.expect("commit raw RLS tx");
+        }
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
     }
 
     #[tokio::test]

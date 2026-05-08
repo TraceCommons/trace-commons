@@ -669,3 +669,51 @@ async fn trace_tenant_context_is_transaction_local(
         .get::<_, Option<String>>("tenant_context");
     Ok(inside.as_deref() == Some(probe_tenant) && after.as_deref().is_none_or(str::is_empty))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trace_commons_rls_registry_matches_migration_policy_coverage() {
+        let central_policy_migration =
+            include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql");
+        let force_rls_migrations = [
+            include_str!("../../../../migrations/V6__trace_force_rls.sql"),
+            include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),
+            include_str!("../../../../migrations/V14__trace_ranking_preference_labels.sql"),
+            include_str!("../../../../migrations/V15__trace_benchmark_registry_outbox.sql"),
+            include_str!("../../../../migrations/V16__trace_ranking_calibration_datasets.sql"),
+        ];
+
+        for table in TRACE_COMMONS_RLS_TABLES {
+            assert!(
+                central_policy_migration.contains(&format!(
+                    "DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON {table};"
+                )),
+                "{table} is missing from the central RLS policy migration cleanup"
+            );
+            assert!(
+                central_policy_migration.contains(&format!(
+                    "CREATE POLICY trace_corpus_tenant_isolation ON {table}"
+                )),
+                "{table} is missing from the central RLS policy migration install"
+            );
+            assert!(
+                force_rls_migrations.iter().any(|migration| {
+                    migration.contains(&format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY;"))
+                }),
+                "{table} is missing FORCE ROW LEVEL SECURITY migration coverage"
+            );
+        }
+
+        let central_policy_count = central_policy_migration
+            .matches("CREATE POLICY trace_corpus_tenant_isolation ON trace_")
+            .count();
+        assert_eq!(
+            central_policy_count,
+            TRACE_COMMONS_RLS_TABLES.len(),
+            "central RLS policy migration and diagnostics registry drifted"
+        );
+    }
+}
