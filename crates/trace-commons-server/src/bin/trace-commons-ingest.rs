@@ -30440,13 +30440,15 @@ async fn run_benchmark_conversion_job(
         if !object_primary_derived_exports {
             write_benchmark_artifact(&state.root, &tenant.tenant_id, &artifact)
                 .map_err(internal_error)?;
-            write_export_provenance(&provenance_path, &provenance).map_err(internal_error)?;
+            write_export_provenance(&provenance_path, &tenant.tenant_id, &provenance)
+                .map_err(internal_error)?;
         }
     } else {
         if !object_primary_derived_exports {
             write_benchmark_artifact(&state.root, &tenant.tenant_id, &artifact)
                 .map_err(internal_error)?;
-            write_export_provenance(&provenance_path, &provenance).map_err(internal_error)?;
+            write_export_provenance(&provenance_path, &tenant.tenant_id, &provenance)
+                .map_err(internal_error)?;
         }
         let artifact_object_ref_material = if state.db_mirror.is_some() {
             Some(
@@ -30959,11 +30961,13 @@ async fn run_ranker_training_candidates_export_job(
             .map_err(internal_error)?;
         required_artifact_object_ref_material = artifact_object_ref_material;
         if !object_primary_derived_exports {
-            write_export_provenance(&provenance_path, &provenance).map_err(internal_error)?;
+            write_export_provenance(&provenance_path, &tenant.tenant_id, &provenance)
+                .map_err(internal_error)?;
         }
     } else {
         if !object_primary_derived_exports {
-            write_export_provenance(&provenance_path, &provenance).map_err(internal_error)?;
+            write_export_provenance(&provenance_path, &tenant.tenant_id, &provenance)
+                .map_err(internal_error)?;
         }
         let artifact_object_ref_material = if state.db_mirror.is_some() {
             Some(
@@ -31304,11 +31308,13 @@ async fn run_ranker_training_pairs_export_job(
             .map_err(internal_error)?;
         required_artifact_object_ref_material = artifact_object_ref_material;
         if !object_primary_derived_exports {
-            write_export_provenance(&provenance_path, &provenance).map_err(internal_error)?;
+            write_export_provenance(&provenance_path, &tenant.tenant_id, &provenance)
+                .map_err(internal_error)?;
         }
     } else {
         if !object_primary_derived_exports {
-            write_export_provenance(&provenance_path, &provenance).map_err(internal_error)?;
+            write_export_provenance(&provenance_path, &tenant.tenant_id, &provenance)
+                .map_err(internal_error)?;
         }
         let artifact_object_ref_material = if state.db_mirror.is_some() {
             Some(
@@ -41376,8 +41382,10 @@ fn ranker_provenance_path(root: &Path, tenant_id: &str, export_id: Uuid) -> Path
 
 fn write_export_provenance(
     path: &Path,
+    tenant_id: &str,
     provenance: &TraceExportProvenanceManifest,
 ) -> anyhow::Result<()> {
+    ensure_export_provenance_tenant(provenance, tenant_id)?;
     write_json_file(path, provenance, "trace export provenance manifest")
 }
 
@@ -44928,7 +44936,7 @@ fn invalidate_export_provenance_for_sources(
         }
         provenance.invalidated_at = Some(Utc::now());
         provenance.invalidation_reason = Some(reason);
-        write_export_provenance(&path, &provenance)?;
+        write_export_provenance(&path, tenant_id, &provenance)?;
     }
     Ok(invalidated)
 }
@@ -51388,6 +51396,24 @@ mod tests {
         .expect_err("ranking model append must reject embedded tenant mismatch");
         assert!(ranking_error.to_string().contains("tenant mismatch"));
         assert!(!ranking_model_versions_path(temp.path(), "tenant-a").exists());
+
+        let export_id = Uuid::new_v4();
+        let provenance_error = write_export_provenance(
+            &ranker_provenance_path(temp.path(), "tenant-a", export_id),
+            "tenant-a",
+            &TraceExportProvenanceManifest::new(
+                wrong_tenant,
+                export_id,
+                Uuid::new_v4(),
+                TraceExportProvenanceKind::RankerTrainingCandidates,
+                "wrong-tenant-ranker-export".to_string(),
+                Vec::new(),
+                source_submission_ids_hash("wrong_tenant_ranker_export", &[]),
+            ),
+        )
+        .expect_err("export provenance write must reject embedded tenant mismatch");
+        assert!(provenance_error.to_string().contains("tenant mismatch"));
+        assert!(!ranker_provenance_path(temp.path(), "tenant-a", export_id).exists());
     }
 
     struct RankingBackfillFixture {
@@ -53110,7 +53136,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
         let export_id = Uuid::new_v4();
-        write_export_provenance(
+        write_json_file(
             &ranker_provenance_path(temp.path(), "tenant-a", export_id),
             &TraceExportProvenanceManifest::new(
                 "tenant-b",
@@ -53121,6 +53147,7 @@ mod tests {
                 Vec::new(),
                 source_submission_ids_hash("ranker_training_candidates", &[]),
             ),
+            "corrupt trace export provenance manifest",
         )
         .expect("corrupt export provenance writes");
 
