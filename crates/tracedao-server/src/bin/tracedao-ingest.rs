@@ -12408,6 +12408,12 @@ async fn credit_hold_handler(
             "credit holds require reason_detail",
         ));
     }
+    if !credit_account_ref_exists_for_admin(state.as_ref(), &tenant, &credit_account_ref)
+        .await
+        .map_err(internal_error)?
+    {
+        return Err(api_error(StatusCode::NOT_FOUND, "credit account not found"));
+    }
     let hold = TraceCreditHoldRecord {
         hold_id: Uuid::new_v4(),
         tenant_id: tenant.tenant_id.clone(),
@@ -12553,6 +12559,17 @@ fn active_credit_hold_exists_for_account(
             && hold.released_at.is_none()
             && Some(hold.hold_id) != except_hold_id
     })
+}
+
+async fn credit_account_ref_exists_for_admin(
+    state: &AppState,
+    tenant: &TenantAuth,
+    credit_account_ref: &str,
+) -> anyhow::Result<bool> {
+    let credit_events = read_credit_events_for_admin(state, tenant).await?;
+    Ok(credit_events
+        .iter()
+        .any(|event| event.auth_principal_ref == credit_account_ref))
 }
 
 async fn append_credit_hold_near_account_outbox_item(
@@ -86116,17 +86133,174 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_credit_hold_routes_are_tenant_scoped() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_near_contract_id =
+            Some("trace-credits.testnet".to_string());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.25,
+                reason: Some("tenant-a account hold boundary".to_string()),
+                external_ref: Some("frontier:tenant-a-hold-boundary".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+
+        let Json(hold) = credit_hold_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditHoldRequest {
+                credit_account_ref: event.auth_principal_ref.clone(),
+                reason: StorageTraceCreditHoldReason::AttestationDispute,
+                reason_detail: "tenant-a hold boundary check".to_string(),
+            }),
+        )
+        .await
+        .expect("tenant-a admin can hold tenant-a account");
+
+        let tenant_b_release_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/admin/credit-holds/{}/release", hold.hold_id))
+                    .header(AUTHORIZATION, "Bearer admin-token-b")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "reason_detail": "tenant-b cannot release tenant-a hold"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("tenant-b release request builds"),
+            )
+            .await
+            .expect("tenant-b release response");
+        assert_eq!(tenant_b_release_response.status(), StatusCode::NOT_FOUND);
+
+        let tenant_b_hold_error = credit_hold_handler(
+            State(state.clone()),
+            auth_headers("admin-token-b"),
+            Json(TraceCreditHoldRequest {
+                credit_account_ref: event.auth_principal_ref.clone(),
+                reason: StorageTraceCreditHoldReason::AttestationDispute,
+                reason_detail: "tenant-b cannot hold tenant-a account".to_string(),
+            }),
+        )
+        .await
+        .expect_err("tenant-b admin cannot place hold for tenant-a ledger account");
+        assert_eq!(tenant_b_hold_error.0, StatusCode::NOT_FOUND);
+
+        let Json(tenant_b_holds) =
+            credit_holds_handler(State(state.clone()), auth_headers("admin-token-b"))
+                .await
+                .expect("tenant-b admin can list tenant-b holds");
+        assert!(tenant_b_holds.is_empty());
+        assert!(
+            read_all_credit_holds(temp.path(), "tenant-b")
+                .expect("tenant-b holds read")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-b")
+                .expect("tenant-b outbox reads")
+                .is_empty()
+        );
+
+        let tenant_a_holds =
+            read_all_credit_holds(temp.path(), "tenant-a").expect("tenant-a holds read");
+        assert_eq!(tenant_a_holds.len(), 1);
+        assert_eq!(tenant_a_holds[0].hold_id, hold.hold_id);
+        assert!(tenant_a_holds[0].released_at.is_none());
+
+        let Json(released) = credit_hold_release_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            AxumPath(hold.hold_id),
+            Json(TraceCreditHoldReleaseRequest {
+                reason_detail: "tenant-a hold released after boundary check".to_string(),
+            }),
+        )
+        .await
+        .expect("tenant-a admin can release tenant-a hold");
+        assert_eq!(released.hold_id, hold.hold_id);
+        assert!(released.released_at.is_some());
+
+        let tenant_a_outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+            .expect("tenant-a outbox reads");
+        assert_eq!(tenant_a_outbox.len(), 2);
+        assert_eq!(
+            tenant_a_outbox[0].near_call.method_name,
+            "freeze_credit_account"
+        );
+        assert_eq!(
+            tenant_a_outbox[1].near_call.method_name,
+            "unfreeze_credit_account"
+        );
+    }
+
+    #[tokio::test]
     async fn admin_credit_holds_enqueue_near_account_freeze_transitions_when_configured() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
         Arc::make_mut(&mut state).credit_settlement_near_contract_id =
             Some("trace-credits.testnet".to_string());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.25,
+                reason: Some("credit hold NEAR account transition".to_string()),
+                external_ref: Some("frontier:credit-hold-near-transition".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+        let credit_account_ref = event.auth_principal_ref.clone();
 
         let Json(first_hold) = credit_hold_handler(
             State(state.clone()),
             auth_headers("admin-token-a"),
             Json(TraceCreditHoldRequest {
-                credit_account_ref: "principal:held-account".to_string(),
+                credit_account_ref: credit_account_ref.clone(),
                 reason: StorageTraceCreditHoldReason::AttestationDispute,
                 reason_detail: "first account freeze reason".to_string(),
             }),
@@ -86159,7 +86333,7 @@ mod tests {
             State(state.clone()),
             auth_headers("admin-token-a"),
             Json(TraceCreditHoldRequest {
-                credit_account_ref: "principal:held-account".to_string(),
+                credit_account_ref,
                 reason: StorageTraceCreditHoldReason::AttestationDispute,
                 reason_detail: "second account freeze reason".to_string(),
             }),
@@ -86453,13 +86627,40 @@ mod tests {
     async fn credit_control_plane_required_db_mirror_blocks_hold_writes_without_db() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds before required mirror mode");
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.25,
+                reason: Some("required mirror hold write account".to_string()),
+                external_ref: Some("frontier:required-mirror-hold-account".to_string()),
+            }),
+        )
+        .await
+        .expect("credit event succeeds before required mirror mode");
         Arc::make_mut(&mut state).require_db_mirror_writes = true;
 
         let error = credit_hold_handler(
             State(state),
             auth_headers("admin-token-a"),
             Json(TraceCreditHoldRequest {
-                credit_account_ref: "principal:held-account".to_string(),
+                credit_account_ref: event.auth_principal_ref,
                 reason: StorageTraceCreditHoldReason::AttestationDispute,
                 reason_detail: "review required before settlement".to_string(),
             }),

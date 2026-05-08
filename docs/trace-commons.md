@@ -909,11 +909,13 @@ downgraded through the fallback route.
 
 Credit-hold release is admin-only through
 `POST /v1/admin/credit-holds/{hold_id}/release`. The route requires a non-empty
-operator `reason_detail`, keeps responses hash-only without raw hold or release
-reason text, projects one current hold state across append-only file records and
-DB mirrors, appends hash-only credit-mutation audit rows for placement and
-release, and lets the next settlement run include the account again when no other
-active hold or policy blocker remains.
+operator `reason_detail`, while placement requires the target account ref to
+already appear in the caller's tenant-local credit ledger. The routes keep
+responses hash-only without raw hold or release reason text, project one current
+hold state across append-only file records and DB mirrors, append hash-only
+credit-mutation audit rows for placement and release, and let the next settlement
+run include the account again when no other active hold or policy blocker
+remains.
 
 `GET /v1/admin/credit-risk-summary` gives admins a safe bounded pre-issuance
 view of pending, held, and over-cap credit grouped by account hash, so operators
