@@ -87172,6 +87172,38 @@ mod tests {
         .await
         .expect("admin can register ranking model version");
 
+        let tenant_b_feature_error = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("admin-token-b"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                feature_schema_version: model.feature_schema_version.clone(),
+                feature_vector_hash:
+                    "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                        .to_string(),
+                feature_names_hash:
+                    "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                        .to_string(),
+                source_feature_hash:
+                    "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                        .to_string(),
+                duplicate_score: Some(0.05),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.88),
+                coverage_tags: vec!["tool:terminal".to_string()],
+            }),
+        )
+        .await
+        .expect_err("tenant-b admin cannot write tenant-a ranking features");
+        assert_eq!(tenant_b_feature_error.0, StatusCode::NOT_FOUND);
+        assert!(
+            read_all_ranking_features(temp.path(), "tenant-b")
+                .expect("tenant-b features read")
+                .is_empty()
+        );
+
         let Json(feature) = ranking_feature_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
@@ -87193,6 +87225,33 @@ mod tests {
         .expect("utility worker can write ranking feature record");
         assert_eq!(feature.submission_id, submission_id);
         assert_eq!(feature.feature_vector_hash, "sha256:feature-vector");
+
+        let tenant_b_prediction_error = ranking_prediction_handler(
+            State(state.clone()),
+            auth_headers("admin-token-b"),
+            Json(TraceRankingPredictionRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                model_version: model.model_version.clone(),
+                feature_schema_version: model.feature_schema_version.clone(),
+                prediction_policy_version: "trace-credit-policy-v1".to_string(),
+                feature_vector_hash: feature.feature_vector_hash.clone(),
+                predicted_utility_micros: 2_100_000,
+                uncertainty_micros: 300_000,
+                confidence: 0.82,
+                risk_penalty_micros: 50_000,
+                novelty_bonus_micros: 125_000,
+                explanation_codes: vec!["novel_tool_success".to_string()],
+            }),
+        )
+        .await
+        .expect_err("tenant-b admin cannot write tenant-a ranking prediction");
+        assert_eq!(tenant_b_prediction_error.0, StatusCode::NOT_FOUND);
+        assert!(
+            read_all_ranking_predictions(temp.path(), "tenant-b")
+                .expect("tenant-b predictions read")
+                .is_empty()
+        );
 
         let Json(prediction) = ranking_prediction_handler(
             State(state.clone()),
