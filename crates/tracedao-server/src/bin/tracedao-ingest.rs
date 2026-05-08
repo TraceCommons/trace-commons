@@ -68271,6 +68271,7 @@ mod tests {
             return;
         };
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let remote_config = TraceRemoteObjectStoreConfig::from_parts(
@@ -68310,6 +68311,46 @@ mod tests {
         )
         .await
         .expect("submission mirrors to DB");
+
+        let mut tenant_b_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_b_envelope);
+        let tenant_b_submission_id = tenant_b_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_envelope),
+        )
+        .await
+        .expect("tenant-b submission mirrors to DB");
+        let tenant_b_propagation_item_id = deterministic_trace_uuid_for_external_ref(
+            "tenant-b-revocation-propagation-item",
+            "tenant-b",
+            tenant_b_submission_id,
+            "older-pending-item",
+        );
+        backend
+            .upsert_trace_revocation_propagation_item(StorageTraceRevocationPropagationItemWrite {
+                tenant_id: "tenant-b".to_string(),
+                propagation_item_id: tenant_b_propagation_item_id,
+                source_submission_id: tenant_b_submission_id,
+                target: StorageTraceRevocationPropagationTarget::DerivedRecord {
+                    derived_id: Uuid::new_v4(),
+                },
+                action: StorageTraceRevocationPropagationAction::InvalidateMetadata,
+                status: StorageTraceRevocationPropagationItemStatus::Pending,
+                idempotency_key: sha256_prefixed(&format!(
+                    "tenant-b-revocation-propagation:{tenant_b_submission_id}"
+                )),
+                reason: "tenant-b pending revocation propagation".to_string(),
+                attempt_count: 0,
+                last_error: None,
+                next_attempt_at: None,
+                completed_at: None,
+                evidence_hash: None,
+                metadata: BTreeMap::new(),
+            })
+            .await
+            .expect("tenant-b propagation item writes");
 
         let object_ref_id = deterministic_trace_uuid_for_external_ref(
             "disabled-remote-revocation-object-ref",
@@ -68435,6 +68476,20 @@ mod tests {
             skipped.last_error.as_deref(),
             Some("object payload deletion skipped because remote object-store IO is disabled")
         );
+        let tenant_b_items = backend
+            .list_trace_revocation_propagation_items("tenant-b", tenant_b_submission_id)
+            .await
+            .expect("tenant-b propagation items read");
+        let tenant_b_item = tenant_b_items
+            .iter()
+            .find(|item| item.propagation_item_id == tenant_b_propagation_item_id)
+            .expect("tenant-b propagation item remains");
+        assert_eq!(
+            tenant_b_item.status,
+            StorageTraceRevocationPropagationItemStatus::Pending
+        );
+        assert_eq!(tenant_b_item.attempt_count, 0);
+        assert!(tenant_b_item.completed_at.is_none());
         let skipped_text = serde_json::to_string(skipped).expect("skipped item serializes");
         for secret in [
             "trace-commons-prod-bucket-secret",
@@ -68463,6 +68518,7 @@ mod tests {
         }));
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
     }
 
     #[tokio::test]
