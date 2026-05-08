@@ -66940,6 +66940,45 @@ mod tests {
         write_json_file(&metadata_path, &metadata_json, "expired trace metadata")
             .expect("expired metadata writes");
 
+        let mut tenant_b_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_b_envelope);
+        let tenant_b_submission_id = tenant_b_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_envelope),
+        )
+        .await
+        .expect("tenant-b submission succeeds");
+        let tenant_b_record =
+            read_submission_record(temp.path(), "tenant-b", tenant_b_submission_id)
+                .expect("tenant-b record reads")
+                .expect("tenant-b record exists");
+        let tenant_b_object_path = temp.path().join(&tenant_b_record.object_key);
+        assert!(tenant_b_object_path.exists());
+        let tenant_b_receipt = tenant_b_record
+            .artifact_receipt
+            .clone()
+            .expect("tenant-b encrypted receipt exists");
+        artifact_store
+            .read_artifact(&tenant_b_record.tenant_storage_ref, &tenant_b_receipt)
+            .expect("tenant-b encrypted artifact exists");
+        let tenant_b_metadata_path = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-b"))
+            .join("metadata")
+            .join(format!("{tenant_b_submission_id}.json"));
+        let mut tenant_b_metadata_json =
+            serde_json::to_value(tenant_b_record).expect("tenant-b record serializes");
+        tenant_b_metadata_json["expires_at"] = serde_json::json!(expired_at.to_rfc3339());
+        write_json_file(
+            &tenant_b_metadata_path,
+            &tenant_b_metadata_json,
+            "tenant-b expired trace metadata",
+        )
+        .expect("tenant-b expired metadata writes");
+
         let Json(dry_run) = maintenance_handler(
             State(state.clone()),
             auth_headers("admin-token-a"),
@@ -66963,6 +67002,10 @@ mod tests {
         artifact_store
             .read_artifact(&tenant_storage_ref("tenant-a"), &receipt)
             .expect("dry-run keeps encrypted artifact");
+        assert!(tenant_b_object_path.exists());
+        artifact_store
+            .read_artifact(&tenant_storage_ref("tenant-b"), &tenant_b_receipt)
+            .expect("dry-run keeps tenant-b encrypted artifact");
 
         let Json(response) = maintenance_handler(
             State(state.clone()),
@@ -66994,6 +67037,16 @@ mod tests {
         artifact_store
             .read_artifact(&tenant_storage_ref("tenant-a"), &receipt)
             .expect_err("encrypted artifact was deleted");
+        assert!(tenant_b_object_path.exists());
+        let tenant_b_record_after =
+            read_submission_record(temp.path(), "tenant-b", tenant_b_submission_id)
+                .expect("tenant-b record reads after tenant-a purge")
+                .expect("tenant-b record remains after tenant-a purge");
+        assert_ne!(tenant_b_record_after.status, TraceCorpusStatus::Purged);
+        assert!(tenant_b_record_after.purged_at.is_none());
+        artifact_store
+            .read_artifact(&tenant_storage_ref("tenant-b"), &tenant_b_receipt)
+            .expect("tenant-a purge keeps tenant-b encrypted artifact");
     }
 
     #[tokio::test]
