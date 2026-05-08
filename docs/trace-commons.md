@@ -534,8 +534,10 @@ contract id without writing settlement batches or NEAR outbox rows, requires the
 NEAR submitter and confirmer adapters by default when the contract check is
 required unless
 `require_near_submitter` or `require_near_confirmer` is explicitly disabled for
-a pilot rehearsal, requires a configured per-account issuer cap by default
-unless `require_account_cap` is explicitly disabled, and requires a
+a pilot rehearsal, can require authenticated NEAR adapters through either
+`TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH=true` or
+`require_near_adapter_auth: true`, requires a configured per-account issuer cap
+by default unless `require_account_cap` is explicitly disabled, and requires a
 sha256-prefixed `issuer_approval_evidence_hash` when
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` or the request
 sets `require_issuer_approval: true`. Approval evidence is source-list bound:
@@ -544,8 +546,8 @@ operators first run the drill or settlement dry-run to obtain the exact
 `POST /v1/admin/credit-settlement-approvals` for that `policy_version`,
 `source_list_hash`, and approval `evidence_hash`. The drill returns only safe
 account hashes, aggregate risk counts, settlement exclusion reason counts,
-blocker codes, NEAR adapter readiness booleans, issuer-approval configured and
-recorded booleans, and a sha256-prefixed evidence hash, and can append
+blocker codes, NEAR adapter readiness/auth booleans, issuer-approval configured
+and recorded booleans, and a sha256-prefixed evidence hash, and can append
 `credit_settlement` rollout-smoke evidence directly.
 Final settlement requests can include `issuer_approval_evidence_hash` to bind
 the batch to a central operator approval artifact. Set
@@ -679,9 +681,9 @@ non-transferable NEAR credit contract, and
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_NEAR_CONTRACT=true` makes live
 settlement fail closed unless that configured contract is available. Operational
 summary and metrics also surface missing credit-settlement cap, required NEAR
-contract, NEAR submitter/confirmer adapter, and central issuer approval gates
-when positive delayed credit exists, even before any NEAR outbox side effect has
-been created.
+contract, NEAR submitter/confirmer adapter, required adapter bearer auth, and
+central issuer approval gates when positive delayed credit exists, even before
+any NEAR outbox side effect has been created.
 Admins can inspect `GET /v1/admin/credit-risk-summary` before issuing credit to
 see tenant-scoped pending, held, and over-cap totals grouped by deterministic
 credit-account hash. The response is bounded by `limit` (default 100, max 500)

@@ -123,7 +123,12 @@ failure. Configure
 `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL` to let the scoped confirm worker
 poll submitted transactions through an operator-owned confirmer and move rows to
 confirmed or failed status. Workers can still manually mark items submitted,
-confirmed, or failed for fallback operations. The server ledger remains
+confirmed, or failed for fallback operations. Set
+`TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH=true` for production credit
+issuance so configured submitter and confirmation adapters must also provide
+their bearer-token settings before startup, live worker submission, or live
+confirmation can proceed; pilot deployments can leave the gate disabled while
+using private adapter endpoints. The server ledger remains
 authoritative; NEAR payloads contain batch ids, account hashes, source-list
 hashes, policy versions, optional issuer-approval evidence hashes folded into
 attestation/signature hashes, amounts, and issuer-signature hashes, never trace
