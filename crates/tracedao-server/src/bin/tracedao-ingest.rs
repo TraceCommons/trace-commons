@@ -76997,6 +76997,34 @@ mod tests {
         .expect("utility worker can append training credit");
         assert_eq!(credit.appended_count, 1);
 
+        let mut tenant_b_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_b_envelope);
+        tenant_b_envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        tenant_b_envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        tenant_b_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let tenant_b_submission_id = tenant_b_envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_envelope),
+        )
+        .await
+        .expect("tenant-b training submission succeeds");
+        let Json(_) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-b"),
+            AxumPath(tenant_b_submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.5,
+                reason: Some("tenant-b frontier lab training value".to_string()),
+                external_ref: Some("frontier:tenant-b-worker-settlement".to_string()),
+            }),
+        )
+        .await
+        .expect("tenant-b reviewer can append training credit");
+
         let admin_surface_error = credit_settlement_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
@@ -77043,12 +77071,22 @@ mod tests {
             batches[0].actor_principal_ref,
             principal_storage_ref("utility-worker-token-a")
         );
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-b")
+                .expect("tenant-b settlement reads")
+                .is_empty()
+        );
         let outbox =
             read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
         assert_eq!(outbox.len(), 1);
         assert_eq!(
             outbox[0].status,
             StorageTraceCreditSettlementNearStatus::Pending
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-b")
+                .expect("tenant-b outbox reads")
+                .is_empty()
         );
 
         let Json(retry) = credit_settlement_worker_run_handler(
@@ -77076,6 +77114,16 @@ mod tests {
                 .expect("retry outbox reads")
                 .len(),
             1
+        );
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-b")
+                .expect("tenant-b settlement reads after retry")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-b")
+                .expect("tenant-b outbox reads after retry")
+                .is_empty()
         );
     }
 
