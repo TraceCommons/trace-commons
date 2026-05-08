@@ -59,7 +59,8 @@ settlement unless the supplied `issuer_approval_evidence_hash` matches a recorde
 approval for the tenant, policy version, source list, and evidence hash while
 still allowing dry-runs. Set
 `TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS` to make those
-central approvals expire for live issuance and settlement drills.
+central approvals expire for live issuance and settlement drills; startup
+rejects that max-age knob unless required issuer approval is enabled.
 The worker `POST /v1/workers/credit-cycle/run` route can run the production
 credit path in bounded steps for a single model/version:
 calibration, model promotion, prediction credit, settlement, then a NEAR outbox
