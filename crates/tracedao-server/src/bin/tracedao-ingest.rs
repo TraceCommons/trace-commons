@@ -248,6 +248,8 @@ const TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL";
+const TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_NEAR_CONTRACT: &str =
@@ -496,6 +498,7 @@ struct AppState {
     analytics_broad_release_privacy_accounting: Option<TraceAnalyticsPrivacyAccountingConfig>,
     credit_settlement_max_micros_per_account: Option<i64>,
     credit_settlement_require_issuer_approval: bool,
+    credit_settlement_issuer_approval_max_age: Option<Duration>,
     credit_settlement_near_contract_id: Option<String>,
     credit_settlement_require_near_contract: bool,
     submission_quota: TraceSubmissionQuotaConfig,
@@ -1820,6 +1823,8 @@ impl AppState {
             parse_credit_settlement_max_points_per_account_from_env()?;
         let credit_settlement_require_issuer_approval =
             env_truthy(TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL);
+        let credit_settlement_issuer_approval_max_age =
+            parse_credit_settlement_issuer_approval_max_age_from_env()?;
         let credit_settlement_near_contract_id =
             parse_credit_settlement_near_contract_id_from_env()?;
         let credit_settlement_require_near_contract =
@@ -2077,6 +2082,7 @@ impl AppState {
             analytics_broad_release_privacy_accounting,
             credit_settlement_max_micros_per_account,
             credit_settlement_require_issuer_approval,
+            credit_settlement_issuer_approval_max_age,
             credit_settlement_near_contract_id,
             credit_settlement_require_near_contract,
             submission_quota,
@@ -5200,6 +5206,34 @@ fn parse_credit_settlement_max_points_per_account(configured: &str) -> anyhow::R
     }
 }
 
+fn parse_credit_settlement_issuer_approval_max_age_from_env() -> anyhow::Result<Option<Duration>> {
+    let Some(value) =
+        optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS)?
+    else {
+        return Ok(None);
+    };
+    parse_credit_settlement_issuer_approval_max_age(&value)
+}
+
+fn parse_credit_settlement_issuer_approval_max_age(
+    configured: &str,
+) -> anyhow::Result<Option<Duration>> {
+    let hours = configured.trim().parse::<i64>().with_context(|| {
+        format!(
+            "{TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS} must be a non-negative hour count"
+        )
+    })?;
+    anyhow::ensure!(
+        (0..=24 * 365).contains(&hours),
+        "{TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS} must be between 0 and 8760 hours"
+    );
+    if hours == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(Duration::hours(hours)))
+    }
+}
+
 fn parse_credit_settlement_near_contract_id_from_env() -> anyhow::Result<Option<String>> {
     optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID)?
         .map(|configured| validate_credit_settlement_near_contract_id(&configured))
@@ -5620,6 +5654,7 @@ struct TraceCommonsConfigStatusResponse {
     analytics_broad_release_max_epsilon_micros: Option<u64>,
     credit_settlement_max_micros_per_account: Option<i64>,
     credit_settlement_require_issuer_approval: bool,
+    credit_settlement_issuer_approval_max_age_hours: Option<i64>,
     credit_settlement_near_contract_configured: bool,
     credit_settlement_require_near_contract: bool,
     submission_quota: TraceSubmissionQuotaConfig,
@@ -5810,6 +5845,9 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .map(|config| config.max_epsilon_micros),
         credit_settlement_max_micros_per_account: state.credit_settlement_max_micros_per_account,
         credit_settlement_require_issuer_approval: state.credit_settlement_require_issuer_approval,
+        credit_settlement_issuer_approval_max_age_hours: state
+            .credit_settlement_issuer_approval_max_age
+            .map(|max_age| max_age.num_hours()),
         credit_settlement_near_contract_configured: state
             .credit_settlement_near_contract_id
             .is_some(),
@@ -8530,6 +8568,8 @@ struct TraceCreditSettlementDrillResponse {
     require_issuer_approval: bool,
     issuer_approval_evidence_configured: bool,
     issuer_approval_evidence_recorded: bool,
+    issuer_approval_max_age_hours: Option<i64>,
+    issuer_approval_evidence_fresh: bool,
     risk_summary: TraceCreditRiskSummaryResponse,
     settlement: TraceCreditSettlementRunResponse,
     blocking_gaps: Vec<String>,
@@ -10789,9 +10829,9 @@ async fn run_credit_settlement_drill(
         None,
     )
     .await?;
-    let issuer_approval_evidence_recorded =
+    let issuer_approval_check =
         if let Some(issuer_approval_evidence_hash) = issuer_approval_evidence_hash.as_deref() {
-            credit_settlement_issuer_approval_recorded(
+            credit_settlement_issuer_approval_check(
                 state,
                 tenant,
                 &settlement.policy_version,
@@ -10801,7 +10841,7 @@ async fn run_credit_settlement_drill(
             .await
             .map_err(internal_error)?
         } else {
-            false
+            TraceCreditSettlementIssuerApprovalCheck::default()
         };
     let readiness = TraceCreditSettlementDrillReadiness {
         require_pending,
@@ -10818,7 +10858,9 @@ async fn run_credit_settlement_drill(
         settlement_account_cap_configured,
         require_issuer_approval,
         issuer_approval_evidence_configured: issuer_approval_evidence_hash.is_some(),
-        issuer_approval_evidence_recorded,
+        issuer_approval_evidence_recorded: issuer_approval_check.recorded,
+        issuer_approval_max_age: state.credit_settlement_issuer_approval_max_age,
+        issuer_approval_evidence_fresh: issuer_approval_check.fresh,
     };
     let blocking_gaps =
         credit_settlement_drill_blocking_gaps(&risk_summary, &settlement, &readiness);
@@ -10853,6 +10895,10 @@ async fn run_credit_settlement_drill(
         require_issuer_approval: readiness.require_issuer_approval,
         issuer_approval_evidence_configured: readiness.issuer_approval_evidence_configured,
         issuer_approval_evidence_recorded: readiness.issuer_approval_evidence_recorded,
+        issuer_approval_max_age_hours: readiness
+            .issuer_approval_max_age
+            .map(|max_age| max_age.num_hours()),
+        issuer_approval_evidence_fresh: readiness.issuer_approval_evidence_fresh,
         risk_summary,
         settlement,
         blocking_gaps,
@@ -10907,6 +10953,8 @@ struct TraceCreditSettlementDrillReadiness {
     require_issuer_approval: bool,
     issuer_approval_evidence_configured: bool,
     issuer_approval_evidence_recorded: bool,
+    issuer_approval_max_age: Option<Duration>,
+    issuer_approval_evidence_fresh: bool,
 }
 
 fn credit_settlement_drill_blocking_gaps(
@@ -10940,6 +10988,11 @@ fn credit_settlement_drill_blocking_gaps(
         blocking_gaps.push("issuer_approval_evidence_hash_missing".to_string());
     } else if readiness.require_issuer_approval && !readiness.issuer_approval_evidence_recorded {
         blocking_gaps.push("issuer_approval_evidence_hash_unrecorded".to_string());
+    } else if readiness.require_issuer_approval
+        && readiness.issuer_approval_max_age.is_some()
+        && !readiness.issuer_approval_evidence_fresh
+    {
+        blocking_gaps.push("issuer_approval_evidence_hash_stale".to_string());
     }
     if readiness.require_pending && risk_summary.pending_credit_micros <= 0 {
         blocking_gaps.push("pending_credit_events_missing".to_string());
@@ -11015,6 +11068,10 @@ fn credit_settlement_drill_evidence_hash(
             "require_issuer_approval": readiness.require_issuer_approval,
             "issuer_approval_evidence_configured": readiness.issuer_approval_evidence_configured,
             "issuer_approval_evidence_recorded": readiness.issuer_approval_evidence_recorded,
+            "issuer_approval_max_age_hours": readiness
+                .issuer_approval_max_age
+                .map(|max_age| max_age.num_hours()),
+            "issuer_approval_evidence_fresh": readiness.issuer_approval_evidence_fresh,
             "risk_account_count": risk_summary.account_count,
             "risk_pending_account_count": risk_summary.pending_account_count,
             "risk_held_account_count": risk_summary.held_account_count,
@@ -11789,23 +11846,44 @@ async fn read_credit_settlement_issuer_approvals_for_admin(
         .collect()
 }
 
-async fn credit_settlement_issuer_approval_recorded(
+#[derive(Debug, Default, Clone, Copy)]
+struct TraceCreditSettlementIssuerApprovalCheck {
+    recorded: bool,
+    fresh: bool,
+}
+
+async fn credit_settlement_issuer_approval_check(
     state: &AppState,
     tenant: &TenantAuth,
     policy_version: &str,
     source_list_hash: &str,
     evidence_hash: &str,
-) -> anyhow::Result<bool> {
-    Ok(
-        read_credit_settlement_issuer_approvals_for_admin(state, tenant)
-            .await?
-            .iter()
-            .any(|approval| {
-                approval.policy_version == policy_version
-                    && approval.source_list_hash == source_list_hash
-                    && approval.evidence_hash == evidence_hash
-            }),
-    )
+) -> anyhow::Result<TraceCreditSettlementIssuerApprovalCheck> {
+    let now = Utc::now();
+    let mut check = TraceCreditSettlementIssuerApprovalCheck::default();
+    for approval in read_credit_settlement_issuer_approvals_for_admin(state, tenant).await? {
+        if approval.policy_version == policy_version
+            && approval.source_list_hash == source_list_hash
+            && approval.evidence_hash == evidence_hash
+        {
+            check.recorded = true;
+            if credit_settlement_issuer_approval_is_fresh(state, &approval, now) {
+                check.fresh = true;
+                break;
+            }
+        }
+    }
+    Ok(check)
+}
+
+fn credit_settlement_issuer_approval_is_fresh(
+    state: &AppState,
+    approval: &TraceCreditSettlementIssuerApprovalResponse,
+    now: DateTime<Utc>,
+) -> bool {
+    state
+        .credit_settlement_issuer_approval_max_age
+        .is_none_or(|max_age| now.signed_duration_since(approval.recorded_at) <= max_age)
 }
 
 fn require_credit_settlement_issuer_approval_if_configured(
@@ -11842,7 +11920,7 @@ async fn require_recorded_credit_settlement_issuer_approval_if_configured(
             "live credit settlement requires issuer_approval_evidence_hash",
         ));
     };
-    if !credit_settlement_issuer_approval_recorded(
+    let approval_check = credit_settlement_issuer_approval_check(
         state,
         tenant,
         policy_version,
@@ -11850,11 +11928,17 @@ async fn require_recorded_credit_settlement_issuer_approval_if_configured(
         issuer_approval_evidence_hash,
     )
     .await
-    .map_err(internal_error)?
-    {
+    .map_err(internal_error)?;
+    if !approval_check.recorded {
         return Err(api_error(
             StatusCode::CONFLICT,
             "live credit settlement requires recorded issuer approval for policy_version, source_list_hash, and issuer_approval_evidence_hash",
+        ));
+    }
+    if !approval_check.fresh {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "live credit settlement requires fresh issuer approval for policy_version, source_list_hash, and issuer_approval_evidence_hash",
         ));
     }
     Ok(())
@@ -53020,6 +53104,7 @@ mod tests {
             analytics_broad_release_privacy_accounting: None,
             credit_settlement_max_micros_per_account: None,
             credit_settlement_require_issuer_approval: false,
+            credit_settlement_issuer_approval_max_age: None,
             credit_settlement_near_contract_id: None,
             credit_settlement_require_near_contract: false,
             submission_quota: TraceSubmissionQuotaConfig::default(),
@@ -54496,6 +54581,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_credit_settlement_issuer_approval_max_age() {
+        assert_eq!(
+            parse_credit_settlement_issuer_approval_max_age("24")
+                .expect("issuer approval max age parses")
+                .map(|duration| duration.num_hours()),
+            Some(24)
+        );
+        assert!(
+            parse_credit_settlement_issuer_approval_max_age("0")
+                .expect("zero disables issuer approval max age")
+                .is_none()
+        );
+        let error = parse_credit_settlement_issuer_approval_max_age("8761")
+            .expect_err("issuer approval max age has an upper bound");
+        assert!(
+            error
+                .to_string()
+                .contains(TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS)
+        );
+    }
+
+    #[test]
     fn validates_configured_credit_settlement_near_contract_id() {
         assert_eq!(
             validate_credit_settlement_near_contract_id(" trace-credits.testnet ")
@@ -55849,6 +55956,10 @@ mod tests {
         assert_eq!(
             value["credit_settlement_require_issuer_approval"],
             serde_json::json!(false)
+        );
+        assert_eq!(
+            value["credit_settlement_issuer_approval_max_age_hours"],
+            serde_json::Value::Null
         );
         assert_eq!(
             value["credit_settlement_near_contract_configured"],
@@ -66466,6 +66577,7 @@ mod tests {
             analytics_broad_release_privacy_accounting: None,
             credit_settlement_max_micros_per_account: None,
             credit_settlement_require_issuer_approval: false,
+            credit_settlement_issuer_approval_max_age: None,
             credit_settlement_near_contract_id: None,
             credit_settlement_require_near_contract: false,
             submission_quota: TraceSubmissionQuotaConfig::default(),
@@ -73594,6 +73706,166 @@ mod tests {
         assert_eq!(
             batches[0].issuer_approval_evidence_hash.as_deref(),
             Some("sha256:issuer-required-approval")
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_settlement_rejects_stale_central_issuer_approval_when_max_age_configured() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
+        Arc::make_mut(&mut state).credit_settlement_issuer_approval_max_age =
+            Some(Duration::hours(1));
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let Json(_) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.0,
+                reason: Some("frontier lab stale issuer approval probe".to_string()),
+                external_ref: Some("lab-attestation:stale-issuer-approval".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+
+        let Json(dry_run) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: true,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "preview exact source list before issuer approval".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("dry-run settlement succeeds");
+
+        let approval_hash = "sha256:stale-issuer-approval";
+        let admin = state
+            .tokens
+            .get("admin-token-a")
+            .expect("admin token exists")
+            .clone();
+        let stale_approval = TraceCreditSettlementIssuerApprovalResponse::from_request(
+            &admin,
+            TraceCreditSettlementIssuerApprovalRequest {
+                policy_version: dry_run.policy_version.clone(),
+                source_list_hash: dry_run.source_list_hash.clone(),
+                evidence_hash: approval_hash.to_string(),
+                reason: "central issuer approval too old for live settlement".to_string(),
+                evidence_ref: Some("private-lab-review:stale-approval".to_string()),
+            },
+        )
+        .expect("issuer approval request validates");
+        let mut stale_event =
+            TraceCommonsAuditEvent::credit_settlement_issuer_approval(&stale_approval);
+        stale_event.created_at = Utc::now() - Duration::hours(2);
+        append_audit_event(temp.path(), "tenant-a", stale_event)
+            .expect("stale issuer approval audit event writes");
+
+        let stale_live_error = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "live settlement should reject stale issuer approval".to_string(),
+                issuer_approval_evidence_hash: Some(approval_hash.to_string()),
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect_err("stale issuer approval blocks live settlement");
+        assert_eq!(stale_live_error.0, StatusCode::CONFLICT);
+        assert!(stale_live_error.1.0.error.contains("fresh issuer approval"));
+
+        let Json(stale_drill) = credit_settlement_drill_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementDrillRequest {
+                policy_version: "trace-credit-policy-v1".to_string(),
+                purpose: Some("operator stale issuer approval drill".to_string()),
+                issuer_approval_evidence_hash: Some(approval_hash.to_string()),
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+                account_limit: None,
+                require_pending: None,
+                require_near_contract: Some(false),
+                require_near_submitter: None,
+                require_near_confirmer: None,
+                require_near_adapter_auth: None,
+                require_account_cap: Some(false),
+                require_issuer_approval: None,
+                record_evidence: false,
+            }),
+        )
+        .await
+        .expect("settlement drill reports stale issuer approval");
+        assert!(!stale_drill.ready);
+        assert!(stale_drill.issuer_approval_evidence_recorded);
+        assert!(!stale_drill.issuer_approval_evidence_fresh);
+        assert_eq!(stale_drill.issuer_approval_max_age_hours, Some(1));
+        assert_eq!(
+            stale_drill.blocking_gaps,
+            vec!["issuer_approval_evidence_hash_stale".to_string()]
+        );
+
+        let Json(_) = credit_settlement_approval_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementIssuerApprovalRequest {
+                policy_version: dry_run.policy_version,
+                source_list_hash: dry_run.source_list_hash,
+                evidence_hash: approval_hash.to_string(),
+                reason: "central issuer refreshed exact source-list approval".to_string(),
+                evidence_ref: Some("private-lab-review:fresh-approval".to_string()),
+            }),
+        )
+        .await
+        .expect("fresh issuer approval records");
+
+        let Json(approved) = credit_settlement_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "live settlement uses fresh issuer approval".to_string(),
+                issuer_approval_evidence_hash: Some(approval_hash.to_string()),
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("fresh issuer approval allows live settlement");
+        assert_eq!(approved.settled_source_event_count, 1);
+        assert_eq!(
+            approved.issuer_approval_evidence_hash.as_deref(),
+            Some(approval_hash)
         );
     }
 
