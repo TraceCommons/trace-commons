@@ -265,7 +265,11 @@ struct RawRankingControlPlaneIds {
 struct RawTraceRlsIds {
     submission_id: Uuid,
     object_ref_id: Uuid,
+    derived_id: Uuid,
+    vector_entry_id: Uuid,
     export_manifest_id: Uuid,
+    export_access_grant_id: Uuid,
+    export_job_id: Uuid,
     credit_event_id: Uuid,
     utility_attestation_id: Uuid,
     settlement_batch_id: Uuid,
@@ -288,8 +292,12 @@ struct RawTraceRlsIds {
 struct RawTraceRlsCounts {
     submissions: i64,
     object_refs: i64,
+    derived_records: i64,
+    vector_entries: i64,
     export_manifests: i64,
     export_manifest_items: i64,
+    export_access_grants: i64,
+    export_jobs: i64,
     credit_events: i64,
     utility_attestations: i64,
     credit_settlement_batches: i64,
@@ -316,8 +324,12 @@ impl RawTraceRlsCounts {
         Self {
             submissions: count,
             object_refs: count,
+            derived_records: count,
+            vector_entries: count,
             export_manifests: count,
             export_manifest_items: count,
+            export_access_grants: count,
+            export_jobs: count,
             credit_events: count,
             utility_attestations: count,
             credit_settlement_batches: count,
@@ -780,31 +792,39 @@ async fn raw_trace_rls_counts(
             "SELECT
                 (SELECT COUNT(*) FROM trace_submissions WHERE submission_id = $1) AS submissions,
                 (SELECT COUNT(*) FROM trace_object_refs WHERE object_ref_id = $2) AS object_refs,
-                (SELECT COUNT(*) FROM trace_export_manifests WHERE export_manifest_id = $3) AS export_manifests,
-                (SELECT COUNT(*) FROM trace_export_manifest_items WHERE export_manifest_id = $3) AS export_manifest_items,
-                (SELECT COUNT(*) FROM trace_credit_ledger WHERE credit_event_id = $4) AS credit_events,
-                (SELECT COUNT(*) FROM trace_utility_attestations WHERE attestation_id = $5) AS utility_attestations,
-                (SELECT COUNT(*) FROM trace_credit_settlement_batches WHERE settlement_batch_id = $6) AS credit_settlement_batches,
-                (SELECT COUNT(*) FROM trace_credit_holds WHERE hold_id = $7) AS credit_holds,
-                (SELECT COUNT(*) FROM trace_near_credit_outbox WHERE near_outbox_id = $8) AS near_credit_outbox,
-                (SELECT COUNT(*) FROM trace_near_credit_account_outbox WHERE near_outbox_id = $9) AS near_credit_account_outbox,
+                (SELECT COUNT(*) FROM trace_derived_records WHERE derived_id = $3) AS derived_records,
+                (SELECT COUNT(*) FROM trace_vector_entries WHERE vector_entry_id = $4) AS vector_entries,
+                (SELECT COUNT(*) FROM trace_export_manifests WHERE export_manifest_id = $5) AS export_manifests,
+                (SELECT COUNT(*) FROM trace_export_manifest_items WHERE export_manifest_id = $5) AS export_manifest_items,
+                (SELECT COUNT(*) FROM trace_export_access_grants WHERE grant_id = $6) AS export_access_grants,
+                (SELECT COUNT(*) FROM trace_export_jobs WHERE export_job_id = $7) AS export_jobs,
+                (SELECT COUNT(*) FROM trace_credit_ledger WHERE credit_event_id = $8) AS credit_events,
+                (SELECT COUNT(*) FROM trace_utility_attestations WHERE attestation_id = $9) AS utility_attestations,
+                (SELECT COUNT(*) FROM trace_credit_settlement_batches WHERE settlement_batch_id = $10) AS credit_settlement_batches,
+                (SELECT COUNT(*) FROM trace_credit_holds WHERE hold_id = $11) AS credit_holds,
+                (SELECT COUNT(*) FROM trace_near_credit_outbox WHERE near_outbox_id = $12) AS near_credit_outbox,
+                (SELECT COUNT(*) FROM trace_near_credit_account_outbox WHERE near_outbox_id = $13) AS near_credit_account_outbox,
                 (SELECT COUNT(*) FROM trace_ranking_model_versions WHERE model_version = 'trace-ranker-raw-rls-v1') AS ranking_model_versions,
                 (SELECT COUNT(*) FROM trace_ranking_calibration_datasets WHERE calibration_dataset_hash = 'sha256:raw-rls-calibration-dataset') AS ranking_calibration_datasets,
-                (SELECT COUNT(*) FROM trace_ranking_features WHERE ranking_feature_id = $10) AS ranking_features,
-                (SELECT COUNT(*) FROM trace_ranking_predictions WHERE ranking_prediction_id = $11) AS ranking_predictions,
-                (SELECT COUNT(*) FROM trace_ranking_labels WHERE ranking_label_id = $12) AS ranking_labels,
-                (SELECT COUNT(*) FROM trace_ranking_preference_labels WHERE preference_label_id = $13) AS ranking_preference_labels,
-                (SELECT COUNT(*) FROM trace_ranking_calibration_runs WHERE calibration_run_id = $14) AS ranking_calibration_runs,
-                (SELECT COUNT(*) FROM trace_ranking_worker_runs WHERE ranking_worker_run_id = $15) AS ranking_worker_runs,
-                (SELECT COUNT(*) FROM trace_benchmark_registry_outbox WHERE benchmark_outbox_id = $16) AS benchmark_registry_outbox,
-                (SELECT COUNT(*) FROM trace_tombstones WHERE tombstone_id = $17) AS tombstones,
-                (SELECT COUNT(*) FROM trace_retention_jobs WHERE retention_job_id = $18) AS retention_jobs,
-                (SELECT COUNT(*) FROM trace_retention_job_items WHERE retention_job_id = $18) AS retention_job_items,
-                (SELECT COUNT(*) FROM trace_revocation_propagation_items WHERE propagation_item_id = $19) AS revocation_propagation_items",
+                (SELECT COUNT(*) FROM trace_ranking_features WHERE ranking_feature_id = $14) AS ranking_features,
+                (SELECT COUNT(*) FROM trace_ranking_predictions WHERE ranking_prediction_id = $15) AS ranking_predictions,
+                (SELECT COUNT(*) FROM trace_ranking_labels WHERE ranking_label_id = $16) AS ranking_labels,
+                (SELECT COUNT(*) FROM trace_ranking_preference_labels WHERE preference_label_id = $17) AS ranking_preference_labels,
+                (SELECT COUNT(*) FROM trace_ranking_calibration_runs WHERE calibration_run_id = $18) AS ranking_calibration_runs,
+                (SELECT COUNT(*) FROM trace_ranking_worker_runs WHERE ranking_worker_run_id = $19) AS ranking_worker_runs,
+                (SELECT COUNT(*) FROM trace_benchmark_registry_outbox WHERE benchmark_outbox_id = $20) AS benchmark_registry_outbox,
+                (SELECT COUNT(*) FROM trace_tombstones WHERE tombstone_id = $21) AS tombstones,
+                (SELECT COUNT(*) FROM trace_retention_jobs WHERE retention_job_id = $22) AS retention_jobs,
+                (SELECT COUNT(*) FROM trace_retention_job_items WHERE retention_job_id = $22) AS retention_job_items,
+                (SELECT COUNT(*) FROM trace_revocation_propagation_items WHERE propagation_item_id = $23) AS revocation_propagation_items",
             &[
                 &ids.submission_id,
                 &ids.object_ref_id,
+                &ids.derived_id,
+                &ids.vector_entry_id,
                 &ids.export_manifest_id,
+                &ids.export_access_grant_id,
+                &ids.export_job_id,
                 &ids.credit_event_id,
                 &ids.utility_attestation_id,
                 &ids.settlement_batch_id,
@@ -829,8 +849,12 @@ async fn raw_trace_rls_counts(
     RawTraceRlsCounts {
         submissions: row.get("submissions"),
         object_refs: row.get("object_refs"),
+        derived_records: row.get("derived_records"),
+        vector_entries: row.get("vector_entries"),
         export_manifests: row.get("export_manifests"),
         export_manifest_items: row.get("export_manifest_items"),
+        export_access_grants: row.get("export_access_grants"),
+        export_jobs: row.get("export_jobs"),
         credit_events: row.get("credit_events"),
         utility_attestations: row.get("utility_attestations"),
         credit_settlement_batches: row.get("credit_settlement_batches"),
@@ -2983,6 +3007,111 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
         .await
         .expect("append tenant B object ref");
 
+    let tenant_a_derived_id = Uuid::new_v4();
+    backend
+        .append_trace_derived_record(TraceDerivedRecordWrite {
+            tenant_id: tenant_a.clone(),
+            derived_id: tenant_a_derived_id,
+            submission_id: tenant_a_submission_id,
+            trace_id: tenant_a_trace_id,
+            status: TraceDerivedStatus::Current,
+            worker_kind: TraceWorkerKind::DuplicatePrecheck,
+            worker_version: "raw-rls-derived-v1".to_string(),
+            input_object_ref: None,
+            input_hash: format!("sha256:{tenant_a}:derived-input"),
+            output_object_ref: None,
+            canonical_summary: Some("tenant A raw RLS summary".to_string()),
+            canonical_summary_hash: Some(format!("sha256:{tenant_a}:summary")),
+            summary_model: "raw-rls-summary-model".to_string(),
+            task_success: Some("success".to_string()),
+            privacy_risk: Some("low".to_string()),
+            event_count: Some(1),
+            tool_sequence: vec!["terminal".to_string()],
+            tool_categories: vec!["shell".to_string()],
+            coverage_tags: vec!["raw-rls".to_string()],
+            duplicate_score: Some(0.01),
+            novelty_score: Some(0.9),
+            cluster_id: Some(format!("cluster:{tenant_a}")),
+        })
+        .await
+        .expect("append tenant A derived record");
+    let tenant_a_vector_entry_id = Uuid::new_v4();
+    backend
+        .upsert_trace_vector_entry(TraceVectorEntryWrite {
+            tenant_id: tenant_a.clone(),
+            submission_id: tenant_a_submission_id,
+            derived_id: tenant_a_derived_id,
+            vector_entry_id: tenant_a_vector_entry_id,
+            vector_store: "raw-rls-vector-store".to_string(),
+            embedding_model: "raw-rls-embedder".to_string(),
+            embedding_dimension: 8,
+            embedding_version: "v1".to_string(),
+            source_projection: TraceVectorEntrySourceProjection::CanonicalSummary,
+            source_hash: format!("sha256:{tenant_a}:summary"),
+            status: TraceVectorEntryStatus::Active,
+            nearest_trace_ids: vec![tenant_a_trace_id.to_string()],
+            cluster_id: Some(format!("cluster:{tenant_a}")),
+            duplicate_score: Some(0.01),
+            novelty_score: Some(0.9),
+            indexed_at: Some(Utc::now()),
+            invalidated_at: None,
+            deleted_at: None,
+        })
+        .await
+        .expect("append tenant A vector entry");
+    let tenant_b_derived_id = Uuid::new_v4();
+    backend
+        .append_trace_derived_record(TraceDerivedRecordWrite {
+            tenant_id: tenant_b.clone(),
+            derived_id: tenant_b_derived_id,
+            submission_id: tenant_b_submission_id,
+            trace_id: tenant_b_trace_id,
+            status: TraceDerivedStatus::Current,
+            worker_kind: TraceWorkerKind::DuplicatePrecheck,
+            worker_version: "raw-rls-derived-v1".to_string(),
+            input_object_ref: None,
+            input_hash: format!("sha256:{tenant_b}:derived-input"),
+            output_object_ref: None,
+            canonical_summary: Some("tenant B raw RLS summary".to_string()),
+            canonical_summary_hash: Some(format!("sha256:{tenant_b}:summary")),
+            summary_model: "raw-rls-summary-model".to_string(),
+            task_success: Some("success".to_string()),
+            privacy_risk: Some("low".to_string()),
+            event_count: Some(1),
+            tool_sequence: vec!["terminal".to_string()],
+            tool_categories: vec!["shell".to_string()],
+            coverage_tags: vec!["raw-rls".to_string()],
+            duplicate_score: Some(0.02),
+            novelty_score: Some(0.8),
+            cluster_id: Some(format!("cluster:{tenant_b}")),
+        })
+        .await
+        .expect("append tenant B derived record");
+    let tenant_b_vector_entry_id = Uuid::new_v4();
+    backend
+        .upsert_trace_vector_entry(TraceVectorEntryWrite {
+            tenant_id: tenant_b.clone(),
+            submission_id: tenant_b_submission_id,
+            derived_id: tenant_b_derived_id,
+            vector_entry_id: tenant_b_vector_entry_id,
+            vector_store: "raw-rls-vector-store".to_string(),
+            embedding_model: "raw-rls-embedder".to_string(),
+            embedding_dimension: 8,
+            embedding_version: "v1".to_string(),
+            source_projection: TraceVectorEntrySourceProjection::CanonicalSummary,
+            source_hash: format!("sha256:{tenant_b}:summary"),
+            status: TraceVectorEntryStatus::Active,
+            nearest_trace_ids: vec![tenant_b_trace_id.to_string()],
+            cluster_id: Some(format!("cluster:{tenant_b}")),
+            duplicate_score: Some(0.02),
+            novelty_score: Some(0.8),
+            indexed_at: Some(Utc::now()),
+            invalidated_at: None,
+            deleted_at: None,
+        })
+        .await
+        .expect("append tenant B vector entry");
+
     let tenant_a_export_manifest_id = Uuid::new_v4();
     backend
         .upsert_trace_export_manifest(TraceExportManifestWrite {
@@ -3041,6 +3170,87 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
         })
         .await
         .expect("append tenant B export manifest item");
+
+    let export_requested_at = Utc::now();
+    let export_expires_at = export_requested_at + chrono::Duration::minutes(30);
+    let tenant_a_export_grant_id = Uuid::new_v4();
+    let tenant_a_export_job_id = Uuid::new_v4();
+    backend
+        .upsert_trace_export_access_grant(TraceExportAccessGrantWrite {
+            tenant_id: tenant_a.clone(),
+            export_job_id: tenant_a_export_job_id,
+            grant_id: tenant_a_export_grant_id,
+            caller_principal_ref: format!("principal:{tenant_a}:exporter"),
+            requested_dataset_kind: "replay".to_string(),
+            purpose: "raw-rls-export".to_string(),
+            max_item_cap: Some(10),
+            status: TraceExportAccessGrantStatus::Active,
+            requested_at: export_requested_at,
+            expires_at: export_expires_at,
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("append tenant A export access grant");
+    backend
+        .upsert_trace_export_job(TraceExportJobWrite {
+            tenant_id: tenant_a.clone(),
+            export_job_id: tenant_a_export_job_id,
+            grant_id: tenant_a_export_grant_id,
+            caller_principal_ref: format!("principal:{tenant_a}:exporter"),
+            requested_dataset_kind: "replay".to_string(),
+            purpose: "raw-rls-export".to_string(),
+            max_item_cap: Some(10),
+            status: TraceExportJobStatus::Queued,
+            requested_at: export_requested_at,
+            started_at: None,
+            finished_at: None,
+            expires_at: export_expires_at,
+            result_manifest_id: Some(tenant_a_export_manifest_id),
+            item_count: Some(1),
+            last_error: None,
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("append tenant A export job");
+    let tenant_b_export_grant_id = Uuid::new_v4();
+    let tenant_b_export_job_id = Uuid::new_v4();
+    backend
+        .upsert_trace_export_access_grant(TraceExportAccessGrantWrite {
+            tenant_id: tenant_b.clone(),
+            export_job_id: tenant_b_export_job_id,
+            grant_id: tenant_b_export_grant_id,
+            caller_principal_ref: format!("principal:{tenant_b}:exporter"),
+            requested_dataset_kind: "benchmark".to_string(),
+            purpose: "raw-rls-export".to_string(),
+            max_item_cap: Some(10),
+            status: TraceExportAccessGrantStatus::Active,
+            requested_at: export_requested_at,
+            expires_at: export_expires_at,
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("append tenant B export access grant");
+    backend
+        .upsert_trace_export_job(TraceExportJobWrite {
+            tenant_id: tenant_b.clone(),
+            export_job_id: tenant_b_export_job_id,
+            grant_id: tenant_b_export_grant_id,
+            caller_principal_ref: format!("principal:{tenant_b}:exporter"),
+            requested_dataset_kind: "benchmark".to_string(),
+            purpose: "raw-rls-export".to_string(),
+            max_item_cap: Some(10),
+            status: TraceExportJobStatus::Queued,
+            requested_at: export_requested_at,
+            started_at: None,
+            finished_at: None,
+            expires_at: export_expires_at,
+            result_manifest_id: Some(tenant_b_export_manifest_id),
+            item_count: Some(1),
+            last_error: None,
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("append tenant B export job");
 
     let tenant_a_credit_event_id = Uuid::new_v4();
     backend
@@ -3328,7 +3538,11 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
             RawTraceRlsIds {
                 submission_id: tenant_a_submission_id,
                 object_ref_id: tenant_a_object_ref_id,
+                derived_id: tenant_a_derived_id,
+                vector_entry_id: tenant_a_vector_entry_id,
                 export_manifest_id: tenant_a_export_manifest_id,
+                export_access_grant_id: tenant_a_export_grant_id,
+                export_job_id: tenant_a_export_job_id,
                 credit_event_id: tenant_a_credit_event_id,
                 utility_attestation_id: tenant_a_credit_control_ids.utility_attestation_id,
                 settlement_batch_id: tenant_a_credit_control_ids.settlement_batch_id,
@@ -3349,7 +3563,11 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
             RawTraceRlsIds {
                 submission_id: tenant_b_submission_id,
                 object_ref_id: tenant_b_object_ref_id,
+                derived_id: tenant_b_derived_id,
+                vector_entry_id: tenant_b_vector_entry_id,
                 export_manifest_id: tenant_b_export_manifest_id,
+                export_access_grant_id: tenant_b_export_grant_id,
+                export_job_id: tenant_b_export_job_id,
                 credit_event_id: tenant_b_credit_event_id,
                 utility_attestation_id: tenant_b_credit_control_ids.utility_attestation_id,
                 settlement_batch_id: tenant_b_credit_control_ids.settlement_batch_id,
