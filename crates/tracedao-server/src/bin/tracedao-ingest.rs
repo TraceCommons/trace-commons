@@ -85366,6 +85366,7 @@ mod tests {
             return;
         };
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_mirror: Arc<dyn Database> = backend.clone();
@@ -85408,6 +85409,33 @@ mod tests {
         .await
         .expect("credit event mirrors to DB");
 
+        let mut other_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut other_envelope);
+        other_envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        other_envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        other_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let other_submission_id = other_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(other_envelope),
+        )
+        .await
+        .expect("other tenant submission mirrors to DB");
+        let Json(other_event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-b"),
+            AxumPath(other_submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 9.0,
+                reason: Some("tenant B frontier training utility".to_string()),
+                external_ref: Some("frontier:tenant-b-db-settlement".to_string()),
+            }),
+        )
+        .await
+        .expect("other tenant credit event mirrors to DB");
+
         let Json(finalized) = credit_settlement_handler(
             State(state.clone()),
             auth_headers("admin-token-a"),
@@ -85431,6 +85459,11 @@ mod tests {
             .expect("DB settlement batches read");
         assert_eq!(db_batches.len(), 1);
         assert_eq!(db_batches[0].source_credit_event_ids, vec![event.event_id]);
+        assert!(
+            !db_batches[0]
+                .source_credit_event_ids
+                .contains(&other_event.event_id)
+        );
 
         let Json(listed_batches) =
             credit_settlements_handler(State(state.clone()), auth_headers("admin-token-a"))
@@ -85441,6 +85474,18 @@ mod tests {
             listed_batches[0].settlement_batch_id,
             finalized.settlement_batch_id
         );
+
+        let Json(risk_summary) = credit_risk_summary_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Query(TraceCreditRiskSummaryQuery::default()),
+        )
+        .await
+        .expect("admin tenant A risk summary reads from DB without tenant B credit");
+        assert_eq!(risk_summary.tenant_id, "tenant-a");
+        assert_eq!(risk_summary.account_count, 0);
+        assert_eq!(risk_summary.pending_credit_micros, 0);
+        assert_eq!(risk_summary.held_credit_micros, 0);
 
         let Json(outbox) =
             near_credit_outbox_handler(State(state.clone()), auth_headers("admin-token-a"))
@@ -85474,6 +85519,7 @@ mod tests {
         );
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
     }
 
     #[test]
