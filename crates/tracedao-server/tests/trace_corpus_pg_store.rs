@@ -29,6 +29,8 @@ use tracedao_server::trace_corpus_storage::{
 };
 use uuid::Uuid;
 
+const TEST_NEAR_TX_HASH: &str = "11111111111111111111111111111111111111111111";
+
 fn postgres_test_config() -> Option<DatabaseConfig> {
     let url = std::env::var("TRACEDAO_PG_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
@@ -2099,7 +2101,7 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
             &tenant_alpha,
             near_outbox_id,
             TraceCreditSettlementNearStatus::Submitted,
-            Some("near-public-tx-hash".to_string()),
+            Some(TEST_NEAR_TX_HASH.to_string()),
             None,
         )
         .await
@@ -2108,7 +2110,7 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
     assert_eq!(updated.status, TraceCreditSettlementNearStatus::Submitted);
     assert_eq!(
         updated.near_transaction_hash.as_deref(),
-        Some("near-public-tx-hash")
+        Some(TEST_NEAR_TX_HASH)
     );
     assert!(updated.submitted_at.is_some());
     assert!(updated.last_error_hash.is_none());
@@ -2118,7 +2120,7 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
             &tenant_alpha,
             near_outbox_id,
             TraceCreditSettlementNearStatus::Submitted,
-            Some("near-public-tx-hash".to_string()),
+            Some(TEST_NEAR_TX_HASH.to_string()),
             Some("sha256:near-confirmation-mismatch".to_string()),
         )
         .await
@@ -2130,7 +2132,7 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
     );
     assert_eq!(
         submitted_with_error.near_transaction_hash.as_deref(),
-        Some("near-public-tx-hash")
+        Some(TEST_NEAR_TX_HASH)
     );
     assert_eq!(
         submitted_with_error.last_error_hash.as_deref(),
@@ -2257,7 +2259,7 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
     );
     assert_eq!(
         alpha_near[0].near_transaction_hash.as_deref(),
-        Some("near-public-tx-hash")
+        Some(TEST_NEAR_TX_HASH)
     );
     assert_eq!(
         alpha_near[0].near_call_json["idempotency_key"].as_str(),
