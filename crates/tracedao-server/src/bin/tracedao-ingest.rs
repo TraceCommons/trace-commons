@@ -8768,6 +8768,8 @@ struct TraceCreditSettlementDrillResponse {
     issuer_approval_evidence_recorded: bool,
     issuer_approval_max_age_hours: Option<i64>,
     issuer_approval_evidence_fresh: bool,
+    credit_settlement_central_issuer_profile_required: bool,
+    credit_settlement_central_issuer_profile_ready: bool,
     risk_summary: TraceCreditRiskSummaryResponse,
     settlement: TraceCreditSettlementRunResponse,
     blocking_gaps: Vec<String>,
@@ -11002,6 +11004,8 @@ async fn run_credit_settlement_drill(
     let near_confirmer_configured = state.near_credit_confirmer.is_some();
     let near_submitter_auth_configured = state.near_credit_submitter_auth_configured;
     let near_confirmer_auth_configured = state.near_credit_confirmer_auth_configured;
+    let central_issuer_profile_config =
+        credit_settlement_central_issuer_profile_config_from_state(state);
     let issuer_approval_evidence_hash = validate_credit_settlement_issuer_approval_evidence_hash(
         request.issuer_approval_evidence_hash.as_deref(),
     )?;
@@ -11059,6 +11063,10 @@ async fn run_credit_settlement_drill(
         issuer_approval_evidence_recorded: issuer_approval_check.recorded,
         issuer_approval_max_age: state.credit_settlement_issuer_approval_max_age,
         issuer_approval_evidence_fresh: issuer_approval_check.fresh,
+        central_issuer_profile_required: state.credit_settlement_require_central_issuer_profile,
+        central_issuer_profile_ready: credit_settlement_central_issuer_profile_ready(
+            &central_issuer_profile_config,
+        ),
     };
     let blocking_gaps =
         credit_settlement_drill_blocking_gaps(&risk_summary, &settlement, &readiness);
@@ -11097,6 +11105,9 @@ async fn run_credit_settlement_drill(
             .issuer_approval_max_age
             .map(|max_age| max_age.num_hours()),
         issuer_approval_evidence_fresh: readiness.issuer_approval_evidence_fresh,
+        credit_settlement_central_issuer_profile_required: readiness
+            .central_issuer_profile_required,
+        credit_settlement_central_issuer_profile_ready: readiness.central_issuer_profile_ready,
         risk_summary,
         settlement,
         blocking_gaps,
@@ -11153,6 +11164,8 @@ struct TraceCreditSettlementDrillReadiness {
     issuer_approval_evidence_recorded: bool,
     issuer_approval_max_age: Option<Duration>,
     issuer_approval_evidence_fresh: bool,
+    central_issuer_profile_required: bool,
+    central_issuer_profile_ready: bool,
 }
 
 fn credit_settlement_drill_blocking_gaps(
@@ -11191,6 +11204,9 @@ fn credit_settlement_drill_blocking_gaps(
         && !readiness.issuer_approval_evidence_fresh
     {
         blocking_gaps.push("issuer_approval_evidence_hash_stale".to_string());
+    }
+    if readiness.central_issuer_profile_required && !readiness.central_issuer_profile_ready {
+        blocking_gaps.push("credit_settlement_central_issuer_profile_incomplete".to_string());
     }
     if readiness.require_pending && risk_summary.pending_credit_micros <= 0 {
         blocking_gaps.push("pending_credit_events_missing".to_string());
@@ -11246,7 +11262,7 @@ fn credit_settlement_drill_evidence_hash(
     } = inputs;
     sha256_prefixed(
         &serde_json::json!({
-            "schema": "trace_commons_credit_settlement_drill.v1",
+            "schema": "trace_commons_credit_settlement_drill.v2",
             "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
             "actor_principal_ref": tenant.principal_ref,
             "purpose_hash": sha256_prefixed(purpose),
@@ -11270,6 +11286,10 @@ fn credit_settlement_drill_evidence_hash(
                 .issuer_approval_max_age
                 .map(|max_age| max_age.num_hours()),
             "issuer_approval_evidence_fresh": readiness.issuer_approval_evidence_fresh,
+            "credit_settlement_central_issuer_profile_required":
+                readiness.central_issuer_profile_required,
+            "credit_settlement_central_issuer_profile_ready":
+                readiness.central_issuer_profile_ready,
             "risk_account_count": risk_summary.account_count,
             "risk_pending_account_count": risk_summary.pending_account_count,
             "risk_held_account_count": risk_summary.held_account_count,
@@ -75396,6 +75416,109 @@ mod tests {
         );
         assert_eq!(opt_out["blocking_gaps"], serde_json::json!([]));
 
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement reads")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_settlement_drill_blocks_incomplete_central_issuer_profile() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_require_central_issuer_profile = true;
+        Arc::make_mut(&mut state).credit_settlement_max_micros_per_account = Some(2_000_000);
+        Arc::make_mut(&mut state).near_credit_submitter =
+            Some(Arc::new(FakeNearCreditSubmitter::default()));
+        Arc::make_mut(&mut state).near_credit_confirmer =
+            Some(Arc::new(FakeNearCreditConfirmer::default()));
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 0.75,
+                reason: Some("frontier lab central issuer profile drill probe".to_string()),
+                external_ref: Some("lab-attestation:central-issuer-profile-drill".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlement-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "policy_version": "trace-credit-policy-v1",
+                            "near_contract_id": "trace-credits.testnet",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("central issuer profile drill request builds"),
+            )
+            .await
+            .expect("central issuer profile drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16384)
+            .await
+            .expect("central issuer profile body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("central issuer profile json parses");
+        assert_eq!(value["ready"], serde_json::json!(false));
+        assert_eq!(
+            value["credit_settlement_central_issuer_profile_required"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["credit_settlement_central_issuer_profile_ready"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["blocking_gaps"],
+            serde_json::json!(["credit_settlement_central_issuer_profile_incomplete"])
+        );
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("failed")
+        );
+        let body_text =
+            std::str::from_utf8(&body).expect("central issuer profile response is utf8");
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("token-a"));
+        assert!(!body_text.contains(&event.event_id.to_string()));
+        assert!(!body_text.contains("frontier lab central issuer profile drill probe"));
+        assert!(!body_text.contains("lab-attestation:central-issuer-profile-drill"));
         assert!(
             read_all_credit_settlement_batches(temp.path(), "tenant-a")
                 .expect("settlement reads")

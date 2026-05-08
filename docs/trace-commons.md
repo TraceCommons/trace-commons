@@ -547,8 +547,12 @@ operators first run the drill or settlement dry-run to obtain the exact
 `source_list_hash`, and approval `evidence_hash`. The drill returns only safe
 account hashes, aggregate risk counts, settlement exclusion reason counts,
 blocker codes, NEAR adapter readiness/auth booleans, issuer-approval configured
-and recorded booleans, and a sha256-prefixed evidence hash, and can append
-`credit_settlement` rollout-smoke evidence directly.
+and recorded booleans, central issuer profile readiness booleans, and a
+sha256-prefixed evidence hash, and can append `credit_settlement` rollout-smoke
+evidence directly. When
+`TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE=true`, the drill
+reports `credit_settlement_central_issuer_profile_incomplete` until the same
+central issuance controls required at startup are configured.
 Final settlement requests can include `issuer_approval_evidence_hash` to bind
 the batch to a central operator approval artifact. Set
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` to reject live
