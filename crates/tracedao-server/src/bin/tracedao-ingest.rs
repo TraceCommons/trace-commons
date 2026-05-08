@@ -29017,6 +29017,38 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             ),
         ),
         (
+            "near_submitter_configured",
+            usize::from(
+                response
+                    .promotion_gates
+                    .credit_settlement_near_submitter_configured,
+            ),
+        ),
+        (
+            "near_submitter_missing",
+            usize::from(
+                response
+                    .promotion_gates
+                    .credit_settlement_near_submitter_missing,
+            ),
+        ),
+        (
+            "near_confirmer_configured",
+            usize::from(
+                response
+                    .promotion_gates
+                    .credit_settlement_near_confirmer_configured,
+            ),
+        ),
+        (
+            "near_confirmer_missing",
+            usize::from(
+                response
+                    .promotion_gates
+                    .credit_settlement_near_confirmer_missing,
+            ),
+        ),
+        (
             "issuer_approval_required",
             usize::from(
                 response
@@ -50079,6 +50111,10 @@ struct TraceOperationalPromotionGateSummary {
     revocation_propagation_latest_skipped_count: usize,
     credit_settlement_account_cap_configured: bool,
     credit_settlement_account_cap_missing: bool,
+    credit_settlement_near_submitter_configured: bool,
+    credit_settlement_near_submitter_missing: bool,
+    credit_settlement_near_confirmer_configured: bool,
+    credit_settlement_near_confirmer_missing: bool,
     credit_settlement_issuer_approval_required: bool,
     credit_settlement_issuer_approval_missing: bool,
     object_store_versioning_required: bool,
@@ -50182,6 +50218,12 @@ impl TraceOperationalPromotionGateSummary {
             state.credit_settlement_max_micros_per_account.is_some();
         let credit_settlement_account_cap_missing =
             delayed_credit.points_positive > 0.0 && !credit_settlement_account_cap_configured;
+        let credit_settlement_near_submitter_configured = near_credit.submitter_configured;
+        let credit_settlement_near_submitter_missing =
+            delayed_credit.points_positive > 0.0 && !credit_settlement_near_submitter_configured;
+        let credit_settlement_near_confirmer_configured = near_credit.confirmer_configured;
+        let credit_settlement_near_confirmer_missing =
+            delayed_credit.points_positive > 0.0 && !credit_settlement_near_confirmer_configured;
         let credit_settlement_issuer_approval_required =
             state.credit_settlement_require_issuer_approval;
         let credit_settlement_issuer_approval_missing =
@@ -50354,6 +50396,12 @@ impl TraceOperationalPromotionGateSummary {
         if credit_settlement_account_cap_missing {
             blocking_gates.push("credit_settlement_account_cap_missing".to_string());
         }
+        if credit_settlement_near_submitter_missing {
+            blocking_gates.push("credit_settlement_near_submitter_missing".to_string());
+        }
+        if credit_settlement_near_confirmer_missing {
+            blocking_gates.push("credit_settlement_near_confirmer_missing".to_string());
+        }
         if credit_settlement_issuer_approval_missing {
             blocking_gates.push("credit_settlement_issuer_approval_missing".to_string());
         }
@@ -50463,6 +50511,10 @@ impl TraceOperationalPromotionGateSummary {
             revocation_propagation_latest_skipped_count,
             credit_settlement_account_cap_configured,
             credit_settlement_account_cap_missing,
+            credit_settlement_near_submitter_configured,
+            credit_settlement_near_submitter_missing,
+            credit_settlement_near_confirmer_configured,
+            credit_settlement_near_confirmer_missing,
             credit_settlement_issuer_approval_required,
             credit_settlement_issuer_approval_missing,
             object_store_versioning_required,
@@ -72795,6 +72847,10 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
         Arc::make_mut(&mut state).credit_settlement_max_micros_per_account = Some(2_000_000);
+        Arc::make_mut(&mut state).near_credit_submitter =
+            Some(Arc::new(FakeNearCreditSubmitter::default()));
+        Arc::make_mut(&mut state).near_credit_confirmer =
+            Some(Arc::new(FakeNearCreditConfirmer::default()));
         let mut envelope = sample_envelope().await;
         make_metadata_only_low_risk(&mut envelope);
         envelope.consent.scopes = vec![ConsentScope::ModelTraining];
@@ -72905,6 +72961,146 @@ mod tests {
         assert!(!metrics_text.contains("admin-token-a"));
         assert!(!metrics_text.contains("frontier lab issuer approval readiness probe"));
         assert!(!metrics_text.contains("lab-attestation:operational-issuer-approval"));
+    }
+
+    #[tokio::test]
+    async fn operational_summary_blocks_credit_settlement_without_near_adapters() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_max_micros_per_account = Some(2_000_000);
+        Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 0.75,
+                reason: Some("frontier lab near adapter readiness probe".to_string()),
+                external_ref: Some("lab-attestation:operational-near-adapters".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+
+        let summary_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-summary")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("summary request builds"),
+            )
+            .await
+            .expect("summary response");
+        assert_eq!(summary_response.status(), StatusCode::OK);
+        let summary_body = axum::body::to_bytes(summary_response.into_body(), 128 * 1024)
+            .await
+            .expect("summary body reads");
+        let summary: serde_json::Value =
+            serde_json::from_slice(&summary_body).expect("summary json parses");
+        assert_eq!(
+            summary["promotion_gates"]["ready"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            summary["promotion_gates"]["credit_settlement_near_submitter_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            summary["promotion_gates"]["credit_settlement_near_submitter_missing"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            summary["promotion_gates"]["credit_settlement_near_confirmer_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            summary["promotion_gates"]["credit_settlement_near_confirmer_missing"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            summary["promotion_gates"]["credit_settlement_issuer_approval_required"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            summary["promotion_gates"]["credit_settlement_issuer_approval_missing"],
+            serde_json::json!(false)
+        );
+        assert!(
+            summary["promotion_gates"]["blocking_gates"]
+                .as_array()
+                .expect("blocking gates are an array")
+                .contains(&serde_json::json!(
+                    "credit_settlement_near_submitter_missing"
+                ))
+        );
+        assert!(
+            summary["promotion_gates"]["blocking_gates"]
+                .as_array()
+                .expect("blocking gates are an array")
+                .contains(&serde_json::json!(
+                    "credit_settlement_near_confirmer_missing"
+                ))
+        );
+        let summary_text = std::str::from_utf8(&summary_body).expect("summary body is utf8");
+        assert!(!summary_text.contains("admin-token-a"));
+        assert!(!summary_text.contains("token-a"));
+        assert!(!summary_text.contains(&event.event_id.to_string()));
+        assert!(!summary_text.contains("frontier lab near adapter readiness probe"));
+        assert!(!summary_text.contains("lab-attestation:operational-near-adapters"));
+
+        let metrics_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-metrics")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("metrics request builds"),
+            )
+            .await
+            .expect("metrics response");
+        assert_eq!(metrics_response.status(), StatusCode::OK);
+        let metrics_body = axum::body::to_bytes(metrics_response.into_body(), 128 * 1024)
+            .await
+            .expect("metrics body reads");
+        let metrics_text = std::str::from_utf8(&metrics_body).expect("metrics body is utf8");
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(metrics_text.contains(&format!(
+            "tracedao_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"credit_settlement_near_submitter_missing\"}} 1"
+        )));
+        assert!(metrics_text.contains(&format!(
+            "tracedao_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"credit_settlement_near_confirmer_missing\"}} 1"
+        )));
+        assert!(metrics_text.contains(&format!(
+            "tracedao_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"near_submitter_missing\"}} 1"
+        )));
+        assert!(metrics_text.contains(&format!(
+            "tracedao_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"near_confirmer_missing\"}} 1"
+        )));
+        assert!(!metrics_text.contains("admin-token-a"));
+        assert!(!metrics_text.contains("frontier lab near adapter readiness probe"));
+        assert!(!metrics_text.contains("lab-attestation:operational-near-adapters"));
     }
 
     #[tokio::test]
