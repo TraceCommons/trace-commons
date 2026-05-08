@@ -3478,6 +3478,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(credit_settlements_handler).post(credit_settlement_handler),
         )
         .route(
+            "/v1/admin/credit-settlement-approvals",
+            get(credit_settlement_approvals_handler).post(credit_settlement_approval_handler),
+        )
+        .route(
             "/v1/admin/credit-risk-summary",
             get(credit_risk_summary_handler),
         )
@@ -7714,6 +7718,31 @@ struct TraceCreditSettlementDrillRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct TraceCreditSettlementIssuerApprovalRequest {
+    policy_version: String,
+    source_list_hash: String,
+    evidence_hash: String,
+    reason: String,
+    #[serde(default)]
+    evidence_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TraceCreditSettlementIssuerApprovalResponse {
+    event_id: Uuid,
+    tenant_id: String,
+    tenant_storage_ref: String,
+    policy_version: String,
+    source_list_hash: String,
+    evidence_hash: String,
+    reason_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    evidence_ref_hash: Option<String>,
+    actor_principal_ref: String,
+    recorded_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
 struct TraceCreditCycleWorkerRunRequest {
     #[serde(default)]
     dry_run: bool,
@@ -8449,6 +8478,7 @@ struct TraceCreditSettlementDrillResponse {
     settlement_account_cap_configured: bool,
     require_issuer_approval: bool,
     issuer_approval_evidence_configured: bool,
+    issuer_approval_evidence_recorded: bool,
     risk_summary: TraceCreditRiskSummaryResponse,
     settlement: TraceCreditSettlementRunResponse,
     blocking_gaps: Vec<String>,
@@ -9890,6 +9920,51 @@ async fn credit_settlement_drill_handler(
     Ok(Json(response))
 }
 
+async fn credit_settlement_approval_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceCreditSettlementIssuerApprovalRequest>,
+) -> ApiResult<Json<TraceCreditSettlementIssuerApprovalResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let response = TraceCreditSettlementIssuerApprovalResponse::from_request(&tenant, request)?;
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::credit_settlement_issuer_approval(&response),
+        StorageTraceAuditAction::CreditMutate,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(response))
+}
+
+async fn credit_settlement_approvals_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<TraceCreditSettlementIssuerApprovalResponse>>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let approvals = read_credit_settlement_issuer_approvals_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::read(
+            &tenant,
+            "credit_settlement_issuer_approvals",
+            approvals.len(),
+        ),
+        StorageTraceAuditAction::Read,
+        trace_read_audit_metadata("credit_settlement_issuer_approvals", approvals.len()),
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(approvals))
+}
+
 async fn credit_cycle_scheduler_run_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -10291,6 +10366,10 @@ async fn credit_cycle_worker_run_handler(
         body.dry_run,
         issuer_approval_evidence_hash.as_deref(),
     )?;
+    reject_live_credit_cycle_when_recorded_issuer_approval_is_required(
+        state.as_ref(),
+        body.dry_run,
+    )?;
     let near_contract_id = resolve_credit_settlement_near_contract_id(
         state.as_ref(),
         body.dry_run,
@@ -10654,6 +10733,20 @@ async fn run_credit_settlement_drill(
         None,
     )
     .await?;
+    let issuer_approval_evidence_recorded =
+        if let Some(issuer_approval_evidence_hash) = issuer_approval_evidence_hash.as_deref() {
+            credit_settlement_issuer_approval_recorded(
+                state,
+                tenant,
+                &settlement.policy_version,
+                &settlement.source_list_hash,
+                issuer_approval_evidence_hash,
+            )
+            .await
+            .map_err(internal_error)?
+        } else {
+            false
+        };
     let readiness = TraceCreditSettlementDrillReadiness {
         require_pending,
         require_near_contract,
@@ -10666,6 +10759,7 @@ async fn run_credit_settlement_drill(
         settlement_account_cap_configured,
         require_issuer_approval,
         issuer_approval_evidence_configured: issuer_approval_evidence_hash.is_some(),
+        issuer_approval_evidence_recorded,
     };
     let blocking_gaps =
         credit_settlement_drill_blocking_gaps(&risk_summary, &settlement, &readiness);
@@ -10696,6 +10790,7 @@ async fn run_credit_settlement_drill(
         settlement_account_cap_configured: readiness.settlement_account_cap_configured,
         require_issuer_approval: readiness.require_issuer_approval,
         issuer_approval_evidence_configured: readiness.issuer_approval_evidence_configured,
+        issuer_approval_evidence_recorded: readiness.issuer_approval_evidence_recorded,
         risk_summary,
         settlement,
         blocking_gaps,
@@ -10746,6 +10841,7 @@ struct TraceCreditSettlementDrillReadiness {
     settlement_account_cap_configured: bool,
     require_issuer_approval: bool,
     issuer_approval_evidence_configured: bool,
+    issuer_approval_evidence_recorded: bool,
 }
 
 fn credit_settlement_drill_blocking_gaps(
@@ -10765,6 +10861,8 @@ fn credit_settlement_drill_blocking_gaps(
     }
     if readiness.require_issuer_approval && !readiness.issuer_approval_evidence_configured {
         blocking_gaps.push("issuer_approval_evidence_hash_missing".to_string());
+    } else if readiness.require_issuer_approval && !readiness.issuer_approval_evidence_recorded {
+        blocking_gaps.push("issuer_approval_evidence_hash_unrecorded".to_string());
     }
     if readiness.require_pending && risk_summary.pending_credit_micros <= 0 {
         blocking_gaps.push("pending_credit_events_missing".to_string());
@@ -10836,6 +10934,7 @@ fn credit_settlement_drill_evidence_hash(
             "settlement_account_cap_configured": readiness.settlement_account_cap_configured,
             "require_issuer_approval": readiness.require_issuer_approval,
             "issuer_approval_evidence_configured": readiness.issuer_approval_evidence_configured,
+            "issuer_approval_evidence_recorded": readiness.issuer_approval_evidence_recorded,
             "risk_account_count": risk_summary.account_count,
             "risk_pending_account_count": risk_summary.pending_account_count,
             "risk_held_account_count": risk_summary.held_account_count,
@@ -11061,6 +11160,15 @@ async fn run_credit_settlement(
         .into_iter()
         .collect::<Vec<_>>();
     let source_list_hash = source_credit_event_ids_hash(&policy_version, &source_credit_event_ids);
+    require_recorded_credit_settlement_issuer_approval_if_configured(
+        state,
+        tenant,
+        body.dry_run,
+        &policy_version,
+        &source_list_hash,
+        issuer_approval_evidence_hash.as_deref(),
+    )
+    .await?;
     let settlement_batch_id = Uuid::new_v4();
     let tenant_storage_ref = tenant_storage_ref(&tenant.tenant_id);
     let reason_hash = sha256_prefixed(&reason);
@@ -11439,6 +11547,187 @@ fn validate_credit_settlement_issuer_approval_evidence_hash(
         .transpose()
 }
 
+impl TraceCreditSettlementIssuerApprovalResponse {
+    fn from_request(
+        tenant: &TenantAuth,
+        request: TraceCreditSettlementIssuerApprovalRequest,
+    ) -> ApiResult<Self> {
+        let policy_version =
+            validate_credit_settlement_issuer_approval_policy_version(&request.policy_version)?;
+        let source_list_hash =
+            validate_trace_sha256_hash(&request.source_list_hash, "source_list_hash")?;
+        let evidence_hash =
+            validate_trace_sha256_hash(&request.evidence_hash, "issuer approval evidence_hash")?;
+        let reason_hash = validate_credit_settlement_issuer_approval_reason(&request.reason)?;
+        let evidence_ref_hash = request
+            .evidence_ref
+            .as_deref()
+            .map(str::trim)
+            .filter(|evidence_ref| !evidence_ref.is_empty())
+            .map(sha256_prefixed);
+        Ok(Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            policy_version,
+            source_list_hash,
+            evidence_hash,
+            reason_hash,
+            evidence_ref_hash,
+            actor_principal_ref: tenant.principal_ref.clone(),
+            recorded_at: Utc::now(),
+        })
+    }
+}
+
+fn validate_credit_settlement_issuer_approval_policy_version(value: &str) -> ApiResult<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "issuer approval requires policy_version",
+        ));
+    }
+    if value.len() > 256 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "issuer approval policy_version is too long",
+        ));
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':'))
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "issuer approval policy_version contains unsupported characters",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn validate_credit_settlement_issuer_approval_reason(reason: &str) -> ApiResult<String> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "issuer approval requires a non-empty reason",
+        ));
+    }
+    if reason.len() > 1024 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "issuer approval reason is too long",
+        ));
+    }
+    Ok(sha256_prefixed(reason))
+}
+
+fn trace_credit_settlement_issuer_approval_audit_reason(
+    approval: &TraceCreditSettlementIssuerApprovalResponse,
+) -> String {
+    let mut reason = format!(
+        "surface=credit_settlement_issuer_approval;policy_version={};source_list_hash={};evidence_hash={};reason_hash={}",
+        approval.policy_version,
+        approval.source_list_hash,
+        approval.evidence_hash,
+        approval.reason_hash
+    );
+    if let Some(evidence_ref_hash) = approval.evidence_ref_hash.as_deref() {
+        reason.push_str(";evidence_ref_hash=");
+        reason.push_str(evidence_ref_hash);
+    }
+    reason
+}
+
+fn trace_audit_reason_is_credit_settlement_issuer_approval(reason: Option<&str>) -> bool {
+    trace_audit_reason_value(reason, "surface") == Some("credit_settlement_issuer_approval")
+}
+
+fn trace_credit_settlement_issuer_approval_from_audit_event(
+    event: &TraceCommonsAuditEvent,
+) -> Option<anyhow::Result<TraceCreditSettlementIssuerApprovalResponse>> {
+    let reason = event.reason.as_deref();
+    if event.kind != "credit_settlement_issuer_approval"
+        && !trace_audit_reason_is_credit_settlement_issuer_approval(reason)
+    {
+        return None;
+    }
+    Some((|| {
+        let policy_version = trace_audit_reason_value(reason, "policy_version")
+            .context("credit settlement issuer approval audit missing policy_version")?
+            .to_string();
+        let source_list_hash = trace_audit_reason_value(reason, "source_list_hash")
+            .context("credit settlement issuer approval audit missing source_list_hash")?
+            .to_string();
+        let evidence_hash = trace_audit_reason_value(reason, "evidence_hash")
+            .context("credit settlement issuer approval audit missing evidence_hash")?
+            .to_string();
+        let reason_hash = trace_audit_reason_value(reason, "reason_hash")
+            .context("credit settlement issuer approval audit missing reason_hash")?
+            .to_string();
+        anyhow::ensure!(
+            source_list_hash.starts_with("sha256:"),
+            "credit settlement issuer approval source_list_hash must be sha256-prefixed"
+        );
+        anyhow::ensure!(
+            evidence_hash.starts_with("sha256:"),
+            "credit settlement issuer approval evidence_hash must be sha256-prefixed"
+        );
+        anyhow::ensure!(
+            reason_hash.starts_with("sha256:"),
+            "credit settlement issuer approval reason_hash must be sha256-prefixed"
+        );
+        Ok(TraceCreditSettlementIssuerApprovalResponse {
+            event_id: event.event_id,
+            tenant_id: event.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&event.tenant_id),
+            policy_version,
+            source_list_hash,
+            evidence_hash,
+            reason_hash,
+            evidence_ref_hash: trace_audit_reason_value(reason, "evidence_ref_hash")
+                .map(ToOwned::to_owned),
+            actor_principal_ref: event.actor_principal_ref.clone().unwrap_or_default(),
+            recorded_at: event.created_at,
+        })
+    })())
+}
+
+async fn read_credit_settlement_issuer_approvals_for_admin(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceCreditSettlementIssuerApprovalResponse>> {
+    let events = if state.db_audit_reads_for_tenant(&tenant.tenant_id) {
+        read_audit_events_from_db(state, tenant).await?
+    } else {
+        read_all_audit_events(&state.root, &tenant.tenant_id)?
+    };
+    events
+        .iter()
+        .filter_map(trace_credit_settlement_issuer_approval_from_audit_event)
+        .collect()
+}
+
+async fn credit_settlement_issuer_approval_recorded(
+    state: &AppState,
+    tenant: &TenantAuth,
+    policy_version: &str,
+    source_list_hash: &str,
+    evidence_hash: &str,
+) -> anyhow::Result<bool> {
+    Ok(
+        read_credit_settlement_issuer_approvals_for_admin(state, tenant)
+            .await?
+            .iter()
+            .any(|approval| {
+                approval.policy_version == policy_version
+                    && approval.source_list_hash == source_list_hash
+                    && approval.evidence_hash == evidence_hash
+            }),
+    )
+}
+
 fn require_credit_settlement_issuer_approval_if_configured(
     state: &AppState,
     dry_run: bool,
@@ -11451,6 +11740,54 @@ fn require_credit_settlement_issuer_approval_if_configured(
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "live credit settlement requires issuer_approval_evidence_hash",
+        ));
+    }
+    Ok(())
+}
+
+async fn require_recorded_credit_settlement_issuer_approval_if_configured(
+    state: &AppState,
+    tenant: &TenantAuth,
+    dry_run: bool,
+    policy_version: &str,
+    source_list_hash: &str,
+    issuer_approval_evidence_hash: Option<&str>,
+) -> ApiResult<()> {
+    if dry_run || !state.credit_settlement_require_issuer_approval {
+        return Ok(());
+    }
+    let Some(issuer_approval_evidence_hash) = issuer_approval_evidence_hash else {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "live credit settlement requires issuer_approval_evidence_hash",
+        ));
+    };
+    if !credit_settlement_issuer_approval_recorded(
+        state,
+        tenant,
+        policy_version,
+        source_list_hash,
+        issuer_approval_evidence_hash,
+    )
+    .await
+    .map_err(internal_error)?
+    {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "live credit settlement requires recorded issuer approval for policy_version, source_list_hash, and issuer_approval_evidence_hash",
+        ));
+    }
+    Ok(())
+}
+
+fn reject_live_credit_cycle_when_recorded_issuer_approval_is_required(
+    state: &AppState,
+    dry_run: bool,
+) -> ApiResult<()> {
+    if !dry_run && state.credit_settlement_require_issuer_approval {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "live credit cycle requires separate credit settlement after recorded source-list issuer approval",
         ));
     }
     Ok(())
@@ -34643,6 +34980,11 @@ fn trace_commons_audit_event_from_storage(
     {
         kind = "rollout_smoke_evidence".to_string();
     }
+    if event.action == StorageTraceAuditAction::CreditMutate
+        && trace_audit_reason_is_credit_settlement_issuer_approval(event.reason.as_deref())
+    {
+        kind = "credit_settlement_issuer_approval".to_string();
+    }
     let (status, reason, export_count) = match &event.metadata {
         StorageTraceAuditSafeMetadata::Submission {
             status,
@@ -42311,6 +42653,11 @@ fn storage_audit_canonical_kind(event: &StorageTraceAuditEventRecord) -> String 
     {
         return "rollout_smoke_evidence".to_string();
     }
+    if event.action == StorageTraceAuditAction::CreditMutate
+        && trace_audit_reason_is_credit_settlement_issuer_approval(event.reason.as_deref())
+    {
+        return "credit_settlement_issuer_approval".to_string();
+    }
     if event.action == StorageTraceAuditAction::Retain
         && matches!(
             &event.metadata,
@@ -42990,7 +43337,9 @@ fn audit_backfill_storage_projection(
         "submitted" => StorageTraceAuditAction::Submit,
         "read" | "trace_content_read" => StorageTraceAuditAction::Read,
         "review_decision" => StorageTraceAuditAction::Review,
-        "credit_mutate" => StorageTraceAuditAction::CreditMutate,
+        "credit_mutate" | "credit_settlement_issuer_approval" => {
+            StorageTraceAuditAction::CreditMutate
+        }
         "revoked" => StorageTraceAuditAction::Revoke,
         "dataset_export" | "ranker_training_candidates_export" | "ranker_training_pairs_export" => {
             StorageTraceAuditAction::Export
@@ -48476,6 +48825,29 @@ impl TraceCommonsAuditEvent {
             export_count: None,
             export_id: None,
             decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    fn credit_settlement_issuer_approval(
+        approval: &TraceCreditSettlementIssuerApprovalResponse,
+    ) -> Self {
+        Self {
+            event_id: approval.event_id,
+            tenant_id: approval.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "credit_settlement_issuer_approval".to_string(),
+            created_at: approval.recorded_at,
+            status: None,
+            actor_role: Some(TokenRole::Admin),
+            actor_principal_ref: Some(approval.actor_principal_ref.clone()),
+            reason: Some(trace_credit_settlement_issuer_approval_audit_reason(
+                approval,
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: Some(approval.evidence_hash.clone()),
             previous_event_hash: None,
             event_hash: None,
         }
@@ -57925,6 +58297,68 @@ mod tests {
 
         assert_eq!(projected_event.kind, "rollout_smoke_evidence");
         assert_eq!(projected_event.reason, audit_event.reason);
+    }
+
+    #[test]
+    fn db_audit_projection_preserves_credit_settlement_issuer_approval_kind() {
+        let auth = TenantAuth {
+            tenant_id: "tenant-a".to_string(),
+            role: TokenRole::Admin,
+            principal_ref: principal_storage_ref("admin-token-a"),
+            expires_at: None,
+            auth_method: TraceAuthMethod::StaticToken,
+            signed_claim_issuer: None,
+            signed_claim_audiences: BTreeSet::new(),
+            signed_claim_subject: None,
+            allowed_consent_scopes: BTreeSet::new(),
+            allowed_uses: BTreeSet::new(),
+        };
+        let approval = TraceCreditSettlementIssuerApprovalResponse::from_request(
+            &auth,
+            TraceCreditSettlementIssuerApprovalRequest {
+                policy_version: "trace-credit-policy-v1".to_string(),
+                source_list_hash: sha256_prefixed("settlement source list"),
+                evidence_hash: sha256_prefixed("central issuer approval"),
+                reason: "central issuer approved exact source list".to_string(),
+                evidence_ref: Some("private-lab-review:source-list".to_string()),
+            },
+        )
+        .expect("issuer approval request is valid");
+        let audit_event = TraceCommonsAuditEvent::credit_settlement_issuer_approval(&approval);
+        let storage_event = StorageTraceAuditEventRecord {
+            audit_event_id: audit_event.event_id,
+            tenant_id: audit_event.tenant_id.clone(),
+            audit_sequence: 1,
+            actor_principal_ref: audit_event.actor_principal_ref.clone().unwrap(),
+            actor_role: "admin".to_string(),
+            action: StorageTraceAuditAction::CreditMutate,
+            reason: audit_event.reason.clone(),
+            request_id: None,
+            submission_id: None,
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: audit_event.decision_inputs_hash.clone(),
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: None,
+            metadata: StorageTraceAuditSafeMetadata::Empty,
+            occurred_at: audit_event.created_at,
+        };
+
+        let projected_event = trace_commons_audit_event_from_storage("tenant-a", storage_event)
+            .expect("storage audit projects");
+        let projected_approval =
+            trace_credit_settlement_issuer_approval_from_audit_event(&projected_event)
+                .expect("projected audit is an approval")
+                .expect("approval parses");
+
+        assert_eq!(projected_event.kind, "credit_settlement_issuer_approval");
+        assert_eq!(projected_event.reason, audit_event.reason);
+        assert_eq!(projected_approval.evidence_hash, approval.evidence_hash);
+        assert_eq!(
+            projected_approval.source_list_hash,
+            approval.source_list_hash
+        );
     }
 
     #[test]
@@ -72632,6 +73066,15 @@ mod tests {
             .await
             .expect("dry-run response");
         assert_eq!(dry_run_response.status(), StatusCode::OK);
+        let dry_run_body = axum::body::to_bytes(dry_run_response.into_body(), 16384)
+            .await
+            .expect("dry-run body reads");
+        let dry_run: serde_json::Value =
+            serde_json::from_slice(&dry_run_body).expect("dry-run json parses");
+        let source_list_hash = dry_run["source_list_hash"]
+            .as_str()
+            .expect("dry-run response includes source_list_hash")
+            .to_string();
 
         let missing_response = app(state.clone())
             .oneshot(
@@ -72663,6 +73106,101 @@ mod tests {
                 .expect("settlement reads")
                 .is_empty()
         );
+
+        let unrecorded_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlements")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "dry_run": false,
+                            "policy_version": "trace-credit-policy-v1",
+                            "reason": "live settlement with unrecorded central approval",
+                            "issuer_approval_evidence_hash": "sha256:issuer-required-approval"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("unrecorded approval request builds"),
+            )
+            .await
+            .expect("unrecorded approval response");
+        assert_eq!(unrecorded_response.status(), StatusCode::CONFLICT);
+        let unrecorded_body = axum::body::to_bytes(unrecorded_response.into_body(), 8192)
+            .await
+            .expect("unrecorded body reads");
+        let unrecorded_text = std::str::from_utf8(&unrecorded_body).expect("body is utf8");
+        assert!(unrecorded_text.contains("recorded issuer approval"));
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement reads")
+                .is_empty()
+        );
+
+        let approval_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlement-approvals")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "policy_version": "trace-credit-policy-v1",
+                            "source_list_hash": source_list_hash.clone(),
+                            "evidence_hash": "sha256:issuer-required-approval",
+                            "reason": "central issuer reviewed exact settlement source list",
+                            "evidence_ref": "private-lab-review:issuer-required"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("approval request builds"),
+            )
+            .await
+            .expect("approval response");
+        assert_eq!(approval_response.status(), StatusCode::OK);
+        let approval_body = axum::body::to_bytes(approval_response.into_body(), 16384)
+            .await
+            .expect("approval body reads");
+        let approval: serde_json::Value =
+            serde_json::from_slice(&approval_body).expect("approval json parses");
+        assert_eq!(
+            approval["evidence_hash"],
+            serde_json::json!("sha256:issuer-required-approval")
+        );
+        assert_eq!(
+            approval["source_list_hash"],
+            serde_json::json!(source_list_hash)
+        );
+        let approval_body_text = std::str::from_utf8(&approval_body).expect("body is utf8");
+        assert!(
+            !approval_body_text.contains("central issuer reviewed exact settlement source list")
+        );
+        assert!(!approval_body_text.contains("private-lab-review:issuer-required"));
+
+        let approvals_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/credit-settlement-approvals")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("approvals list request builds"),
+            )
+            .await
+            .expect("approvals list response");
+        assert_eq!(approvals_response.status(), StatusCode::OK);
+        let approvals_body = axum::body::to_bytes(approvals_response.into_body(), 16384)
+            .await
+            .expect("approvals list body reads");
+        let approvals: serde_json::Value =
+            serde_json::from_slice(&approvals_body).expect("approvals list json parses");
+        assert_eq!(approvals.as_array().expect("approval list").len(), 1);
+        let approvals_text = std::str::from_utf8(&approvals_body).expect("body is utf8");
+        assert!(!approvals_text.contains("central issuer reviewed exact settlement source list"));
+        assert!(!approvals_text.contains("private-lab-review:issuer-required"));
 
         let approved_response = app(state.clone())
             .oneshot(
@@ -73662,6 +74200,10 @@ mod tests {
             serde_json::json!(false)
         );
         assert_eq!(
+            missing["issuer_approval_evidence_recorded"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
             missing["blocking_gaps"],
             serde_json::json!(["issuer_approval_evidence_hash_missing"])
         );
@@ -73677,8 +74219,74 @@ mod tests {
             missing["recorded_evidence"]["status"],
             serde_json::json!("failed")
         );
+        let source_list_hash = missing["settlement"]["source_list_hash"]
+            .as_str()
+            .expect("missing approval drill includes source_list_hash")
+            .to_string();
 
         let approval_hash = "sha256:issuer-drill-approval";
+        let unrecorded_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlement-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "policy_version": "trace-credit-policy-v1",
+                            "near_contract_id": "trace-credits.testnet",
+                            "issuer_approval_evidence_hash": approval_hash,
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("unrecorded drill request builds"),
+            )
+            .await
+            .expect("unrecorded drill response");
+        assert_eq!(unrecorded_response.status(), StatusCode::OK);
+        let unrecorded_body = axum::body::to_bytes(unrecorded_response.into_body(), 16384)
+            .await
+            .expect("unrecorded body reads");
+        let unrecorded: serde_json::Value =
+            serde_json::from_slice(&unrecorded_body).expect("unrecorded json parses");
+        assert_eq!(unrecorded["ready"], serde_json::json!(false));
+        assert_eq!(
+            unrecorded["issuer_approval_evidence_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            unrecorded["issuer_approval_evidence_recorded"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            unrecorded["blocking_gaps"],
+            serde_json::json!(["issuer_approval_evidence_hash_unrecorded"])
+        );
+
+        let approval_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlement-approvals")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "policy_version": "trace-credit-policy-v1",
+                            "source_list_hash": source_list_hash,
+                            "evidence_hash": approval_hash,
+                            "reason": "central issuer approved drill source list"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("issuer approval request builds"),
+            )
+            .await
+            .expect("issuer approval response");
+        assert_eq!(approval_response.status(), StatusCode::OK);
+
         let approved_response = app(state.clone())
             .oneshot(
                 axum::http::Request::builder()
@@ -73708,6 +74316,10 @@ mod tests {
         assert_eq!(approved["ready"], serde_json::json!(true));
         assert_eq!(
             approved["issuer_approval_evidence_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            approved["issuer_approval_evidence_recorded"],
             serde_json::json!(true)
         );
         assert_eq!(approved["blocking_gaps"], serde_json::json!([]));
@@ -80208,8 +80820,7 @@ mod tests {
     #[tokio::test]
     async fn credit_cycle_worker_runs_ranking_credit_settlement_sequence() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let mut state = test_state(temp.path().to_path_buf());
-        Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
+        let state = test_state(temp.path().to_path_buf());
         let issuer_approval_evidence_hash = "sha256:credit-cycle-issuer-approval".to_string();
         let (candidate, prediction) =
             seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-credit-cycle-v1").await;
@@ -80436,6 +81047,71 @@ mod tests {
             error.1.0.error,
             "live credit settlement requires issuer_approval_evidence_hash"
         );
+        assert!(
+            read_all_ranking_worker_runs(temp.path(), "tenant-a")
+                .expect("worker runs read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit events read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement batches read")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_worker_rejects_live_cycle_when_source_list_approval_is_required() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
+        let (candidate, _) = seed_credit_cycle_ready_candidate(
+            state.clone(),
+            "trace-ranker-credit-cycle-source-approval-v1",
+        )
+        .await;
+
+        let error = credit_cycle_worker_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleWorkerRunRequest {
+                dry_run: false,
+                submit_near_outbox: false,
+                confirm_near_outbox: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: candidate.model_version.clone(),
+                policy_version: candidate.policy_version.clone(),
+                reason: "scheduled credit cycle with source-list issuer approval".to_string(),
+                issuer_approval_evidence_hash: Some(
+                    "sha256:cycle-source-list-approval".to_string(),
+                ),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect_err("source-list approval gate rejects live credit cycle before claiming");
+
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert!(error.1.0.error.contains("source-list issuer approval"));
         assert!(
             read_all_ranking_worker_runs(temp.path(), "tenant-a")
                 .expect("worker runs read")

@@ -538,11 +538,15 @@ a pilot rehearsal, requires a configured per-account issuer cap by default
 unless `require_account_cap` is explicitly disabled, and requires a
 sha256-prefixed `issuer_approval_evidence_hash` when
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` or the request
-sets `require_issuer_approval: true`. The drill returns only safe account
-hashes, aggregate risk counts, settlement exclusion reason counts, blocker
-codes, NEAR adapter readiness booleans, issuer-approval readiness booleans, and
-a sha256-prefixed evidence hash, and can append `credit_settlement`
-rollout-smoke evidence directly.
+sets `require_issuer_approval: true`. Approval evidence is source-list bound:
+operators first run the drill or settlement dry-run to obtain the exact
+`source_list_hash`, then record a hash-only approval with
+`POST /v1/admin/credit-settlement-approvals` for that `policy_version`,
+`source_list_hash`, and approval `evidence_hash`. The drill returns only safe
+account hashes, aggregate risk counts, settlement exclusion reason counts,
+blocker codes, NEAR adapter readiness booleans, issuer-approval configured and
+recorded booleans, and a sha256-prefixed evidence hash, and can append
+`credit_settlement` rollout-smoke evidence directly.
 Final settlement requests can include `issuer_approval_evidence_hash` to bind
 the batch to a central operator approval artifact. Set
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` to reject live
@@ -658,12 +662,18 @@ positive delayed credit exists without an issuer cap, so operators see the
 governance gap before a settlement run or smoke drill.
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` adds the early
 central-issuer fail-closed gate: live admin or worker settlement requests must
-carry a sha256-prefixed `issuer_approval_evidence_hash`, which is persisted on
-the settlement batch and folded into newly queued NEAR receipt attestation and
+carry a sha256-prefixed `issuer_approval_evidence_hash` that has already been
+recorded through `/v1/admin/credit-settlement-approvals` for the exact tenant,
+policy version, and dry-run `source_list_hash`. The hash is persisted on the
+settlement batch and folded into newly queued NEAR receipt attestation and
 issuer-signature hashes. Dry-runs remain approval-free so operators can produce
-or inspect evidence before granting non-transferable credits; production
-credit-settlement drills report `issuer_approval_evidence_hash_missing` until
-the same hash is supplied for rehearsal.
+or inspect the source-list hash before granting non-transferable credits;
+production credit-settlement drills report
+`issuer_approval_evidence_hash_missing` when no hash is supplied and
+`issuer_approval_evidence_hash_unrecorded` when the hash has not been recorded
+for that source list. Live credit-cycle automation is rejected while this gate
+is active; run the cycle in dry-run/preflight mode, record the exact source-list
+approval, then finalize through the settlement route.
 `TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID` configures the central
 non-transferable NEAR credit contract, and
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_NEAR_CONTRACT=true` makes live
@@ -794,6 +804,7 @@ The service exposes:
 - `POST /v1/admin/credit-holds/{hold_id}/release`
 - `GET /v1/admin/credit-risk-summary` with optional `limit`
 - `GET|POST /v1/admin/credit-settlements`
+- `GET|POST /v1/admin/credit-settlement-approvals`
 - `POST /v1/workers/credit-settlements/run`
 - `POST /v1/workers/credit-cycle/run`
 - `POST /v1/workers/credit-cycle/scheduler/run`
