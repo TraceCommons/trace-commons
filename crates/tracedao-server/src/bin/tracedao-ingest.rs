@@ -250,6 +250,8 @@ const TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS";
+const TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_NEAR_CONTRACT: &str =
@@ -485,6 +487,7 @@ struct AppState {
     db_audit_reads: bool,
     db_tenant_policy_reads: bool,
     require_db_mirror_writes: bool,
+    require_postgres_trace_rls_ready: bool,
     require_derived_export_object_refs: bool,
     object_primary_submit_review: bool,
     object_primary_replay_export: bool,
@@ -499,6 +502,7 @@ struct AppState {
     credit_settlement_max_micros_per_account: Option<i64>,
     credit_settlement_require_issuer_approval: bool,
     credit_settlement_issuer_approval_max_age: Option<Duration>,
+    credit_settlement_require_central_issuer_profile: bool,
     credit_settlement_near_contract_id: Option<String>,
     credit_settlement_require_near_contract: bool,
     submission_quota: TraceSubmissionQuotaConfig,
@@ -1703,7 +1707,9 @@ impl AppState {
         let require_tenant_submission_policy =
             env_truthy("TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY");
         let db_mirror = trace_corpus_db_mirror_from_env().await?;
-        if env_truthy(TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY) {
+        let require_postgres_trace_rls_ready =
+            env_truthy(TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY);
+        if require_postgres_trace_rls_ready {
             validate_required_postgres_trace_rls_ready(db_mirror.as_ref()).await?;
         }
         let tenant_rollout_gates = TraceTenantRolloutGates::from_env()?;
@@ -1829,6 +1835,8 @@ impl AppState {
             credit_settlement_require_issuer_approval,
             credit_settlement_issuer_approval_max_age,
         )?;
+        let credit_settlement_require_central_issuer_profile =
+            env_truthy(TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE);
         let credit_settlement_near_contract_id =
             parse_credit_settlement_near_contract_id_from_env()?;
         let credit_settlement_require_near_contract =
@@ -1856,6 +1864,7 @@ impl AppState {
             .is_some_and(|config| config.auth_configured);
         let near_credit_submitter = near_credit_submitter_config.map(|config| config.submitter);
         let near_credit_confirmer_config = trace_near_credit_confirmer_from_env()?;
+        let near_credit_confirmer_configured = near_credit_confirmer_config.is_some();
         let near_credit_confirmer_timeout_ms = near_credit_confirmer_config
             .as_ref()
             .map(|config| config.timeout_ms);
@@ -1880,6 +1889,25 @@ impl AppState {
                 "{TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH} requires {TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_BEARER_TOKEN} when {TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL} is configured"
             );
         }
+        validate_credit_settlement_central_issuer_profile_config(
+            credit_settlement_require_central_issuer_profile,
+            CreditSettlementCentralIssuerProfileConfig {
+                db_mirror_configured: db_mirror.is_some(),
+                require_db_mirror_writes,
+                require_postgres_trace_rls_ready,
+                account_cap_configured: credit_settlement_max_micros_per_account.is_some(),
+                require_issuer_approval: credit_settlement_require_issuer_approval,
+                issuer_approval_freshness_configured: credit_settlement_issuer_approval_max_age
+                    .is_some(),
+                near_contract_configured: credit_settlement_near_contract_id.is_some(),
+                require_near_contract: credit_settlement_require_near_contract,
+                near_submitter_configured: near_credit_submitter.is_some(),
+                near_submitter_auth_configured: near_credit_submitter_auth_configured,
+                near_confirmer_configured: near_credit_confirmer_configured,
+                near_confirmer_auth_configured: near_credit_confirmer_auth_configured,
+                near_adapter_auth_required: near_credit_require_adapter_auth,
+            },
+        )?;
         let near_credit_confirmer = near_credit_confirmer_config.map(|config| config.confirmer);
         let benchmark_registry_submitter_config = trace_benchmark_registry_submitter_from_env()?;
         let benchmark_registry_submitter_timeout_ms = benchmark_registry_submitter_config
@@ -2082,6 +2110,7 @@ impl AppState {
             db_audit_reads,
             db_tenant_policy_reads,
             require_db_mirror_writes,
+            require_postgres_trace_rls_ready,
             require_derived_export_object_refs,
             object_primary_submit_review,
             object_primary_replay_export,
@@ -2096,6 +2125,7 @@ impl AppState {
             credit_settlement_max_micros_per_account,
             credit_settlement_require_issuer_approval,
             credit_settlement_issuer_approval_max_age,
+            credit_settlement_require_central_issuer_profile,
             credit_settlement_near_contract_id,
             credit_settlement_require_near_contract,
             submission_quota,
@@ -5258,6 +5288,113 @@ fn validate_credit_settlement_issuer_approval_freshness_config(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CreditSettlementCentralIssuerProfileConfig {
+    db_mirror_configured: bool,
+    require_db_mirror_writes: bool,
+    require_postgres_trace_rls_ready: bool,
+    account_cap_configured: bool,
+    require_issuer_approval: bool,
+    issuer_approval_freshness_configured: bool,
+    near_contract_configured: bool,
+    require_near_contract: bool,
+    near_submitter_configured: bool,
+    near_submitter_auth_configured: bool,
+    near_confirmer_configured: bool,
+    near_confirmer_auth_configured: bool,
+    near_adapter_auth_required: bool,
+}
+
+fn credit_settlement_central_issuer_profile_ready(
+    config: &CreditSettlementCentralIssuerProfileConfig,
+) -> bool {
+    credit_settlement_central_issuer_profile_missing_config(config).is_empty()
+}
+
+fn credit_settlement_central_issuer_profile_config_from_state(
+    state: &AppState,
+) -> CreditSettlementCentralIssuerProfileConfig {
+    CreditSettlementCentralIssuerProfileConfig {
+        db_mirror_configured: state.db_mirror.is_some(),
+        require_db_mirror_writes: state.require_db_mirror_writes,
+        require_postgres_trace_rls_ready: state.require_postgres_trace_rls_ready,
+        account_cap_configured: state.credit_settlement_max_micros_per_account.is_some(),
+        require_issuer_approval: state.credit_settlement_require_issuer_approval,
+        issuer_approval_freshness_configured: state
+            .credit_settlement_issuer_approval_max_age
+            .is_some(),
+        near_contract_configured: state.credit_settlement_near_contract_id.is_some(),
+        require_near_contract: state.credit_settlement_require_near_contract,
+        near_submitter_configured: state.near_credit_submitter.is_some(),
+        near_submitter_auth_configured: state.near_credit_submitter_auth_configured,
+        near_confirmer_configured: state.near_credit_confirmer.is_some(),
+        near_confirmer_auth_configured: state.near_credit_confirmer_auth_configured,
+        near_adapter_auth_required: state.near_credit_require_adapter_auth,
+    }
+}
+
+fn credit_settlement_central_issuer_profile_missing_config(
+    config: &CreditSettlementCentralIssuerProfileConfig,
+) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if !config.db_mirror_configured {
+        missing.push("TRACE_COMMONS_DB_DUAL_WRITE");
+    }
+    if !config.require_db_mirror_writes {
+        missing.push("TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES");
+    }
+    if !config.require_postgres_trace_rls_ready {
+        missing.push(TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY);
+    }
+    if !config.account_cap_configured {
+        missing.push(TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT);
+    }
+    if !config.require_issuer_approval {
+        missing.push(TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL);
+    }
+    if !config.issuer_approval_freshness_configured {
+        missing.push(TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS);
+    }
+    if !config.near_contract_configured {
+        missing.push(TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID);
+    }
+    if !config.require_near_contract {
+        missing.push(TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_NEAR_CONTRACT);
+    }
+    if !config.near_submitter_configured {
+        missing.push(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL);
+    }
+    if !config.near_confirmer_configured {
+        missing.push(TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL);
+    }
+    if !config.near_adapter_auth_required {
+        missing.push(TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH);
+    }
+    if !config.near_submitter_auth_configured {
+        missing.push(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN);
+    }
+    if !config.near_confirmer_auth_configured {
+        missing.push(TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_BEARER_TOKEN);
+    }
+    missing
+}
+
+fn validate_credit_settlement_central_issuer_profile_config(
+    require_profile: bool,
+    config: CreditSettlementCentralIssuerProfileConfig,
+) -> anyhow::Result<()> {
+    if !require_profile {
+        return Ok(());
+    }
+    let missing = credit_settlement_central_issuer_profile_missing_config(&config);
+    anyhow::ensure!(
+        missing.is_empty(),
+        "{TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE} requires central issuance controls: {}",
+        missing.join(", ")
+    );
+    Ok(())
+}
+
 fn parse_credit_settlement_near_contract_id_from_env() -> anyhow::Result<Option<String>> {
     optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID)?
         .map(|configured| validate_credit_settlement_near_contract_id(&configured))
@@ -5689,6 +5826,7 @@ struct TraceCommonsConfigStatusResponse {
     db_tenant_policy_reads: bool,
     require_tenant_submission_policy: bool,
     require_db_mirror_writes: bool,
+    require_postgres_trace_rls_ready: bool,
     require_derived_export_object_refs: bool,
     object_primary_submit_review: bool,
     object_primary_replay_export: bool,
@@ -5706,6 +5844,8 @@ struct TraceCommonsConfigStatusResponse {
     credit_settlement_max_micros_per_account: Option<i64>,
     credit_settlement_require_issuer_approval: bool,
     credit_settlement_issuer_approval_max_age_hours: Option<i64>,
+    credit_settlement_require_central_issuer_profile: bool,
+    credit_settlement_central_issuer_profile_ready: bool,
     credit_settlement_near_contract_configured: bool,
     credit_settlement_require_near_contract: bool,
     submission_quota: TraceSubmissionQuotaConfig,
@@ -5791,6 +5931,8 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         .managed_eddsa_keyset_refresh
         .as_ref()
         .and_then(|refresh| refresh.max_stale);
+    let central_issuer_profile_config =
+        credit_settlement_central_issuer_profile_config_from_state(state);
     TraceCommonsConfigStatusResponse {
         schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION,
         db_mirror_configured: state.db_mirror.is_some(),
@@ -5871,6 +6013,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         db_tenant_policy_reads: state.db_tenant_policy_reads,
         require_tenant_submission_policy: state.require_tenant_submission_policy,
         require_db_mirror_writes: state.require_db_mirror_writes,
+        require_postgres_trace_rls_ready: state.require_postgres_trace_rls_ready,
         require_derived_export_object_refs: state.require_derived_export_object_refs,
         object_primary_submit_review: state.object_primary_submit_review,
         object_primary_replay_export: state.object_primary_replay_export,
@@ -5899,6 +6042,10 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         credit_settlement_issuer_approval_max_age_hours: state
             .credit_settlement_issuer_approval_max_age
             .map(|max_age| max_age.num_hours()),
+        credit_settlement_require_central_issuer_profile: state
+            .credit_settlement_require_central_issuer_profile,
+        credit_settlement_central_issuer_profile_ready:
+            credit_settlement_central_issuer_profile_ready(&central_issuer_profile_config),
         credit_settlement_near_contract_configured: state
             .credit_settlement_near_contract_id
             .is_some(),
@@ -29877,6 +30024,22 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
     body.push_str("# TYPE tracedao_operational_credit_settlement_readiness gauge\n");
     for (state, value) in [
         (
+            "central_issuer_profile_required",
+            usize::from(
+                response
+                    .promotion_gates
+                    .credit_settlement_central_issuer_profile_required,
+            ),
+        ),
+        (
+            "central_issuer_profile_ready",
+            usize::from(
+                response
+                    .promotion_gates
+                    .credit_settlement_central_issuer_profile_ready,
+            ),
+        ),
+        (
             "account_cap_configured",
             usize::from(
                 response
@@ -51087,6 +51250,8 @@ struct TraceOperationalPromotionGateSummary {
     ranking_worker_run_skip_reason_counts: BTreeMap<String, usize>,
     revocation_propagation_latest_failed_count: usize,
     revocation_propagation_latest_skipped_count: usize,
+    credit_settlement_central_issuer_profile_required: bool,
+    credit_settlement_central_issuer_profile_ready: bool,
     credit_settlement_account_cap_configured: bool,
     credit_settlement_account_cap_missing: bool,
     credit_settlement_near_contract_required: bool,
@@ -51200,6 +51365,12 @@ impl TraceOperationalPromotionGateSummary {
             inputs.revocation_propagation.latest_failed_count;
         let revocation_propagation_latest_skipped_count =
             inputs.revocation_propagation.latest_skipped_count;
+        let credit_settlement_central_issuer_profile_required =
+            state.credit_settlement_require_central_issuer_profile;
+        let central_issuer_profile_config =
+            credit_settlement_central_issuer_profile_config_from_state(state);
+        let credit_settlement_central_issuer_profile_ready =
+            credit_settlement_central_issuer_profile_ready(&central_issuer_profile_config);
         let credit_settlement_account_cap_configured =
             state.credit_settlement_max_micros_per_account.is_some();
         let credit_settlement_account_cap_missing =
@@ -51420,6 +51591,11 @@ impl TraceOperationalPromotionGateSummary {
         if credit_settlement_issuer_approval_missing {
             blocking_gates.push("credit_settlement_issuer_approval_missing".to_string());
         }
+        if credit_settlement_central_issuer_profile_required
+            && !credit_settlement_central_issuer_profile_ready
+        {
+            blocking_gates.push("credit_settlement_central_issuer_profile_incomplete".to_string());
+        }
 
         push_gap_count(
             &mut warning_gates,
@@ -51524,6 +51700,8 @@ impl TraceOperationalPromotionGateSummary {
             ranking_worker_run_skip_reason_counts,
             revocation_propagation_latest_failed_count,
             revocation_propagation_latest_skipped_count,
+            credit_settlement_central_issuer_profile_required,
+            credit_settlement_central_issuer_profile_ready,
             credit_settlement_account_cap_configured,
             credit_settlement_account_cap_missing,
             credit_settlement_near_contract_required,
@@ -53234,6 +53412,7 @@ mod tests {
             db_audit_reads,
             db_tenant_policy_reads,
             require_db_mirror_writes,
+            require_postgres_trace_rls_ready: false,
             require_derived_export_object_refs,
             object_primary_submit_review: false,
             object_primary_replay_export: false,
@@ -53248,6 +53427,7 @@ mod tests {
             credit_settlement_max_micros_per_account: None,
             credit_settlement_require_issuer_approval: false,
             credit_settlement_issuer_approval_max_age: None,
+            credit_settlement_require_central_issuer_profile: false,
             credit_settlement_near_contract_id: None,
             credit_settlement_require_near_contract: false,
             submission_quota: TraceSubmissionQuotaConfig::default(),
@@ -54762,6 +54942,76 @@ mod tests {
     }
 
     #[test]
+    fn central_issuer_profile_requires_fail_closed_credit_controls() {
+        validate_credit_settlement_central_issuer_profile_config(
+            false,
+            CreditSettlementCentralIssuerProfileConfig {
+                db_mirror_configured: false,
+                require_db_mirror_writes: false,
+                require_postgres_trace_rls_ready: false,
+                account_cap_configured: false,
+                require_issuer_approval: false,
+                issuer_approval_freshness_configured: false,
+                near_contract_configured: false,
+                require_near_contract: false,
+                near_submitter_configured: false,
+                near_submitter_auth_configured: false,
+                near_confirmer_configured: false,
+                near_confirmer_auth_configured: false,
+                near_adapter_auth_required: false,
+            },
+        )
+        .expect("pilot mode can leave the central issuer profile disabled");
+
+        let error = validate_credit_settlement_central_issuer_profile_config(
+            true,
+            CreditSettlementCentralIssuerProfileConfig {
+                db_mirror_configured: true,
+                require_db_mirror_writes: true,
+                require_postgres_trace_rls_ready: true,
+                account_cap_configured: true,
+                require_issuer_approval: true,
+                issuer_approval_freshness_configured: true,
+                near_contract_configured: true,
+                require_near_contract: true,
+                near_submitter_configured: true,
+                near_submitter_auth_configured: false,
+                near_confirmer_configured: true,
+                near_confirmer_auth_configured: false,
+                near_adapter_auth_required: true,
+            },
+        )
+        .expect_err("production central issuer profile requires authenticated NEAR adapters");
+        let text = error.to_string();
+        assert!(
+            text.contains(TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE),
+            "{text}"
+        );
+        assert!(text.contains(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN));
+        assert!(text.contains(TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_BEARER_TOKEN));
+
+        validate_credit_settlement_central_issuer_profile_config(
+            true,
+            CreditSettlementCentralIssuerProfileConfig {
+                db_mirror_configured: true,
+                require_db_mirror_writes: true,
+                require_postgres_trace_rls_ready: true,
+                account_cap_configured: true,
+                require_issuer_approval: true,
+                issuer_approval_freshness_configured: true,
+                near_contract_configured: true,
+                require_near_contract: true,
+                near_submitter_configured: true,
+                near_submitter_auth_configured: true,
+                near_confirmer_configured: true,
+                near_confirmer_auth_configured: true,
+                near_adapter_auth_required: true,
+            },
+        )
+        .expect("complete central issuer profile is accepted");
+    }
+
+    #[test]
     fn active_calibration_dataset_gate_requires_registry_gate() {
         validate_ranking_active_calibration_dataset_config(false, false)
             .expect("inactive stewardship is allowed without registry");
@@ -56121,6 +56371,10 @@ mod tests {
             serde_json::json!(false)
         );
         assert_eq!(
+            value["require_postgres_trace_rls_ready"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
             value["require_tenant_submission_policy"],
             serde_json::json!(true)
         );
@@ -56148,6 +56402,14 @@ mod tests {
         assert_eq!(
             value["credit_settlement_issuer_approval_max_age_hours"],
             serde_json::Value::Null
+        );
+        assert_eq!(
+            value["credit_settlement_require_central_issuer_profile"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["credit_settlement_central_issuer_profile_ready"],
+            serde_json::json!(false)
         );
         assert_eq!(
             value["credit_settlement_near_contract_configured"],
@@ -66752,6 +67014,7 @@ mod tests {
             db_audit_reads: false,
             db_tenant_policy_reads: false,
             require_db_mirror_writes: false,
+            require_postgres_trace_rls_ready: false,
             require_derived_export_object_refs: false,
             object_primary_submit_review: false,
             object_primary_replay_export: false,
@@ -66766,6 +67029,7 @@ mod tests {
             credit_settlement_max_micros_per_account: None,
             credit_settlement_require_issuer_approval: false,
             credit_settlement_issuer_approval_max_age: None,
+            credit_settlement_require_central_issuer_profile: false,
             credit_settlement_near_contract_id: None,
             credit_settlement_require_near_contract: false,
             submission_quota: TraceSubmissionQuotaConfig::default(),
@@ -74633,6 +74897,49 @@ mod tests {
         assert!(!metrics_text.contains("admin-token-a"));
         assert!(!metrics_text.contains("frontier lab issuer approval readiness probe"));
         assert!(!metrics_text.contains("lab-attestation:operational-issuer-approval"));
+    }
+
+    #[tokio::test]
+    async fn operational_summary_blocks_incomplete_central_issuer_profile_before_credit_accrues() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_require_central_issuer_profile = true;
+
+        let Json(summary) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect central issuer profile readiness");
+        let summary_json = serde_json::to_value(&summary).expect("operational summary serializes");
+        assert_eq!(
+            summary_json["promotion_gates"]["ready"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            summary_json["promotion_gates"]["credit_settlement_central_issuer_profile_required"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            summary_json["promotion_gates"]["credit_settlement_central_issuer_profile_ready"],
+            serde_json::json!(false)
+        );
+        assert!(
+            summary
+                .promotion_gates
+                .blocking_gates
+                .contains(&"credit_settlement_central_issuer_profile_incomplete".to_string())
+        );
+
+        let (metrics, _) = trace_operational_metrics_body(&summary);
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(metrics.contains(&format!(
+            "tracedao_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"credit_settlement_central_issuer_profile_incomplete\"}} 1"
+        )));
+        assert!(metrics.contains(&format!(
+            "tracedao_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"central_issuer_profile_required\"}} 1"
+        )));
+        assert!(metrics.contains(&format!(
+            "tracedao_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"central_issuer_profile_ready\"}} 0"
+        )));
     }
 
     #[tokio::test]

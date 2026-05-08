@@ -1610,6 +1610,14 @@ model/policy/target, and result-refs the delegated ranking worker runs plus the
 settlement batch. `submit_near_outbox` and `confirm_near_outbox` both default to false, so the final NEAR steps
 inspects pending NEAR payloads as a dry-run unless the operator explicitly asks
 the trusted relayer submission or confirmation step to run live.
+Early deployments do not need a complex multi-actor trust model for issuance.
+When TraceDAO centrally runs the issuer, set
+`TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE=true`; startup
+then requires fail-closed DB mirror writes, PostgreSQL RLS readiness, a
+per-account settlement cap, required fresh source-list issuer approval, a pinned
+required NEAR credit contract, configured NEAR submit/confirm adapters, and
+bearer auth on both adapter directions before the service is considered ready
+for live non-transferable credit issuance.
 
 For unattended cron-style operation, utility workers can call
 `POST /v1/workers/credit-cycle/scheduler/run` instead. The scheduler takes one
