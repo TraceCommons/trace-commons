@@ -1825,6 +1825,10 @@ impl AppState {
             env_truthy(TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL);
         let credit_settlement_issuer_approval_max_age =
             parse_credit_settlement_issuer_approval_max_age_from_env()?;
+        validate_credit_settlement_issuer_approval_freshness_config(
+            credit_settlement_require_issuer_approval,
+            credit_settlement_issuer_approval_max_age,
+        )?;
         let credit_settlement_near_contract_id =
             parse_credit_settlement_near_contract_id_from_env()?;
         let credit_settlement_require_near_contract =
@@ -5232,6 +5236,17 @@ fn parse_credit_settlement_issuer_approval_max_age(
     } else {
         Ok(Some(Duration::hours(hours)))
     }
+}
+
+fn validate_credit_settlement_issuer_approval_freshness_config(
+    require_issuer_approval: bool,
+    issuer_approval_max_age: Option<Duration>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        require_issuer_approval || issuer_approval_max_age.is_none(),
+        "{TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS} requires {TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL}=true"
+    );
+    Ok(())
 }
 
 fn parse_credit_settlement_near_contract_id_from_env() -> anyhow::Result<Option<String>> {
@@ -54600,6 +54615,22 @@ mod tests {
                 .to_string()
                 .contains(TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS)
         );
+    }
+
+    #[test]
+    fn issuer_approval_max_age_requires_required_approval_gate() {
+        validate_credit_settlement_issuer_approval_freshness_config(false, None)
+            .expect("unset freshness is allowed without required approval");
+        validate_credit_settlement_issuer_approval_freshness_config(true, Some(Duration::hours(1)))
+            .expect("freshness is allowed with required approval");
+        let error = validate_credit_settlement_issuer_approval_freshness_config(
+            false,
+            Some(Duration::hours(1)),
+        )
+        .expect_err("freshness without required approval is inert and rejected");
+        let text = error.to_string();
+        assert!(text.contains(TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS));
+        assert!(text.contains(TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL));
     }
 
     #[test]
