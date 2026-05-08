@@ -70322,6 +70322,7 @@ mod tests {
             return;
         };
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_mirror: Arc<dyn Database> = backend.clone();
@@ -70426,6 +70427,49 @@ mod tests {
             .await
             .expect("latest valid DB audit row writes");
 
+        let other_tenant_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-b".to_string(),
+            submission_id: Uuid::new_v4(),
+            kind: "trace_content_read".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Reviewer),
+            actor_principal_ref: Some("reviewer-b".to_string()),
+            reason: Some("surface=review_decision;purpose_hash=sha256:tenant-b".to_string()),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+        backend
+            .append_trace_audit_event(StorageTraceAuditEventWrite {
+                audit_event_id: other_tenant_event.event_id,
+                tenant_id: other_tenant_event.tenant_id.clone(),
+                actor_principal_ref: other_tenant_event.actor_principal_ref.clone().unwrap(),
+                actor_role: "reviewer".to_string(),
+                action: StorageTraceAuditAction::Read,
+                reason: other_tenant_event.reason.clone(),
+                request_id: None,
+                submission_id: Some(other_tenant_event.submission_id),
+                object_ref_id: None,
+                export_manifest_id: None,
+                decision_inputs_hash: None,
+                previous_event_hash: None,
+                event_hash: None,
+                canonical_event_json: Some(
+                    serde_json::to_string(&other_tenant_event)
+                        .expect("other tenant audit serializes"),
+                ),
+                metadata: StorageTraceAuditSafeMetadata::TraceContentRead {
+                    surface: "review_decision".to_string(),
+                    purpose_hash: Some("sha256:tenant-b".to_string()),
+                },
+            })
+            .await
+            .expect("other tenant DB audit row writes");
+
         let Json(events) = audit_events_handler(
             State(state),
             auth_headers("review-token-a"),
@@ -70436,8 +70480,11 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_id, latest_canonical_event.event_id);
+        assert_eq!(events[0].tenant_id, "tenant-a");
+        assert_ne!(events[0].event_id, other_tenant_event.event_id);
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
     }
 
     #[tokio::test]
