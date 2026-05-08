@@ -61267,6 +61267,7 @@ mod tests {
             return;
         };
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_mirror: Arc<dyn Database> = backend.clone();
@@ -61282,6 +61283,8 @@ mod tests {
         let now = Utc::now();
         let expired_job_id = Uuid::new_v4();
         let eligible_job_id = Uuid::new_v4();
+        let tenant_b_job_id = Uuid::new_v4();
+        let tenant_b_grant_id = Uuid::new_v4();
         for (export_job_id, grant_id, purpose, requested_at, expires_at) in [
             (
                 expired_job_id,
@@ -61345,6 +61348,102 @@ mod tests {
                 .await
                 .expect("queued export job writes");
         }
+        backend
+            .upsert_trace_export_access_grant(StorageTraceExportAccessGrantWrite {
+                tenant_id: "tenant-b".to_string(),
+                export_job_id: tenant_b_job_id,
+                grant_id: tenant_b_grant_id,
+                caller_principal_ref: principal_storage_ref("review-token-b"),
+                requested_dataset_kind: "replay_dataset".to_string(),
+                purpose: "cross_tenant_queued_replay".to_string(),
+                max_item_cap: Some(10),
+                status: StorageTraceExportAccessGrantStatus::Active,
+                requested_at: now - Duration::minutes(30),
+                expires_at: now + Duration::minutes(30),
+                metadata: BTreeMap::from([(
+                    "grant_type".to_string(),
+                    "queued_worker_cross_tenant_test".to_string(),
+                )]),
+            })
+            .await
+            .expect("tenant-b export grant writes");
+        backend
+            .upsert_trace_export_job(StorageTraceExportJobWrite {
+                tenant_id: "tenant-b".to_string(),
+                export_job_id: tenant_b_job_id,
+                grant_id: tenant_b_grant_id,
+                caller_principal_ref: principal_storage_ref("review-token-b"),
+                requested_dataset_kind: "replay_dataset".to_string(),
+                purpose: "cross_tenant_queued_replay".to_string(),
+                max_item_cap: Some(10),
+                status: StorageTraceExportJobStatus::Queued,
+                requested_at: now - Duration::minutes(30),
+                started_at: None,
+                finished_at: None,
+                expires_at: now + Duration::minutes(30),
+                result_manifest_id: None,
+                item_count: None,
+                last_error: None,
+                metadata: BTreeMap::from([
+                    (
+                        "request_schema_version".to_string(),
+                        "trace_export_job_request.v1".to_string(),
+                    ),
+                    ("state".to_string(), "queued".to_string()),
+                ]),
+            })
+            .await
+            .expect("tenant-b queued export job writes");
+
+        let Json(visible_jobs) = export_jobs_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Query(ExportJobsQuery {
+                limit: Some(10),
+                status: None,
+                dataset_kind: Some("replay-dataset".to_string()),
+            }),
+        )
+        .await
+        .expect("tenant-a admin lists export jobs");
+        assert!(visible_jobs.iter().all(|job| job.tenant_id == "tenant-a"));
+        assert!(
+            visible_jobs
+                .iter()
+                .any(|job| job.export_job_id == eligible_job_id)
+        );
+        assert!(
+            !visible_jobs
+                .iter()
+                .any(|job| job.export_job_id == tenant_b_job_id)
+        );
+
+        let Json(visible_grants) = export_access_grants_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Query(ExportAccessGrantsQuery {
+                limit: Some(10),
+                status: None,
+                dataset_kind: Some("replay-dataset".to_string()),
+            }),
+        )
+        .await
+        .expect("tenant-a admin lists export grants");
+        assert!(
+            visible_grants
+                .iter()
+                .all(|grant| grant.tenant_id == "tenant-a")
+        );
+        assert!(
+            visible_grants
+                .iter()
+                .any(|grant| grant.export_job_id == eligible_job_id)
+        );
+        assert!(
+            !visible_grants
+                .iter()
+                .any(|grant| grant.export_job_id == tenant_b_job_id)
+        );
 
         let Json(response) = worker_export_job_claim_next_handler(
             State(state.clone()),
@@ -61389,8 +61488,18 @@ mod tests {
         )
         .expect("audit serializes");
         assert!(!audit_json.contains("trace_content_read"));
+        let tenant_b_jobs = backend
+            .list_trace_export_jobs("tenant-b")
+            .await
+            .expect("tenant-b export jobs read");
+        let tenant_b_job = tenant_b_jobs
+            .iter()
+            .find(|job| job.export_job_id == tenant_b_job_id)
+            .expect("tenant-b job remains");
+        assert_eq!(tenant_b_job.status, StorageTraceExportJobStatus::Queued);
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
     }
 
     #[tokio::test]
