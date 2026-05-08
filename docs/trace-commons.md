@@ -715,7 +715,9 @@ new calibration runs, model promotion, active-model risk clearance, prediction
 credit, or ranking-utility settlement. This gives production issuers a simple
 curation/stewardship gate: admins can register immutable `candidate` holdout
 manifests for review, then append a status-only `active` row once the dataset is
-ready to back credit-bearing ranking evidence.
+ready to back credit-bearing ranking evidence. This gate requires
+`TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY=true`; startup
+rejects active-holdout stewardship without the registry gate.
 
 `TRACE_COMMONS_RANKING_MIN_CONFIDENCE_THRESHOLD` sets a server-owned floor for
 the per-prediction confidence threshold used by calibration runs. Calibration

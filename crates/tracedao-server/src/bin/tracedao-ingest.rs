@@ -1934,6 +1934,10 @@ impl AppState {
             env_truthy(TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY);
         let ranking_require_active_calibration_dataset =
             env_truthy(TRACE_COMMONS_RANKING_REQUIRE_ACTIVE_CALIBRATION_DATASET);
+        validate_ranking_active_calibration_dataset_config(
+            ranking_require_calibration_dataset_registry,
+            ranking_require_active_calibration_dataset,
+        )?;
         let ranking_require_server_feature_provenance =
             env_truthy(TRACE_COMMONS_RANKING_REQUIRE_SERVER_FEATURE_PROVENANCE);
         let ranking_min_confidence_threshold = parse_ranking_min_confidence_threshold_from_env()?;
@@ -5323,6 +5327,17 @@ fn parse_ranking_min_confidence_threshold_from_env() -> anyhow::Result<f32> {
         Some(value) => parse_ranking_min_confidence_threshold(&value),
         None => Ok(DEFAULT_TRACE_RANKING_MIN_CONFIDENCE_THRESHOLD),
     }
+}
+
+fn validate_ranking_active_calibration_dataset_config(
+    require_registry: bool,
+    require_active: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        require_registry || !require_active,
+        "{TRACE_COMMONS_RANKING_REQUIRE_ACTIVE_CALIBRATION_DATASET} requires {TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY}=true"
+    );
+    Ok(())
 }
 
 fn parse_ranking_min_confidence_threshold(configured: &str) -> anyhow::Result<f32> {
@@ -54631,6 +54646,19 @@ mod tests {
         let text = error.to_string();
         assert!(text.contains(TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS));
         assert!(text.contains(TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL));
+    }
+
+    #[test]
+    fn active_calibration_dataset_gate_requires_registry_gate() {
+        validate_ranking_active_calibration_dataset_config(false, false)
+            .expect("inactive stewardship is allowed without registry");
+        validate_ranking_active_calibration_dataset_config(true, true)
+            .expect("active stewardship is allowed when registry is required");
+        let error = validate_ranking_active_calibration_dataset_config(false, true)
+            .expect_err("active stewardship without registry is inert and rejected");
+        let text = error.to_string();
+        assert!(text.contains(TRACE_COMMONS_RANKING_REQUIRE_ACTIVE_CALIBRATION_DATASET));
+        assert!(text.contains(TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY));
     }
 
     #[test]
