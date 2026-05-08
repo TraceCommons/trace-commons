@@ -79971,6 +79971,23 @@ mod tests {
         .await
         .expect("admin can promote calibrated model");
 
+        let tenant_b_credit_error = ranking_prediction_credit_handler(
+            State(state.clone()),
+            auth_headers("review-token-b"),
+            Json(TraceRankingPredictionCreditRequest {
+                ranking_prediction_id: prediction.ranking_prediction_id,
+                reason: "tenant-b cannot credit tenant-a prediction".to_string(),
+            }),
+        )
+        .await
+        .expect_err("tenant-b reviewer cannot credit tenant-a prediction");
+        assert_eq!(tenant_b_credit_error.0, StatusCode::NOT_FOUND);
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-b")
+                .expect("tenant-b credit reads")
+                .is_empty()
+        );
+
         let Json(response) = ranking_prediction_credit_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
