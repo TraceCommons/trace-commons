@@ -12022,16 +12022,16 @@ fn trace_credit_settlement_issuer_approval_from_audit_event(
             .context("credit settlement issuer approval audit missing reason_hash")?
             .to_string();
         anyhow::ensure!(
-            source_list_hash.starts_with("sha256:"),
-            "credit settlement issuer approval source_list_hash must be sha256-prefixed"
+            is_canonical_sha256_prefixed_hash(&source_list_hash),
+            "credit settlement issuer approval source_list_hash must be a canonical sha256-prefixed hex digest"
         );
         anyhow::ensure!(
-            evidence_hash.starts_with("sha256:"),
-            "credit settlement issuer approval evidence_hash must be sha256-prefixed"
+            is_canonical_sha256_prefixed_hash(&evidence_hash),
+            "credit settlement issuer approval evidence_hash must be a canonical sha256-prefixed hex digest"
         );
         anyhow::ensure!(
-            reason_hash.starts_with("sha256:"),
-            "credit settlement issuer approval reason_hash must be sha256-prefixed"
+            is_canonical_sha256_prefixed_hash(&reason_hash),
+            "credit settlement issuer approval reason_hash must be a canonical sha256-prefixed hex digest"
         );
         Ok(TraceCreditSettlementIssuerApprovalResponse {
             event_id: event.event_id,
@@ -19179,14 +19179,20 @@ fn validate_sha256_hash(value: &str, label: &str) -> ApiResult<String> {
 
 fn validate_trace_sha256_hash(value: &str, label: &str) -> ApiResult<String> {
     let value = value.trim();
-    if value.starts_with("sha256:") {
+    if is_canonical_sha256_prefixed_hash(value) {
         Ok(value.to_string())
     } else {
         Err(api_error(
             StatusCode::BAD_REQUEST,
-            format!("{label} must be a sha256-prefixed hash"),
+            format!("{label} must be a canonical sha256-prefixed hex digest"),
         ))
     }
+}
+
+fn is_canonical_sha256_prefixed_hash(value: &str) -> bool {
+    value
+        .strip_prefix("sha256:")
+        .is_some_and(|digest| digest.len() == 64 && digest.chars().all(|ch| ch.is_ascii_hexdigit()))
 }
 
 fn validate_positive_ranking_count(value: u32, label: &str) -> ApiResult<()> {
@@ -59314,6 +59320,47 @@ mod tests {
     }
 
     #[test]
+    fn issuer_approval_audit_projection_rejects_noncanonical_hashes() {
+        let auth = TenantAuth {
+            tenant_id: "tenant-a".to_string(),
+            role: TokenRole::Admin,
+            principal_ref: principal_storage_ref("admin-token-a"),
+            expires_at: None,
+            auth_method: TraceAuthMethod::StaticToken,
+            signed_claim_issuer: None,
+            signed_claim_audiences: BTreeSet::new(),
+            signed_claim_subject: None,
+            allowed_consent_scopes: BTreeSet::new(),
+            allowed_uses: BTreeSet::new(),
+        };
+        let approval = TraceCreditSettlementIssuerApprovalResponse::from_request(
+            &auth,
+            TraceCreditSettlementIssuerApprovalRequest {
+                policy_version: "trace-credit-policy-v1".to_string(),
+                source_list_hash: sha256_prefixed("settlement source list"),
+                evidence_hash: sha256_prefixed("central issuer approval"),
+                reason: "central issuer approved exact source list".to_string(),
+                evidence_ref: None,
+            },
+        )
+        .expect("issuer approval request is valid");
+        let mut audit_event = TraceCommonsAuditEvent::credit_settlement_issuer_approval(&approval);
+        audit_event.reason = audit_event.reason.map(|reason| {
+            reason.replace(
+                &format!("evidence_hash={}", approval.evidence_hash),
+                "evidence_hash=sha256:not-canonical",
+            )
+        });
+
+        let parsed = trace_credit_settlement_issuer_approval_from_audit_event(&audit_event)
+            .expect("audit event is an issuer approval");
+        match parsed {
+            Ok(_) => panic!("noncanonical approval hash should not parse"),
+            Err(error) => assert!(error.to_string().contains("canonical sha256")),
+        }
+    }
+
+    #[test]
     fn audit_mirror_normalization_derives_trace_content_read_metadata_from_reason() {
         let auth = test_reviewer_auth("tenant-a");
         let audit_event = TraceCommonsAuditEvent::trace_content_read(
@@ -74701,7 +74748,7 @@ mod tests {
         .await
         .expect("reviewer can append delayed utility credit");
 
-        let approval_hash = "sha256:central-issuer-approval-evidence";
+        let approval_hash = sha256_prefixed("central-issuer-approval-evidence");
         let response = app(state.clone())
             .oneshot(
                 axum::http::Request::builder()
@@ -74714,7 +74761,7 @@ mod tests {
                             "dry_run": false,
                             "policy_version": "trace-credit-policy-v1",
                             "reason": "central issuer approved batch",
-                            "issuer_approval_evidence_hash": approval_hash
+                            "issuer_approval_evidence_hash": approval_hash.clone()
                         })
                         .to_string(),
                     ))
@@ -74729,7 +74776,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&body).expect("json parses");
         assert_eq!(
             value["issuer_approval_evidence_hash"],
-            serde_json::json!(approval_hash)
+            serde_json::json!(approval_hash.as_str())
         );
 
         let batches =
@@ -74737,7 +74784,7 @@ mod tests {
         assert_eq!(batches.len(), 1);
         assert_eq!(
             batches[0].issuer_approval_evidence_hash.as_deref(),
-            Some(approval_hash)
+            Some(approval_hash.as_str())
         );
         let body_text = std::str::from_utf8(&body).expect("settlement response is utf8");
         assert!(!body_text.contains("frontier lab central issuer approval probe"));
@@ -74810,6 +74857,7 @@ mod tests {
             .as_str()
             .expect("dry-run response includes source_list_hash")
             .to_string();
+        let approval_hash = sha256_prefixed("issuer-required-approval");
 
         let missing_response = app(state.clone())
             .oneshot(
@@ -74842,6 +74890,39 @@ mod tests {
                 .is_empty()
         );
 
+        let malformed_approval_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlement-approvals")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "policy_version": "trace-credit-policy-v1",
+                            "source_list_hash": source_list_hash.clone(),
+                            "evidence_hash": "sha256:not-canonical",
+                            "reason": "malformed central issuer approval must not record",
+                            "evidence_ref": "private-lab-review:malformed"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("malformed approval request builds"),
+            )
+            .await
+            .expect("malformed approval response");
+        assert_eq!(
+            malformed_approval_response.status(),
+            StatusCode::BAD_REQUEST
+        );
+        let malformed_approval_body =
+            axum::body::to_bytes(malformed_approval_response.into_body(), 8192)
+                .await
+                .expect("malformed approval body reads");
+        let malformed_approval_text =
+            std::str::from_utf8(&malformed_approval_body).expect("body is utf8");
+        assert!(malformed_approval_text.contains("canonical sha256"));
+
         let tenant_b_approval_response = app(state.clone())
             .oneshot(
                 axum::http::Request::builder()
@@ -74853,7 +74934,7 @@ mod tests {
                         serde_json::json!({
                             "policy_version": "trace-credit-policy-v1",
                             "source_list_hash": source_list_hash.clone(),
-                            "evidence_hash": "sha256:issuer-required-approval",
+                            "evidence_hash": approval_hash.clone(),
                             "reason": "tenant-b approval must not unlock tenant-a settlement",
                             "evidence_ref": "private-lab-review:tenant-b-wrong-tenant"
                         })
@@ -74930,7 +75011,7 @@ mod tests {
                             "dry_run": false,
                             "policy_version": "trace-credit-policy-v1",
                             "reason": "live settlement with unrecorded central approval",
-                            "issuer_approval_evidence_hash": "sha256:issuer-required-approval"
+                            "issuer_approval_evidence_hash": approval_hash.clone()
                         })
                         .to_string(),
                     ))
@@ -74966,7 +75047,7 @@ mod tests {
                         serde_json::json!({
                             "policy_version": "trace-credit-policy-v1",
                             "source_list_hash": source_list_hash.clone(),
-                            "evidence_hash": "sha256:issuer-required-approval",
+                            "evidence_hash": approval_hash.clone(),
                             "reason": "central issuer reviewed exact settlement source list",
                             "evidence_ref": "private-lab-review:issuer-required"
                         })
@@ -74984,7 +75065,7 @@ mod tests {
             serde_json::from_slice(&approval_body).expect("approval json parses");
         assert_eq!(
             approval["evidence_hash"],
-            serde_json::json!("sha256:issuer-required-approval")
+            serde_json::json!(approval_hash.as_str())
         );
         assert_eq!(
             approval["source_list_hash"],
@@ -75030,7 +75111,7 @@ mod tests {
                             "dry_run": false,
                             "policy_version": "trace-credit-policy-v1",
                             "reason": "live settlement with central approval",
-                            "issuer_approval_evidence_hash": "sha256:issuer-required-approval"
+                            "issuer_approval_evidence_hash": approval_hash.clone()
                         })
                         .to_string(),
                     ))
@@ -75046,13 +75127,13 @@ mod tests {
             serde_json::from_slice(&approved_body).expect("approved json parses");
         assert_eq!(
             approved["issuer_approval_evidence_hash"],
-            serde_json::json!("sha256:issuer-required-approval")
+            serde_json::json!(approval_hash.as_str())
         );
         let batches =
             read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
         assert_eq!(
             batches[0].issuer_approval_evidence_hash.as_deref(),
-            Some("sha256:issuer-required-approval")
+            Some(approval_hash.as_str())
         );
     }
 
@@ -75107,7 +75188,7 @@ mod tests {
         .await
         .expect("dry-run settlement succeeds");
 
-        let approval_hash = "sha256:stale-issuer-approval";
+        let approval_hash = sha256_prefixed("stale-issuer-approval");
         let admin = state
             .tokens
             .get("admin-token-a")
@@ -75118,7 +75199,7 @@ mod tests {
             TraceCreditSettlementIssuerApprovalRequest {
                 policy_version: dry_run.policy_version.clone(),
                 source_list_hash: dry_run.source_list_hash.clone(),
-                evidence_hash: approval_hash.to_string(),
+                evidence_hash: approval_hash.clone(),
                 reason: "central issuer approval too old for live settlement".to_string(),
                 evidence_ref: Some("private-lab-review:stale-approval".to_string()),
             },
@@ -75137,7 +75218,7 @@ mod tests {
                 dry_run: false,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "live settlement should reject stale issuer approval".to_string(),
-                issuer_approval_evidence_hash: Some(approval_hash.to_string()),
+                issuer_approval_evidence_hash: Some(approval_hash.clone()),
                 near_contract_id: None,
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -75154,7 +75235,7 @@ mod tests {
             Json(TraceCreditSettlementDrillRequest {
                 policy_version: "trace-credit-policy-v1".to_string(),
                 purpose: Some("operator stale issuer approval drill".to_string()),
-                issuer_approval_evidence_hash: Some(approval_hash.to_string()),
+                issuer_approval_evidence_hash: Some(approval_hash.clone()),
                 near_contract_id: None,
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -75186,7 +75267,7 @@ mod tests {
             Json(TraceCreditSettlementIssuerApprovalRequest {
                 policy_version: dry_run.policy_version,
                 source_list_hash: dry_run.source_list_hash,
-                evidence_hash: approval_hash.to_string(),
+                evidence_hash: approval_hash.clone(),
                 reason: "central issuer refreshed exact source-list approval".to_string(),
                 evidence_ref: Some("private-lab-review:fresh-approval".to_string()),
             }),
@@ -75201,7 +75282,7 @@ mod tests {
                 dry_run: false,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "live settlement uses fresh issuer approval".to_string(),
-                issuer_approval_evidence_hash: Some(approval_hash.to_string()),
+                issuer_approval_evidence_hash: Some(approval_hash.clone()),
                 near_contract_id: None,
                 ranking_model_version: None,
                 ranking_target_use: None,
@@ -75212,7 +75293,7 @@ mod tests {
         assert_eq!(approved.settled_source_event_count, 1);
         assert_eq!(
             approved.issuer_approval_evidence_hash.as_deref(),
-            Some(approval_hash)
+            Some(approval_hash.as_str())
         );
     }
 
@@ -76504,7 +76585,7 @@ mod tests {
             .expect("missing approval drill includes source_list_hash")
             .to_string();
 
-        let approval_hash = "sha256:issuer-drill-approval";
+        let approval_hash = sha256_prefixed("issuer-drill-approval");
         let unrecorded_response = app(state.clone())
             .oneshot(
                 axum::http::Request::builder()
@@ -76516,7 +76597,7 @@ mod tests {
                         serde_json::json!({
                             "policy_version": "trace-credit-policy-v1",
                             "near_contract_id": "trace-credits.testnet",
-                            "issuer_approval_evidence_hash": approval_hash,
+                            "issuer_approval_evidence_hash": approval_hash.clone(),
                             "record_evidence": true
                         })
                         .to_string(),
@@ -76556,7 +76637,7 @@ mod tests {
                         serde_json::json!({
                             "policy_version": "trace-credit-policy-v1",
                             "source_list_hash": source_list_hash,
-                            "evidence_hash": approval_hash,
+                            "evidence_hash": approval_hash.clone(),
                             "reason": "central issuer approved drill source list"
                         })
                         .to_string(),
@@ -76578,7 +76659,7 @@ mod tests {
                         serde_json::json!({
                             "policy_version": "trace-credit-policy-v1",
                             "near_contract_id": "trace-credits.testnet",
-                            "issuer_approval_evidence_hash": approval_hash,
+                            "issuer_approval_evidence_hash": approval_hash.clone(),
                             "record_evidence": true
                         })
                         .to_string(),
@@ -76605,7 +76686,7 @@ mod tests {
         assert_eq!(approved["blocking_gaps"], serde_json::json!([]));
         assert_eq!(
             approved["settlement"]["issuer_approval_evidence_hash"],
-            serde_json::json!(approval_hash)
+            serde_json::json!(approval_hash.as_str())
         );
         assert_eq!(
             approved["recorded_evidence"]["status"],
@@ -83963,7 +84044,7 @@ mod tests {
     async fn credit_cycle_worker_runs_ranking_credit_settlement_sequence() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
-        let issuer_approval_evidence_hash = "sha256:credit-cycle-issuer-approval".to_string();
+        let issuer_approval_evidence_hash = sha256_prefixed("credit-cycle-issuer-approval");
         let (candidate, prediction) =
             seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-credit-cycle-v1").await;
 
@@ -84258,6 +84339,7 @@ mod tests {
             "trace-ranker-credit-cycle-source-approval-v1",
         )
         .await;
+        let issuer_approval_evidence_hash = sha256_prefixed("cycle-source-list-approval");
 
         let error = credit_cycle_worker_run_handler(
             State(state.clone()),
@@ -84270,9 +84352,7 @@ mod tests {
                 model_version: candidate.model_version.clone(),
                 policy_version: candidate.policy_version.clone(),
                 reason: "scheduled credit cycle with source-list issuer approval".to_string(),
-                issuer_approval_evidence_hash: Some(
-                    "sha256:cycle-source-list-approval".to_string(),
-                ),
+                issuer_approval_evidence_hash: Some(issuer_approval_evidence_hash),
                 near_contract_id: Some("trace-credits.testnet".to_string()),
                 calibration_limit: Some(10),
                 model_promotion_limit: Some(10),

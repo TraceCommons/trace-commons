@@ -56,8 +56,9 @@ through `GET|POST /v1/admin/credit-settlement-approvals` after a dry-run
 produces the exact settlement source-list hash. Deployments that set
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` reject live
 settlement unless the supplied `issuer_approval_evidence_hash` matches a recorded
-approval for the tenant, policy version, source list, and evidence hash while
-still allowing dry-runs. Set
+approval for the tenant, policy version, canonical `sha256:<64 hex>`
+source-list hash, and canonical approval evidence hash while still allowing
+dry-runs. Set
 `TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS` to make those
 central approvals expire for live issuance and settlement drills; startup
 rejects that max-age knob unless required issuer approval is enabled.
