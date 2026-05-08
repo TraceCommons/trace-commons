@@ -215,6 +215,10 @@ require that registered holdout row to be `active`, turning candidate holdouts
 into visible stewardship blockers until an admin promotes the curated manifest;
 startup rejects the active-holdout gate unless the registry gate is also
 enabled.
+Startup also rejects an explicitly configured nonzero pairwise ordering-accuracy
+floor unless `TRACE_COMMONS_RANKING_MIN_PAIRWISE_LABEL_COUNT` is greater than
+zero, so operators cannot think pairwise accuracy is protecting credit while the
+pairwise evidence floor is disabled.
 When deployments require multiple joined label sources, calibration also
 requires that many distinct label-writing actor principals so one worker cannot
 satisfy source diversity by switching label-source enums. Model manifests must

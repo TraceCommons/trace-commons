@@ -749,7 +749,11 @@ of joined pairwise preferences that an active model must order correctly,
 encoded in micros. It defaults to `500000` (chance for binary preferences) and
 accepts `0` through `1000000`; active model-risk reports emit
 `pairwise_accuracy_below_threshold` when joined pairwise evidence exists but the
-model falls below this deployment threshold.
+model falls below this deployment threshold. If an operator explicitly
+configures a nonzero pairwise accuracy floor, startup requires
+`TRACE_COMMONS_RANKING_MIN_PAIRWISE_LABEL_COUNT` to be greater than zero so the
+ordering threshold cannot be mistaken for active protection while pairwise
+evidence is disabled.
 
 `TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT` optionally suppresses aggregate analytics cells whose count is below the configured threshold. The endpoint still returns content-free totals and reports `min_cell_count` plus `suppressed_cell_count` for compatibility, and also returns a `privacy_budget` object with the `k_anonymity_min_cell` strategy, released/suppressed cell counts, whether suppression was applied, and conservative broad-release blocker reasons such as `min_cell_count_disabled` or `small_cells_suppressed`. Reviewers/admins can request `GET /v1/analytics/summary?release_scope=broad` as a publication preflight; the route fails closed with safe blocker reason codes when the privacy budget is not broad-release ready.
 
