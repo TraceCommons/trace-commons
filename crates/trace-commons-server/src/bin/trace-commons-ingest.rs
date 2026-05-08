@@ -67289,6 +67289,20 @@ mod tests {
         let record = read_submission_record(temp.path(), "tenant-a", submission_id)
             .expect("record reads")
             .expect("record exists");
+        let mut tenant_b_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_b_envelope);
+        let tenant_b_submission_id = tenant_b_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_envelope),
+        )
+        .await
+        .expect("tenant-b submission succeeds");
+        let tenant_b_record =
+            read_submission_record(temp.path(), "tenant-b", tenant_b_submission_id)
+                .expect("tenant-b record reads")
+                .expect("tenant-b record exists");
         let Json(pre_expiry_export) = dataset_replay_handler(
             State(state.clone()),
             auth_headers("review-token-a"),
@@ -67323,6 +67337,23 @@ mod tests {
             serde_json::json!((Utc::now() - chrono::Duration::days(1)).to_rfc3339());
         write_json_file(&metadata_path, &metadata_json, "expired trace metadata")
             .expect("expired metadata writes");
+
+        let tenant_b_metadata_path = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-b"))
+            .join("metadata")
+            .join(format!("{tenant_b_submission_id}.json"));
+        let mut tenant_b_metadata_json =
+            serde_json::to_value(tenant_b_record).expect("tenant-b record serializes");
+        tenant_b_metadata_json["expires_at"] =
+            serde_json::json!((Utc::now() - chrono::Duration::days(1)).to_rfc3339());
+        write_json_file(
+            &tenant_b_metadata_path,
+            &tenant_b_metadata_json,
+            "tenant-b expired trace metadata",
+        )
+        .expect("tenant-b expired metadata writes");
 
         let response = app(state.clone())
             .oneshot(
@@ -67381,6 +67412,17 @@ mod tests {
             .expect("dry-run derived reads")
             .expect("dry-run derived exists");
         assert_eq!(dry_run_derived.status, TraceCorpusStatus::Accepted);
+        let tenant_b_record_after =
+            read_submission_record(temp.path(), "tenant-b", tenant_b_submission_id)
+                .expect("tenant-b record reads after tenant-a dry-run drill")
+                .expect("tenant-b record remains after tenant-a dry-run drill");
+        assert_eq!(tenant_b_record_after.status, TraceCorpusStatus::Accepted);
+        assert!(tenant_b_record_after.purged_at.is_none());
+        let tenant_b_derived_after =
+            read_derived_record(temp.path(), "tenant-b", tenant_b_submission_id)
+                .expect("tenant-b derived reads after tenant-a dry-run drill")
+                .expect("tenant-b derived remains after tenant-a dry-run drill");
+        assert_eq!(tenant_b_derived_after.status, TraceCorpusStatus::Accepted);
         let audit_events =
             read_all_audit_events(temp.path(), "tenant-a").expect("file audit events read");
         assert!(audit_events.iter().any(|event| {
@@ -67396,6 +67438,18 @@ mod tests {
                         && reason.contains("status=passed")
                 })
         }));
+        let tenant_b_audit_events =
+            read_all_audit_events(temp.path(), "tenant-b").expect("tenant-b audit events read");
+        assert!(
+            !tenant_b_audit_events
+                .iter()
+                .any(|event| event.kind == "maintenance")
+        );
+        assert!(
+            !tenant_b_audit_events
+                .iter()
+                .any(|event| event.kind == "rollout_smoke_evidence")
+        );
     }
 
     #[tokio::test]
