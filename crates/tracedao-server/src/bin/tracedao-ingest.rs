@@ -78762,6 +78762,58 @@ mod tests {
         .expect("settlement creates outbox");
         assert_eq!(settlement.near_outbox_item_count, 1);
 
+        let mut tenant_b_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_b_envelope);
+        tenant_b_envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        tenant_b_envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        tenant_b_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let tenant_b_submission_id = tenant_b_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_envelope),
+        )
+        .await
+        .expect("tenant-b submission succeeds");
+
+        let _ = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-b"),
+            AxumPath(tenant_b_submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.0,
+                reason: Some("tenant-b frontier utility for NEAR worker".to_string()),
+                external_ref: Some("frontier:tenant-b-near-submit-worker".to_string()),
+            }),
+        )
+        .await
+        .expect("tenant-b credit event succeeds");
+        let Json(tenant_b_settlement) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-b"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "tenant-b settlement for NEAR submit worker".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("tenant-b settlement creates outbox");
+        assert_eq!(tenant_b_settlement.near_outbox_item_count, 1);
+        let tenant_b_outbox_before = read_all_near_credit_outbox_items(temp.path(), "tenant-b")
+            .expect("tenant-b outbox reads");
+        assert_eq!(tenant_b_outbox_before.len(), 1);
+        assert_eq!(
+            tenant_b_outbox_before[0].status,
+            StorageTraceCreditSettlementNearStatus::Pending
+        );
+        assert!(tenant_b_outbox_before[0].near_transaction_hash.is_none());
+
         let Json(response) = near_credit_outbox_submit_worker_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
@@ -78799,6 +78851,14 @@ mod tests {
             outbox[0].near_transaction_hash.as_deref(),
             Some(TEST_NEAR_TX_HASH_1)
         );
+        let tenant_b_outbox_after = read_all_near_credit_outbox_items(temp.path(), "tenant-b")
+            .expect("tenant-b outbox reads");
+        assert_eq!(tenant_b_outbox_after.len(), 1);
+        assert_eq!(
+            tenant_b_outbox_after[0].status,
+            StorageTraceCreditSettlementNearStatus::Pending
+        );
+        assert!(tenant_b_outbox_after[0].near_transaction_hash.is_none());
     }
 
     #[tokio::test]
