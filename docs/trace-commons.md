@@ -811,7 +811,7 @@ The service exposes:
 - `GET|POST /v1/workers/ranker/training-candidates`
 - `GET|POST /v1/workers/ranker/training-pairs`
 - `POST /v1/workers/utility-credit`
-- `POST /v1/workers/utility-attestations`
+- `POST /v1/workers/utility-attestations` with a canonical `sha256:<64 hex>` evidence hash
 - `GET /v1/admin/credit-attestations`
 - `GET|POST /v1/admin/credit-holds`
 - `POST /v1/admin/credit-holds/{hold_id}/release`

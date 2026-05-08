@@ -10043,10 +10043,10 @@ async fn utility_attestation_handler(
         ));
     }
     let evidence_hash = body.evidence_hash.trim().to_string();
-    if !evidence_hash.starts_with("sha256:") {
+    if !is_canonical_sha256_prefixed_hash(&evidence_hash) {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
-            "utility attestations require sha256 evidence_hash",
+            "utility attestations require a canonical sha256-prefixed hex digest evidence_hash",
         ));
     }
     let reason = body.reason.trim().to_string();
@@ -87667,6 +87667,41 @@ mod tests {
         )
         .await
         .expect("submission succeeds");
+
+        let malformed_attestation_error = utility_attestation_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceUtilityAttestationRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 2.0,
+                use_category: "frontier_lab_training".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                evidence_hash: "sha256:not-canonical".to_string(),
+                reason: "malformed utility attestation must not record".to_string(),
+                external_ref: "frontier-lab:malformed-utility-attestation".to_string(),
+                source_submission_ids: vec![submission_id],
+            }),
+        )
+        .await
+        .expect_err("malformed utility attestation is rejected");
+        assert_eq!(malformed_attestation_error.0, StatusCode::BAD_REQUEST);
+        assert!(
+            malformed_attestation_error
+                .1
+                .0
+                .error
+                .contains("canonical sha256")
+        );
+        assert!(
+            read_all_utility_attestations(temp.path(), "tenant-a")
+                .expect("tenant-a attestations read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("tenant-a credit reads")
+                .is_empty()
+        );
 
         let tenant_b_attestation_error = utility_attestation_handler(
             State(state.clone()),
