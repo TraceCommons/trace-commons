@@ -61,6 +61,13 @@ still allowing dry-runs. Set
 `TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS` to make those
 central approvals expire for live issuance and settlement drills; startup
 rejects that max-age knob unless required issuer approval is enabled.
+Set `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE=true` for
+the early production mode where TraceCommons centrally runs issuance instead of
+trusting a broader actor reputation system. That profile fails startup unless
+DB mirror writes and PostgreSQL RLS readiness are fail-closed, per-account caps
+are configured, fresh central source-list approvals are required, a single NEAR
+credit contract is pinned and required, NEAR submit/confirm adapters are
+configured, and adapter bearer auth is required for both directions.
 The worker `POST /v1/workers/credit-cycle/run` route can run the production
 credit path in bounded steps for a single model/version:
 calibration, model promotion, prediction credit, settlement, then a NEAR outbox
