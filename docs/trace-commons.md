@@ -1357,9 +1357,12 @@ to fail startup unless the configured PostgreSQL database is fully ready for RLS
 as an active tenant boundary. Production deployments still need a non-bypassing
 non-owner runtime role plus transaction-local tenant context through every
 DB-backed runtime path before RLS can become the active trust boundary. Production
-deployments should finish promoting reviewer/export/analytics paths into
-DB/object-primary reads and move encrypted artifacts behind remote service-owned
-object storage before broad rollout.
+RLS tests already exercise tenant metadata rows plus the main corpus,
+audit, credit, export, retention, revocation, ranking, and benchmark
+control-plane rows under matching and mismatched transaction-local tenant
+contexts. Deployments should still finish promoting reviewer/export/analytics
+paths into DB/object-primary reads and move encrypted artifacts behind remote
+service-owned object storage before broad rollout.
 
 ## Production Hardening Roadmap
 
