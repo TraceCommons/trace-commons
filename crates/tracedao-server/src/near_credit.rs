@@ -262,9 +262,12 @@ fn validate_near_contract_id(contract_id: String) -> anyhow::Result<String> {
 }
 
 fn ensure_hash_like(label: &str, value: &str) -> anyhow::Result<()> {
+    let Some(hex_digest) = value.strip_prefix("sha256:") else {
+        anyhow::bail!("{label} must be a sha256-prefixed safe hash");
+    };
     anyhow::ensure!(
-        value.starts_with("sha256:"),
-        "{label} must be a sha256-prefixed safe hash"
+        hex_digest.len() == 64 && hex_digest.chars().all(|ch| ch.is_ascii_hexdigit()),
+        "{label} must be a canonical sha256-prefixed hex digest"
     );
     Ok(())
 }
