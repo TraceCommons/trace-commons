@@ -68098,6 +68098,7 @@ mod tests {
             return;
         };
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_mirror: Arc<dyn Database> = backend.clone();
@@ -68131,6 +68132,25 @@ mod tests {
         .expect("revocation mirrors propagation items to DB");
         assert_eq!(revoke_status, StatusCode::NO_CONTENT);
 
+        let mut tenant_b_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_b_envelope);
+        let tenant_b_submission_id = tenant_b_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_envelope),
+        )
+        .await
+        .expect("tenant-b submission mirrors to DB");
+        let tenant_b_revoke_status = revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            AxumPath(tenant_b_submission_id),
+        )
+        .await
+        .expect("tenant-b revocation mirrors propagation items to DB");
+        assert_eq!(tenant_b_revoke_status, StatusCode::NO_CONTENT);
+
         let propagation_items = backend
             .list_trace_revocation_propagation_items("tenant-a", submission_id)
             .await
@@ -68138,6 +68158,16 @@ mod tests {
         assert!(!propagation_items.is_empty());
         assert!(
             propagation_items.iter().all(|item| {
+                item.status == StorageTraceRevocationPropagationItemStatus::Pending
+            })
+        );
+        let tenant_b_propagation_items = backend
+            .list_trace_revocation_propagation_items("tenant-b", tenant_b_submission_id)
+            .await
+            .expect("tenant-b revocation propagation items read");
+        assert!(!tenant_b_propagation_items.is_empty());
+        assert!(
+            tenant_b_propagation_items.iter().all(|item| {
                 item.status == StorageTraceRevocationPropagationItemStatus::Pending
             })
         );
@@ -68202,6 +68232,19 @@ mod tests {
                 && item.attempt_count == 0
                 && item.completed_at.is_none()
         }));
+        let tenant_b_propagation_items_after = backend
+            .list_trace_revocation_propagation_items("tenant-b", tenant_b_submission_id)
+            .await
+            .expect("tenant-b revocation propagation items read after drill");
+        assert_eq!(
+            tenant_b_propagation_items_after.len(),
+            tenant_b_propagation_items.len()
+        );
+        assert!(tenant_b_propagation_items_after.iter().all(|item| {
+            item.status == StorageTraceRevocationPropagationItemStatus::Pending
+                && item.attempt_count == 0
+                && item.completed_at.is_none()
+        }));
         assert!(
             read_all_audit_events(temp.path(), "tenant-a")
                 .expect("file audit events remain after drill")
@@ -68216,6 +68259,7 @@ mod tests {
         );
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
     }
 
     #[tokio::test]
