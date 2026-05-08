@@ -8,19 +8,23 @@ use tracedao_server::config::{DatabaseConfig, SslMode};
 use tracedao_server::db::{Database, TraceCorpusRlsDiagnostics, postgres::PgBackend};
 use tracedao_server::trace_corpus_storage::{
     TenantScopedTraceObjectRef, TraceAuditAction, TraceAuditEventWrite, TraceAuditSafeMetadata,
-    TraceCorpusStatus, TraceCorpusStore, TraceCreditAccountSettlementLineItem,
-    TraceCreditEventType, TraceCreditEventWrite, TraceCreditHoldReason, TraceCreditHoldWrite,
-    TraceCreditSettlementBatchStatus, TraceCreditSettlementBatchWrite,
-    TraceCreditSettlementNearStatus, TraceCreditSettlementState, TraceDerivedRecordWrite,
-    TraceDerivedStatus, TraceExportAccessGrantStatus, TraceExportAccessGrantWrite,
-    TraceExportJobStatus, TraceExportJobStatusUpdate, TraceExportJobWrite,
-    TraceExportManifestItemInvalidationReason, TraceExportManifestItemWrite,
+    TraceBenchmarkRegistryOutboxItemWrite, TraceBenchmarkRegistryOutboxOperation,
+    TraceBenchmarkRegistryOutboxStatus, TraceCorpusStatus, TraceCorpusStore,
+    TraceCreditAccountSettlementLineItem, TraceCreditEventType, TraceCreditEventWrite,
+    TraceCreditHoldReason, TraceCreditHoldWrite, TraceCreditSettlementBatchStatus,
+    TraceCreditSettlementBatchWrite, TraceCreditSettlementNearStatus, TraceCreditSettlementState,
+    TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportAccessGrantStatus,
+    TraceExportAccessGrantWrite, TraceExportJobStatus, TraceExportJobStatusUpdate,
+    TraceExportJobWrite, TraceExportManifestItemInvalidationReason, TraceExportManifestItemWrite,
     TraceExportManifestWrite, TraceNearCreditOutboxItemWrite, TraceObjectArtifactKind,
-    TraceObjectRefWrite, TraceRankingFeatureWrite, TraceRankingModelStatus,
-    TraceRankingModelVersionWrite, TraceRankingPredictionWrite, TraceRankingWorkerRunKind,
-    TraceRankingWorkerRunStatus, TraceRankingWorkerRunWrite, TraceRetentionJobItemAction,
-    TraceRetentionJobItemStatus, TraceRetentionJobItemWrite, TraceRetentionJobStatus,
-    TraceRetentionJobWrite, TraceReviewLeaseAuditAction, TraceRevocationPropagationAction,
+    TraceObjectRefWrite, TraceRankingCalibrationDatasetStatus, TraceRankingCalibrationDatasetWrite,
+    TraceRankingCalibrationRunWrite, TraceRankingFeatureWrite, TraceRankingLabelOutcome,
+    TraceRankingLabelSource, TraceRankingLabelWrite, TraceRankingModelStatus,
+    TraceRankingModelVersionWrite, TraceRankingPredictionWrite, TraceRankingPreferenceLabelWrite,
+    TraceRankingUtilityCategory, TraceRankingWorkerRunKind, TraceRankingWorkerRunStatus,
+    TraceRankingWorkerRunWrite, TraceRetentionJobItemAction, TraceRetentionJobItemStatus,
+    TraceRetentionJobItemWrite, TraceRetentionJobStatus, TraceRetentionJobWrite,
+    TraceReviewLeaseAuditAction, TraceRevocationPropagationAction,
     TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget, TraceSubmissionWrite,
     TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus, TraceTenantAccessGrantWrite,
@@ -237,6 +241,26 @@ struct RawCreditControlPlaneIds {
     near_account_outbox_id: Uuid,
 }
 
+const RAW_RLS_RANKING_MODEL_VERSION: &str = "trace-ranker-raw-rls-v1";
+const RAW_RLS_RANKING_FEATURE_SCHEMA_VERSION: &str = "ranking-features-raw-rls-v1";
+const RAW_RLS_RANKING_POLICY_VERSION: &str = "trace-credit-policy-raw-rls-v1";
+const RAW_RLS_RANKING_TARGET_USE: &str = "ranking_model_training";
+const RAW_RLS_RANKING_CALIBRATION_DATASET_HASH: &str = "sha256:raw-rls-calibration-dataset";
+
+#[derive(Clone, Copy)]
+struct RawRankingControlPlaneIds {
+    secondary_submission_id: Uuid,
+    secondary_trace_id: Uuid,
+    ranking_feature_id: Uuid,
+    ranking_prediction_id: Uuid,
+    ranking_label_id: Uuid,
+    preference_label_id: Uuid,
+    calibration_run_id: Uuid,
+    ranking_worker_run_id: Uuid,
+    benchmark_outbox_id: Uuid,
+    benchmark_conversion_id: Uuid,
+}
+
 #[derive(Clone, Copy)]
 struct RawTraceRlsIds {
     submission_id: Uuid,
@@ -248,6 +272,13 @@ struct RawTraceRlsIds {
     credit_hold_id: Uuid,
     near_outbox_id: Uuid,
     near_account_outbox_id: Uuid,
+    ranking_feature_id: Uuid,
+    ranking_prediction_id: Uuid,
+    ranking_label_id: Uuid,
+    preference_label_id: Uuid,
+    calibration_run_id: Uuid,
+    ranking_worker_run_id: Uuid,
+    benchmark_outbox_id: Uuid,
     tombstone_id: Uuid,
     retention_job_id: Uuid,
     propagation_item_id: Uuid,
@@ -265,6 +296,15 @@ struct RawTraceRlsCounts {
     credit_holds: i64,
     near_credit_outbox: i64,
     near_credit_account_outbox: i64,
+    ranking_model_versions: i64,
+    ranking_calibration_datasets: i64,
+    ranking_features: i64,
+    ranking_predictions: i64,
+    ranking_labels: i64,
+    ranking_preference_labels: i64,
+    ranking_calibration_runs: i64,
+    ranking_worker_runs: i64,
+    benchmark_registry_outbox: i64,
     tombstones: i64,
     retention_jobs: i64,
     retention_job_items: i64,
@@ -284,6 +324,15 @@ impl RawTraceRlsCounts {
             credit_holds: count,
             near_credit_outbox: count,
             near_credit_account_outbox: count,
+            ranking_model_versions: count,
+            ranking_calibration_datasets: count,
+            ranking_features: count,
+            ranking_predictions: count,
+            ranking_labels: count,
+            ranking_preference_labels: count,
+            ranking_calibration_runs: count,
+            ranking_worker_runs: count,
+            benchmark_registry_outbox: count,
             tombstones: count,
             retention_jobs: count,
             retention_job_items: count,
@@ -430,6 +479,206 @@ async fn write_sample_credit_control_plane_rows(
         .expect("write tenant NEAR account outbox");
 }
 
+async fn write_sample_ranking_and_benchmark_control_plane_rows(
+    backend: &PgBackend,
+    tenant_id: &str,
+    submission_id: Uuid,
+    trace_id: Uuid,
+    ids: RawRankingControlPlaneIds,
+    label: &str,
+) {
+    let mut secondary_submission = sample_submission(tenant_id, ids.secondary_submission_id);
+    secondary_submission.trace_id = ids.secondary_trace_id;
+    secondary_submission.allowed_uses = vec![RAW_RLS_RANKING_TARGET_USE.to_string()];
+    backend
+        .upsert_trace_submission(secondary_submission)
+        .await
+        .expect("write tenant secondary ranking source submission");
+    backend
+        .upsert_trace_ranking_model_version(TraceRankingModelVersionWrite {
+            tenant_id: tenant_id.to_string(),
+            model_version: RAW_RLS_RANKING_MODEL_VERSION.to_string(),
+            feature_schema_version: RAW_RLS_RANKING_FEATURE_SCHEMA_VERSION.to_string(),
+            policy_version: RAW_RLS_RANKING_POLICY_VERSION.to_string(),
+            status: TraceRankingModelStatus::Candidate,
+            training_dataset_hash: format!("sha256:{tenant_id}:raw-rls-training"),
+            calibration_dataset_hash: RAW_RLS_RANKING_CALIBRATION_DATASET_HASH.to_string(),
+            model_artifact_hash: format!("sha256:{tenant_id}:raw-rls-model"),
+            actor_principal_ref: format!("principal:{tenant_id}:ranker-admin"),
+        })
+        .await
+        .expect("write tenant ranking model version");
+    backend
+        .upsert_trace_ranking_calibration_dataset(TraceRankingCalibrationDatasetWrite {
+            tenant_id: tenant_id.to_string(),
+            calibration_dataset_hash: RAW_RLS_RANKING_CALIBRATION_DATASET_HASH.to_string(),
+            target_use: RAW_RLS_RANKING_TARGET_USE.to_string(),
+            policy_version: RAW_RLS_RANKING_POLICY_VERSION.to_string(),
+            source_manifest_hash: format!("sha256:{tenant_id}:raw-rls-calibration-manifest"),
+            source_count: 32,
+            label_source_count: 2,
+            label_actor_count: 2,
+            status: TraceRankingCalibrationDatasetStatus::Candidate,
+            actor_principal_ref: format!("principal:{tenant_id}:ranker-admin"),
+        })
+        .await
+        .expect("write tenant ranking calibration dataset");
+    backend
+        .upsert_trace_ranking_feature(TraceRankingFeatureWrite {
+            tenant_id: tenant_id.to_string(),
+            ranking_feature_id: ids.ranking_feature_id,
+            submission_id,
+            trace_id,
+            target_use: RAW_RLS_RANKING_TARGET_USE.to_string(),
+            feature_schema_version: RAW_RLS_RANKING_FEATURE_SCHEMA_VERSION.to_string(),
+            feature_vector_hash: format!("sha256:{tenant_id}:raw-rls-feature-vector"),
+            feature_names_hash: format!("sha256:{tenant_id}:raw-rls-feature-names"),
+            source_feature_hash: format!("sha256:{tenant_id}:raw-rls-source-feature"),
+            duplicate_score: Some(0.01),
+            novelty_score: Some(0.9),
+            privacy_risk_score: Some(0.02),
+            quality_score: Some(0.95),
+            coverage_tags: vec![format!("tenant:{label}")],
+            actor_principal_ref: format!("principal:{tenant_id}:ranker-worker"),
+        })
+        .await
+        .expect("write tenant ranking feature");
+    backend
+        .upsert_trace_ranking_prediction(TraceRankingPredictionWrite {
+            tenant_id: tenant_id.to_string(),
+            ranking_prediction_id: ids.ranking_prediction_id,
+            submission_id,
+            trace_id,
+            target_use: RAW_RLS_RANKING_TARGET_USE.to_string(),
+            model_version: RAW_RLS_RANKING_MODEL_VERSION.to_string(),
+            feature_schema_version: RAW_RLS_RANKING_FEATURE_SCHEMA_VERSION.to_string(),
+            prediction_policy_version: RAW_RLS_RANKING_POLICY_VERSION.to_string(),
+            feature_vector_hash: format!("sha256:{tenant_id}:raw-rls-feature-vector"),
+            predicted_utility_micros: 1_250_000,
+            uncertainty_micros: 125_000,
+            confidence: 0.87,
+            risk_penalty_micros: 10_000,
+            novelty_bonus_micros: 50_000,
+            settlement_score_micros: 1_290_000,
+            explanation_codes: vec![format!("raw_rls_prediction_{label}")],
+            actor_principal_ref: format!("principal:{tenant_id}:ranker-worker"),
+        })
+        .await
+        .expect("write tenant ranking prediction");
+    backend
+        .upsert_trace_ranking_label(TraceRankingLabelWrite {
+            tenant_id: tenant_id.to_string(),
+            ranking_label_id: ids.ranking_label_id,
+            submission_id,
+            trace_id,
+            target_use: RAW_RLS_RANKING_TARGET_USE.to_string(),
+            label_source: TraceRankingLabelSource::FrontierLab,
+            utility_category: TraceRankingUtilityCategory::RankingTraining,
+            label_outcome: TraceRankingLabelOutcome::Useful,
+            utility_delta_micros: 1_400_000,
+            evidence_hash: format!("sha256:{tenant_id}:raw-rls-label-evidence"),
+            external_ref_hash: format!("sha256:{tenant_id}:raw-rls-label-ref"),
+            actor_principal_ref: format!("principal:{tenant_id}:frontier-lab"),
+        })
+        .await
+        .expect("write tenant ranking label");
+    backend
+        .upsert_trace_ranking_preference_label(TraceRankingPreferenceLabelWrite {
+            tenant_id: tenant_id.to_string(),
+            preference_label_id: ids.preference_label_id,
+            preferred_submission_id: submission_id,
+            preferred_trace_id: trace_id,
+            rejected_submission_id: ids.secondary_submission_id,
+            rejected_trace_id: ids.secondary_trace_id,
+            target_use: RAW_RLS_RANKING_TARGET_USE.to_string(),
+            label_source: TraceRankingLabelSource::Reviewer,
+            utility_category: TraceRankingUtilityCategory::RankingTraining,
+            preference_strength_micros: 700_000,
+            evidence_hash: format!("sha256:{tenant_id}:raw-rls-preference-evidence"),
+            external_ref_hash: format!("sha256:{tenant_id}:raw-rls-preference-ref"),
+            actor_principal_ref: format!("principal:{tenant_id}:reviewer"),
+        })
+        .await
+        .expect("write tenant ranking preference label");
+    backend
+        .upsert_trace_ranking_calibration_run(TraceRankingCalibrationRunWrite {
+            tenant_id: tenant_id.to_string(),
+            calibration_run_id: ids.calibration_run_id,
+            model_version: RAW_RLS_RANKING_MODEL_VERSION.to_string(),
+            target_use: RAW_RLS_RANKING_TARGET_USE.to_string(),
+            policy_version: RAW_RLS_RANKING_POLICY_VERSION.to_string(),
+            evaluation_dataset_hash: RAW_RLS_RANKING_CALIBRATION_DATASET_HASH.to_string(),
+            prediction_count: 1,
+            label_count: 1,
+            joined_label_prediction_count: 1,
+            joined_label_source_count: 1,
+            joined_label_actor_count: 1,
+            joined_evidence_hash: format!("sha256:{tenant_id}:raw-rls-joined-evidence"),
+            average_predicted_utility_micros: Some(1_250_000),
+            average_label_utility_delta_micros: Some(1_400_000),
+            average_absolute_error_micros: Some(150_000),
+            max_label_source_average_absolute_error_micros: Some(150_000),
+            max_error_label_source: Some("frontier_lab".to_string()),
+            mean_signed_error_micros: Some(-150_000),
+            low_confidence_prediction_count: 0,
+            confidence_threshold: 0.5,
+            min_label_count: 1,
+            min_label_source_count: 1,
+            max_average_absolute_error_micros: 500_000,
+            promotable: true,
+            reason_codes: Vec::new(),
+            report_hash: format!("sha256:{tenant_id}:raw-rls-calibration-report"),
+            actor_principal_ref: format!("principal:{tenant_id}:ranker-worker"),
+        })
+        .await
+        .expect("write tenant ranking calibration run");
+    backend
+        .upsert_trace_ranking_worker_run(TraceRankingWorkerRunWrite {
+            tenant_id: tenant_id.to_string(),
+            ranking_worker_run_id: ids.ranking_worker_run_id,
+            run_kind: TraceRankingWorkerRunKind::Calibration,
+            status: TraceRankingWorkerRunStatus::Completed,
+            dry_run: false,
+            reason_hash: format!("sha256:{tenant_id}:raw-rls-worker-reason"),
+            model_version: Some(RAW_RLS_RANKING_MODEL_VERSION.to_string()),
+            target_use: Some(RAW_RLS_RANKING_TARGET_USE.to_string()),
+            policy_version: Some(RAW_RLS_RANKING_POLICY_VERSION.to_string()),
+            limit: 10,
+            checked_count: 1,
+            succeeded_count: 1,
+            skipped_existing_count: 0,
+            skipped_model_risk_count: 0,
+            skipped_ineligible_count: 0,
+            pending_after_count: 0,
+            result_refs: vec![format!(
+                "ranking_calibration_run:{}",
+                ids.calibration_run_id
+            )],
+            reason_counts: BTreeMap::new(),
+            actor_principal_ref: format!("principal:{tenant_id}:ranker-worker"),
+            created_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            last_error_hash: None,
+        })
+        .await
+        .expect("write tenant ranking worker run");
+    backend
+        .upsert_trace_benchmark_registry_outbox_item(TraceBenchmarkRegistryOutboxItemWrite {
+            tenant_id: tenant_id.to_string(),
+            benchmark_outbox_id: ids.benchmark_outbox_id,
+            conversion_id: ids.benchmark_conversion_id,
+            operation: TraceBenchmarkRegistryOutboxOperation::Publish,
+            registry_ref: format!("benchmark-registry:{tenant_id}:raw-rls"),
+            artifact_payload_hash: format!("sha256:{tenant_id}:raw-rls-benchmark-artifact"),
+            source_submission_ids_hash: format!("sha256:{tenant_id}:raw-rls-benchmark-sources"),
+            evaluator_ref: Some(format!("benchmark-evaluator:{label}")),
+            evaluation_score: Some(0.99),
+            status: TraceBenchmarkRegistryOutboxStatus::Pending,
+        })
+        .await
+        .expect("write tenant benchmark registry outbox item");
+}
+
 async fn current_role_bypasses_trace_rls(
     client: &mut tokio_postgres::Client,
 ) -> Result<bool, tokio_postgres::Error> {
@@ -539,10 +788,19 @@ async fn raw_trace_rls_counts(
                 (SELECT COUNT(*) FROM trace_credit_holds WHERE hold_id = $7) AS credit_holds,
                 (SELECT COUNT(*) FROM trace_near_credit_outbox WHERE near_outbox_id = $8) AS near_credit_outbox,
                 (SELECT COUNT(*) FROM trace_near_credit_account_outbox WHERE near_outbox_id = $9) AS near_credit_account_outbox,
-                (SELECT COUNT(*) FROM trace_tombstones WHERE tombstone_id = $10) AS tombstones,
-                (SELECT COUNT(*) FROM trace_retention_jobs WHERE retention_job_id = $11) AS retention_jobs,
-                (SELECT COUNT(*) FROM trace_retention_job_items WHERE retention_job_id = $11) AS retention_job_items,
-                (SELECT COUNT(*) FROM trace_revocation_propagation_items WHERE propagation_item_id = $12) AS revocation_propagation_items",
+                (SELECT COUNT(*) FROM trace_ranking_model_versions WHERE model_version = 'trace-ranker-raw-rls-v1') AS ranking_model_versions,
+                (SELECT COUNT(*) FROM trace_ranking_calibration_datasets WHERE calibration_dataset_hash = 'sha256:raw-rls-calibration-dataset') AS ranking_calibration_datasets,
+                (SELECT COUNT(*) FROM trace_ranking_features WHERE ranking_feature_id = $10) AS ranking_features,
+                (SELECT COUNT(*) FROM trace_ranking_predictions WHERE ranking_prediction_id = $11) AS ranking_predictions,
+                (SELECT COUNT(*) FROM trace_ranking_labels WHERE ranking_label_id = $12) AS ranking_labels,
+                (SELECT COUNT(*) FROM trace_ranking_preference_labels WHERE preference_label_id = $13) AS ranking_preference_labels,
+                (SELECT COUNT(*) FROM trace_ranking_calibration_runs WHERE calibration_run_id = $14) AS ranking_calibration_runs,
+                (SELECT COUNT(*) FROM trace_ranking_worker_runs WHERE ranking_worker_run_id = $15) AS ranking_worker_runs,
+                (SELECT COUNT(*) FROM trace_benchmark_registry_outbox WHERE benchmark_outbox_id = $16) AS benchmark_registry_outbox,
+                (SELECT COUNT(*) FROM trace_tombstones WHERE tombstone_id = $17) AS tombstones,
+                (SELECT COUNT(*) FROM trace_retention_jobs WHERE retention_job_id = $18) AS retention_jobs,
+                (SELECT COUNT(*) FROM trace_retention_job_items WHERE retention_job_id = $18) AS retention_job_items,
+                (SELECT COUNT(*) FROM trace_revocation_propagation_items WHERE propagation_item_id = $19) AS revocation_propagation_items",
             &[
                 &ids.submission_id,
                 &ids.object_ref_id,
@@ -553,6 +811,13 @@ async fn raw_trace_rls_counts(
                 &ids.credit_hold_id,
                 &ids.near_outbox_id,
                 &ids.near_account_outbox_id,
+                &ids.ranking_feature_id,
+                &ids.ranking_prediction_id,
+                &ids.ranking_label_id,
+                &ids.preference_label_id,
+                &ids.calibration_run_id,
+                &ids.ranking_worker_run_id,
+                &ids.benchmark_outbox_id,
                 &ids.tombstone_id,
                 &ids.retention_job_id,
                 &ids.propagation_item_id,
@@ -572,6 +837,15 @@ async fn raw_trace_rls_counts(
         credit_holds: row.get("credit_holds"),
         near_credit_outbox: row.get("near_credit_outbox"),
         near_credit_account_outbox: row.get("near_credit_account_outbox"),
+        ranking_model_versions: row.get("ranking_model_versions"),
+        ranking_calibration_datasets: row.get("ranking_calibration_datasets"),
+        ranking_features: row.get("ranking_features"),
+        ranking_predictions: row.get("ranking_predictions"),
+        ranking_labels: row.get("ranking_labels"),
+        ranking_preference_labels: row.get("ranking_preference_labels"),
+        ranking_calibration_runs: row.get("ranking_calibration_runs"),
+        ranking_worker_runs: row.get("ranking_worker_runs"),
+        benchmark_registry_outbox: row.get("benchmark_registry_outbox"),
         tombstones: row.get("tombstones"),
         retention_jobs: row.get("retention_jobs"),
         retention_job_items: row.get("retention_job_items"),
@@ -2822,6 +3096,49 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
     )
     .await;
 
+    let tenant_a_ranking_control_ids = RawRankingControlPlaneIds {
+        secondary_submission_id: Uuid::new_v4(),
+        secondary_trace_id: Uuid::new_v4(),
+        ranking_feature_id: Uuid::new_v4(),
+        ranking_prediction_id: Uuid::new_v4(),
+        ranking_label_id: Uuid::new_v4(),
+        preference_label_id: Uuid::new_v4(),
+        calibration_run_id: Uuid::new_v4(),
+        ranking_worker_run_id: Uuid::new_v4(),
+        benchmark_outbox_id: Uuid::new_v4(),
+        benchmark_conversion_id: Uuid::new_v4(),
+    };
+    write_sample_ranking_and_benchmark_control_plane_rows(
+        &backend,
+        &tenant_a,
+        tenant_a_submission_id,
+        tenant_a_trace_id,
+        tenant_a_ranking_control_ids,
+        "raw-a",
+    )
+    .await;
+    let tenant_b_ranking_control_ids = RawRankingControlPlaneIds {
+        secondary_submission_id: Uuid::new_v4(),
+        secondary_trace_id: Uuid::new_v4(),
+        ranking_feature_id: Uuid::new_v4(),
+        ranking_prediction_id: Uuid::new_v4(),
+        ranking_label_id: Uuid::new_v4(),
+        preference_label_id: Uuid::new_v4(),
+        calibration_run_id: Uuid::new_v4(),
+        ranking_worker_run_id: Uuid::new_v4(),
+        benchmark_outbox_id: Uuid::new_v4(),
+        benchmark_conversion_id: Uuid::new_v4(),
+    };
+    write_sample_ranking_and_benchmark_control_plane_rows(
+        &backend,
+        &tenant_b,
+        tenant_b_submission_id,
+        tenant_b_trace_id,
+        tenant_b_ranking_control_ids,
+        "raw-b",
+    )
+    .await;
+
     let effective_at = DateTime::parse_from_rfc3339("2026-04-25T12:00:00Z")
         .expect("parse effective timestamp")
         .with_timezone(&Utc);
@@ -3018,6 +3335,13 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
                 credit_hold_id: tenant_a_credit_control_ids.credit_hold_id,
                 near_outbox_id: tenant_a_credit_control_ids.near_outbox_id,
                 near_account_outbox_id: tenant_a_credit_control_ids.near_account_outbox_id,
+                ranking_feature_id: tenant_a_ranking_control_ids.ranking_feature_id,
+                ranking_prediction_id: tenant_a_ranking_control_ids.ranking_prediction_id,
+                ranking_label_id: tenant_a_ranking_control_ids.ranking_label_id,
+                preference_label_id: tenant_a_ranking_control_ids.preference_label_id,
+                calibration_run_id: tenant_a_ranking_control_ids.calibration_run_id,
+                ranking_worker_run_id: tenant_a_ranking_control_ids.ranking_worker_run_id,
+                benchmark_outbox_id: tenant_a_ranking_control_ids.benchmark_outbox_id,
                 tombstone_id: tenant_a_tombstone_id,
                 retention_job_id: tenant_a_retention_job_id,
                 propagation_item_id: tenant_a_propagation_item_id,
@@ -3032,6 +3356,13 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
                 credit_hold_id: tenant_b_credit_control_ids.credit_hold_id,
                 near_outbox_id: tenant_b_credit_control_ids.near_outbox_id,
                 near_account_outbox_id: tenant_b_credit_control_ids.near_account_outbox_id,
+                ranking_feature_id: tenant_b_ranking_control_ids.ranking_feature_id,
+                ranking_prediction_id: tenant_b_ranking_control_ids.ranking_prediction_id,
+                ranking_label_id: tenant_b_ranking_control_ids.ranking_label_id,
+                preference_label_id: tenant_b_ranking_control_ids.preference_label_id,
+                calibration_run_id: tenant_b_ranking_control_ids.calibration_run_id,
+                ranking_worker_run_id: tenant_b_ranking_control_ids.ranking_worker_run_id,
+                benchmark_outbox_id: tenant_b_ranking_control_ids.benchmark_outbox_id,
                 tombstone_id: tenant_b_tombstone_id,
                 retention_job_id: tenant_b_retention_job_id,
                 propagation_item_id: tenant_b_propagation_item_id,
