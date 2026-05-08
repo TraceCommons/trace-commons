@@ -84056,6 +84056,35 @@ mod tests {
             seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-credit-cycle-sched-v1")
                 .await;
 
+        let mut tenant_b_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_b_envelope);
+        tenant_b_envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        tenant_b_envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        tenant_b_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let tenant_b_submission_id = tenant_b_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_envelope),
+        )
+        .await
+        .expect("tenant-b training submission succeeds");
+        let Json(_) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-b"),
+            AxumPath(tenant_b_submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 2.0,
+                reason: Some(
+                    "tenant-b utility outside scheduled tenant-a credit cycle".to_string(),
+                ),
+                external_ref: Some("frontier:tenant-b-credit-cycle-scheduler-boundary".to_string()),
+            }),
+        )
+        .await
+        .expect("tenant-b reviewer can append training credit");
+
         let Json(scheduler) = credit_cycle_scheduler_run_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
@@ -84114,6 +84143,16 @@ mod tests {
                 .filter(|run| run.run_kind == TraceRankingWorkerRunKind::CreditCycle)
                 .count(),
             1
+        );
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-b")
+                .expect("tenant-b settlement batches read")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-b")
+                .expect("tenant-b outbox reads")
+                .is_empty()
         );
     }
 
