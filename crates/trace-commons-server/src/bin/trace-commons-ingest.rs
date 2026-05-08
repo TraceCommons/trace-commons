@@ -7650,6 +7650,10 @@ struct TraceCreditSettlementDrillRequest {
     #[serde(default)]
     require_near_contract: Option<bool>,
     #[serde(default)]
+    require_near_submitter: Option<bool>,
+    #[serde(default)]
+    require_near_confirmer: Option<bool>,
+    #[serde(default)]
     require_account_cap: Option<bool>,
     #[serde(default)]
     require_issuer_approval: Option<bool>,
@@ -8385,6 +8389,10 @@ struct TraceCreditSettlementDrillResponse {
     require_pending: bool,
     require_near_contract: bool,
     near_contract_configured: bool,
+    require_near_submitter: bool,
+    near_submitter_configured: bool,
+    require_near_confirmer: bool,
+    near_confirmer_configured: bool,
     require_account_cap: bool,
     settlement_account_cap_configured: bool,
     require_issuer_approval: bool,
@@ -10557,12 +10565,20 @@ async fn run_credit_settlement_drill(
     let account_limit = validate_credit_risk_summary_account_limit(request.account_limit)?;
     let require_pending = request.require_pending.unwrap_or(true);
     let require_near_contract = request.require_near_contract.unwrap_or(true);
+    let require_near_submitter = request
+        .require_near_submitter
+        .unwrap_or(require_near_contract);
+    let require_near_confirmer = request
+        .require_near_confirmer
+        .unwrap_or(require_near_contract);
     let require_account_cap = request.require_account_cap.unwrap_or(true);
     let require_issuer_approval = request
         .require_issuer_approval
         .unwrap_or(state.credit_settlement_require_issuer_approval);
     let settlement_account_cap_configured =
         state.credit_settlement_max_micros_per_account.is_some();
+    let near_submitter_configured = state.near_credit_submitter.is_some();
+    let near_confirmer_configured = state.near_credit_confirmer.is_some();
     let issuer_approval_evidence_hash = validate_credit_settlement_issuer_approval_evidence_hash(
         request.issuer_approval_evidence_hash.as_deref(),
     )?;
@@ -10594,6 +10610,10 @@ async fn run_credit_settlement_drill(
         require_pending,
         require_near_contract,
         near_contract_configured: near_contract_id.is_some(),
+        require_near_submitter,
+        near_submitter_configured,
+        require_near_confirmer,
+        near_confirmer_configured,
         require_account_cap,
         settlement_account_cap_configured,
         require_issuer_approval,
@@ -10620,6 +10640,10 @@ async fn run_credit_settlement_drill(
         require_pending: readiness.require_pending,
         require_near_contract: readiness.require_near_contract,
         near_contract_configured: readiness.near_contract_configured,
+        require_near_submitter: readiness.require_near_submitter,
+        near_submitter_configured: readiness.near_submitter_configured,
+        require_near_confirmer: readiness.require_near_confirmer,
+        near_confirmer_configured: readiness.near_confirmer_configured,
         require_account_cap: readiness.require_account_cap,
         settlement_account_cap_configured: readiness.settlement_account_cap_configured,
         require_issuer_approval: readiness.require_issuer_approval,
@@ -10685,6 +10709,10 @@ struct TraceCreditSettlementDrillReadiness {
     require_pending: bool,
     require_near_contract: bool,
     near_contract_configured: bool,
+    require_near_submitter: bool,
+    near_submitter_configured: bool,
+    require_near_confirmer: bool,
+    near_confirmer_configured: bool,
     require_account_cap: bool,
     settlement_account_cap_configured: bool,
     require_issuer_approval: bool,
@@ -10699,6 +10727,12 @@ fn credit_settlement_drill_blocking_gaps(
     let mut blocking_gaps = Vec::new();
     if readiness.require_near_contract && !readiness.near_contract_configured {
         blocking_gaps.push("near_contract_id_missing".to_string());
+    }
+    if readiness.require_near_submitter && !readiness.near_submitter_configured {
+        blocking_gaps.push("near_credit_submitter_missing".to_string());
+    }
+    if readiness.require_near_confirmer && !readiness.near_confirmer_configured {
+        blocking_gaps.push("near_credit_confirmer_missing".to_string());
     }
     if readiness.require_issuer_approval && !readiness.issuer_approval_evidence_configured {
         blocking_gaps.push("issuer_approval_evidence_hash_missing".to_string());
@@ -10765,6 +10799,10 @@ fn credit_settlement_drill_evidence_hash(
             "require_pending": readiness.require_pending,
             "require_near_contract": readiness.require_near_contract,
             "near_contract_configured": readiness.near_contract_configured,
+            "require_near_submitter": readiness.require_near_submitter,
+            "near_submitter_configured": readiness.near_submitter_configured,
+            "require_near_confirmer": readiness.require_near_confirmer,
+            "near_confirmer_configured": readiness.near_confirmer_configured,
             "require_account_cap": readiness.require_account_cap,
             "settlement_account_cap_configured": readiness.settlement_account_cap_configured,
             "require_issuer_approval": readiness.require_issuer_approval,
@@ -72875,7 +72913,11 @@ mod tests {
         use tower::ServiceExt;
 
         let temp = tempfile::tempdir().expect("temp dir");
-        let state = test_state(temp.path().to_path_buf());
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).near_credit_submitter =
+            Some(Arc::new(FakeNearCreditSubmitter::default()));
+        Arc::make_mut(&mut state).near_credit_confirmer =
+            Some(Arc::new(FakeNearCreditConfirmer::default()));
         let mut envelope = sample_envelope().await;
         make_metadata_only_low_risk(&mut envelope);
         envelope.consent.scopes = vec![ConsentScope::ModelTraining];
@@ -73009,6 +73051,10 @@ mod tests {
         let mut state = test_state(temp.path().to_path_buf());
         Arc::make_mut(&mut state).credit_settlement_max_micros_per_account = Some(2_000_000);
         Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
+        Arc::make_mut(&mut state).near_credit_submitter =
+            Some(Arc::new(FakeNearCreditSubmitter::default()));
+        Arc::make_mut(&mut state).near_credit_confirmer =
+            Some(Arc::new(FakeNearCreditConfirmer::default()));
         let mut envelope = sample_envelope().await;
         make_metadata_only_low_risk(&mut envelope);
         envelope.consent.scopes = vec![ConsentScope::ModelTraining];
@@ -73147,6 +73193,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn credit_settlement_drill_requires_near_adapters_by_default() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_max_micros_per_account = Some(2_000_000);
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 0.75,
+                reason: Some("frontier lab near adapter drill probe".to_string()),
+                external_ref: Some("lab-attestation:near-adapter-drill".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+
+        let missing_adapters_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlement-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "policy_version": "trace-credit-policy-v1",
+                            "near_contract_id": "trace-credits.testnet",
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("missing adapter drill request builds"),
+            )
+            .await
+            .expect("missing adapter drill response");
+        assert_eq!(missing_adapters_response.status(), StatusCode::OK);
+        let missing_body = axum::body::to_bytes(missing_adapters_response.into_body(), 16384)
+            .await
+            .expect("missing adapter body reads");
+        let missing: serde_json::Value =
+            serde_json::from_slice(&missing_body).expect("missing adapter json parses");
+        assert_eq!(missing["ready"], serde_json::json!(false));
+        assert_eq!(missing["require_near_submitter"], serde_json::json!(true));
+        assert_eq!(
+            missing["near_submitter_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(missing["require_near_confirmer"], serde_json::json!(true));
+        assert_eq!(
+            missing["near_confirmer_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            missing["blocking_gaps"],
+            serde_json::json!([
+                "near_credit_submitter_missing",
+                "near_credit_confirmer_missing"
+            ])
+        );
+        assert_eq!(
+            missing["recorded_evidence"]["status"],
+            serde_json::json!("failed")
+        );
+
+        let opt_out_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlement-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "policy_version": "trace-credit-policy-v1",
+                            "near_contract_id": "trace-credits.testnet",
+                            "require_near_submitter": false,
+                            "require_near_confirmer": false
+                        })
+                        .to_string(),
+                    ))
+                    .expect("adapter opt-out drill request builds"),
+            )
+            .await
+            .expect("adapter opt-out drill response");
+        assert_eq!(opt_out_response.status(), StatusCode::OK);
+        let opt_out_body = axum::body::to_bytes(opt_out_response.into_body(), 16384)
+            .await
+            .expect("adapter opt-out body reads");
+        let opt_out: serde_json::Value =
+            serde_json::from_slice(&opt_out_body).expect("adapter opt-out json parses");
+        assert_eq!(opt_out["ready"], serde_json::json!(true));
+        assert_eq!(opt_out["require_near_submitter"], serde_json::json!(false));
+        assert_eq!(opt_out["require_near_confirmer"], serde_json::json!(false));
+        assert_eq!(opt_out["blocking_gaps"], serde_json::json!([]));
+
+        let body_text = std::str::from_utf8(&opt_out_body).expect("opt-out response is utf8");
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("token-a"));
+        assert!(!body_text.contains(&event.event_id.to_string()));
+        assert!(!body_text.contains("frontier lab near adapter drill probe"));
+        assert!(!body_text.contains("lab-attestation:near-adapter-drill"));
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement reads")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn admin_credit_settlement_drill_dry_runs_risk_and_records_smoke_evidence() {
         use axum::body::Body;
         use tower::ServiceExt;
@@ -73154,6 +73334,10 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
         Arc::make_mut(&mut state).credit_settlement_max_micros_per_account = Some(1_000_000);
+        Arc::make_mut(&mut state).near_credit_submitter =
+            Some(Arc::new(FakeNearCreditSubmitter::default()));
+        Arc::make_mut(&mut state).near_credit_confirmer =
+            Some(Arc::new(FakeNearCreditConfirmer::default()));
 
         let mut high_utility = sample_envelope().await;
         make_metadata_only_low_risk(&mut high_utility);

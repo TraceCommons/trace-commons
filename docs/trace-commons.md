@@ -530,14 +530,18 @@ credentials.
 `POST /v1/admin/credit-settlement-drill` runs the Trace Credits settlement
 promotion check through the admin credit-risk summary plus the existing dry-run
 settlement selector. It validates a supplied NEAR contract id without writing
-settlement batches or NEAR outbox rows, requires a configured per-account issuer
-cap by default unless `require_account_cap` is explicitly disabled, and requires
-a sha256-prefixed `issuer_approval_evidence_hash` when
+settlement batches or NEAR outbox rows, requires the NEAR submitter and
+confirmer adapters by default when the contract check is required unless
+`require_near_submitter` or `require_near_confirmer` is explicitly disabled for
+a pilot rehearsal, requires a configured per-account issuer cap by default
+unless `require_account_cap` is explicitly disabled, and requires a
+sha256-prefixed `issuer_approval_evidence_hash` when
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` or the request
 sets `require_issuer_approval: true`. The drill returns only safe account
 hashes, aggregate risk counts, settlement exclusion reason counts, blocker
-codes, issuer-approval readiness booleans, and a sha256-prefixed evidence hash,
-and can append `credit_settlement` rollout-smoke evidence directly.
+codes, NEAR adapter readiness booleans, issuer-approval readiness booleans, and
+a sha256-prefixed evidence hash, and can append `credit_settlement`
+rollout-smoke evidence directly.
 Final settlement requests can include `issuer_approval_evidence_hash` to bind
 the batch to a central operator approval artifact. Set
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` to reject live
