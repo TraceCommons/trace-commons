@@ -210,6 +210,34 @@ fn sample_unhashed_audit_event(tenant_id: &str, submission_id: Uuid) -> TraceAud
     }
 }
 
+fn sample_raw_rls_audit_event(
+    tenant_id: &str,
+    submission_id: Uuid,
+    audit_event_id: Uuid,
+    label: &str,
+) -> TraceAuditEventWrite {
+    TraceAuditEventWrite {
+        tenant_id: tenant_id.to_string(),
+        audit_event_id,
+        submission_id: Some(submission_id),
+        actor_principal_ref: format!("principal:{tenant_id}:raw-rls"),
+        actor_role: "rls_tester".to_string(),
+        action: TraceAuditAction::Read,
+        reason: Some(format!("raw RLS audit probe {label}")),
+        request_id: Some(format!("request:{label}:audit")),
+        object_ref_id: None,
+        export_manifest_id: None,
+        decision_inputs_hash: None,
+        previous_event_hash: None,
+        event_hash: None,
+        canonical_event_json: None,
+        metadata: TraceAuditSafeMetadata::Read {
+            surface: "raw_rls_probe".to_string(),
+            item_count: 1,
+        },
+    }
+}
+
 fn sample_credit_event(
     tenant_id: &str,
     submission_id: Uuid,
@@ -270,6 +298,7 @@ struct RawTraceRlsIds {
     export_manifest_id: Uuid,
     export_access_grant_id: Uuid,
     export_job_id: Uuid,
+    audit_event_id: Uuid,
     credit_event_id: Uuid,
     utility_attestation_id: Uuid,
     settlement_batch_id: Uuid,
@@ -298,6 +327,7 @@ struct RawTraceRlsCounts {
     export_manifest_items: i64,
     export_access_grants: i64,
     export_jobs: i64,
+    audit_events: i64,
     credit_events: i64,
     utility_attestations: i64,
     credit_settlement_batches: i64,
@@ -330,6 +360,7 @@ impl RawTraceRlsCounts {
             export_manifest_items: count,
             export_access_grants: count,
             export_jobs: count,
+            audit_events: count,
             credit_events: count,
             utility_attestations: count,
             credit_settlement_batches: count,
@@ -798,25 +829,26 @@ async fn raw_trace_rls_counts(
                 (SELECT COUNT(*) FROM trace_export_manifest_items WHERE export_manifest_id = $5) AS export_manifest_items,
                 (SELECT COUNT(*) FROM trace_export_access_grants WHERE grant_id = $6) AS export_access_grants,
                 (SELECT COUNT(*) FROM trace_export_jobs WHERE export_job_id = $7) AS export_jobs,
-                (SELECT COUNT(*) FROM trace_credit_ledger WHERE credit_event_id = $8) AS credit_events,
-                (SELECT COUNT(*) FROM trace_utility_attestations WHERE attestation_id = $9) AS utility_attestations,
-                (SELECT COUNT(*) FROM trace_credit_settlement_batches WHERE settlement_batch_id = $10) AS credit_settlement_batches,
-                (SELECT COUNT(*) FROM trace_credit_holds WHERE hold_id = $11) AS credit_holds,
-                (SELECT COUNT(*) FROM trace_near_credit_outbox WHERE near_outbox_id = $12) AS near_credit_outbox,
-                (SELECT COUNT(*) FROM trace_near_credit_account_outbox WHERE near_outbox_id = $13) AS near_credit_account_outbox,
+                (SELECT COUNT(*) FROM trace_audit_events WHERE audit_event_id = $8) AS audit_events,
+                (SELECT COUNT(*) FROM trace_credit_ledger WHERE credit_event_id = $9) AS credit_events,
+                (SELECT COUNT(*) FROM trace_utility_attestations WHERE attestation_id = $10) AS utility_attestations,
+                (SELECT COUNT(*) FROM trace_credit_settlement_batches WHERE settlement_batch_id = $11) AS credit_settlement_batches,
+                (SELECT COUNT(*) FROM trace_credit_holds WHERE hold_id = $12) AS credit_holds,
+                (SELECT COUNT(*) FROM trace_near_credit_outbox WHERE near_outbox_id = $13) AS near_credit_outbox,
+                (SELECT COUNT(*) FROM trace_near_credit_account_outbox WHERE near_outbox_id = $14) AS near_credit_account_outbox,
                 (SELECT COUNT(*) FROM trace_ranking_model_versions WHERE model_version = 'trace-ranker-raw-rls-v1') AS ranking_model_versions,
                 (SELECT COUNT(*) FROM trace_ranking_calibration_datasets WHERE calibration_dataset_hash = 'sha256:raw-rls-calibration-dataset') AS ranking_calibration_datasets,
-                (SELECT COUNT(*) FROM trace_ranking_features WHERE ranking_feature_id = $14) AS ranking_features,
-                (SELECT COUNT(*) FROM trace_ranking_predictions WHERE ranking_prediction_id = $15) AS ranking_predictions,
-                (SELECT COUNT(*) FROM trace_ranking_labels WHERE ranking_label_id = $16) AS ranking_labels,
-                (SELECT COUNT(*) FROM trace_ranking_preference_labels WHERE preference_label_id = $17) AS ranking_preference_labels,
-                (SELECT COUNT(*) FROM trace_ranking_calibration_runs WHERE calibration_run_id = $18) AS ranking_calibration_runs,
-                (SELECT COUNT(*) FROM trace_ranking_worker_runs WHERE ranking_worker_run_id = $19) AS ranking_worker_runs,
-                (SELECT COUNT(*) FROM trace_benchmark_registry_outbox WHERE benchmark_outbox_id = $20) AS benchmark_registry_outbox,
-                (SELECT COUNT(*) FROM trace_tombstones WHERE tombstone_id = $21) AS tombstones,
-                (SELECT COUNT(*) FROM trace_retention_jobs WHERE retention_job_id = $22) AS retention_jobs,
-                (SELECT COUNT(*) FROM trace_retention_job_items WHERE retention_job_id = $22) AS retention_job_items,
-                (SELECT COUNT(*) FROM trace_revocation_propagation_items WHERE propagation_item_id = $23) AS revocation_propagation_items",
+                (SELECT COUNT(*) FROM trace_ranking_features WHERE ranking_feature_id = $15) AS ranking_features,
+                (SELECT COUNT(*) FROM trace_ranking_predictions WHERE ranking_prediction_id = $16) AS ranking_predictions,
+                (SELECT COUNT(*) FROM trace_ranking_labels WHERE ranking_label_id = $17) AS ranking_labels,
+                (SELECT COUNT(*) FROM trace_ranking_preference_labels WHERE preference_label_id = $18) AS ranking_preference_labels,
+                (SELECT COUNT(*) FROM trace_ranking_calibration_runs WHERE calibration_run_id = $19) AS ranking_calibration_runs,
+                (SELECT COUNT(*) FROM trace_ranking_worker_runs WHERE ranking_worker_run_id = $20) AS ranking_worker_runs,
+                (SELECT COUNT(*) FROM trace_benchmark_registry_outbox WHERE benchmark_outbox_id = $21) AS benchmark_registry_outbox,
+                (SELECT COUNT(*) FROM trace_tombstones WHERE tombstone_id = $22) AS tombstones,
+                (SELECT COUNT(*) FROM trace_retention_jobs WHERE retention_job_id = $23) AS retention_jobs,
+                (SELECT COUNT(*) FROM trace_retention_job_items WHERE retention_job_id = $23) AS retention_job_items,
+                (SELECT COUNT(*) FROM trace_revocation_propagation_items WHERE propagation_item_id = $24) AS revocation_propagation_items",
             &[
                 &ids.submission_id,
                 &ids.object_ref_id,
@@ -825,6 +857,7 @@ async fn raw_trace_rls_counts(
                 &ids.export_manifest_id,
                 &ids.export_access_grant_id,
                 &ids.export_job_id,
+                &ids.audit_event_id,
                 &ids.credit_event_id,
                 &ids.utility_attestation_id,
                 &ids.settlement_batch_id,
@@ -855,6 +888,7 @@ async fn raw_trace_rls_counts(
         export_manifest_items: row.get("export_manifest_items"),
         export_access_grants: row.get("export_access_grants"),
         export_jobs: row.get("export_jobs"),
+        audit_events: row.get("audit_events"),
         credit_events: row.get("credit_events"),
         utility_attestations: row.get("utility_attestations"),
         credit_settlement_batches: row.get("credit_settlement_batches"),
@@ -3252,6 +3286,27 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
         .await
         .expect("append tenant B export job");
 
+    let tenant_a_audit_event_id = Uuid::new_v4();
+    backend
+        .append_trace_audit_event(sample_raw_rls_audit_event(
+            &tenant_a,
+            tenant_a_submission_id,
+            tenant_a_audit_event_id,
+            "raw-a",
+        ))
+        .await
+        .expect("append tenant A audit event");
+    let tenant_b_audit_event_id = Uuid::new_v4();
+    backend
+        .append_trace_audit_event(sample_raw_rls_audit_event(
+            &tenant_b,
+            tenant_b_submission_id,
+            tenant_b_audit_event_id,
+            "raw-b",
+        ))
+        .await
+        .expect("append tenant B audit event");
+
     let tenant_a_credit_event_id = Uuid::new_v4();
     backend
         .append_trace_credit_event(sample_credit_event(
@@ -3543,6 +3598,7 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
                 export_manifest_id: tenant_a_export_manifest_id,
                 export_access_grant_id: tenant_a_export_grant_id,
                 export_job_id: tenant_a_export_job_id,
+                audit_event_id: tenant_a_audit_event_id,
                 credit_event_id: tenant_a_credit_event_id,
                 utility_attestation_id: tenant_a_credit_control_ids.utility_attestation_id,
                 settlement_batch_id: tenant_a_credit_control_ids.settlement_batch_id,
@@ -3568,6 +3624,7 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
                 export_manifest_id: tenant_b_export_manifest_id,
                 export_access_grant_id: tenant_b_export_grant_id,
                 export_job_id: tenant_b_export_job_id,
+                audit_event_id: tenant_b_audit_event_id,
                 credit_event_id: tenant_b_credit_event_id,
                 utility_attestation_id: tenant_b_credit_control_ids.utility_attestation_id,
                 settlement_batch_id: tenant_b_credit_control_ids.settlement_batch_id,
