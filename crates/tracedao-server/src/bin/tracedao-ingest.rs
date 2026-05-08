@@ -12838,7 +12838,34 @@ async fn run_near_credit_outbox_confirm_worker(
         .context("NEAR credit outbox confirmer is not configured")?
         .clone();
     for item in candidates {
-        let confirm_request = near_credit_confirmation_request_from_outbox_item(&item)?;
+        let confirm_request = match near_credit_confirmation_request_from_outbox_item(&item) {
+            Ok(request) => request,
+            Err(error) => {
+                let last_error_hash = sha256_prefixed(&safe_worker_error(&error));
+                let near_transaction_hash = item
+                    .near_transaction_hash
+                    .as_deref()
+                    .and_then(|hash| normalize_near_transaction_hash(hash).ok());
+                update_near_credit_outbox_item_status_with_db_mirror(
+                    state,
+                    tenant,
+                    item.near_outbox_id,
+                    StorageTraceCreditSettlementNearStatus::Failed,
+                    near_transaction_hash,
+                    Some(last_error_hash),
+                )
+                .await?
+                .with_context(|| {
+                    format!(
+                        "NEAR credit outbox item {} disappeared before invalid-confirmation status update",
+                        item.near_outbox_id
+                    )
+                })?;
+                response.failed += 1;
+                response.pending = response.pending.saturating_sub(1);
+                continue;
+            }
+        };
         match confirmer.confirm(confirm_request).await {
             Ok(confirm_response) => match confirm_response.status {
                 TraceNearCreditConfirmationStatus::Confirmed => {
@@ -75979,6 +76006,58 @@ mod tests {
         assert_eq!(
             outbox[0].status,
             StorageTraceCreditSettlementNearStatus::Submitted
+        );
+        assert_eq!(
+            outbox[0].near_transaction_hash.as_deref(),
+            Some(TEST_NEAR_TX_HASH_1)
+        );
+        assert!(outbox[0].confirmed_at.is_none());
+        assert!(outbox[0].last_error_hash.is_some());
+    }
+
+    #[tokio::test]
+    async fn near_credit_outbox_confirm_worker_rejects_tampered_method_call_before_confirmer() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let fake_confirmer = FakeNearCreditConfirmer::default();
+        let confirmation_calls = fake_confirmer.calls.clone();
+        Arc::make_mut(&mut state).near_credit_confirmer = Some(Arc::new(fake_confirmer));
+
+        let near_outbox_id = Uuid::new_v4();
+        let mut item =
+            submitted_near_credit_outbox_item(near_outbox_id, TEST_NEAR_TX_HASH_1, 1_000_000);
+        item.near_call.idempotency_key = "sha256:tampered-confirmation".to_string();
+        append_near_credit_outbox_item(temp.path(), "tenant-a", &item)
+            .expect("NEAR outbox file writes");
+
+        let Json(response) = near_credit_outbox_confirm_worker_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxConfirmWorkerRequest {
+                purpose: Some("confirm_near_tampered_receipt".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("invalid stored NEAR call is recorded as a confirmation item failure");
+
+        assert_eq!(response.checked, 1);
+        assert_eq!(response.confirmed, 0);
+        assert_eq!(response.failed, 1);
+        assert_eq!(response.pending, 0);
+        assert!(
+            confirmation_calls
+                .lock()
+                .expect("fake NEAR credit confirmer calls lock")
+                .is_empty(),
+            "tampered method call must not reach the NEAR confirmer"
+        );
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert_eq!(
+            outbox[0].status,
+            StorageTraceCreditSettlementNearStatus::Failed
         );
         assert_eq!(
             outbox[0].near_transaction_hash.as_deref(),
