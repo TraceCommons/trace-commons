@@ -62098,6 +62098,7 @@ mod tests {
             return;
         };
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let db_mirror: Arc<dyn Database> = backend.clone();
@@ -62114,6 +62115,8 @@ mod tests {
         let bad_job_id = Uuid::new_v4();
         let benchmark_job_id = Uuid::new_v4();
         let ranker_job_id = Uuid::new_v4();
+        let tenant_b_job_id = Uuid::new_v4();
+        let tenant_b_grant_id = Uuid::new_v4();
         for (export_job_id, dataset_kind, purpose, requested_at, metadata) in [
             (
                 bad_job_id,
@@ -62188,6 +62191,53 @@ mod tests {
                 .await
                 .expect("queued export job writes");
         }
+        backend
+            .upsert_trace_export_access_grant(StorageTraceExportAccessGrantWrite {
+                tenant_id: "tenant-b".to_string(),
+                export_job_id: tenant_b_job_id,
+                grant_id: tenant_b_grant_id,
+                caller_principal_ref: principal_storage_ref("export-worker-token-b"),
+                requested_dataset_kind: TraceExportDatasetKind::ReplayDataset
+                    .storage_name()
+                    .to_string(),
+                purpose: "tenant-b queued replay scheduler job".to_string(),
+                max_item_cap: Some(5),
+                status: StorageTraceExportAccessGrantStatus::Active,
+                requested_at: now - Duration::minutes(7),
+                expires_at: now + Duration::minutes(30),
+                metadata: BTreeMap::from([("grant_type".to_string(), "queued".to_string())]),
+            })
+            .await
+            .expect("tenant-b export grant writes");
+        backend
+            .upsert_trace_export_job(StorageTraceExportJobWrite {
+                tenant_id: "tenant-b".to_string(),
+                export_job_id: tenant_b_job_id,
+                grant_id: tenant_b_grant_id,
+                caller_principal_ref: principal_storage_ref("export-worker-token-b"),
+                requested_dataset_kind: TraceExportDatasetKind::ReplayDataset
+                    .storage_name()
+                    .to_string(),
+                purpose: "tenant-b queued replay scheduler job".to_string(),
+                max_item_cap: Some(5),
+                status: StorageTraceExportJobStatus::Queued,
+                requested_at: now - Duration::minutes(7),
+                started_at: None,
+                finished_at: None,
+                expires_at: now + Duration::minutes(30),
+                result_manifest_id: None,
+                item_count: None,
+                last_error: None,
+                metadata: export_job_request_metadata(
+                    Some(5),
+                    Some(TraceCorpusStatus::Accepted),
+                    Some(ResidualPiiRisk::Low),
+                    Some(ConsentScope::DebuggingEvaluation),
+                    None,
+                ),
+            })
+            .await
+            .expect("tenant-b queued export job writes");
 
         let Json(response) = worker_export_jobs_run_queued_handler(
             State(state.clone()),
@@ -62243,8 +62293,18 @@ mod tests {
                 Some("completed")
             );
         }
+        let tenant_b_jobs = backend
+            .list_trace_export_jobs("tenant-b")
+            .await
+            .expect("tenant-b jobs list");
+        let tenant_b_job = tenant_b_jobs
+            .iter()
+            .find(|job| job.export_job_id == tenant_b_job_id)
+            .expect("tenant-b job remains");
+        assert_eq!(tenant_b_job.status, StorageTraceExportJobStatus::Queued);
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
     }
 
     #[tokio::test]
