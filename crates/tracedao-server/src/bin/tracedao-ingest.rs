@@ -86977,6 +86977,68 @@ mod tests {
         .await
         .expect("other tenant credit event mirrors to DB");
 
+        let tenant_b_hold_error = credit_hold_handler(
+            State(state.clone()),
+            auth_headers("admin-token-b"),
+            Json(TraceCreditHoldRequest {
+                credit_account_ref: event.auth_principal_ref.clone(),
+                reason: StorageTraceCreditHoldReason::AttestationDispute,
+                reason_detail: "tenant-b cannot hold tenant-a DB ledger account".to_string(),
+            }),
+        )
+        .await
+        .expect_err("tenant-b admin cannot hold tenant-a DB-backed ledger account");
+        assert_eq!(tenant_b_hold_error.0, StatusCode::NOT_FOUND);
+
+        let Json(db_hold) = credit_hold_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditHoldRequest {
+                credit_account_ref: event.auth_principal_ref.clone(),
+                reason: StorageTraceCreditHoldReason::AttestationDispute,
+                reason_detail: "DB-backed hold placement".to_string(),
+            }),
+        )
+        .await
+        .expect("tenant-a admin can place DB-backed hold");
+        assert_eq!(db_hold.credit_account_ref, event.auth_principal_ref);
+
+        let tenant_a_db_holds = backend
+            .list_trace_credit_holds("tenant-a")
+            .await
+            .expect("tenant-a DB holds read after placement");
+        assert_eq!(tenant_a_db_holds.len(), 1);
+        assert_eq!(tenant_a_db_holds[0].hold_id, db_hold.hold_id);
+        assert!(tenant_a_db_holds[0].released_at.is_none());
+        assert!(
+            backend
+                .list_trace_credit_holds("tenant-b")
+                .await
+                .expect("tenant-b DB holds read after failed placement")
+                .is_empty()
+        );
+
+        let Json(released_hold) = credit_hold_release_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            AxumPath(db_hold.hold_id),
+            Json(TraceCreditHoldReleaseRequest {
+                reason_detail: "DB-backed hold release".to_string(),
+            }),
+        )
+        .await
+        .expect("tenant-a admin can release DB-backed hold");
+        assert_eq!(released_hold.hold_id, db_hold.hold_id);
+        assert!(released_hold.released_at.is_some());
+
+        let tenant_a_db_holds = backend
+            .list_trace_credit_holds("tenant-a")
+            .await
+            .expect("tenant-a DB holds read after release");
+        assert_eq!(tenant_a_db_holds.len(), 1);
+        assert_eq!(tenant_a_db_holds[0].hold_id, db_hold.hold_id);
+        assert!(tenant_a_db_holds[0].released_at.is_some());
+
         let Json(finalized) = credit_settlement_handler(
             State(state.clone()),
             auth_headers("admin-token-a"),
