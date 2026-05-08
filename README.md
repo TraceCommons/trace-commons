@@ -76,9 +76,10 @@ from finalized batches, and revocation propagation can append deterministic
 negative ledger rows plus `reverse_credit_receipt` NEAR outbox calls for settled
 revoked sources. Reviewer/admin credit summaries report tenant-wide settled line
 items while contributor summaries stay principal-scoped. Admins can place and
-release credit holds around fraud/review investigations; active holds block
-settlement, and released holds project current state so later settlement resumes
-without exposing raw hold/release reason text. Hold placement and release also
+release credit holds around fraud/review investigations for existing
+tenant-local credit ledger accounts; active holds block settlement, and released
+holds project current state so later settlement resumes without exposing raw
+hold/release reason text. Hold placement and release also
 append hash-only credit-mutation audit rows. When a central NEAR contract is
 configured, those hold transitions enqueue account freeze/unfreeze outbox rows
 for the non-transferable contract. With the DB mirror configured, utility
