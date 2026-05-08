@@ -112,6 +112,11 @@ const TRACE_NEAR_CREDIT_OUTBOX_COLUMNS: &str = "\
     tenant_id, near_outbox_id, settlement_batch_id, credit_account_hash, near_call_json, \
     status, created_at, submitted_at, near_transaction_hash, last_error_hash, confirmed_at";
 
+const TRACE_NEAR_CREDIT_ACCOUNT_OUTBOX_COLUMNS: &str = "\
+    tenant_id, near_outbox_id, credit_hold_id AS settlement_batch_id, credit_account_hash, \
+    near_call_json, status, created_at, submitted_at, near_transaction_hash, last_error_hash, \
+    confirmed_at";
+
 const TRACE_BENCHMARK_REGISTRY_OUTBOX_COLUMNS: &str = "\
     tenant_id, benchmark_outbox_id, conversion_id, operation, registry_ref, \
     artifact_payload_hash, source_submission_ids_hash, evaluator_ref, evaluation_score, \
@@ -528,6 +533,19 @@ fn row_to_near_credit_outbox_item(
         near_transaction_hash: row.get("near_transaction_hash"),
         last_error_hash: row.get("last_error_hash"),
         confirmed_at: row.get("confirmed_at"),
+    })
+}
+
+fn near_credit_call_method_name(call: &serde_json::Value) -> Option<&str> {
+    call.get("method_name").and_then(serde_json::Value::as_str)
+}
+
+fn near_credit_call_is_account_operation(call: &serde_json::Value) -> bool {
+    near_credit_call_method_name(call).is_some_and(|method_name| {
+        matches!(
+            method_name,
+            "freeze_credit_account" | "unfreeze_credit_account"
+        )
     })
 }
 
@@ -3860,24 +3878,59 @@ impl TraceCorpusStore for PgBackend {
         let mut client = self.pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &item.tenant_id).await?;
         let status = enum_to_storage(item.status)?;
+        let account_operation = near_credit_call_method_name(&item.near_call_json)
+            .filter(|_| near_credit_call_is_account_operation(&item.near_call_json))
+            .map(str::to_string);
+        let Some(account_operation) = account_operation else {
+            let row = tx
+                .query_one(
+                    &format!(
+                        "INSERT INTO trace_near_credit_outbox (
+                            tenant_id, near_outbox_id, settlement_batch_id, credit_account_hash,
+                            near_call_json, status
+                         ) VALUES ($1, $2, $3, $4, $5, $6)
+                         ON CONFLICT (tenant_id, near_outbox_id) DO UPDATE SET
+                            settlement_batch_id = excluded.settlement_batch_id,
+                            credit_account_hash = excluded.credit_account_hash,
+                            near_call_json = excluded.near_call_json,
+                            status = excluded.status
+                         RETURNING {TRACE_NEAR_CREDIT_OUTBOX_COLUMNS}"
+                    ),
+                    &[
+                        &item.tenant_id,
+                        &item.near_outbox_id,
+                        &item.settlement_batch_id,
+                        &item.credit_account_hash,
+                        &item.near_call_json,
+                        &status,
+                    ],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            let record = row_to_near_credit_outbox_item(&row)?;
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            return Ok(record);
+        };
         let row = tx
             .query_one(
                 &format!(
-                    "INSERT INTO trace_near_credit_outbox (
-                        tenant_id, near_outbox_id, settlement_batch_id, credit_account_hash,
-                        near_call_json, status
-                     ) VALUES ($1, $2, $3, $4, $5, $6)
+                    "INSERT INTO trace_near_credit_account_outbox (
+                        tenant_id, near_outbox_id, credit_hold_id, operation,
+                        credit_account_hash, near_call_json, status
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7)
                      ON CONFLICT (tenant_id, near_outbox_id) DO UPDATE SET
-                        settlement_batch_id = excluded.settlement_batch_id,
+                        credit_hold_id = excluded.credit_hold_id,
+                        operation = excluded.operation,
                         credit_account_hash = excluded.credit_account_hash,
                         near_call_json = excluded.near_call_json,
                         status = excluded.status
-                     RETURNING {TRACE_NEAR_CREDIT_OUTBOX_COLUMNS}"
+                     RETURNING {TRACE_NEAR_CREDIT_ACCOUNT_OUTBOX_COLUMNS}"
                 ),
                 &[
                     &item.tenant_id,
                     &item.near_outbox_id,
                     &item.settlement_batch_id,
+                    &account_operation,
                     &item.credit_account_hash,
                     &item.near_call_json,
                     &status,
@@ -3901,6 +3954,10 @@ impl TraceCorpusStore for PgBackend {
                 &format!(
                     "SELECT {TRACE_NEAR_CREDIT_OUTBOX_COLUMNS}
                      FROM trace_near_credit_outbox
+                     WHERE tenant_id = $1
+                     UNION ALL
+                     SELECT {TRACE_NEAR_CREDIT_ACCOUNT_OUTBOX_COLUMNS}
+                     FROM trace_near_credit_account_outbox
                      WHERE tenant_id = $1
                      ORDER BY created_at ASC, near_outbox_id ASC"
                 ),
@@ -3959,6 +4016,44 @@ impl TraceCorpusStore for PgBackend {
             )
             .await
             .map_err(DatabaseError::Postgres)?;
+        let row = if row.is_some() {
+            row
+        } else {
+            tx.query_opt(
+                &format!(
+                    "UPDATE trace_near_credit_account_outbox
+                     SET status = $3,
+                         near_transaction_hash = COALESCE($4, near_transaction_hash),
+                         submitted_at = CASE
+                            WHEN submitted_at IS NULL AND $3 IN ('submitted', 'confirmed')
+                            THEN NOW()
+                            ELSE submitted_at
+                         END,
+                         confirmed_at = CASE
+                            WHEN $3 = 'confirmed' THEN NOW()
+                            WHEN $3 IN ('submitted', 'failed') THEN NULL
+                            ELSE confirmed_at
+                         END,
+                         last_error_hash = CASE
+                            WHEN $3 = 'failed' THEN $5
+                            WHEN $3 = 'submitted' THEN $5
+                            WHEN $3 = 'confirmed' THEN NULL
+                            ELSE last_error_hash
+                         END
+                     WHERE tenant_id = $1 AND near_outbox_id = $2
+                     RETURNING {TRACE_NEAR_CREDIT_ACCOUNT_OUTBOX_COLUMNS}"
+                ),
+                &[
+                    &tenant_id,
+                    &near_outbox_id,
+                    &status_storage,
+                    &near_transaction_hash,
+                    &last_error_hash,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+        };
         let record = row
             .as_ref()
             .map(row_to_near_credit_outbox_item)

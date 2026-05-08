@@ -1904,6 +1904,7 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
     let hold_id = Uuid::new_v4();
     let settlement_batch_id = Uuid::new_v4();
     let near_outbox_id = Uuid::new_v4();
+    let account_near_outbox_id = Uuid::new_v4();
     let ranking_calibration_run_id = Uuid::new_v4();
     let tenant_cases = [
         (
@@ -2094,6 +2095,34 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
         assert_eq!(near_item.near_outbox_id, near_outbox_id);
         assert_eq!(near_item.credit_account_hash, account_hash);
         assert_eq!(near_item.status, TraceCreditSettlementNearStatus::Pending);
+
+        let account_near_item = backend
+            .upsert_trace_near_credit_outbox_item(TraceNearCreditOutboxItemWrite {
+                tenant_id: tenant_id.clone(),
+                near_outbox_id: account_near_outbox_id,
+                settlement_batch_id: hold_id,
+                credit_account_hash: account_hash.to_string(),
+                near_call_json: serde_json::json!({
+                    "contract_id": "trace-credits.testnet",
+                    "method_name": "freeze_credit_account",
+                    "args": {
+                        "credit_account_hash": account_hash,
+                        "reason_hash": hold_reason_hash
+                    },
+                    "idempotency_key": format!("sha256:{label}-hold-freeze")
+                }),
+                status: TraceCreditSettlementNearStatus::Pending,
+            })
+            .await
+            .expect("upsert tenant NEAR account freeze outbox item");
+        assert_eq!(account_near_item.tenant_id, *tenant_id);
+        assert_eq!(account_near_item.near_outbox_id, account_near_outbox_id);
+        assert_eq!(account_near_item.settlement_batch_id, hold_id);
+        assert_eq!(account_near_item.credit_account_hash, account_hash);
+        assert_eq!(
+            account_near_item.status,
+            TraceCreditSettlementNearStatus::Pending
+        );
     }
 
     let updated = backend
@@ -2137,6 +2166,26 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
     assert_eq!(
         submitted_with_error.last_error_hash.as_deref(),
         Some("sha256:near-confirmation-mismatch")
+    );
+
+    let account_updated = backend
+        .update_trace_near_credit_outbox_status(
+            &tenant_alpha,
+            account_near_outbox_id,
+            TraceCreditSettlementNearStatus::Submitted,
+            Some(TEST_NEAR_TX_HASH.to_string()),
+            None,
+        )
+        .await
+        .expect("update NEAR account outbox item")
+        .expect("updated account item exists");
+    assert_eq!(
+        account_updated.status,
+        TraceCreditSettlementNearStatus::Submitted
+    );
+    assert_eq!(
+        account_updated.near_transaction_hash.as_deref(),
+        Some(TEST_NEAR_TX_HASH)
     );
 
     let alpha_events = backend
@@ -2250,37 +2299,69 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
         .list_trace_near_credit_outbox_items(&tenant_alpha)
         .await
         .expect("list alpha NEAR outbox");
-    assert_eq!(alpha_near.len(), 1);
-    assert_eq!(alpha_near[0].tenant_id, tenant_alpha);
-    assert_eq!(alpha_near[0].near_outbox_id, near_outbox_id);
+    assert_eq!(alpha_near.len(), 2);
+    let alpha_settlement_near = alpha_near
+        .iter()
+        .find(|item| item.near_outbox_id == near_outbox_id)
+        .expect("alpha settlement NEAR item exists");
+    assert_eq!(alpha_settlement_near.tenant_id, tenant_alpha);
     assert_eq!(
-        alpha_near[0].status,
+        alpha_settlement_near.status,
         TraceCreditSettlementNearStatus::Submitted
     );
     assert_eq!(
-        alpha_near[0].near_transaction_hash.as_deref(),
+        alpha_settlement_near.near_transaction_hash.as_deref(),
         Some(TEST_NEAR_TX_HASH)
     );
     assert_eq!(
-        alpha_near[0].near_call_json["idempotency_key"].as_str(),
+        alpha_settlement_near.near_call_json["idempotency_key"].as_str(),
         Some("sha256:settlement-alpha-near-call")
+    );
+    let alpha_account_near = alpha_near
+        .iter()
+        .find(|item| item.near_outbox_id == account_near_outbox_id)
+        .expect("alpha account NEAR item exists");
+    assert_eq!(alpha_account_near.settlement_batch_id, hold_id);
+    assert_eq!(
+        alpha_account_near.near_call_json["method_name"].as_str(),
+        Some("freeze_credit_account")
+    );
+    assert_eq!(
+        alpha_account_near.status,
+        TraceCreditSettlementNearStatus::Submitted
     );
 
     let beta_near = backend
         .list_trace_near_credit_outbox_items(&tenant_beta)
         .await
         .expect("list beta NEAR outbox");
-    assert_eq!(beta_near.len(), 1);
-    assert_eq!(beta_near[0].tenant_id, tenant_beta);
-    assert_eq!(beta_near[0].near_outbox_id, near_outbox_id);
+    assert_eq!(beta_near.len(), 2);
+    let beta_settlement_near = beta_near
+        .iter()
+        .find(|item| item.near_outbox_id == near_outbox_id)
+        .expect("beta settlement NEAR item exists");
+    assert_eq!(beta_settlement_near.tenant_id, tenant_beta);
     assert_eq!(
-        beta_near[0].status,
+        beta_settlement_near.status,
         TraceCreditSettlementNearStatus::Pending
     );
-    assert_eq!(beta_near[0].near_transaction_hash, None);
+    assert_eq!(beta_settlement_near.near_transaction_hash, None);
     assert_eq!(
-        beta_near[0].near_call_json["idempotency_key"].as_str(),
+        beta_settlement_near.near_call_json["idempotency_key"].as_str(),
         Some("sha256:settlement-beta-near-call")
+    );
+    let beta_account_near = beta_near
+        .iter()
+        .find(|item| item.near_outbox_id == account_near_outbox_id)
+        .expect("beta account NEAR item exists");
+    assert_eq!(beta_account_near.settlement_batch_id, hold_id);
+    assert_eq!(
+        beta_account_near.near_call_json["method_name"].as_str(),
+        Some("freeze_credit_account")
+    );
+    assert_eq!(
+        beta_account_near.status,
+        TraceCreditSettlementNearStatus::Pending
     );
 
     cleanup_tenant(&backend, &tenant_alpha).await;

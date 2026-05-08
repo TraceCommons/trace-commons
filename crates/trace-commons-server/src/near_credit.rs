@@ -109,6 +109,25 @@ impl NearCreditReceiptCall {
         )
     }
 
+    pub fn unfreeze_account(
+        contract_id: impl Into<String>,
+        credit_account_hash: impl Into<String>,
+        reason_hash: impl Into<String>,
+    ) -> anyhow::Result<Self> {
+        let credit_account_hash = credit_account_hash.into();
+        let reason_hash = reason_hash.into();
+        ensure_hash_like("credit_account_hash", &credit_account_hash)?;
+        ensure_hash_like("reason_hash", &reason_hash)?;
+        Self::raw(
+            contract_id,
+            "unfreeze_credit_account",
+            json!({
+                "credit_account_hash": credit_account_hash,
+                "reason_hash": reason_hash,
+            }),
+        )
+    }
+
     pub fn raw(
         contract_id: impl Into<String>,
         method_name: impl Into<String>,
@@ -191,7 +210,7 @@ fn validate_method_args(method_name: &str, args: &Value) -> anyhow::Result<()> {
                 issuer_signature_hash: args.issuer_signature_hash,
             })?;
         }
-        "freeze_credit_account" => {
+        "freeze_credit_account" | "unfreeze_credit_account" => {
             let args: NearCreditFreezeAccountArgs = serde_json::from_value(args.clone())
                 .context("invalid NEAR credit freeze method args")?;
             ensure_hash_like("credit_account_hash", &args.credit_account_hash)?;
@@ -255,7 +274,10 @@ fn ensure_non_transferable_method(method_name: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(
             normalized,
-            "settle_credit_receipt" | "reverse_credit_receipt" | "freeze_credit_account"
+            "settle_credit_receipt"
+                | "reverse_credit_receipt"
+                | "freeze_credit_account"
+                | "unfreeze_credit_account"
         ),
         "NEAR credit receipts are non-transferable; unsupported credit methods are not allowed"
     );
