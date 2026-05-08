@@ -538,13 +538,13 @@ a pilot rehearsal, can require authenticated NEAR adapters through either
 `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH=true` or
 `require_near_adapter_auth: true`, requires a configured per-account issuer cap
 by default unless `require_account_cap` is explicitly disabled, and requires a
-sha256-prefixed `issuer_approval_evidence_hash` when
+canonical `sha256:<64 hex>` `issuer_approval_evidence_hash` when
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` or the request
 sets `require_issuer_approval: true`. Approval evidence is source-list bound:
 operators first run the drill or settlement dry-run to obtain the exact
 `source_list_hash`, then record a hash-only approval with
 `POST /v1/admin/credit-settlement-approvals` for that `policy_version`,
-`source_list_hash`, and approval `evidence_hash`. The drill returns only safe
+`source_list_hash`, and canonical approval `evidence_hash`. The drill returns only safe
 account hashes, aggregate risk counts, settlement exclusion reason counts,
 blocker codes, NEAR adapter readiness/auth booleans, issuer-approval configured
 and recorded booleans, central issuer profile readiness booleans, and a
@@ -668,11 +668,12 @@ positive delayed credit exists without an issuer cap, so operators see the
 governance gap before a settlement run or smoke drill.
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` adds the early
 central-issuer fail-closed gate: live admin or worker settlement requests must
-carry a sha256-prefixed `issuer_approval_evidence_hash` that has already been
-recorded through `/v1/admin/credit-settlement-approvals` for the exact tenant,
-policy version, and dry-run `source_list_hash`. The hash is persisted on the
-settlement batch and folded into newly queued NEAR receipt attestation and
-issuer-signature hashes. Dry-runs remain approval-free so operators can produce
+carry a canonical `sha256:<64 hex>` `issuer_approval_evidence_hash` that has
+already been recorded through `/v1/admin/credit-settlement-approvals` for the
+exact tenant, policy version, and canonical dry-run `source_list_hash`. The
+hash is persisted on the settlement batch and folded into newly queued NEAR
+receipt attestation and issuer-signature hashes. Dry-runs remain approval-free
+so operators can produce
 or inspect the source-list hash before granting non-transferable credits;
 production credit-settlement drills report
 `issuer_approval_evidence_hash_missing` when no hash is supplied and
