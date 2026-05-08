@@ -87216,6 +87216,31 @@ mod tests {
         .expect("utility worker can write ranking prediction");
         assert_eq!(prediction.settlement_score_micros, 2_175_000);
 
+        let tenant_b_label_error = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("admin-token-b"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 2_500_000,
+                evidence_hash:
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_string(),
+                external_ref: "tenant-b-private-cross-tenant-label".to_string(),
+            }),
+        )
+        .await
+        .expect_err("tenant-b admin cannot label tenant-a ranking source");
+        assert_eq!(tenant_b_label_error.0, StatusCode::NOT_FOUND);
+        assert!(
+            read_all_ranking_labels(temp.path(), "tenant-b")
+                .expect("tenant-b labels read")
+                .is_empty()
+        );
+
         let Json(label) = ranking_label_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
@@ -87287,6 +87312,31 @@ mod tests {
         )
         .await
         .expect("rejected ranking source submission succeeds");
+
+        let tenant_b_preference_error = ranking_preference_label_handler(
+            State(state.clone()),
+            auth_headers("admin-token-b"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id,
+                rejected_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 850_000,
+                evidence_hash:
+                    "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                        .to_string(),
+                external_ref: "tenant-b-private-cross-tenant-preference".to_string(),
+            }),
+        )
+        .await
+        .expect_err("tenant-b admin cannot label tenant-a ranking preference");
+        assert_eq!(tenant_b_preference_error.0, StatusCode::NOT_FOUND);
+        assert!(
+            read_all_ranking_preference_labels(temp.path(), "tenant-b")
+                .expect("tenant-b preference labels read")
+                .is_empty()
+        );
 
         let Json(preference) = ranking_preference_label_handler(
             State(state.clone()),
