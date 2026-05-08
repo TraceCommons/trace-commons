@@ -531,15 +531,18 @@ credentials.
 promotion check through the admin credit-risk summary plus the existing dry-run
 settlement selector. It validates a supplied NEAR contract id without writing
 settlement batches or NEAR outbox rows, requires a configured per-account issuer
-cap by default unless `require_account_cap` is explicitly disabled, returns only
-safe account hashes, aggregate risk counts, settlement exclusion reason counts,
-blocker codes, and a sha256-prefixed evidence hash, and can append
-`credit_settlement` rollout-smoke evidence directly.
+cap by default unless `require_account_cap` is explicitly disabled, and requires
+a sha256-prefixed `issuer_approval_evidence_hash` when
+`TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` or the request
+sets `require_issuer_approval: true`. The drill returns only safe account
+hashes, aggregate risk counts, settlement exclusion reason counts, blocker
+codes, issuer-approval readiness booleans, and a sha256-prefixed evidence hash,
+and can append `credit_settlement` rollout-smoke evidence directly.
 Final settlement requests can include `issuer_approval_evidence_hash` to bind
 the batch to a central operator approval artifact. Set
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` to reject live
-settlement without that hash while preserving dry-run and drill workflows for
-pre-approval review.
+settlement without that hash; dry-runs remain non-mutating, and the drill now
+fails readiness until the approval-evidence hash is present.
 Operators can still use `POST /v1/admin/rollout-smoke/evidence` for external
 manual evidence, while operational summary and metrics expose only readiness
 booleans, bounded max-delta metadata, and blocker reason codes.
@@ -644,7 +647,9 @@ central-issuer fail-closed gate: live admin or worker settlement requests must
 carry a sha256-prefixed `issuer_approval_evidence_hash`, which is persisted on
 the settlement batch and folded into newly queued NEAR receipt attestation and
 issuer-signature hashes. Dry-runs remain approval-free so operators can produce
-or inspect evidence before granting non-transferable credits.
+or inspect evidence before granting non-transferable credits; production
+credit-settlement drills report `issuer_approval_evidence_hash_missing` until
+the same hash is supplied for rehearsal.
 Admins can inspect `GET /v1/admin/credit-risk-summary` before issuing credit to
 see tenant-scoped pending, held, and over-cap totals grouped by deterministic
 credit-account hash. The response is bounded by `limit` (default 100, max 500)
