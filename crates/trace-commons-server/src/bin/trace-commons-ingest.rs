@@ -12406,6 +12406,7 @@ async fn mark_near_credit_outbox_status_handler(
     } else {
         None
     };
+    require_near_credit_manual_status_adapter_auth(state.as_ref(), status)?;
     let existing = read_near_credit_outbox_items_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?
@@ -12429,6 +12430,36 @@ async fn mark_near_credit_outbox_status_handler(
     .map_err(internal_error)?
     .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "NEAR credit outbox item not found"))?;
     Ok(Json(updated))
+}
+
+fn require_near_credit_manual_status_adapter_auth(
+    state: &AppState,
+    status: StorageTraceCreditSettlementNearStatus,
+) -> ApiResult<()> {
+    if !state.near_credit_require_adapter_auth {
+        return Ok(());
+    }
+    match status {
+        StorageTraceCreditSettlementNearStatus::Submitted
+            if state.near_credit_submitter.is_none()
+                || !state.near_credit_submitter_auth_configured =>
+        {
+            Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "manual submitted NEAR credit outbox status requires TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL and TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN when TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH is enabled",
+            ))
+        }
+        StorageTraceCreditSettlementNearStatus::Confirmed
+            if state.near_credit_confirmer.is_none()
+                || !state.near_credit_confirmer_auth_configured =>
+        {
+            Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "manual confirmed NEAR credit outbox status requires TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL and TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_BEARER_TOKEN when TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH is enabled",
+            ))
+        }
+        _ => Ok(()),
+    }
 }
 
 async fn mark_benchmark_registry_outbox_status_handler(
@@ -76627,6 +76658,129 @@ mod tests {
             StorageTraceCreditSettlementNearStatus::Pending
         );
         assert!(outbox[0].near_transaction_hash.is_none());
+    }
+
+    #[tokio::test]
+    async fn near_credit_outbox_mark_status_requires_adapter_auth_when_configured() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).near_credit_submitter =
+            Some(Arc::new(FakeNearCreditSubmitter::default()));
+        Arc::make_mut(&mut state).near_credit_confirmer =
+            Some(Arc::new(FakeNearCreditConfirmer::default()));
+        Arc::make_mut(&mut state).near_credit_require_adapter_auth = true;
+
+        let pending_outbox_id = Uuid::new_v4();
+        let mut pending_item =
+            submitted_near_credit_outbox_item(pending_outbox_id, TEST_NEAR_TX_HASH_1, 1_000_000);
+        pending_item.status = StorageTraceCreditSettlementNearStatus::Pending;
+        pending_item.submitted_at = None;
+        pending_item.near_transaction_hash = None;
+        let submitted_outbox_id = Uuid::new_v4();
+        let submitted_item =
+            submitted_near_credit_outbox_item(submitted_outbox_id, TEST_NEAR_TX_HASH_2, 1_000_000);
+        append_near_credit_outbox_item(temp.path(), "tenant-a", &pending_item)
+            .expect("pending NEAR outbox file writes");
+        append_near_credit_outbox_item(temp.path(), "tenant-a", &submitted_item)
+            .expect("submitted NEAR outbox file writes");
+
+        let submit_error = mark_near_credit_outbox_status_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxStatusRequest {
+                near_outbox_id: pending_outbox_id,
+                status: StorageTraceCreditSettlementNearStatus::Submitted,
+                near_transaction_hash: Some(TEST_NEAR_TX_HASH_1.to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect_err("manual submitted status cannot bypass missing submitter auth");
+        assert_eq!(submit_error.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            submit_error
+                .1
+                .0
+                .error
+                .contains(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN)
+        );
+
+        let confirm_error = mark_near_credit_outbox_status_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxStatusRequest {
+                near_outbox_id: submitted_outbox_id,
+                status: StorageTraceCreditSettlementNearStatus::Confirmed,
+                near_transaction_hash: Some(TEST_NEAR_TX_HASH_2.to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect_err("manual confirmed status cannot bypass missing confirmer auth");
+        assert_eq!(confirm_error.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            confirm_error
+                .1
+                .0
+                .error
+                .contains(TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_BEARER_TOKEN)
+        );
+
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert!(outbox.iter().any(|item| {
+            item.near_outbox_id == pending_outbox_id
+                && item.status == StorageTraceCreditSettlementNearStatus::Pending
+                && item.near_transaction_hash.is_none()
+        }));
+        assert!(outbox.iter().any(|item| {
+            item.near_outbox_id == submitted_outbox_id
+                && item.status == StorageTraceCreditSettlementNearStatus::Submitted
+                && item.near_transaction_hash.as_deref() == Some(TEST_NEAR_TX_HASH_2)
+                && item.confirmed_at.is_none()
+        }));
+
+        Arc::make_mut(&mut state).near_credit_submitter_auth_configured = true;
+        Arc::make_mut(&mut state).near_credit_confirmer_auth_configured = true;
+
+        let Json(submitted) = mark_near_credit_outbox_status_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxStatusRequest {
+                near_outbox_id: pending_outbox_id,
+                status: StorageTraceCreditSettlementNearStatus::Submitted,
+                near_transaction_hash: Some(TEST_NEAR_TX_HASH_1.to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect("manual submitted status is allowed once submitter auth is configured");
+        assert_eq!(
+            submitted.status,
+            StorageTraceCreditSettlementNearStatus::Submitted
+        );
+        assert_eq!(
+            submitted.near_transaction_hash.as_deref(),
+            Some(TEST_NEAR_TX_HASH_1)
+        );
+
+        let Json(confirmed) = mark_near_credit_outbox_status_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxStatusRequest {
+                near_outbox_id: submitted_outbox_id,
+                status: StorageTraceCreditSettlementNearStatus::Confirmed,
+                near_transaction_hash: Some(TEST_NEAR_TX_HASH_2.to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect("manual confirmed status is allowed once confirmer auth is configured");
+        assert_eq!(
+            confirmed.status,
+            StorageTraceCreditSettlementNearStatus::Confirmed
+        );
+        assert!(confirmed.confirmed_at.is_some());
     }
 
     #[tokio::test]

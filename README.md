@@ -123,7 +123,9 @@ failure. Configure
 `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL` to let the scoped confirm worker
 poll submitted transactions through an operator-owned confirmer and move rows to
 confirmed or failed status. Workers can still manually mark items submitted,
-confirmed, or failed for fallback operations. Set
+confirmed, or failed for fallback operations; when adapter auth is required,
+manual submitted/confirmed marks also require the matching authenticated adapter
+configuration so missing bearer-token readiness cannot be bypassed. Set
 `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH=true` for production credit
 issuance so configured submitter and confirmation adapters must also provide
 their bearer-token settings before startup, live worker submission, or live
