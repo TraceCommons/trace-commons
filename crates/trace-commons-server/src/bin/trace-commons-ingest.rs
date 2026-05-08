@@ -78331,9 +78331,16 @@ mod tests {
             submitted_near_credit_outbox_item(near_outbox_id, TEST_NEAR_TX_HASH_1, 1_000_000);
         append_near_credit_outbox_item(temp.path(), "tenant-a", &item)
             .expect("NEAR outbox file writes");
+        let tenant_b_outbox_id = Uuid::new_v4();
+        let mut tenant_b_item =
+            submitted_near_credit_outbox_item(tenant_b_outbox_id, TEST_NEAR_TX_HASH_2, 1_000_000);
+        tenant_b_item.tenant_id = "tenant-b".to_string();
+        tenant_b_item.tenant_storage_ref = tenant_storage_ref("tenant-b");
+        append_near_credit_outbox_item(temp.path(), "tenant-b", &tenant_b_item)
+            .expect("tenant-b NEAR outbox file writes");
 
         let error = mark_near_credit_outbox_status_handler(
-            State(state),
+            State(state.clone()),
             auth_headers("utility-worker-token-a"),
             Json(TraceNearCreditOutboxStatusRequest {
                 near_outbox_id,
@@ -78364,6 +78371,32 @@ mod tests {
             Some(TEST_NEAR_TX_HASH_1)
         );
         assert!(outbox[0].confirmed_at.is_none());
+
+        let tenant_b_error = mark_near_credit_outbox_status_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxStatusRequest {
+                near_outbox_id: tenant_b_outbox_id,
+                status: StorageTraceCreditSettlementNearStatus::Confirmed,
+                near_transaction_hash: Some(TEST_NEAR_TX_HASH_2.to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect_err("tenant-a utility worker cannot mark tenant-b outbox status");
+        assert_eq!(tenant_b_error.0, StatusCode::NOT_FOUND);
+        let tenant_b_outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-b")
+            .expect("tenant-b outbox reads");
+        assert_eq!(tenant_b_outbox.len(), 1);
+        assert_eq!(
+            tenant_b_outbox[0].status,
+            StorageTraceCreditSettlementNearStatus::Submitted
+        );
+        assert_eq!(
+            tenant_b_outbox[0].near_transaction_hash.as_deref(),
+            Some(TEST_NEAR_TX_HASH_2)
+        );
+        assert!(tenant_b_outbox[0].confirmed_at.is_none());
     }
 
     #[tokio::test]
