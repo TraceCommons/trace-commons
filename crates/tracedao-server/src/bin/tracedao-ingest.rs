@@ -77015,6 +77015,27 @@ mod tests {
         )
         .await
         .expect("training submission succeeds");
+
+        let tenant_b_credit_error = utility_credit_handler(
+            State(state.clone()),
+            auth_headers("admin-token-b"),
+            Json(TraceUtilityCreditJobRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 2.25,
+                reason: "tenant-b cannot credit tenant-a utility source".to_string(),
+                external_ref: "frontier:tenant-b-cross-tenant-utility-credit".to_string(),
+                submission_ids: vec![submission_id],
+            }),
+        )
+        .await
+        .expect_err("tenant-b admin cannot credit tenant-a utility source");
+        assert_eq!(tenant_b_credit_error.0, StatusCode::NOT_FOUND);
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-b")
+                .expect("tenant-b credit reads")
+                .is_empty()
+        );
+
         let Json(credit) = utility_credit_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
