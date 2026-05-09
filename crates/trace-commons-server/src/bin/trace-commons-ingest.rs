@@ -6700,6 +6700,7 @@ async fn submit_trace_handler(
     )?;
 
     rescrub_trace_envelope(&mut envelope);
+    bind_envelope_server_tenant_scope_for_storage(&mut envelope, tenant.tenant_id());
     let existing_revocations = read_revocations_for_submit(state.as_ref(), tenant.tenant_id())
         .await
         .map_err(internal_error)?;
@@ -39894,6 +39895,20 @@ fn ensure_envelope_tenant_scope(
     Ok(())
 }
 
+fn bind_envelope_server_tenant_scope_for_storage(
+    envelope: &mut TraceContributionEnvelope,
+    tenant_id: &str,
+) {
+    if envelope
+        .contributor
+        .tenant_scope_ref
+        .as_deref()
+        .is_some_and(looks_like_server_tenant_storage_ref)
+    {
+        envelope.contributor.tenant_scope_ref = Some(tenant_storage_ref(tenant_id));
+    }
+}
+
 fn looks_like_server_tenant_storage_ref(value: &str) -> bool {
     let Some(hex_ref) = value.strip_prefix("tenant_sha256:") else {
         return false;
@@ -54835,9 +54850,13 @@ mod tests {
         let submission_id = envelope.submission_id;
         envelope.contributor.tenant_scope_ref = Some(tenant_storage_ref("tenant-b"));
 
-        let _ = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
-            .await
-            .expect("submission succeeds under authenticated tenant");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds under authenticated tenant");
 
         let record = read_submission_record(temp.path(), "tenant-a", submission_id)
             .expect("tenant-a record reads")
@@ -54845,6 +54864,12 @@ mod tests {
         assert_eq!(record.tenant_id, "tenant-a");
         assert_eq!(
             record.submitted_tenant_scope_ref.as_deref(),
+            Some(tenant_storage_ref("tenant-a").as_str())
+        );
+        let stored_envelope =
+            read_envelope_by_record(state.as_ref(), &record).expect("stored envelope reads");
+        assert_eq!(
+            stored_envelope.contributor.tenant_scope_ref.as_deref(),
             Some(tenant_storage_ref("tenant-a").as_str())
         );
         assert!(
