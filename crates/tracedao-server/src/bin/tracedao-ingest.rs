@@ -12613,6 +12613,9 @@ async fn credit_cycle_scheduler_run_handler(
     let preference_labels = read_ranking_preference_labels_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    let calibration_datasets = read_ranking_calibration_datasets_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
     let mut candidates = latest_ranking_model_versions(&model_versions)
         .into_iter()
         .filter(|model| {
@@ -12741,6 +12744,7 @@ async fn credit_cycle_scheduler_run_handler(
                 predictions: &predictions,
                 labels: &labels,
                 preference_labels: &preference_labels,
+                calibration_datasets: &calibration_datasets,
             },
         ) {
             credit_cycle_scheduler_record_skip(&mut response, &skip_reason);
@@ -12894,6 +12898,7 @@ struct CreditCycleSchedulerPreflightEvidence<'a> {
     predictions: &'a [TraceRankingPredictionRecord],
     labels: &'a [TraceRankingLabelRecord],
     preference_labels: &'a [TraceRankingPreferenceLabelRecord],
+    calibration_datasets: &'a [TraceRankingCalibrationDatasetRecord],
 }
 
 fn credit_cycle_scheduler_candidate_skip_reason(
@@ -12962,6 +12967,15 @@ fn credit_cycle_scheduler_candidate_skip_reason(
     }
     if ranking_model_training_calibration_datasets_overlap(candidate) {
         return Some("training_calibration_dataset_overlap".to_string());
+    }
+    if let Some(reason) = ranking_calibration_dataset_gate_reason(
+        evidence.calibration_datasets,
+        &candidate.calibration_dataset_hash,
+        target_use,
+        &candidate.policy_version,
+        ranking_calibration_dataset_gate_config(state, current.min_label_count),
+    ) {
+        return Some(reason.to_string());
     }
     if let Some(reason) = ranking_calibration_labeler_reliability_reason_codes(
         state,
@@ -97008,6 +97022,74 @@ mod tests {
         assert_eq!(
             scheduler.decisions[0].skip_reason.as_deref(),
             Some("training_calibration_dataset_overlap")
+        );
+        assert!(scheduler.cycles.is_empty());
+        assert!(
+            read_all_ranking_worker_runs(temp.path(), "tenant-a")
+                .expect("worker runs read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit events read")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_preflight_blocks_missing_calibration_dataset_registry() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let (candidate, _) = seed_credit_cycle_ready_candidate(
+            state.clone(),
+            "trace-ranker-credit-cycle-missing-holdout-v1",
+        )
+        .await;
+        Arc::make_mut(&mut state).ranking_require_calibration_dataset_registry = true;
+
+        let Json(scheduler) = credit_cycle_scheduler_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleSchedulerRunRequest {
+                dry_run: false,
+                preflight_only: true,
+                submit_near_outbox: false,
+                confirm_near_outbox: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: Some(candidate.model_version.clone()),
+                policy_version: Some(candidate.policy_version.clone()),
+                reason: "preflight should block missing calibration dataset registry".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: Some(1),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect("scheduler preflight evaluates calibration dataset registry");
+
+        assert_eq!(scheduler.checked_count, 1);
+        assert_eq!(scheduler.eligible_count, 0);
+        assert_eq!(scheduler.started_count, 0);
+        assert_eq!(scheduler.skipped_count, 1);
+        assert_eq!(
+            scheduler
+                .skipped_reason_counts
+                .get("calibration_dataset_not_registered"),
+            Some(&1)
+        );
+        assert_eq!(
+            scheduler.decisions[0].skip_reason.as_deref(),
+            Some("calibration_dataset_not_registered")
         );
         assert!(scheduler.cycles.is_empty());
         assert!(
