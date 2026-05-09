@@ -266,7 +266,10 @@ fn ensure_hash_like(label: &str, value: &str) -> anyhow::Result<()> {
         anyhow::bail!("{label} must be a canonical sha256-prefixed hex digest");
     };
     anyhow::ensure!(
-        hex_digest.len() == 64 && hex_digest.chars().all(|ch| ch.is_ascii_hexdigit()),
+        hex_digest.len() == 64
+            && hex_digest
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || matches!(ch, 'a'..='f')),
         "{label} must be a canonical sha256-prefixed hex digest"
     );
     Ok(())

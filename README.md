@@ -60,7 +60,7 @@ source-list hash, and reuse the same bound and approval hash when finalizing.
 Deployments that set
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` reject live
 settlement unless the supplied `issuer_approval_evidence_hash` matches a recorded
-approval for the tenant, policy version, canonical `sha256:<64 hex>`
+approval for the tenant, policy version, canonical lowercase `sha256:<64 hex>`
 source-list hash, and canonical approval evidence hash while still allowing
 dry-runs. Settlement and issuer-approval `policy_version` values are bounded
 safe identifiers, so they can be stored, audited, and mirrored into NEAR receipt
@@ -203,7 +203,7 @@ feature hashes, model predictions, lab/reviewer/evaluator labels, and calibratio
 runs that record aggregate error, confidence, threshold policy, per-source
 quality gates, joined label-source and label-actor diversity, joined-evidence
 hashes, reason codes, and a hash-only report digest.
-Client-supplied ranking evidence hashes must be canonical `sha256:<64 hex>`
+Client-supplied ranking evidence hashes must be canonical lowercase `sha256:<64 hex>`
 digests across model manifests, calibration dataset manifests, feature evidence,
 label/preference evidence, and calibration run evaluation datasets; symbolic
 `sha256:` placeholders are rejected before persistence.
