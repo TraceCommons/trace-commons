@@ -9931,6 +9931,162 @@ fn trace_near_credit_outbox_status_audit_metadata_from_reason(
     })
 }
 
+fn trace_benchmark_registry_outbox_status_external_receipt_ref_hash(
+    external_receipt_ref: Option<&str>,
+) -> Option<String> {
+    external_receipt_ref
+        .map(str::trim)
+        .filter(|receipt| !receipt.is_empty())
+        .map(sha256_prefixed)
+}
+
+fn trace_benchmark_registry_outbox_status_evaluator_ref_hash(
+    evaluator_ref: Option<&str>,
+) -> Option<String> {
+    evaluator_ref
+        .map(str::trim)
+        .filter(|evaluator| !evaluator.is_empty())
+        .map(sha256_prefixed)
+}
+
+struct TraceBenchmarkRegistryOutboxStatusAuditReasonParts<'a> {
+    benchmark_outbox_id: Uuid,
+    conversion_id: Uuid,
+    operation: StorageTraceBenchmarkRegistryOutboxOperation,
+    registry_ref_hash: &'a str,
+    artifact_payload_hash: &'a str,
+    source_submission_ids_hash: &'a str,
+    evaluator_ref_hash: Option<&'a str>,
+    status: StorageTraceBenchmarkRegistryOutboxStatus,
+    external_receipt_ref_hash: Option<&'a str>,
+    last_error_hash: Option<&'a str>,
+}
+
+fn trace_benchmark_registry_outbox_status_audit_reason_from_parts(
+    parts: TraceBenchmarkRegistryOutboxStatusAuditReasonParts<'_>,
+) -> String {
+    let mut reason = format!(
+        "benchmark_outbox_id={};conversion_id={};operation={};registry_ref_hash={};artifact_payload_hash={};source_submission_ids_hash={};status={}",
+        parts.benchmark_outbox_id,
+        parts.conversion_id,
+        serde_enum_tag(&parts.operation),
+        parts.registry_ref_hash,
+        parts.artifact_payload_hash,
+        parts.source_submission_ids_hash,
+        serde_enum_tag(&parts.status)
+    );
+    if let Some(evaluator_ref_hash) = parts.evaluator_ref_hash {
+        reason.push_str(";evaluator_ref_hash=");
+        reason.push_str(evaluator_ref_hash);
+    }
+    if let Some(external_receipt_ref_hash) = parts.external_receipt_ref_hash {
+        reason.push_str(";external_receipt_ref_hash=");
+        reason.push_str(external_receipt_ref_hash);
+    }
+    if let Some(last_error_hash) = parts.last_error_hash {
+        reason.push_str(";last_error_hash=");
+        reason.push_str(last_error_hash);
+    }
+    reason
+}
+
+fn trace_benchmark_registry_outbox_status_audit_reason(
+    item: &TraceBenchmarkRegistryOutboxItem,
+) -> String {
+    trace_benchmark_registry_outbox_status_audit_reason_from_parts(
+        TraceBenchmarkRegistryOutboxStatusAuditReasonParts {
+            benchmark_outbox_id: item.benchmark_outbox_id,
+            conversion_id: item.conversion_id,
+            operation: item.operation,
+            registry_ref_hash: &sha256_prefixed(&item.registry_ref),
+            artifact_payload_hash: &item.artifact_payload_hash,
+            source_submission_ids_hash: &item.source_submission_ids_hash,
+            evaluator_ref_hash: trace_benchmark_registry_outbox_status_evaluator_ref_hash(
+                item.evaluator_ref.as_deref(),
+            )
+            .as_deref(),
+            status: item.status,
+            external_receipt_ref_hash:
+                trace_benchmark_registry_outbox_status_external_receipt_ref_hash(
+                    item.external_receipt_ref.as_deref(),
+                )
+                .as_deref(),
+            last_error_hash: item.last_error_hash.as_deref(),
+        },
+    )
+}
+
+fn trace_benchmark_registry_outbox_status_audit_metadata(
+    item: &TraceBenchmarkRegistryOutboxItem,
+) -> StorageTraceAuditSafeMetadata {
+    StorageTraceAuditSafeMetadata::BenchmarkRegistryOutboxStatus {
+        benchmark_outbox_id: item.benchmark_outbox_id,
+        conversion_id: item.conversion_id,
+        operation: item.operation,
+        registry_ref_hash: sha256_prefixed(&item.registry_ref),
+        artifact_payload_hash: item.artifact_payload_hash.clone(),
+        source_submission_ids_hash: item.source_submission_ids_hash.clone(),
+        evaluator_ref_hash: trace_benchmark_registry_outbox_status_evaluator_ref_hash(
+            item.evaluator_ref.as_deref(),
+        ),
+        status: item.status,
+        external_receipt_ref_hash: trace_benchmark_registry_outbox_status_external_receipt_ref_hash(
+            item.external_receipt_ref.as_deref(),
+        ),
+        last_error_hash: item.last_error_hash.clone(),
+    }
+}
+
+fn trace_benchmark_registry_outbox_status_audit_metadata_from_reason(
+    reason: Option<&str>,
+) -> Option<StorageTraceAuditSafeMetadata> {
+    let benchmark_outbox_id = trace_audit_reason_value(reason, "benchmark_outbox_id")
+        .and_then(|id| Uuid::parse_str(id).ok())?;
+    let conversion_id = trace_audit_reason_value(reason, "conversion_id")
+        .and_then(|id| Uuid::parse_str(id).ok())?;
+    let operation = trace_audit_reason_enum::<StorageTraceBenchmarkRegistryOutboxOperation>(
+        reason,
+        "operation",
+    )?;
+    let registry_ref_hash = trace_audit_reason_canonical_sha256_value(reason, "registry_ref_hash")?;
+    let artifact_payload_hash =
+        trace_audit_reason_canonical_sha256_value(reason, "artifact_payload_hash")?;
+    let source_submission_ids_hash =
+        trace_audit_reason_canonical_sha256_value(reason, "source_submission_ids_hash")?;
+    let evaluator_ref_hash = match trace_audit_reason_value(reason, "evaluator_ref_hash") {
+        Some(hash) if is_canonical_sha256_prefixed_hash(hash) => Some(hash.to_string()),
+        Some(_) => return None,
+        None => None,
+    };
+    let status =
+        trace_audit_reason_enum::<StorageTraceBenchmarkRegistryOutboxStatus>(reason, "status")?;
+    let external_receipt_ref_hash =
+        match trace_audit_reason_value(reason, "external_receipt_ref_hash") {
+            Some(hash) if is_canonical_sha256_prefixed_hash(hash) => Some(hash.to_string()),
+            Some(_) => return None,
+            None => None,
+        };
+    let last_error_hash = match trace_audit_reason_value(reason, "last_error_hash") {
+        Some(hash) if is_canonical_sha256_prefixed_hash(hash) => Some(hash.to_string()),
+        Some(_) => return None,
+        None => None,
+    };
+    Some(
+        StorageTraceAuditSafeMetadata::BenchmarkRegistryOutboxStatus {
+            benchmark_outbox_id,
+            conversion_id,
+            operation,
+            registry_ref_hash,
+            artifact_payload_hash,
+            source_submission_ids_hash,
+            evaluator_ref_hash,
+            status,
+            external_receipt_ref_hash,
+            last_error_hash,
+        },
+    )
+}
+
 fn trace_audit_reason_is_rollout_smoke_evidence(reason: Option<&str>) -> bool {
     trace_audit_reason_value(reason, "surface") == Some("rollout_smoke_evidence")
 }
@@ -16050,7 +16206,40 @@ async fn mark_benchmark_registry_outbox_status_handler(
             "benchmark registry outbox item not found",
         )
     })?;
+    append_benchmark_registry_outbox_status_audit(state.as_ref(), &tenant, &updated)
+        .await
+        .map_err(internal_error)?;
     Ok(Json(updated))
+}
+
+async fn append_benchmark_registry_outbox_status_audit(
+    state: &AppState,
+    tenant: &TenantAuth,
+    item: &TraceBenchmarkRegistryOutboxItem,
+) -> anyhow::Result<()> {
+    append_audit_event_with_db_mirror(
+        state,
+        tenant,
+        TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "benchmark_registry_outbox_status".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(tenant.role),
+            actor_principal_ref: Some(tenant.principal_ref.clone()),
+            reason: Some(trace_benchmark_registry_outbox_status_audit_reason(item)),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        },
+        StorageTraceAuditAction::BenchmarkConvert,
+        trace_benchmark_registry_outbox_status_audit_metadata(item),
+    )
+    .await
 }
 
 async fn run_benchmark_registry_outbox_submit_worker(
@@ -40329,6 +40518,37 @@ fn trace_commons_audit_event_from_storage(
             }),
             None,
         ),
+        StorageTraceAuditSafeMetadata::BenchmarkRegistryOutboxStatus {
+            benchmark_outbox_id,
+            conversion_id,
+            operation,
+            registry_ref_hash,
+            artifact_payload_hash,
+            source_submission_ids_hash,
+            evaluator_ref_hash,
+            status,
+            external_receipt_ref_hash,
+            last_error_hash,
+        } => (
+            None,
+            event.reason.clone().or_else(|| {
+                Some(trace_benchmark_registry_outbox_status_audit_reason_from_parts(
+                    TraceBenchmarkRegistryOutboxStatusAuditReasonParts {
+                        benchmark_outbox_id: *benchmark_outbox_id,
+                        conversion_id: *conversion_id,
+                        operation: *operation,
+                        registry_ref_hash,
+                        artifact_payload_hash,
+                        source_submission_ids_hash,
+                        evaluator_ref_hash: evaluator_ref_hash.as_deref(),
+                        status: *status,
+                        external_receipt_ref_hash: external_receipt_ref_hash.as_deref(),
+                        last_error_hash: last_error_hash.as_deref(),
+                    },
+                ))
+            }),
+            None,
+        ),
         StorageTraceAuditSafeMetadata::ProcessEvaluation {
             evaluator_version_hash: _,
             label_count: _,
@@ -40613,6 +40833,14 @@ fn storage_audit_event_kind(
         )
     {
         return "near_credit_outbox_status".to_string();
+    }
+    if let StorageTraceAuditAction::BenchmarkConvert = action
+        && matches!(
+            metadata,
+            StorageTraceAuditSafeMetadata::BenchmarkRegistryOutboxStatus { .. }
+        )
+    {
+        return "benchmark_registry_outbox_status".to_string();
     }
     if let StorageTraceAuditAction::Read = action
         && matches!(
@@ -47098,6 +47326,37 @@ fn normalize_audit_event_metadata(
             ),
         };
     }
+    if action == StorageTraceAuditAction::BenchmarkConvert
+        && event.kind == "benchmark_registry_outbox_status"
+    {
+        let expected = trace_benchmark_registry_outbox_status_audit_metadata_from_reason(
+            event.reason.as_deref(),
+        )
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "benchmark registry outbox status audit event {} requires canonical hash reason fields",
+                event.event_id
+            )
+        })?;
+        return match metadata {
+            StorageTraceAuditSafeMetadata::Empty => Ok(expected),
+            StorageTraceAuditSafeMetadata::BenchmarkRegistryOutboxStatus { .. }
+                if metadata == expected =>
+            {
+                Ok(metadata)
+            }
+            StorageTraceAuditSafeMetadata::BenchmarkRegistryOutboxStatus { .. } => {
+                anyhow::bail!(
+                    "benchmark registry outbox status audit event {} metadata does not match reason fields",
+                    event.event_id
+                )
+            }
+            _ => anyhow::bail!(
+                "benchmark registry outbox status audit event {} requires benchmark registry outbox status metadata",
+                event.event_id
+            ),
+        };
+    }
     if action == StorageTraceAuditAction::Revoke && event.kind == "revoked" {
         let expected = trace_revocation_audit_metadata_from_reason(event.reason.as_deref())
             .ok_or_else(|| {
@@ -48519,6 +48778,33 @@ fn storage_audit_canonical_reason(event: &StorageTraceAuditEventRecord) -> Optio
             near_transaction_hash_hash.as_deref(),
             last_error_hash.as_deref(),
         )),
+        StorageTraceAuditSafeMetadata::BenchmarkRegistryOutboxStatus {
+            benchmark_outbox_id,
+            conversion_id,
+            operation,
+            registry_ref_hash,
+            artifact_payload_hash,
+            source_submission_ids_hash,
+            evaluator_ref_hash,
+            status,
+            external_receipt_ref_hash,
+            last_error_hash,
+        } => Some(
+            trace_benchmark_registry_outbox_status_audit_reason_from_parts(
+                TraceBenchmarkRegistryOutboxStatusAuditReasonParts {
+                    benchmark_outbox_id: *benchmark_outbox_id,
+                    conversion_id: *conversion_id,
+                    operation: *operation,
+                    registry_ref_hash,
+                    artifact_payload_hash,
+                    source_submission_ids_hash,
+                    evaluator_ref_hash: evaluator_ref_hash.as_deref(),
+                    status: *status,
+                    external_receipt_ref_hash: external_receipt_ref_hash.as_deref(),
+                    last_error_hash: last_error_hash.as_deref(),
+                },
+            ),
+        ),
         _ => None,
     }
 }
@@ -49155,6 +49441,7 @@ fn audit_backfill_storage_projection(
         | "credit_hold"
         | "credit_hold_release"
         | "near_credit_outbox_status" => StorageTraceAuditAction::CreditMutate,
+        "benchmark_registry_outbox_status" => StorageTraceAuditAction::BenchmarkConvert,
         "revoked" => StorageTraceAuditAction::Revoke,
         "dataset_export" | "ranker_training_candidates_export" | "ranker_training_pairs_export" => {
             StorageTraceAuditAction::Export
@@ -49216,6 +49503,12 @@ fn audit_backfill_storage_projection(
         "near_credit_outbox_status" => {
             trace_near_credit_outbox_status_audit_metadata_from_reason(event.reason.as_deref())
                 .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
+        }
+        "benchmark_registry_outbox_status" => {
+            trace_benchmark_registry_outbox_status_audit_metadata_from_reason(
+                event.reason.as_deref(),
+            )
+            .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
         }
         "revoked" => trace_revocation_audit_metadata_from_reason(event.reason.as_deref())
             .unwrap_or(StorageTraceAuditSafeMetadata::Empty),
@@ -66798,6 +67091,215 @@ mod tests {
             .expect("storage audit projects");
 
         assert_eq!(projected_event.kind, "near_credit_outbox_status");
+        assert_eq!(projected_event.reason, audit_event.reason);
+    }
+
+    #[test]
+    fn audit_mirror_normalization_derives_benchmark_registry_outbox_status_metadata_from_reason() {
+        let benchmark_outbox_id = Uuid::new_v4();
+        let conversion_id = Uuid::new_v4();
+        let registry_ref = "external-registry:tenant-a:conversion-42";
+        let external_receipt_ref = "external-registry:receipt:manual-failed-1";
+        let last_error_hash = sha256_prefixed("registry rejected manual receipt");
+        let item = TraceBenchmarkRegistryOutboxItem {
+            benchmark_outbox_id,
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            conversion_id,
+            operation: StorageTraceBenchmarkRegistryOutboxOperation::Publish,
+            registry_ref: registry_ref.to_string(),
+            artifact_payload_hash: sha256_prefixed("benchmark artifact payload"),
+            source_submission_ids_hash: sha256_prefixed("benchmark sources"),
+            evaluator_ref: Some("external-benchmark-evaluator:v3".to_string()),
+            evaluation_score: Some(0.97),
+            status: StorageTraceBenchmarkRegistryOutboxStatus::Failed,
+            created_at: Utc::now(),
+            submitted_at: Some(Utc::now()),
+            external_receipt_ref: Some(external_receipt_ref.to_string()),
+            last_error_hash: Some(last_error_hash.clone()),
+            confirmed_at: None,
+        };
+        let audit_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: item.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "benchmark_registry_outbox_status".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::BenchmarkWorker),
+            actor_principal_ref: Some(principal_storage_ref("benchmark-worker-token-a")),
+            reason: Some(trace_benchmark_registry_outbox_status_audit_reason(&item)),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+
+        let metadata = normalize_audit_event_metadata(
+            &audit_event,
+            StorageTraceAuditAction::BenchmarkConvert,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .expect("benchmark registry status metadata normalizes");
+        let metadata_json =
+            serde_json::to_value(&metadata).expect("benchmark status metadata serializes");
+        let benchmark_outbox_id_text = benchmark_outbox_id.to_string();
+        let conversion_id_text = conversion_id.to_string();
+        let registry_ref_hash = sha256_prefixed(registry_ref);
+        let evaluator_ref_hash = sha256_prefixed("external-benchmark-evaluator:v3");
+        let external_receipt_ref_hash = sha256_prefixed(external_receipt_ref);
+
+        assert_eq!(
+            metadata_json.get("kind").and_then(|value| value.as_str()),
+            Some("benchmark_registry_outbox_status")
+        );
+        assert_eq!(
+            metadata_json
+                .get("benchmark_outbox_id")
+                .and_then(|value| value.as_str()),
+            Some(benchmark_outbox_id_text.as_str())
+        );
+        assert_eq!(
+            metadata_json
+                .get("conversion_id")
+                .and_then(|value| value.as_str()),
+            Some(conversion_id_text.as_str())
+        );
+        assert_eq!(
+            metadata_json
+                .get("operation")
+                .and_then(|value| value.as_str()),
+            Some("publish")
+        );
+        assert_eq!(
+            metadata_json
+                .get("registry_ref_hash")
+                .and_then(|value| value.as_str()),
+            Some(registry_ref_hash.as_str())
+        );
+        assert_eq!(
+            metadata_json
+                .get("evaluator_ref_hash")
+                .and_then(|value| value.as_str()),
+            Some(evaluator_ref_hash.as_str())
+        );
+        assert_eq!(
+            metadata_json.get("status").and_then(|value| value.as_str()),
+            Some("failed")
+        );
+        assert_eq!(
+            metadata_json
+                .get("external_receipt_ref_hash")
+                .and_then(|value| value.as_str()),
+            Some(external_receipt_ref_hash.as_str())
+        );
+        assert_eq!(
+            metadata_json
+                .get("last_error_hash")
+                .and_then(|value| value.as_str()),
+            Some(last_error_hash.as_str())
+        );
+        assert!(!metadata_json.to_string().contains(registry_ref));
+        assert!(!metadata_json.to_string().contains(external_receipt_ref));
+        assert!(
+            !metadata_json
+                .to_string()
+                .contains("registry rejected manual receipt")
+        );
+    }
+
+    #[test]
+    fn db_audit_projection_preserves_benchmark_registry_outbox_status_hash_only_metadata() {
+        let benchmark_outbox_id = Uuid::new_v4();
+        let conversion_id = Uuid::new_v4();
+        let registry_ref = "external-registry:tenant-a:conversion-43";
+        let external_receipt_ref = "external-registry:receipt:manual-submitted-1";
+        let item = TraceBenchmarkRegistryOutboxItem {
+            benchmark_outbox_id,
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            conversion_id,
+            operation: StorageTraceBenchmarkRegistryOutboxOperation::Revoke,
+            registry_ref: registry_ref.to_string(),
+            artifact_payload_hash: sha256_prefixed("revoked benchmark artifact payload"),
+            source_submission_ids_hash: sha256_prefixed("revoked benchmark sources"),
+            evaluator_ref: None,
+            evaluation_score: Some(0.91),
+            status: StorageTraceBenchmarkRegistryOutboxStatus::Submitted,
+            created_at: Utc::now(),
+            submitted_at: Some(Utc::now()),
+            external_receipt_ref: Some(external_receipt_ref.to_string()),
+            last_error_hash: None,
+            confirmed_at: None,
+        };
+        let audit_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: item.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "benchmark_registry_outbox_status".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Admin),
+            actor_principal_ref: Some(principal_storage_ref("admin-token-a")),
+            reason: Some(trace_benchmark_registry_outbox_status_audit_reason(&item)),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+
+        let (action, metadata) = audit_backfill_storage_projection(&audit_event);
+        assert_eq!(action, StorageTraceAuditAction::BenchmarkConvert);
+        let metadata_json =
+            serde_json::to_value(&metadata).expect("benchmark status metadata serializes");
+        assert_eq!(
+            metadata_json.get("kind").and_then(|value| value.as_str()),
+            Some("benchmark_registry_outbox_status")
+        );
+        assert_eq!(
+            metadata_json
+                .get("operation")
+                .and_then(|value| value.as_str()),
+            Some("revoke")
+        );
+        assert_eq!(
+            metadata_json.get("status").and_then(|value| value.as_str()),
+            Some("submitted")
+        );
+        assert_eq!(
+            metadata_json
+                .get("external_receipt_ref_hash")
+                .and_then(|value| value.as_str()),
+            Some(sha256_prefixed(external_receipt_ref).as_str())
+        );
+        assert!(!metadata_json.to_string().contains(registry_ref));
+        assert!(!metadata_json.to_string().contains(external_receipt_ref));
+
+        let storage_event = StorageTraceAuditEventRecord {
+            audit_event_id: audit_event.event_id,
+            tenant_id: audit_event.tenant_id.clone(),
+            audit_sequence: 1,
+            actor_principal_ref: audit_event.actor_principal_ref.clone().unwrap(),
+            actor_role: "admin".to_string(),
+            action,
+            reason: audit_event.reason.clone(),
+            request_id: None,
+            submission_id: None,
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: None,
+            metadata,
+            occurred_at: audit_event.created_at,
+        };
+        let projected_event = trace_commons_audit_event_from_storage("tenant-a", storage_event)
+            .expect("storage audit projects");
+
+        assert_eq!(projected_event.kind, "benchmark_registry_outbox_status");
         assert_eq!(projected_event.reason, audit_event.reason);
     }
 
@@ -89974,6 +90476,23 @@ mod tests {
             submitted.external_receipt_ref.as_deref(),
             Some("external-registry:tenant-a-submit")
         );
+
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        let status_audit = audit_events
+            .iter()
+            .find(|event| event.kind == "benchmark_registry_outbox_status")
+            .expect("benchmark registry outbox status audit exists");
+        let status_reason = status_audit
+            .reason
+            .as_deref()
+            .expect("benchmark registry status audit reason exists");
+        assert!(status_reason.contains(&format!("benchmark_outbox_id={benchmark_outbox_id}")));
+        assert!(status_reason.contains("status=submitted"));
+        assert!(status_reason.contains(&format!(
+            "external_receipt_ref_hash={}",
+            sha256_prefixed("external-registry:tenant-a-submit")
+        )));
+        assert!(!status_reason.contains("external-registry:tenant-a-submit"));
     }
 
     #[tokio::test]

@@ -1058,9 +1058,13 @@ Deployments that want the server to own benchmark candidate evaluation and local
 When `TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS` is
 configured, live benchmark registry outbox submit/confirm workers and the
 manual mark-status fallback require a listed central issuer principal while
-dry-run submit/confirm inspection remains available. The optional in-process
-benchmark registry outbox scheduler applies the same allowlist check at startup
-for live mode before it can call the worker routes.
+dry-run submit/confirm inspection remains available. Manual benchmark registry
+status updates append a `benchmark_registry_outbox_status` audit row with typed
+hash-only metadata for the outbox id, conversion id, operation, registry ref
+hash, artifact/source hashes, optional evaluator ref hash, status, external
+receipt-ref hash, and last-error hash. The optional in-process benchmark
+registry outbox scheduler applies the same allowlist check at startup for live
+mode before it can call the worker routes.
 
 Admin-only credit control-plane list reads for settlement batches, credit holds, utility attestations, NEAR credit outbox rows, and benchmark registry outbox rows append the same DB-mirrored aggregate read audit breadcrumb as issuer-approval, risk-summary, and other operator reads: only a code-owned surface plus bounded item count are recorded.
 
