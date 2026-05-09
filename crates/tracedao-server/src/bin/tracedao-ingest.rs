@@ -103392,6 +103392,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn revocation_credit_reversal_supports_ranking_utility_credit_events() {
+        assert_eq!(
+            trace_credit_event_type_from_storage(StorageTraceCreditEventType::RankingUtility),
+            Some(TraceCreditLedgerEventType::RankingUtility)
+        );
+        assert!(trace_credit_event_type_is_settlement_eligible(
+            TraceCreditLedgerEventType::RankingUtility
+        ));
+        assert_eq!(
+            utility_credit_required_allowed_uses(TraceCreditLedgerEventType::RankingUtility),
+            &[TraceAllowedUse::RankingModelTraining]
+        );
+    }
+
     #[tokio::test]
     async fn revocation_propagation_reverses_settled_credit_and_enqueues_near_reverse_receipt() {
         let Some(backend) = postgres_backend_for_ingest_test().await else {
@@ -103740,6 +103755,217 @@ mod tests {
         assert_eq!(credit.credit_points_settled, 0.0);
         assert_eq!(credit.credit_points_reversed, 2.0);
         assert_eq!(credit.credit_points_total, 0.0);
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn revocation_propagation_reverses_settled_ranking_utility_credit_and_near_receipt() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            true,
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+        let (candidate, prediction) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-revocation-credit-v1")
+                .await;
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist revocation-test calibration");
+        assert!(calibration.promotable);
+        let Json(active_model) = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "promote ranking model before revocation credit settlement".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can promote revocation-test ranking model");
+        assert_eq!(
+            active_model.model_status,
+            StorageTraceRankingModelStatus::Active
+        );
+
+        let Json(credit) = ranking_prediction_credit_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionCreditRequest {
+                ranking_prediction_id: prediction.ranking_prediction_id,
+                reason: "prediction selected for settlement reversal coverage".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can append prediction-bound ranking credit");
+        assert_eq!(credit.appended_count, 1);
+        assert_eq!(credit.skipped_existing_count, 0);
+        assert_eq!(credit.credit_points_delta, 1.25);
+        assert_eq!(credit.submission_id, prediction.submission_id);
+
+        let db_credit_events = backend
+            .list_trace_credit_events("tenant-a")
+            .await
+            .expect("DB credit events read after ranking credit");
+        let ranking_event = db_credit_events
+            .iter()
+            .find(|event| {
+                event.submission_id == prediction.submission_id
+                    && event.event_type == StorageTraceCreditEventType::RankingUtility
+                    && event.external_ref.as_deref() == Some(credit.external_ref.as_str())
+            })
+            .expect("ranking utility credit event is mirrored");
+        let ranking_credit_event_id = ranking_event.credit_event_id;
+        assert_eq!(ranking_event.points_delta, "1.2500");
+
+        let Json(finalized) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "settle ranking utility credit before revocation".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: Some(active_model.model_version.clone()),
+                ranking_target_use: Some(TraceAllowedUse::RankingModelTraining),
+            }),
+        )
+        .await
+        .expect("ranking utility credit settles with calibrated active model");
+        assert_eq!(finalized.settled_source_event_count, 1);
+        assert_eq!(finalized.settled_credit_points, 1.25);
+        assert_eq!(finalized.near_outbox_item_count, 1);
+
+        revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(prediction.submission_id),
+        )
+        .await
+        .expect("contributor can revoke settled ranking source");
+
+        let propagation_items = backend
+            .list_trace_revocation_propagation_items("tenant-a", prediction.submission_id)
+            .await
+            .expect("revocation propagation items read");
+        let reversal_items = propagation_items
+            .iter()
+            .filter(|item| {
+                item.action == StorageTraceRevocationPropagationAction::ReverseCreditSettlement
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reversal_items.len(), 1);
+        assert_eq!(
+            reversal_items[0].target,
+            StorageTraceRevocationPropagationTarget::CreditSettlement {
+                credit_event_id: ranking_credit_event_id,
+                credit_account_ref: principal_storage_ref("token-a"),
+                settlement_state_at_selection: StorageTraceCreditSettlementState::Final,
+            }
+        );
+
+        let Json(response) = revocation_propagation_worker_handler(
+            State(state.clone()),
+            auth_headers("revocation-worker-token-a"),
+            Json(TraceRevocationPropagationWorkerRequest {
+                purpose: Some("reverse_ranking_credit_for_revocation".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("revocation worker reverses settled ranking credit");
+        assert_eq!(response.completed, 1);
+        assert_eq!(response.failed, 0);
+
+        let db_credit_events = backend
+            .list_trace_credit_events("tenant-a")
+            .await
+            .expect("DB credit events read after ranking credit reversal");
+        let reversal_event = db_credit_events
+            .iter()
+            .find(|record| {
+                record.external_ref.as_deref()
+                    == Some(&format!(
+                        "revocation_credit_reversal:{ranking_credit_event_id}"
+                    ))
+            })
+            .expect("ranking utility reversal credit event is mirrored");
+        assert_eq!(reversal_event.submission_id, prediction.submission_id);
+        assert_eq!(
+            reversal_event.event_type,
+            StorageTraceCreditEventType::RankingUtility
+        );
+        assert_eq!(
+            reversal_event.settlement_state,
+            StorageTraceCreditSettlementState::Reversed
+        );
+        assert_eq!(reversal_event.points_delta, "-1.2500");
+
+        let db_outbox = backend
+            .list_trace_near_credit_outbox_items("tenant-a")
+            .await
+            .expect("DB NEAR outbox reads")
+            .into_iter()
+            .map(near_credit_outbox_item_from_storage)
+            .collect::<anyhow::Result<Vec<_>>>()
+            .expect("DB NEAR outbox records convert");
+        let reverse_items = db_outbox
+            .iter()
+            .filter(|item| item.near_call.method_name == "reverse_credit_receipt")
+            .collect::<Vec<_>>();
+        assert_eq!(reverse_items.len(), 1);
+        assert_eq!(
+            reverse_items[0].settlement_batch_id,
+            finalized.settlement_batch_id
+        );
+        assert_eq!(
+            reverse_items[0].near_call.args["amount_micros"],
+            serde_json::json!(1_250_000)
+        );
+        assert_eq!(
+            reverse_items[0].near_call.args["source_list_hash"],
+            serde_json::json!(source_credit_event_ids_hash(
+                "trace-credit-policy-v1",
+                &[ranking_credit_event_id],
+            ))
+        );
+
+        let Json(credit_summary) = credit_handler(State(state), auth_headers("token-a"))
+            .await
+            .expect("credit summary reflects ranking reversal");
+        assert_eq!(credit_summary.credit_points_settled, 0.0);
+        assert_eq!(credit_summary.credit_points_reversed, 1.25);
+        assert_eq!(credit_summary.credit_points_total, 0.0);
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
