@@ -746,7 +746,7 @@ outbox id, settlement batch id, account hash, status, transaction-hash hash, and
 last-error hash. Benchmark registry outbox submit/confirm workers use the same
 pattern and also terminalize malformed submitted receipts per item before
 calling the external confirmer. Revocation propagation workers also keep worker
-purposes hash-only in their count-summary audit rows.
+purposes hash-only in their count-summary runtime logs and audit rows.
 
 Stored envelope body reads now also validate any decoded contributor tenant scope that uses the server `tenant_sha256:<hash>` shape against the authenticated tenant for both file-backed and object-ref-backed reads, so a tampered server tenant ref cannot ride behind otherwise valid metadata while legacy client attribution strings remain non-authoritative.
 
