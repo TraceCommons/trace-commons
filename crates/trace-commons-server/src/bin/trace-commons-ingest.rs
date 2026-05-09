@@ -1524,6 +1524,10 @@ fn required_remote_object_store_env<'a>(
         value.len() <= 2048,
         "{env_name} is too long for Trace Commons remote object-store configuration"
     );
+    anyhow::ensure!(
+        !value.bytes().any(|byte| byte.is_ascii_control()),
+        "{env_name} must not contain control characters"
+    );
     Ok(value)
 }
 
@@ -1542,9 +1546,7 @@ impl TraceRemoteObjectStoreProvider {
             "gcs" | "google_cloud_storage" => Ok(Self::Gcs),
             "azure_blob" | "azure" => Ok(Self::AzureBlob),
             "file_system" | "filesystem" | "local_fs" => Ok(Self::FileSystem),
-            other => anyhow::bail!(
-                "unsupported TRACE_COMMONS_REMOTE_OBJECT_STORE_PROVIDER value: {other}"
-            ),
+            _ => anyhow::bail!("unsupported TRACE_COMMONS_REMOTE_OBJECT_STORE_PROVIDER value"),
         }
     }
 
@@ -59374,6 +59376,73 @@ mod tests {
         assert_eq!(
             file_config.status_object_store_alias(),
             TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE
+        );
+    }
+
+    #[test]
+    fn remote_trace_object_store_config_rejects_control_characters_without_echoing_values() {
+        let invalid_cases = [
+            (
+                TRACE_COMMONS_REMOTE_OBJECT_STORE_PROVIDER,
+                Some("file_system\nsecret-provider"),
+                Some("/tmp/trace-commons-remote-artifacts"),
+                Some("kms-key-ref"),
+                Some("credential-ref"),
+            ),
+            (
+                TRACE_COMMONS_REMOTE_OBJECT_STORE_BUCKET,
+                Some("file_system"),
+                Some("/tmp/trace-commons-remote-artifacts\nsecret-bucket"),
+                Some("kms-key-ref"),
+                Some("credential-ref"),
+            ),
+            (
+                TRACE_COMMONS_REMOTE_OBJECT_STORE_KMS_KEY_ID,
+                Some("file_system"),
+                Some("/tmp/trace-commons-remote-artifacts"),
+                Some("kms-key-ref\nsecret-kms"),
+                Some("credential-ref"),
+            ),
+            (
+                TRACE_COMMONS_REMOTE_OBJECT_STORE_CREDENTIAL_REF,
+                Some("file_system"),
+                Some("/tmp/trace-commons-remote-artifacts"),
+                Some("kms-key-ref"),
+                Some("credential-ref\nsecret-credential"),
+            ),
+        ];
+
+        for (env_name, provider, bucket, kms_key_id, credential_ref) in invalid_cases {
+            let error = match TraceRemoteObjectStoreConfig::from_parts(
+                provider,
+                bucket,
+                kms_key_id,
+                credential_ref,
+            ) {
+                Ok(_) => panic!("{env_name} with a control character must fail closed"),
+                Err(error) => error,
+            };
+            let message = error.to_string();
+            assert!(message.contains(env_name));
+            assert!(message.contains("control"));
+            assert!(
+                !message.contains("secret"),
+                "remote object-store config error leaked raw value: {message}"
+            );
+        }
+
+        let unsupported = TraceRemoteObjectStoreConfig::from_parts(
+            Some("unsupported-secret-provider"),
+            Some("/tmp/trace-commons-remote-artifacts"),
+            Some("kms-key-ref"),
+            Some("credential-ref"),
+        )
+        .expect_err("unsupported provider fails closed");
+        let message = unsupported.to_string();
+        assert!(message.contains("unsupported TRACE_COMMONS_REMOTE_OBJECT_STORE_PROVIDER"));
+        assert!(
+            !message.contains("unsupported-secret-provider"),
+            "unsupported provider error leaked raw value: {message}"
         );
     }
 
