@@ -41406,7 +41406,7 @@ async fn delete_object_payload_for_revocation_propagation(
     };
     anyhow::ensure!(
         store.object_store_name() == object_ref.object_store,
-        "configured trace artifact store does not match object ref store"
+        TRACE_OBJECT_REF_STORE_MISMATCH
     );
     let tenant_ref = tenant_storage_ref(&tenant.tenant_id);
     match artifact_kind.clone() {
@@ -43155,7 +43155,7 @@ fn read_envelope_from_object_ref(
                 .context("encrypted trace artifact store is not configured")?;
             anyhow::ensure!(
                 store.object_store_name() == object_ref.object_store,
-                "configured trace envelope store does not match object ref store"
+                TRACE_OBJECT_REF_STORE_MISMATCH
             );
             store.get_json_by_object_key(
                 &tenant_storage_ref(tenant_id),
@@ -43197,7 +43197,7 @@ fn read_trace_vector_payload_from_object_ref(
         .context("encrypted trace vector payload store is not configured")?;
     anyhow::ensure!(
         store.object_store_name() == object_ref.object_store,
-        "configured trace vector payload store does not match object ref store"
+        TRACE_OBJECT_REF_STORE_MISMATCH
     );
     let payload = store
         .get_json_by_object_key::<TraceVectorPayloadArtifact>(
@@ -43292,11 +43292,13 @@ fn read_file_store_envelope_from_object_ref(
 const TRACE_OBJECT_REF_CONTENT_HASH_MISMATCH: &str = "trace object ref content hash mismatch";
 const TRACE_OBJECT_REF_ENCRYPTION_KEY_REF_MISMATCH: &str =
     "trace object ref encryption key ref mismatch";
+const TRACE_OBJECT_REF_STORE_MISMATCH: &str = "trace object ref store mismatch";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TraceObjectRefReadFailureKind {
     HashMismatch,
     KeyRefMismatch,
+    StoreMismatch,
     Unreadable,
 }
 
@@ -43313,6 +43315,11 @@ fn classify_trace_object_ref_read_failure(error: &anyhow::Error) -> TraceObjectR
             .contains(TRACE_OBJECT_REF_ENCRYPTION_KEY_REF_MISMATCH)
     }) {
         TraceObjectRefReadFailureKind::KeyRefMismatch
+    } else if error
+        .chain()
+        .any(|cause| cause.to_string().contains(TRACE_OBJECT_REF_STORE_MISMATCH))
+    {
+        TraceObjectRefReadFailureKind::StoreMismatch
     } else {
         TraceObjectRefReadFailureKind::Unreadable
     }
@@ -49172,6 +49179,7 @@ async fn reconcile_db_mirror(
     let mut unreadable_active_envelope_object_refs = Vec::new();
     let mut hash_mismatched_active_envelope_object_refs = Vec::new();
     let mut key_ref_mismatched_active_envelope_object_refs = Vec::new();
+    let mut store_mismatched_active_envelope_object_refs = Vec::new();
     for record in &db_records {
         let object_refs = db
             .list_trace_object_refs(&tenant.tenant_id, record.submission_id)
@@ -49211,6 +49219,9 @@ async fn reconcile_db_mirror(
                         TraceObjectRefReadFailureKind::KeyRefMismatch => {
                             key_ref_mismatched_active_envelope_object_refs
                                 .push(record.submission_id);
+                        }
+                        TraceObjectRefReadFailureKind::StoreMismatch => {
+                            store_mismatched_active_envelope_object_refs.push(record.submission_id);
                         }
                         TraceObjectRefReadFailureKind::Unreadable => {
                             unreadable_active_envelope_object_refs.push(record.submission_id);
@@ -49652,6 +49663,7 @@ async fn reconcile_db_mirror(
         unreadable_active_envelope_object_refs,
         hash_mismatched_active_envelope_object_refs,
         key_ref_mismatched_active_envelope_object_refs,
+        store_mismatched_active_envelope_object_refs,
         contributor_credit_reader_parity_ok,
         reviewer_metadata_reader_parity_ok,
         analytics_reader_parity_ok,
@@ -52365,6 +52377,7 @@ struct TraceDbReconciliationReport {
     unreadable_active_envelope_object_refs: Vec<Uuid>,
     hash_mismatched_active_envelope_object_refs: Vec<Uuid>,
     key_ref_mismatched_active_envelope_object_refs: Vec<Uuid>,
+    store_mismatched_active_envelope_object_refs: Vec<Uuid>,
     contributor_credit_reader_parity_ok: bool,
     reviewer_metadata_reader_parity_ok: bool,
     analytics_reader_parity_ok: bool,
@@ -52673,6 +52686,11 @@ impl TraceDbReconciliationReport {
             &mut gaps,
             "key_ref_mismatched_active_envelope_object_refs",
             self.key_ref_mismatched_active_envelope_object_refs.len(),
+        );
+        push_gap_count(
+            &mut gaps,
+            "store_mismatched_active_envelope_object_refs",
+            self.store_mismatched_active_envelope_object_refs.len(),
         );
         push_gap_bool(
             &mut gaps,
@@ -63008,10 +63026,10 @@ mod tests {
 
         let error = read_envelope_from_object_ref(state.as_ref(), "tenant-a", &mismatched_ref)
             .expect_err("mismatched encrypted object store must fail closed");
-        assert!(
-            error
-                .to_string()
-                .contains("configured trace envelope store does not match object ref store")
+        assert!(error.to_string().contains(TRACE_OBJECT_REF_STORE_MISMATCH));
+        assert_eq!(
+            classify_trace_object_ref_read_failure(&error),
+            TraceObjectRefReadFailureKind::StoreMismatch
         );
     }
 
@@ -78117,6 +78135,104 @@ mod tests {
         assert!(report.db_reader_parity_failures.iter().any(|failure| {
             failure.contains("audit") && failure.contains("db_error_hash=sha256:")
         }));
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn maintenance_reconciliation_reports_envelope_object_ref_store_mismatch() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            Some(test_artifact_store(artifact_temp.path())),
+            false,
+            false,
+            false,
+            false,
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("encrypted submission mirrors to DB");
+
+        let original_ref = backend
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                submission_id,
+                StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            )
+            .await
+            .expect("object ref reads")
+            .expect("submitted envelope object ref exists");
+        assert_eq!(
+            original_ref.object_store,
+            TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE
+        );
+
+        backend
+            .append_trace_object_ref(StorageTraceObjectRefWrite {
+                object_ref_id: original_ref.object_ref_id,
+                tenant_id: original_ref.tenant_id,
+                submission_id: original_ref.submission_id,
+                artifact_kind: original_ref.artifact_kind,
+                object_store: TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE.to_string(),
+                object_key: original_ref.object_key,
+                content_sha256: original_ref.content_sha256,
+                encryption_key_ref: original_ref.encryption_key_ref,
+                size_bytes: original_ref.size_bytes,
+                compression: original_ref.compression,
+                created_by_job_id: original_ref.created_by_job_id,
+            })
+            .await
+            .expect("object ref alias is drifted in DB");
+
+        let Json(response) = maintenance_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceMaintenanceRequest {
+                purpose: Some("object_ref_store_mismatch_reconcile".to_string()),
+                dry_run: true,
+                backfill_db_mirror: false,
+                index_vectors: false,
+                reconcile_db_mirror: true,
+                verify_audit_chain: false,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("maintenance reports object-ref store mismatch");
+
+        let report = response
+            .db_reconciliation
+            .expect("reconciliation report exists");
+        assert_eq!(
+            report.store_mismatched_active_envelope_object_refs,
+            vec![submission_id]
+        );
+        assert!(report.unreadable_active_envelope_object_refs.is_empty());
+        assert!(
+            report
+                .blocking_gaps
+                .iter()
+                .any(|gap| { gap == "store_mismatched_active_envelope_object_refs=1" })
+        );
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
