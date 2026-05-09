@@ -40410,12 +40410,12 @@ fn require_ranking_label_source_operator(
 }
 
 fn require_process_evaluation_operator(auth: &TenantAuth) -> ApiResult<()> {
-    if auth.role.can_review() || auth.role == TokenRole::ProcessEvalWorker {
+    if auth.role.can_admin() || auth.role == TokenRole::ProcessEvalWorker {
         Ok(())
     } else {
         Err(api_error(
             StatusCode::FORBIDDEN,
-            "reviewer, admin, or process evaluation worker token required",
+            "admin or process evaluation worker token required",
         ))
     }
 }
@@ -67240,6 +67240,25 @@ mod tests {
         .expect_err("process evaluation utility credit requires external ref");
         assert_eq!(missing_external_ref_error.0, StatusCode::BAD_REQUEST);
 
+        let reviewer_error = process_evaluation_worker_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceProcessEvaluationJobRequest {
+                submission_id: Uuid::new_v4(),
+                process_evaluation: ProcessEvaluationLabels {
+                    evaluator_version: "judge-v1".to_string(),
+                    ..ProcessEvaluationLabels::default()
+                },
+                reason: "reviewer must not run process evaluation worker".to_string(),
+                utility_credit_points_delta: None,
+                utility_external_ref: None,
+                ranking_label: None,
+            }),
+        )
+        .await
+        .expect_err("reviewer token must not reach process evaluation source checks");
+        assert_eq!(reviewer_error.0, StatusCode::FORBIDDEN);
+
         let process_eval_reason = "offline trajectory evaluator";
         let Json(response) = process_evaluation_worker_handler(
             State(state.clone()),
@@ -73169,7 +73188,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("reviewer, admin, or process evaluation worker token required")
+                .contains("admin or process evaluation worker token required")
         );
 
         let missing_evaluator = validate_trace_process_evaluation_scheduler_config(

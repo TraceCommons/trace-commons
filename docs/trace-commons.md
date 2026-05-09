@@ -208,7 +208,9 @@ tenant/audience/consent/use metadata, sends optional workload credentials only
 as an Authorization header, accepts only EdDSA JWT responses with `kid`, and
 keeps the resulting bearer token in memory until its refresh margin.
 Process-evaluation workers can submit bounded process quality metadata through
-`POST /v1/workers/process-evaluation` using the CLI helper:
+`POST /v1/workers/process-evaluation` using admin or process-evaluation worker
+credentials; ordinary reviewer tokens are rejected before source lookup or trace
+body reads. Use the CLI helper:
 
 ```bash
 ironclaw traces process-evaluation-submit \
@@ -232,7 +234,8 @@ repeated external refs as idempotent retries when the evidence and label fields
 match.
 
 Schedulers can also use `POST /v1/workers/process-evaluations/run` for bounded
-process-evaluation batches. When `TRACE_COMMONS_PROCESS_EVALUATOR_URL` is
+process-evaluation batches with the same admin-or-process-worker credential
+boundary. When `TRACE_COMMONS_PROCESS_EVALUATOR_URL` is
 configured, the worker sends only derived candidate summaries, summary hashes,
 hashed submission/trace ids, purpose hashes, evaluator refs, and safe aggregate
 metadata to the adapter. It omits raw trace bodies, contributor principals, raw
