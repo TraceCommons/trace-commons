@@ -40368,12 +40368,12 @@ fn require_revocation_propagation_operator(auth: &TenantAuth) -> ApiResult<()> {
 }
 
 fn require_utility_operator(auth: &TenantAuth) -> ApiResult<()> {
-    if auth.role.can_review() || auth.role == TokenRole::UtilityWorker {
+    if auth.role.can_admin() || auth.role == TokenRole::UtilityWorker {
         Ok(())
     } else {
         Err(api_error(
             StatusCode::FORBIDDEN,
-            "reviewer, admin, or utility worker token required",
+            "admin or utility worker token required",
         ))
     }
 }
@@ -72624,7 +72624,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("reviewer, admin, or utility worker token required")
+                .contains("admin or utility worker token required")
         );
 
         let missing_adapter = validate_trace_near_credit_outbox_scheduler_config(
@@ -72772,7 +72772,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("reviewer, admin, or utility worker token required")
+                .contains("admin or utility worker token required")
         );
 
         Arc::make_mut(&mut state).credit_settlement_require_near_contract = true;
@@ -73288,7 +73288,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("reviewer, admin, or utility worker token required")
+                .contains("admin or utility worker token required")
         );
 
         let missing_submitter = validate_trace_credit_cycle_scheduler_config(
@@ -91402,6 +91402,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn utility_credit_worker_route_rejects_reviewer_tokens_before_source_checks() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = utility_credit_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceUtilityCreditJobRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.0,
+                reason: "reviewer must use manual credit surfaces".to_string(),
+                external_ref: "frontier:reviewer-worker-route-denied".to_string(),
+                submission_ids: vec![Uuid::new_v4()],
+            }),
+        )
+        .await
+        .expect_err("reviewer token must not reach utility credit source checks");
+
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn credit_settlement_scheduler_tick_uses_worker_surface_for_dry_run_and_live_settlement()
     {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -102211,10 +102233,7 @@ mod tests {
         .expect_err("contributors cannot run scheduler");
 
         assert_eq!(error.0, StatusCode::FORBIDDEN);
-        assert_eq!(
-            error.1.0.error,
-            "reviewer, admin, or utility worker token required"
-        );
+        assert_eq!(error.1.0.error, "admin or utility worker token required");
         let worker_runs =
             read_all_ranking_worker_runs(temp.path(), "tenant-a").expect("worker runs read");
         assert!(worker_runs.is_empty());
@@ -102546,10 +102565,7 @@ mod tests {
         .expect_err("contributors cannot run the credit cycle worker");
 
         assert_eq!(error.0, StatusCode::FORBIDDEN);
-        assert_eq!(
-            error.1.0.error,
-            "reviewer, admin, or utility worker token required"
-        );
+        assert_eq!(error.1.0.error, "admin or utility worker token required");
         assert!(
             read_all_ranking_worker_runs(temp.path(), "tenant-a")
                 .expect("worker run ledger reads")
