@@ -1225,6 +1225,14 @@ pub enum TraceAuditSafeMetadata {
         hold_reason: TraceCreditHoldReason,
         reason_hash: String,
     },
+    NearCreditOutboxStatus {
+        near_outbox_id: Uuid,
+        settlement_batch_id: Uuid,
+        credit_account_hash: String,
+        status: TraceCreditSettlementNearStatus,
+        near_transaction_hash_hash: Option<String>,
+        last_error_hash: Option<String>,
+    },
     ProcessEvaluation {
         evaluator_version_hash: String,
         label_count: u32,
