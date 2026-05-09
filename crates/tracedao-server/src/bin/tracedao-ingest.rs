@@ -13044,6 +13044,7 @@ async fn run_benchmark_registry_outbox_submit_worker(
     };
     if request.dry_run {
         append_benchmark_registry_outbox_submit_audit(state, tenant, &response).await?;
+        log_benchmark_registry_outbox_submit_worker_summary(tenant, &response);
         return Ok(response);
     }
 
@@ -13056,8 +13057,37 @@ async fn run_benchmark_registry_outbox_submit_worker(
         let submit_request = benchmark_registry_submitter_request_from_outbox_item(&item);
         match submitter.submit(submit_request).await {
             Ok(submit_response) => {
-                let external_receipt_ref =
-                    normalize_external_registry_receipt_ref(&submit_response.external_receipt_ref)?;
+                let external_receipt_ref = match normalize_external_registry_receipt_ref(
+                    &submit_response.external_receipt_ref,
+                ) {
+                    Ok(external_receipt_ref) => external_receipt_ref,
+                    Err(error) => {
+                        let last_error_hash = sha256_prefixed(&safe_worker_error(&error));
+                        tracing::warn!(
+                            tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+                            benchmark_outbox_id = %item.benchmark_outbox_id,
+                            error_hash = %last_error_hash,
+                            "Trace Commons benchmark registry outbox submit rejected adapter receipt"
+                        );
+                        update_benchmark_registry_outbox_item_status_with_db_mirror(
+                            state,
+                            tenant,
+                            item.benchmark_outbox_id,
+                            StorageTraceBenchmarkRegistryOutboxStatus::Failed,
+                            None,
+                            Some(last_error_hash),
+                        )
+                        .await?
+                        .with_context(|| {
+                            format!(
+                                "benchmark registry outbox item {} disappeared before invalid-receipt status update",
+                                item.benchmark_outbox_id
+                            )
+                        })?;
+                        response.failed += 1;
+                        continue;
+                    }
+                };
                 let updated = update_benchmark_registry_outbox_item_status_with_db_mirror(
                     state,
                     tenant,
@@ -13082,6 +13112,12 @@ async fn run_benchmark_registry_outbox_submit_worker(
             }
             Err(error) => {
                 let last_error_hash = sha256_prefixed(&safe_worker_error(&error));
+                tracing::warn!(
+                    tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+                    benchmark_outbox_id = %item.benchmark_outbox_id,
+                    error_hash = %last_error_hash,
+                    "Trace Commons benchmark registry outbox submit failed"
+                );
                 update_benchmark_registry_outbox_item_status_with_db_mirror(
                     state,
                     tenant,
@@ -13103,6 +13139,7 @@ async fn run_benchmark_registry_outbox_submit_worker(
     }
     response.pending = pending_total.saturating_sub(response.submitted);
     append_benchmark_registry_outbox_submit_audit(state, tenant, &response).await?;
+    log_benchmark_registry_outbox_submit_worker_summary(tenant, &response);
     Ok(response)
 }
 
@@ -13139,6 +13176,7 @@ async fn run_benchmark_registry_outbox_confirm_worker(
     };
     if request.dry_run {
         append_benchmark_registry_outbox_confirm_audit(state, tenant, &response).await?;
+        log_benchmark_registry_outbox_confirm_worker_summary(tenant, &response);
         return Ok(response);
     }
 
@@ -13148,18 +13186,85 @@ async fn run_benchmark_registry_outbox_confirm_worker(
         .context("benchmark registry outbox confirmer is not configured")?
         .clone();
     for item in candidates {
-        let confirm_request = benchmark_registry_confirmation_request_from_outbox_item(&item)?;
+        let confirm_request = match benchmark_registry_confirmation_request_from_outbox_item(&item)
+        {
+            Ok(request) => request,
+            Err(error) => {
+                let last_error_hash = sha256_prefixed(&safe_worker_error(&error));
+                tracing::warn!(
+                    tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+                    benchmark_outbox_id = %item.benchmark_outbox_id,
+                    error_hash = %last_error_hash,
+                    "Trace Commons benchmark registry outbox confirmation skipped invalid receipt"
+                );
+                let external_receipt_ref = item
+                    .external_receipt_ref
+                    .as_deref()
+                    .and_then(|receipt| normalize_external_registry_receipt_ref(receipt).ok());
+                update_benchmark_registry_outbox_item_status_with_db_mirror(
+                    state,
+                    tenant,
+                    item.benchmark_outbox_id,
+                    StorageTraceBenchmarkRegistryOutboxStatus::Failed,
+                    external_receipt_ref,
+                    Some(last_error_hash),
+                )
+                .await?
+                .with_context(|| {
+                    format!(
+                        "benchmark registry outbox item {} disappeared before invalid-confirmation status update",
+                        item.benchmark_outbox_id
+                    )
+                })?;
+                response.failed += 1;
+                response.pending = response.pending.saturating_sub(1);
+                continue;
+            }
+        };
         match confirmer.confirm(confirm_request).await {
             Ok(confirm_response) => match confirm_response.status {
                 TraceBenchmarkRegistryConfirmationStatus::Confirmed => {
-                    let external_receipt_ref = confirm_response
+                    let external_receipt_ref = match confirm_response
                         .external_receipt_ref
                         .as_deref()
                         .or(item.external_receipt_ref.as_deref())
                         .context(
                             "confirmed benchmark registry response requires external_receipt_ref",
                         )
-                        .and_then(normalize_external_registry_receipt_ref)?;
+                        .and_then(normalize_external_registry_receipt_ref)
+                    {
+                        Ok(external_receipt_ref) => external_receipt_ref,
+                        Err(error) => {
+                            let last_error_hash = sha256_prefixed(&safe_worker_error(&error));
+                            tracing::warn!(
+                                tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+                                benchmark_outbox_id = %item.benchmark_outbox_id,
+                                error_hash = %last_error_hash,
+                                "Trace Commons benchmark registry outbox confirmation rejected adapter receipt"
+                            );
+                            let existing_receipt_ref =
+                                item.external_receipt_ref.as_deref().and_then(|receipt| {
+                                    normalize_external_registry_receipt_ref(receipt).ok()
+                                });
+                            update_benchmark_registry_outbox_item_status_with_db_mirror(
+                                state,
+                                tenant,
+                                item.benchmark_outbox_id,
+                                StorageTraceBenchmarkRegistryOutboxStatus::Submitted,
+                                existing_receipt_ref,
+                                Some(last_error_hash),
+                            )
+                            .await?
+                            .with_context(|| {
+                                format!(
+                                    "benchmark registry outbox item {} disappeared before confirmation error update",
+                                    item.benchmark_outbox_id
+                                )
+                            })?;
+                            response.failed += 1;
+                            continue;
+                        }
+                    };
                     let updated = update_benchmark_registry_outbox_item_status_with_db_mirror(
                         state,
                         tenant,
@@ -13184,24 +13289,83 @@ async fn run_benchmark_registry_outbox_confirm_worker(
                     response.pending = response.pending.saturating_sub(1);
                 }
                 TraceBenchmarkRegistryConfirmationStatus::Failed => {
-                    let error_detail = confirm_response
+                    let error_detail = match confirm_response
                         .error_detail
                         .as_deref()
                         .map(str::trim)
                         .filter(|value| !value.is_empty())
-                        .context("failed benchmark registry response requires error_detail")?;
+                        .context("failed benchmark registry response requires error_detail")
+                    {
+                        Ok(error_detail) => error_detail,
+                        Err(error) => {
+                            let last_error_hash = sha256_prefixed(&safe_worker_error(&error));
+                            tracing::warn!(
+                                tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+                                benchmark_outbox_id = %item.benchmark_outbox_id,
+                                error_hash = %last_error_hash,
+                                "Trace Commons benchmark registry outbox confirmation returned malformed failure"
+                            );
+                            let external_receipt_ref =
+                                item.external_receipt_ref.as_deref().and_then(|receipt| {
+                                    normalize_external_registry_receipt_ref(receipt).ok()
+                                });
+                            update_benchmark_registry_outbox_item_status_with_db_mirror(
+                                state,
+                                tenant,
+                                item.benchmark_outbox_id,
+                                StorageTraceBenchmarkRegistryOutboxStatus::Submitted,
+                                external_receipt_ref,
+                                Some(last_error_hash),
+                            )
+                            .await?
+                            .with_context(|| {
+                                format!(
+                                    "benchmark registry outbox item {} disappeared before malformed-failure status update",
+                                    item.benchmark_outbox_id
+                                )
+                            })?;
+                            response.failed += 1;
+                            continue;
+                        }
+                    };
                     let last_error_hash = sha256_prefixed(error_detail);
+                    tracing::warn!(
+                        tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+                        benchmark_outbox_id = %item.benchmark_outbox_id,
+                        error_hash = %last_error_hash,
+                        "Trace Commons benchmark registry outbox confirmation failed at adapter"
+                    );
+                    let external_receipt_ref = match confirm_response
+                        .external_receipt_ref
+                        .as_deref()
+                        .map(normalize_external_registry_receipt_ref)
+                        .transpose()
+                    {
+                        Ok(Some(receipt_ref)) => Some(receipt_ref),
+                        Ok(None) => item
+                            .external_receipt_ref
+                            .as_deref()
+                            .map(normalize_external_registry_receipt_ref)
+                            .transpose()?,
+                        Err(error) => {
+                            let receipt_error_hash = sha256_prefixed(&safe_worker_error(&error));
+                            tracing::warn!(
+                                tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+                                benchmark_outbox_id = %item.benchmark_outbox_id,
+                                error_hash = %receipt_error_hash,
+                                "Trace Commons benchmark registry outbox confirmation ignored invalid failure receipt"
+                            );
+                            item.external_receipt_ref.as_deref().and_then(|receipt| {
+                                normalize_external_registry_receipt_ref(receipt).ok()
+                            })
+                        }
+                    };
                     update_benchmark_registry_outbox_item_status_with_db_mirror(
                         state,
                         tenant,
                         item.benchmark_outbox_id,
                         StorageTraceBenchmarkRegistryOutboxStatus::Failed,
-                        confirm_response
-                            .external_receipt_ref
-                            .as_deref()
-                            .or(item.external_receipt_ref.as_deref())
-                            .map(normalize_external_registry_receipt_ref)
-                            .transpose()?,
+                        external_receipt_ref,
                         Some(last_error_hash),
                     )
                     .await?
@@ -13217,9 +13381,11 @@ async fn run_benchmark_registry_outbox_confirm_worker(
                 TraceBenchmarkRegistryConfirmationStatus::Pending => {}
             },
             Err(error) => {
+                let error_hash = sha256_prefixed(&safe_worker_error(&error));
                 tracing::warn!(
-                    %error,
+                    tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
                     benchmark_outbox_id = %item.benchmark_outbox_id,
+                    error_hash = %error_hash,
                     "Trace Commons benchmark registry confirmation poll failed"
                 );
                 response.failed += 1;
@@ -13227,7 +13393,100 @@ async fn run_benchmark_registry_outbox_confirm_worker(
         }
     }
     append_benchmark_registry_outbox_confirm_audit(state, tenant, &response).await?;
+    log_benchmark_registry_outbox_confirm_worker_summary(tenant, &response);
     Ok(response)
+}
+
+#[derive(Debug)]
+struct TraceBenchmarkRegistryOutboxSubmitWorkerLogFields {
+    tenant_storage_ref: String,
+    purpose_hash: String,
+    dry_run: bool,
+    checked: usize,
+    submitted: usize,
+    failed: usize,
+    skipped: usize,
+    pending: usize,
+}
+
+fn benchmark_registry_outbox_submit_worker_log_fields(
+    tenant: &TenantAuth,
+    response: &TraceBenchmarkRegistryOutboxSubmitWorkerResponse,
+) -> TraceBenchmarkRegistryOutboxSubmitWorkerLogFields {
+    TraceBenchmarkRegistryOutboxSubmitWorkerLogFields {
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        purpose_hash: sha256_prefixed(&response.purpose),
+        dry_run: response.dry_run,
+        checked: response.checked,
+        submitted: response.submitted,
+        failed: response.failed,
+        skipped: response.skipped,
+        pending: response.pending,
+    }
+}
+
+fn log_benchmark_registry_outbox_submit_worker_summary(
+    tenant: &TenantAuth,
+    response: &TraceBenchmarkRegistryOutboxSubmitWorkerResponse,
+) {
+    let fields = benchmark_registry_outbox_submit_worker_log_fields(tenant, response);
+    tracing::info!(
+        tenant_storage_ref = %fields.tenant_storage_ref,
+        purpose_hash = %fields.purpose_hash,
+        dry_run = fields.dry_run,
+        checked_count = fields.checked,
+        submitted_count = fields.submitted,
+        failed_count = fields.failed,
+        skipped_count = fields.skipped,
+        pending_count = fields.pending,
+        "Trace Commons benchmark registry outbox submit worker completed"
+    );
+}
+
+#[derive(Debug)]
+struct TraceBenchmarkRegistryOutboxConfirmWorkerLogFields {
+    tenant_storage_ref: String,
+    purpose_hash: String,
+    dry_run: bool,
+    checked: usize,
+    confirmed: usize,
+    failed: usize,
+    skipped: usize,
+    pending: usize,
+}
+
+fn benchmark_registry_outbox_confirm_worker_log_fields(
+    tenant: &TenantAuth,
+    response: &TraceBenchmarkRegistryOutboxConfirmWorkerResponse,
+) -> TraceBenchmarkRegistryOutboxConfirmWorkerLogFields {
+    TraceBenchmarkRegistryOutboxConfirmWorkerLogFields {
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        purpose_hash: sha256_prefixed(&response.purpose),
+        dry_run: response.dry_run,
+        checked: response.checked,
+        confirmed: response.confirmed,
+        failed: response.failed,
+        skipped: response.skipped,
+        pending: response.pending,
+    }
+}
+
+fn log_benchmark_registry_outbox_confirm_worker_summary(
+    tenant: &TenantAuth,
+    response: &TraceBenchmarkRegistryOutboxConfirmWorkerResponse,
+) {
+    let fields = benchmark_registry_outbox_confirm_worker_log_fields(tenant, response);
+    tracing::info!(
+        tenant_storage_ref = %fields.tenant_storage_ref,
+        purpose_hash = %fields.purpose_hash,
+        dry_run = fields.dry_run,
+        checked_count = fields.checked,
+        confirmed_count = fields.confirmed,
+        failed_count = fields.failed,
+        skipped_count = fields.skipped,
+        pending_count = fields.pending,
+        "Trace Commons benchmark registry outbox confirm worker completed"
+    );
 }
 
 fn benchmark_registry_outbox_item_is_submit_candidate(
@@ -79082,6 +79341,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn benchmark_registry_outbox_confirm_worker_rejects_tampered_receipt_before_confirmer() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let fake_confirmer = FakeBenchmarkRegistryConfirmer::default();
+        let confirmation_calls = fake_confirmer.calls.clone();
+        Arc::make_mut(&mut state).benchmark_registry_confirmer = Some(Arc::new(fake_confirmer));
+
+        let benchmark_outbox_id = Uuid::new_v4();
+        let mut item = submitted_benchmark_registry_outbox_item(
+            benchmark_outbox_id,
+            StorageTraceBenchmarkRegistryOutboxOperation::Publish,
+        );
+        item.external_receipt_ref = Some("external-registry:receipt:tampered\nraw".to_string());
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &item)
+            .expect("tampered benchmark registry outbox file writes");
+
+        let Json(response) = benchmark_registry_outbox_confirm_worker_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxConfirmWorkerRequest {
+                purpose: Some("confirm_tampered_benchmark_registry_receipt".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("tampered registry receipt is terminalized per item");
+
+        assert_eq!(response.checked, 1);
+        assert_eq!(response.confirmed, 0);
+        assert_eq!(response.failed, 1);
+        assert_eq!(response.pending, 0);
+        assert!(
+            confirmation_calls
+                .lock()
+                .expect("fake benchmark confirmer calls lock")
+                .is_empty(),
+            "tampered receipt must fail before adapter confirmation"
+        );
+
+        let outbox = read_all_benchmark_registry_outbox_items(temp.path(), "tenant-a")
+            .expect("benchmark registry outbox reads");
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(
+            outbox[0].status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Failed
+        );
+        assert!(outbox[0].last_error_hash.is_some());
+    }
+
+    #[tokio::test]
     async fn near_credit_outbox_confirm_worker_confirms_submitted_items() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
@@ -95170,6 +95480,60 @@ mod tests {
         assert_eq!(fields.confirmed, 2);
         assert_eq!(fields.failed, 1);
         assert_eq!(fields.skipped, 3);
+        assert_eq!(fields.pending, 1);
+    }
+
+    #[test]
+    fn benchmark_registry_submit_worker_log_fields_hash_sensitive_values() {
+        let auth = test_reviewer_auth("tenant-a");
+        let response = TraceBenchmarkRegistryOutboxSubmitWorkerResponse {
+            purpose: "publish benchmark artifact for frontier lab batch 42".to_string(),
+            dry_run: false,
+            checked: 7,
+            submitted: 4,
+            failed: 1,
+            skipped: 2,
+            pending: 3,
+        };
+
+        let fields = benchmark_registry_outbox_submit_worker_log_fields(&auth, &response);
+
+        assert_eq!(fields.tenant_storage_ref, tenant_storage_ref("tenant-a"));
+        assert_eq!(fields.purpose_hash, sha256_prefixed(&response.purpose));
+        assert!(!fields.purpose_hash.contains("frontier"));
+        assert!(!fields.purpose_hash.contains("batch"));
+        assert!(!fields.dry_run);
+        assert_eq!(fields.checked, 7);
+        assert_eq!(fields.submitted, 4);
+        assert_eq!(fields.failed, 1);
+        assert_eq!(fields.skipped, 2);
+        assert_eq!(fields.pending, 3);
+    }
+
+    #[test]
+    fn benchmark_registry_confirm_worker_log_fields_hash_sensitive_values() {
+        let auth = test_reviewer_auth("tenant-a");
+        let response = TraceBenchmarkRegistryOutboxConfirmWorkerResponse {
+            purpose: "confirm benchmark artifact for frontier lab batch 42".to_string(),
+            dry_run: true,
+            checked: 6,
+            confirmed: 5,
+            failed: 1,
+            skipped: 2,
+            pending: 1,
+        };
+
+        let fields = benchmark_registry_outbox_confirm_worker_log_fields(&auth, &response);
+
+        assert_eq!(fields.tenant_storage_ref, tenant_storage_ref("tenant-a"));
+        assert_eq!(fields.purpose_hash, sha256_prefixed(&response.purpose));
+        assert!(!fields.purpose_hash.contains("frontier"));
+        assert!(!fields.purpose_hash.contains("batch"));
+        assert!(fields.dry_run);
+        assert_eq!(fields.checked, 6);
+        assert_eq!(fields.confirmed, 5);
+        assert_eq!(fields.failed, 1);
+        assert_eq!(fields.skipped, 2);
         assert_eq!(fields.pending, 1);
     }
 
