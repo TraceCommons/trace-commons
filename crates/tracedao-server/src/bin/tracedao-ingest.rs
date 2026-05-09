@@ -333,6 +333,32 @@ const TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_DRY_RUN: &str =
     "TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_DRY_RUN";
 const TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_PURPOSE: &str =
     "TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_PURPOSE";
+const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED: &str =
+    "TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED";
+const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TOKEN: &str =
+    "TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TOKEN";
+const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_INTERVAL_SECONDS";
+const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TARGET_USE: &str =
+    "TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TARGET_USE";
+const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_MODEL_VERSION: &str =
+    "TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_MODEL_VERSION";
+const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_POLICY_VERSION: &str =
+    "TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_POLICY_VERSION";
+const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_REASON: &str =
+    "TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_REASON";
+const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_DRY_RUN: &str =
+    "TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_DRY_RUN";
+const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_PREFLIGHT_ONLY: &str =
+    "TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_PREFLIGHT_ONLY";
+const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_SUBMIT_NEAR_OUTBOX: &str =
+    "TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_SUBMIT_NEAR_OUTBOX";
+const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_CONFIRM_NEAR_OUTBOX: &str =
+    "TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_CONFIRM_NEAR_OUTBOX";
+const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_NEAR_CONTRACT_ID: &str =
+    "TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_NEAR_CONTRACT_ID";
+const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_LIMIT: &str =
+    "TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_LIMIT";
 const TRACE_COMMONS_VECTOR_EMBEDDER_URL: &str = "TRACE_COMMONS_VECTOR_EMBEDDER_URL";
 const TRACE_COMMONS_VECTOR_EMBEDDER_BEARER_TOKEN: &str =
     "TRACE_COMMONS_VECTOR_EMBEDDER_BEARER_TOKEN";
@@ -432,6 +458,8 @@ const TRACE_VECTOR_INDEX_SCHEDULER_DEFAULT_PURPOSE: &str = "scheduled trace vect
 const TRACE_BENCHMARK_REGISTRY_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 60;
 const TRACE_BENCHMARK_REGISTRY_SCHEDULER_DEFAULT_PURPOSE: &str =
     "scheduled trace benchmark registry outbox";
+const TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 300;
+const TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_REASON: &str = "scheduled trace credit cycle";
 const TRACE_RANKING_DEFAULT_MIN_LABEL_COUNT: usize = 25;
 const TRACE_RANKING_DEFAULT_CONFIDENCE_THRESHOLD: f32 = 0.5;
 const TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS: i64 = 1_000_000;
@@ -475,6 +503,11 @@ async fn main() -> anyhow::Result<()> {
         state.benchmark_registry_scheduler.as_ref(),
     )
     .await?;
+    validate_trace_credit_cycle_scheduler_config(
+        state.as_ref(),
+        state.credit_cycle_scheduler.as_ref(),
+    )
+    .await?;
     spawn_managed_eddsa_keyset_refresh_task(&state);
     spawn_trace_export_job_scheduler_task(&state, state.export_job_scheduler.clone());
     spawn_trace_vector_index_scheduler_task(&state, state.vector_index_scheduler.clone());
@@ -482,6 +515,7 @@ async fn main() -> anyhow::Result<()> {
         &state,
         state.benchmark_registry_scheduler.clone(),
     );
+    spawn_trace_credit_cycle_scheduler_task(&state, state.credit_cycle_scheduler.clone());
     let bind = std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
     let addr = bind
         .parse::<SocketAddr>()
@@ -562,6 +596,7 @@ struct AppState {
     export_job_scheduler: Option<TraceExportJobSchedulerConfig>,
     vector_index_scheduler: Option<TraceVectorIndexSchedulerConfig>,
     benchmark_registry_scheduler: Option<TraceBenchmarkRegistrySchedulerConfig>,
+    credit_cycle_scheduler: Option<TraceCreditCycleSchedulerConfig>,
     ranking_calibration_max_age: Option<Duration>,
     ranking_require_calibration_dataset_registry: bool,
     ranking_require_active_calibration_dataset: bool,
@@ -628,6 +663,22 @@ struct TraceBenchmarkRegistrySchedulerConfig {
     confirm_limit: u32,
     dry_run: bool,
     purpose: String,
+}
+
+#[derive(Clone)]
+struct TraceCreditCycleSchedulerConfig {
+    worker_token: SecretString,
+    interval: StdDuration,
+    target_use: TraceAllowedUse,
+    model_version: Option<String>,
+    policy_version: Option<String>,
+    reason: String,
+    dry_run: bool,
+    preflight_only: bool,
+    submit_near_outbox: bool,
+    confirm_near_outbox: bool,
+    near_contract_id: Option<String>,
+    limit: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2011,6 +2062,7 @@ impl AppState {
         let vector_index_scheduler = parse_trace_vector_index_scheduler_config_from_env()?;
         let benchmark_registry_scheduler =
             parse_trace_benchmark_registry_scheduler_config_from_env()?;
+        let credit_cycle_scheduler = parse_trace_credit_cycle_scheduler_config_from_env()?;
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
         let ranking_require_calibration_dataset_registry =
             env_truthy(TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY);
@@ -2213,6 +2265,7 @@ impl AppState {
             export_job_scheduler,
             vector_index_scheduler,
             benchmark_registry_scheduler,
+            credit_cycle_scheduler,
             ranking_calibration_max_age,
             ranking_require_calibration_dataset_registry,
             ranking_require_active_calibration_dataset,
@@ -3265,6 +3318,78 @@ fn parse_trace_benchmark_registry_scheduler_config_from_env()
         dry_run: env_truthy(TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_DRY_RUN),
         purpose,
     }))
+}
+
+fn parse_trace_credit_cycle_scheduler_config_from_env()
+-> anyhow::Result<Option<TraceCreditCycleSchedulerConfig>> {
+    let enabled = env_truthy(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED);
+    let worker_token = optional_trimmed_env(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TOKEN)?;
+    if !enabled && worker_token.is_none() {
+        return Ok(None);
+    }
+    let Some(worker_token) = worker_token else {
+        anyhow::bail!(
+            "{TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TOKEN}"
+        );
+    };
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_INTERVAL_SECONDS,
+        TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
+        5,
+        86_400,
+    )?;
+    let target_use = match optional_trimmed_env(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TARGET_USE)? {
+        Some(configured) => parse_trace_allowed_use_env(
+            TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TARGET_USE,
+            &configured,
+        )?,
+        None => TraceAllowedUse::RankingModelTraining,
+    };
+    let model_version = optional_trimmed_env(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_MODEL_VERSION)?
+        .map(|configured| {
+            validate_ranking_identifier(&configured, "model_version")
+                .map_err(|error| anyhow::anyhow!(error.1.0.error))
+        })
+        .transpose()?;
+    let policy_version = optional_trimmed_env(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_POLICY_VERSION)?
+        .map(|configured| {
+            validate_ranking_identifier(&configured, "policy_version")
+                .map_err(|error| anyhow::anyhow!(error.1.0.error))
+        })
+        .transpose()?;
+    let reason = optional_trimmed_env(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_REASON)?
+        .unwrap_or_else(|| TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_REASON.to_string());
+    let reason = validate_credit_cycle_scheduler_reason(&reason)
+        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    let near_contract_id =
+        optional_trimmed_env(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_NEAR_CONTRACT_ID)?
+            .map(|configured| validate_credit_settlement_near_contract_id(&configured))
+            .transpose()?;
+    let limit = parse_optional_scheduler_usize_env(
+        TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_LIMIT,
+        TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_LIMIT,
+        1,
+        TRACE_CREDIT_CYCLE_SCHEDULER_MAX_LIMIT,
+    )?;
+    Ok(Some(TraceCreditCycleSchedulerConfig {
+        worker_token: SecretString::from(worker_token),
+        interval: StdDuration::from_secs(interval_seconds),
+        target_use,
+        model_version,
+        policy_version,
+        reason,
+        dry_run: env_truthy(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_DRY_RUN),
+        preflight_only: env_truthy(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_PREFLIGHT_ONLY),
+        submit_near_outbox: env_truthy(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_SUBMIT_NEAR_OUTBOX),
+        confirm_near_outbox: env_truthy(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_CONFIRM_NEAR_OUTBOX),
+        near_contract_id,
+        limit,
+    }))
+}
+
+fn parse_trace_allowed_use_env(name: &'static str, value: &str) -> anyhow::Result<TraceAllowedUse> {
+    serde_json::from_value(serde_json::Value::String(value.trim().to_string()))
+        .with_context(|| format!("{name} must be a valid trace allowed use"))
 }
 
 fn parse_optional_scheduler_u64_env(
@@ -5117,6 +5242,58 @@ fn spawn_trace_benchmark_registry_scheduler_task(
     });
 }
 
+fn spawn_trace_credit_cycle_scheduler_task(
+    state: &Arc<AppState>,
+    config: Option<TraceCreditCycleSchedulerConfig>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    let state = state.clone();
+    tracing::info!(
+        interval_seconds = config.interval.as_secs(),
+        target_use = ?config.target_use,
+        model_version_configured = config.model_version.is_some(),
+        policy_version_configured = config.policy_version.is_some(),
+        limit = config.limit,
+        dry_run = config.dry_run,
+        preflight_only = config.preflight_only,
+        submit_near_outbox = config.submit_near_outbox,
+        confirm_near_outbox = config.confirm_near_outbox,
+        near_contract_configured = config.near_contract_id.is_some(),
+        "Trace Commons credit cycle scheduler enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(config.interval).await;
+            match run_trace_credit_cycle_scheduler_tick(state.clone(), &config).await {
+                Ok(summary) => {
+                    tracing::info!(
+                        tenant_storage_ref = %summary.tenant_storage_ref,
+                        target_use = ?summary.target_use,
+                        checked_count = summary.checked_count,
+                        eligible_count = summary.eligible_count,
+                        started_count = summary.started_count,
+                        skipped_count = summary.skipped_count,
+                        skipped_active_count = summary.skipped_active_count,
+                        pending_after_count = summary.pending_after_count,
+                        dry_run = summary.dry_run,
+                        preflight_only = summary.preflight_only,
+                        "Trace Commons credit cycle scheduler tick completed"
+                    );
+                }
+                Err((status, Json(error))) => {
+                    tracing::warn!(
+                        status = %status,
+                        error_hash = %safe_display_error_hash(&error.error),
+                        "Trace Commons credit cycle scheduler tick failed"
+                    );
+                }
+            }
+        }
+    });
+}
+
 async fn validate_trace_export_job_scheduler_config(
     state: &AppState,
     config: Option<&TraceExportJobSchedulerConfig>,
@@ -5199,6 +5376,56 @@ fn trace_benchmark_registry_scheduler_config_error(
 ) -> anyhow::Error {
     anyhow::anyhow!(
         "invalid Trace Commons benchmark registry scheduler configuration: status={}, error={}",
+        error.0,
+        error.1.0.error
+    )
+}
+
+async fn validate_trace_credit_cycle_scheduler_config(
+    state: &AppState,
+    config: Option<&TraceCreditCycleSchedulerConfig>,
+) -> anyhow::Result<()> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
+        .map_err(trace_credit_cycle_scheduler_config_error)?;
+    let auth = authenticate_with_tenant_access_grant(state, &headers)
+        .await
+        .map_err(trace_credit_cycle_scheduler_config_error)?;
+    require_utility_operator(&auth).map_err(trace_credit_cycle_scheduler_config_error)?;
+    if !config.dry_run && !config.preflight_only {
+        if config.submit_near_outbox {
+            anyhow::ensure!(
+                state.near_credit_submitter.is_some(),
+                "invalid Trace Commons credit cycle scheduler configuration: {TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL} is required when live scheduler submits NEAR outbox rows"
+            );
+            if state.near_credit_require_adapter_auth {
+                anyhow::ensure!(
+                    state.near_credit_submitter_auth_configured,
+                    "invalid Trace Commons credit cycle scheduler configuration: {TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN} is required when live scheduler submits NEAR outbox rows"
+                );
+            }
+        }
+        if config.confirm_near_outbox {
+            anyhow::ensure!(
+                state.near_credit_confirmer.is_some(),
+                "invalid Trace Commons credit cycle scheduler configuration: {TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL} is required when live scheduler confirms NEAR outbox rows"
+            );
+            if state.near_credit_require_adapter_auth {
+                anyhow::ensure!(
+                    state.near_credit_confirmer_auth_configured,
+                    "invalid Trace Commons credit cycle scheduler configuration: {TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_BEARER_TOKEN} is required when live scheduler confirms NEAR outbox rows"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn trace_credit_cycle_scheduler_config_error(error: (StatusCode, Json<ApiError>)) -> anyhow::Error {
+    anyhow::anyhow!(
+        "invalid Trace Commons credit cycle scheduler configuration: status={}, error={}",
         error.0,
         error.1.0.error
     )
@@ -6142,6 +6369,17 @@ struct TraceCommonsConfigStatusResponse {
     credit_cycle_scheduler_default_limit: usize,
     credit_cycle_scheduler_max_limit: usize,
     credit_cycle_scheduler_preflight_only_supported: bool,
+    credit_cycle_scheduler_configured: bool,
+    credit_cycle_scheduler_interval_seconds: Option<u64>,
+    credit_cycle_scheduler_target_use: Option<TraceAllowedUse>,
+    credit_cycle_scheduler_model_version_configured: Option<bool>,
+    credit_cycle_scheduler_policy_version_configured: Option<bool>,
+    credit_cycle_scheduler_near_contract_configured: Option<bool>,
+    credit_cycle_scheduler_dry_run: Option<bool>,
+    credit_cycle_scheduler_preflight_only: Option<bool>,
+    credit_cycle_scheduler_submit_near_outbox: Option<bool>,
+    credit_cycle_scheduler_confirm_near_outbox: Option<bool>,
+    credit_cycle_scheduler_limit: Option<usize>,
     artifact_store_configured: bool,
     artifact_object_store: Option<String>,
     artifact_object_store_io_enabled: bool,
@@ -6411,6 +6649,47 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         credit_cycle_scheduler_default_limit: TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_LIMIT,
         credit_cycle_scheduler_max_limit: TRACE_CREDIT_CYCLE_SCHEDULER_MAX_LIMIT,
         credit_cycle_scheduler_preflight_only_supported: true,
+        credit_cycle_scheduler_configured: state.credit_cycle_scheduler.is_some(),
+        credit_cycle_scheduler_interval_seconds: state
+            .credit_cycle_scheduler
+            .as_ref()
+            .map(|config| config.interval.as_secs()),
+        credit_cycle_scheduler_target_use: state
+            .credit_cycle_scheduler
+            .as_ref()
+            .map(|config| config.target_use),
+        credit_cycle_scheduler_model_version_configured: state
+            .credit_cycle_scheduler
+            .as_ref()
+            .map(|config| config.model_version.is_some()),
+        credit_cycle_scheduler_policy_version_configured: state
+            .credit_cycle_scheduler
+            .as_ref()
+            .map(|config| config.policy_version.is_some()),
+        credit_cycle_scheduler_near_contract_configured: state
+            .credit_cycle_scheduler
+            .as_ref()
+            .map(|config| config.near_contract_id.is_some()),
+        credit_cycle_scheduler_dry_run: state
+            .credit_cycle_scheduler
+            .as_ref()
+            .map(|config| config.dry_run),
+        credit_cycle_scheduler_preflight_only: state
+            .credit_cycle_scheduler
+            .as_ref()
+            .map(|config| config.preflight_only),
+        credit_cycle_scheduler_submit_near_outbox: state
+            .credit_cycle_scheduler
+            .as_ref()
+            .map(|config| config.submit_near_outbox),
+        credit_cycle_scheduler_confirm_near_outbox: state
+            .credit_cycle_scheduler
+            .as_ref()
+            .map(|config| config.confirm_near_outbox),
+        credit_cycle_scheduler_limit: state
+            .credit_cycle_scheduler
+            .as_ref()
+            .map(|config| config.limit),
         artifact_store_configured: state.artifact_store.is_some(),
         artifact_object_store: state
             .artifact_store
@@ -25576,6 +25855,42 @@ async fn run_trace_benchmark_registry_scheduler_tick(
     )
     .await?;
     Ok(TraceBenchmarkRegistrySchedulerTickSummary { submit, confirm })
+}
+
+async fn run_trace_credit_cycle_scheduler_tick(
+    state: Arc<AppState>,
+    config: &TraceCreditCycleSchedulerConfig,
+) -> ApiResult<TraceCreditCycleSchedulerRunResponse> {
+    let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())?;
+    let Json(response) = credit_cycle_scheduler_run_handler(
+        State(state),
+        headers,
+        Json(TraceCreditCycleSchedulerRunRequest {
+            dry_run: config.dry_run,
+            preflight_only: config.preflight_only,
+            submit_near_outbox: config.submit_near_outbox,
+            confirm_near_outbox: config.confirm_near_outbox,
+            target_use: config.target_use,
+            model_version: config.model_version.clone(),
+            policy_version: config.policy_version.clone(),
+            reason: config.reason.clone(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: config.near_contract_id.clone(),
+            limit: Some(config.limit),
+            calibration_limit: None,
+            model_promotion_limit: None,
+            prediction_credit_limit: None,
+            credit_settlement_limit: None,
+            near_outbox_limit: None,
+            near_outbox_confirm_limit: None,
+            min_label_count: None,
+            confidence_threshold: None,
+            max_average_absolute_error_micros: None,
+            allow_at_risk_models: false,
+        }),
+    )
+    .await?;
+    Ok(response)
 }
 
 async fn current_trace_export_job_or_claimed(
@@ -54868,6 +55183,7 @@ mod tests {
             export_job_scheduler: None,
             vector_index_scheduler: None,
             benchmark_registry_scheduler: None,
+            credit_cycle_scheduler: None,
             ranking_calibration_max_age: None,
             ranking_require_calibration_dataset_registry: false,
             ranking_require_active_calibration_dataset: false,
@@ -59409,6 +59725,97 @@ mod tests {
         let object = value.as_object().expect("config status is object");
         assert!(!object.contains_key("benchmark_registry_scheduler_token"));
         assert!(!object.contains_key("benchmark_registry_scheduler_purpose"));
+    }
+
+    #[tokio::test]
+    async fn admin_config_status_reports_credit_cycle_scheduler_without_token_or_reason() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_cycle_scheduler = Some(TraceCreditCycleSchedulerConfig {
+            worker_token: SecretString::from("config-status-credit-cycle-token".to_string()),
+            interval: StdDuration::from_secs(120),
+            target_use: TraceAllowedUse::RankingModelTraining,
+            model_version: Some("trace-ranker-config-status-v1".to_string()),
+            policy_version: Some("trace-credit-policy-config-status-v1".to_string()),
+            reason: "do not expose raw credit cycle scheduler note".to_string(),
+            dry_run: true,
+            preflight_only: true,
+            submit_near_outbox: false,
+            confirm_near_outbox: false,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            limit: 3,
+        });
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/config-status")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("config status response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body bytes");
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(
+            value["credit_cycle_scheduler_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["credit_cycle_scheduler_interval_seconds"],
+            serde_json::json!(120)
+        );
+        assert_eq!(
+            value["credit_cycle_scheduler_target_use"],
+            serde_json::json!("ranking_model_training")
+        );
+        assert_eq!(
+            value["credit_cycle_scheduler_model_version_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["credit_cycle_scheduler_policy_version_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["credit_cycle_scheduler_near_contract_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["credit_cycle_scheduler_dry_run"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["credit_cycle_scheduler_preflight_only"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["credit_cycle_scheduler_submit_near_outbox"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["credit_cycle_scheduler_confirm_near_outbox"],
+            serde_json::json!(false)
+        );
+        assert_eq!(value["credit_cycle_scheduler_limit"], serde_json::json!(3));
+        assert!(!body_text.contains("config-status-credit-cycle-token"));
+        assert!(!body_text.contains("do not expose raw credit cycle scheduler note"));
+        assert!(!body_text.contains("trace-ranker-config-status-v1"));
+        assert!(!body_text.contains("trace-credit-policy-config-status-v1"));
+        assert!(!body_text.contains("trace-credits.testnet"));
+        let object = value.as_object().expect("config status is object");
+        assert!(!object.contains_key("credit_cycle_scheduler_token"));
+        assert!(!object.contains_key("credit_cycle_scheduler_reason"));
+        assert!(!object.contains_key("credit_cycle_scheduler_near_contract_id"));
     }
 
     #[tokio::test]
@@ -65516,6 +65923,83 @@ mod tests {
         .expect("dry-run scheduler can start without live registry adapters");
     }
 
+    #[tokio::test]
+    async fn credit_cycle_scheduler_config_requires_utility_worker_auth_and_live_near_adapters() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = validate_trace_credit_cycle_scheduler_config(
+            state.as_ref(),
+            Some(&TraceCreditCycleSchedulerConfig {
+                worker_token: SecretString::from("token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: None,
+                policy_version: None,
+                reason: "scheduled credit cycle".to_string(),
+                dry_run: true,
+                preflight_only: true,
+                submit_near_outbox: false,
+                confirm_near_outbox: false,
+                near_contract_id: None,
+                limit: 1,
+            }),
+        )
+        .await
+        .expect_err("contributor token must not start credit cycle scheduler");
+
+        assert!(
+            error
+                .to_string()
+                .contains("reviewer, admin, or utility worker token required")
+        );
+
+        let missing_submitter = validate_trace_credit_cycle_scheduler_config(
+            state.as_ref(),
+            Some(&TraceCreditCycleSchedulerConfig {
+                worker_token: SecretString::from("utility-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: None,
+                policy_version: None,
+                reason: "scheduled live credit cycle".to_string(),
+                dry_run: false,
+                preflight_only: false,
+                submit_near_outbox: true,
+                confirm_near_outbox: false,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: 1,
+            }),
+        )
+        .await
+        .expect_err("live submit scheduler requires NEAR submitter adapter");
+        assert!(
+            missing_submitter
+                .to_string()
+                .contains(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL)
+        );
+
+        validate_trace_credit_cycle_scheduler_config(
+            state.as_ref(),
+            Some(&TraceCreditCycleSchedulerConfig {
+                worker_token: SecretString::from("utility-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: None,
+                policy_version: None,
+                reason: "scheduled credit cycle preflight".to_string(),
+                dry_run: true,
+                preflight_only: true,
+                submit_near_outbox: false,
+                confirm_near_outbox: false,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: 1,
+            }),
+        )
+        .await
+        .expect("preflight scheduler can start without live NEAR adapters");
+    }
+
     #[test]
     fn export_job_slice_keeps_safe_request_metadata_for_status_updates() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -70054,6 +70538,7 @@ mod tests {
             export_job_scheduler: None,
             vector_index_scheduler: None,
             benchmark_registry_scheduler: None,
+            credit_cycle_scheduler: None,
             ranking_calibration_max_age: None,
             ranking_require_calibration_dataset_registry: false,
             ranking_require_active_calibration_dataset: false,
@@ -87555,6 +88040,67 @@ mod tests {
         let outbox =
             read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
         assert!(outbox.is_empty());
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_tick_preflights_next_model_without_side_effects() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let (candidate, _) = seed_credit_cycle_ready_candidate(
+            state.clone(),
+            "trace-ranker-credit-cycle-in-process-scheduler-v1",
+        )
+        .await;
+
+        let scheduler = run_trace_credit_cycle_scheduler_tick(
+            state.clone(),
+            &TraceCreditCycleSchedulerConfig {
+                worker_token: SecretString::from("utility-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: None,
+                policy_version: Some(candidate.policy_version.clone()),
+                reason: "scheduled in-process credit cycle preflight".to_string(),
+                dry_run: true,
+                preflight_only: true,
+                submit_near_outbox: false,
+                confirm_near_outbox: false,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: 1,
+            },
+        )
+        .await
+        .expect("in-process scheduler tick uses worker route");
+
+        assert_eq!(scheduler.checked_count, 1);
+        assert_eq!(scheduler.eligible_count, 1);
+        assert_eq!(scheduler.started_count, 0);
+        assert_eq!(scheduler.skipped_count, 0);
+        assert_eq!(
+            scheduler.decisions[0].model_version,
+            "trace-ranker-credit-cycle-in-process-scheduler-v1"
+        );
+        assert!(scheduler.cycles.is_empty());
+        assert!(
+            read_all_ranking_worker_runs(temp.path(), "tenant-a")
+                .expect("worker runs read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit events read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement batches read")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads")
+                .is_empty()
+        );
     }
 
     #[tokio::test]

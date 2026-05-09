@@ -1699,6 +1699,25 @@ Requests with `preflight_only: true` stop after eligibility checks and return
 creating worker rows, credit events, settlement batches, or NEAR outbox rows.
 This gives external schedulers a safe retry surface without granting generic
 admin settlement access.
+Deployments that want the server to own this scan loop can configure
+`TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TOKEN` with a utility-worker bearer token;
+startup validates that token and, for live NEAR submission/confirmation,
+requires the matching relayer/confirmer adapters and bearer-token readiness when
+adapter auth is required. The in-process scheduler sleeps for
+`TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_INTERVAL_SECONDS` (default 300), then
+calls the same scheduler worker route with `TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TARGET_USE`
+(default `ranking_model_training`), optional model/policy filters, optional NEAR
+contract id, bounded `TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_LIMIT`, and
+`TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_DRY_RUN`,
+`TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_PREFLIGHT_ONLY`,
+`TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_SUBMIT_NEAR_OUTBOX`, or
+`TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_CONFIRM_NEAR_OUTBOX` toggles. Config
+status reports only safe scheduler booleans, interval, target use, limit, and
+whether model/policy/contract filters are configured; it omits the worker token,
+raw reason, and NEAR contract id. If central issuer approval is required, keep
+the scheduler in preflight/dry-run mode: source-list approvals are intentionally
+bound to a canonical dry-run source list, so live finalization should happen
+through the settlement route after approval is recorded.
 
 Trusted offline utility workers use a narrower bulk route for accepted traces:
 
