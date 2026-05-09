@@ -6765,7 +6765,11 @@ async fn submit_trace_handler(
             mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope)
                 .await;
         if let Err(error) = &mirror_result {
-            tracing::warn!(%error, submission_id = %record.submission_id, "Trace Commons DB dual-write mirror failed");
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                submission_id = %record.submission_id,
+                "Trace Commons DB dual-write mirror failed"
+            );
             cleanup_submission_file_side_writes(state.as_ref(), &record).map_err(internal_error)?;
         }
         enforce_db_mirror_write_result(state.as_ref(), "submission", mirror_result)
@@ -6791,7 +6795,11 @@ async fn submit_trace_handler(
             mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope)
                 .await;
         if let Err(error) = &mirror_result {
-            tracing::warn!(%error, submission_id = %record.submission_id, "Trace Commons DB dual-write mirror failed");
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                submission_id = %record.submission_id,
+                "Trace Commons DB dual-write mirror failed"
+            );
         }
         enforce_db_mirror_write_result(state.as_ref(), "submission", mirror_result)
             .map_err(internal_error)?;
@@ -6959,7 +6967,11 @@ async fn revoke_submission(
     )
     .await;
     if let Err(error) = &mirror_result {
-        tracing::warn!(%error, %submission_id, "Trace Commons DB dual-write revocation mirror failed");
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(error),
+            %submission_id,
+            "Trace Commons DB dual-write revocation mirror failed"
+        );
     }
     enforce_db_mirror_write_result(state, "revocation", mirror_result).map_err(internal_error)?;
     Ok(StatusCode::NO_CONTENT)
@@ -9859,7 +9871,11 @@ async fn append_credit_event_handler(
     if state.require_db_mirror_writes {
         let mirror_result = mirror_credit_event_to_db(&state, &event).await;
         if let Err(error) = &mirror_result {
-            tracing::warn!(%error, submission_id = %event.submission_id, "Trace Commons DB dual-write credit mirror failed");
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                submission_id = %event.submission_id,
+                "Trace Commons DB dual-write credit mirror failed"
+            );
         }
         enforce_db_mirror_write_result(state.as_ref(), "credit ledger event", mirror_result)
             .map_err(internal_error)?;
@@ -9868,7 +9884,11 @@ async fn append_credit_event_handler(
         append_credit_event(&state.root, &tenant.tenant_id, &event).map_err(internal_error)?;
         let mirror_result = mirror_credit_event_to_db(&state, &event).await;
         if let Err(error) = &mirror_result {
-            tracing::warn!(%error, submission_id = %event.submission_id, "Trace Commons DB dual-write credit mirror failed");
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                submission_id = %event.submission_id,
+                "Trace Commons DB dual-write credit mirror failed"
+            );
         }
         enforce_db_mirror_write_result(state.as_ref(), "credit ledger event", mirror_result)
             .map_err(internal_error)?;
@@ -23222,7 +23242,11 @@ async fn append_automatic_utility_credit_events_once_with_counts(
         append_credit_event(&state.root, &tenant.tenant_id, &event)?;
         let mirror_result = mirror_credit_event_to_db(state, &event).await;
         if let Err(error) = &mirror_result {
-            tracing::warn!(%error, submission_id = %event.submission_id, "Trace Commons DB dual-write automatic credit mirror failed");
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                submission_id = %event.submission_id,
+                "Trace Commons DB dual-write automatic credit mirror failed"
+            );
         }
         enforce_db_mirror_write_result(state, "automatic credit ledger event", mirror_result)?;
         append_audit_event_with_db_mirror(
@@ -23441,7 +23465,11 @@ async fn apply_review_decision(
         mirror_review_decision_to_db(state, tenant, &record, &envelope, canonical_summary_hash)
             .await;
     if let Err(error) = &mirror_result {
-        tracing::warn!(%error, %submission_id, "Trace Commons DB dual-write review mirror failed");
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(error),
+            %submission_id,
+            "Trace Commons DB dual-write review mirror failed"
+        );
     }
     enforce_db_mirror_write_result(state, "review decision", mirror_result)
         .map_err(internal_error)?;
@@ -88810,7 +88838,7 @@ mod tests {
                 credit_points_delta: 2.0,
                 use_category: "frontier_lab_training".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
-                evidence_hash: sha256_prefixed("not-canonical"),
+                evidence_hash: "sha256:not-canonical".to_string(),
                 reason: "malformed utility attestation must not record".to_string(),
                 external_ref: "frontier-lab:malformed-utility-attestation".to_string(),
                 source_submission_ids: vec![submission_id],
