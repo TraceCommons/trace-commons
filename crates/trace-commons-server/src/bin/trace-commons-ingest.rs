@@ -5401,6 +5401,11 @@ fn validate_credit_settlement_central_issuer_profile_config(
     Ok(())
 }
 
+fn credit_settlement_central_issuer_profile_complete(state: &AppState) -> bool {
+    let config = credit_settlement_central_issuer_profile_config_from_state(state);
+    credit_settlement_central_issuer_profile_missing_config(&config).is_empty()
+}
+
 fn parse_credit_settlement_near_contract_id_from_env() -> anyhow::Result<Option<String>> {
     optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID)?
         .map(|configured| validate_credit_settlement_near_contract_id(&configured))
@@ -10319,6 +10324,14 @@ async fn credit_cycle_scheduler_run_handler(
         body.dry_run || body.preflight_only,
         body.near_contract_id.as_deref(),
     )?;
+    let central_issuer_profile_skip_reason = if !body.dry_run
+        && state.credit_settlement_require_central_issuer_profile
+        && !credit_settlement_central_issuer_profile_complete(state.as_ref())
+    {
+        Some("credit_settlement_central_issuer_profile_incomplete")
+    } else {
+        None
+    };
 
     let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
         .await
@@ -10410,6 +10423,17 @@ async fn credit_cycle_scheduler_run_handler(
                 Some(skip_reason.to_string()),
             );
             response.skipped_active_count += 1;
+            continue;
+        }
+        if let Some(skip_reason) = central_issuer_profile_skip_reason {
+            credit_cycle_scheduler_record_skip(&mut response, skip_reason);
+            credit_cycle_scheduler_record_decision(
+                &mut response,
+                &candidate,
+                body.target_use,
+                TraceCreditCycleSchedulerDecisionAction::Skipped,
+                Some(skip_reason.to_string()),
+            );
             continue;
         }
         if let Some(skip_reason) = credit_cycle_scheduler_candidate_skip_reason(
@@ -10693,6 +10717,7 @@ async fn credit_cycle_worker_run_handler(
     let issuer_approval_evidence_hash = validate_credit_settlement_issuer_approval_evidence_hash(
         body.issuer_approval_evidence_hash.as_deref(),
     )?;
+    require_credit_settlement_central_issuer_profile_if_configured(state.as_ref(), body.dry_run)?;
     require_credit_settlement_issuer_approval_if_configured(
         state.as_ref(),
         body.dry_run,
@@ -12211,8 +12236,7 @@ fn require_credit_settlement_central_issuer_profile_if_configured(
     if dry_run || !state.credit_settlement_require_central_issuer_profile {
         return Ok(());
     }
-    let config = credit_settlement_central_issuer_profile_config_from_state(state);
-    if credit_settlement_central_issuer_profile_missing_config(&config).is_empty() {
+    if credit_settlement_central_issuer_profile_complete(state) {
         return Ok(());
     }
     Err(api_error(
@@ -85659,6 +85683,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn credit_cycle_worker_requires_central_issuer_profile_before_side_effects() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_require_central_issuer_profile = true;
+        let (candidate, _) = seed_credit_cycle_ready_candidate(
+            state.clone(),
+            "trace-ranker-credit-cycle-profile-v1",
+        )
+        .await;
+
+        let error = credit_cycle_worker_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleWorkerRunRequest {
+                dry_run: false,
+                submit_near_outbox: false,
+                confirm_near_outbox: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: candidate.model_version.clone(),
+                policy_version: candidate.policy_version.clone(),
+                reason: "scheduled credit cycle without central issuer profile".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect_err("central issuer profile gate rejects before claiming the cycle");
+
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(
+            error.1.0.error,
+            "live credit settlement requires complete central issuer profile"
+        );
+        assert!(
+            read_all_ranking_worker_runs(temp.path(), "tenant-a")
+                .expect("worker runs read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit events read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement batches read")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn credit_cycle_worker_rejects_live_cycle_when_source_list_approval_is_required() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
@@ -85898,6 +85988,78 @@ mod tests {
         let outbox =
             read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
         assert!(outbox.is_empty());
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_preflight_reports_incomplete_central_issuer_profile() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_require_central_issuer_profile = true;
+        let (candidate, _) = seed_credit_cycle_ready_candidate(
+            state.clone(),
+            "trace-ranker-credit-cycle-central-profile-preflight-v1",
+        )
+        .await;
+        let request = serde_json::from_value(serde_json::json!({
+            "dry_run": false,
+            "preflight_only": true,
+            "submit_near_outbox": false,
+            "target_use": "ranking_model_training",
+            "policy_version": candidate.policy_version,
+            "reason": "preview blocked central issuer profile credit cycle",
+            "near_contract_id": "trace-credits.testnet",
+            "limit": 1,
+            "calibration_limit": 10,
+            "model_promotion_limit": 10,
+            "prediction_credit_limit": 10,
+            "credit_settlement_limit": 10,
+            "near_outbox_limit": 10,
+            "min_label_count": 1,
+            "confidence_threshold": 0.5,
+            "max_average_absolute_error_micros": 100000,
+            "allow_at_risk_models": false
+        }))
+        .expect("preflight-only request deserializes");
+
+        let Json(scheduler) = credit_cycle_scheduler_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(request),
+        )
+        .await
+        .expect("scheduler preflight reports central issuer profile blocker");
+
+        let scheduler_value =
+            serde_json::to_value(&scheduler).expect("scheduler response serializes");
+        assert_eq!(scheduler.checked_count, 1);
+        assert_eq!(scheduler.started_count, 0);
+        assert_eq!(scheduler.skipped_count, 1);
+        assert_eq!(scheduler_value["eligible_count"].as_u64(), Some(0));
+        assert_eq!(
+            scheduler_value["skipped_reason_counts"]
+                ["credit_settlement_central_issuer_profile_incomplete"]
+                .as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            scheduler_value["decisions"][0]["action"].as_str(),
+            Some("skipped")
+        );
+        assert_eq!(
+            scheduler_value["decisions"][0]["skip_reason"].as_str(),
+            Some("credit_settlement_central_issuer_profile_incomplete")
+        );
+        assert!(scheduler.cycles.is_empty());
+        assert!(
+            read_all_ranking_worker_runs(temp.path(), "tenant-a")
+                .expect("worker runs read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit events read")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
