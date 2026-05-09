@@ -53,7 +53,11 @@ workers record hash-only attestations for accepted traces, admins run settlement
 batches, and optional NEAR receipt calls are queued only after off-chain
 settlement finalizes. Operators record a hash-only central issuer approval
 through `GET|POST /v1/admin/credit-settlement-approvals` after a dry-run
-produces the exact settlement source-list hash. Deployments that set
+produces the exact settlement source-list hash. For partial issuance batches,
+operators run the drill/admin route with `source_event_limit` or the worker and
+scheduler routes with `limit`, record approval for the returned bounded
+source-list hash, and reuse the same bound and approval hash when finalizing.
+Deployments that set
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` reject live
 settlement unless the supplied `issuer_approval_evidence_hash` matches a recorded
 approval for the tenant, policy version, canonical `sha256:<64 hex>`
