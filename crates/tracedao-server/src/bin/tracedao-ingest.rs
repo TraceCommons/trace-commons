@@ -23511,6 +23511,9 @@ async fn apply_review_decision(
         privileged_policy.as_ref(),
         "review decision",
     )?;
+    if state.require_db_mirror_writes {
+        enforce_db_mirror_write_result(state, "review decision", Ok(())).map_err(internal_error)?;
+    }
     let mut envelope = read_envelope_for_review_decision(
         state,
         tenant,
@@ -23568,34 +23571,68 @@ async fn apply_review_decision(
     }
     clear_review_lease_metadata(&mut record);
 
-    if file_record_available {
-        write_submission_record(&state.root, &record).map_err(internal_error)?;
-    }
-    if let Some(mut derived) = read_derived_record(&state.root, &tenant.tenant_id, submission_id)
-        .map_err(internal_error)?
+    let reviewed_derived = if let Some(mut derived) =
+        read_derived_record(&state.root, &tenant.tenant_id, submission_id)
+            .map_err(internal_error)?
     {
         derived.status = record.status;
         canonical_summary_hash = Some(derived.canonical_summary_hash.clone());
-        write_derived_record(&state.root, &derived).map_err(internal_error)?;
+        Some(derived)
+    } else {
+        None
+    };
+    let audit_event =
+        TraceCommonsAuditEvent::review_decision(tenant, submission_id, record.status, Some(reason));
+
+    if state.require_db_mirror_writes {
+        let mirror_result = mirror_review_decision_to_db(
+            state,
+            tenant,
+            &record,
+            &envelope,
+            canonical_summary_hash.clone(),
+        )
+        .await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                %submission_id,
+                "Trace Commons DB dual-write review mirror failed"
+            );
+            if let Err(cleanup_error) = delete_trace_objects_for_record(state, &record) {
+                tracing::warn!(
+                    error_hash = %safe_runtime_error_hash(&cleanup_error),
+                    %submission_id,
+                    "Trace Commons reviewed envelope cleanup failed after DB mirror failure"
+                );
+            }
+        }
+        enforce_db_mirror_write_result(state, "review decision", mirror_result)
+            .map_err(internal_error)?;
     }
-    append_audit_event(
-        &state.root,
-        &tenant.tenant_id,
-        TraceCommonsAuditEvent::review_decision(tenant, submission_id, record.status, Some(reason)),
-    )
-    .map_err(internal_error)?;
-    let mirror_result =
-        mirror_review_decision_to_db(state, tenant, &record, &envelope, canonical_summary_hash)
-            .await;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            error_hash = %safe_runtime_error_hash(error),
-            %submission_id,
-            "Trace Commons DB dual-write review mirror failed"
-        );
+
+    if file_record_available {
+        write_submission_record(&state.root, &record).map_err(internal_error)?;
     }
-    enforce_db_mirror_write_result(state, "review decision", mirror_result)
-        .map_err(internal_error)?;
+    if let Some(derived) = reviewed_derived.as_ref() {
+        write_derived_record(&state.root, derived).map_err(internal_error)?;
+    }
+    append_audit_event(&state.root, &tenant.tenant_id, audit_event).map_err(internal_error)?;
+
+    if !state.require_db_mirror_writes {
+        let mirror_result =
+            mirror_review_decision_to_db(state, tenant, &record, &envelope, canonical_summary_hash)
+                .await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                %submission_id,
+                "Trace Commons DB dual-write review mirror failed"
+            );
+        }
+        enforce_db_mirror_write_result(state, "review decision", mirror_result)
+            .map_err(internal_error)?;
+    }
 
     Ok(receipt_from_record(&record))
 }
@@ -55167,6 +55204,65 @@ mod tests {
         assert_ne!(derived.status, TraceCorpusStatus::Revoked);
         let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
         assert!(!audit_events.iter().any(|event| event.kind == "revoked"));
+    }
+
+    #[tokio::test]
+    async fn review_decision_requires_db_mirror_before_file_side_effects_when_required() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("tenant-a submission succeeds before DB mirror is required");
+        let original = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("tenant-a record reads")
+            .expect("tenant-a record exists");
+        Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+        let error = review_decision_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some("required mirror should preflight before review".to_string()),
+                credit_points_pending: Some(1.25),
+            }),
+        )
+        .await
+        .expect_err("required DB mirror blocks review before file writes");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("tenant-a record still reads")
+            .expect("tenant-a record still exists");
+        assert_eq!(record.status, TraceCorpusStatus::Quarantined);
+        assert_eq!(record.object_key, original.object_key);
+        assert!(
+            !temp
+                .path()
+                .join(trace_envelope_object_key(
+                    "tenant-a",
+                    TraceCorpusStatus::Accepted,
+                    submission_id
+                ))
+                .exists()
+        );
+        let derived = read_derived_record(temp.path(), "tenant-a", submission_id)
+            .expect("tenant-a derived reads")
+            .expect("tenant-a derived exists");
+        assert_eq!(derived.status, TraceCorpusStatus::Quarantined);
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        assert!(!audit_events.iter().any(|event| matches!(
+            event.kind.as_str(),
+            "review_decision" | "trace_content_read"
+        )));
     }
 
     #[tokio::test]
