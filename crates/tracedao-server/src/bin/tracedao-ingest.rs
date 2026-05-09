@@ -4586,7 +4586,7 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/v1/admin/maintenance", post(maintenance_handler))
         .route(
             "/v1/admin/credit-settlements",
-            get(credit_settlements_handler).post(credit_settlement_handler),
+            get(credit_settlements_handler).post(credit_settlement_admin_run_handler),
         )
         .route(
             "/v1/admin/credit-settlement-approvals",
@@ -10206,6 +10206,14 @@ struct TraceCreditSettlementWorkerRunRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct TraceCreditSettlementAdminRunRequest {
+    #[serde(flatten)]
+    request: TraceCreditSettlementRunRequest,
+    #[serde(default)]
+    source_event_limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 struct TraceCreditSettlementDrillRequest {
     policy_version: String,
     #[serde(default)]
@@ -12445,6 +12453,19 @@ async fn credit_settlement_handler(
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
     run_credit_settlement(state.as_ref(), &tenant, body, None)
+        .await
+        .map(Json)
+}
+
+async fn credit_settlement_admin_run_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceCreditSettlementAdminRunRequest>,
+) -> ApiResult<Json<TraceCreditSettlementRunResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let limit = validate_credit_settlement_run_limit(body.source_event_limit)?;
+    run_credit_settlement(state.as_ref(), &tenant, body.request, limit)
         .await
         .map(Json)
 }
@@ -87707,6 +87728,143 @@ mod tests {
             .expect("limited worker body reads");
         let settlement: serde_json::Value =
             serde_json::from_slice(&settlement_body).expect("limited worker json parses");
+        assert_eq!(
+            settlement["settled_source_event_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(settlement["pending_after_count"], serde_json::json!(2));
+        let batches =
+            read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(
+            batches[0].source_credit_event_ids,
+            vec![first_source_event_id]
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_credit_settlement_source_event_limit_matches_drill_approval_batch() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
+        Arc::make_mut(&mut state).credit_settlement_max_micros_per_account = Some(10_000_000);
+        let mut submission_ids = Vec::new();
+        for _ in 0..3 {
+            let mut envelope = sample_envelope().await;
+            make_metadata_only_low_risk(&mut envelope);
+            envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+            envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+            envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+            submission_ids.push(envelope.submission_id);
+            let _ = submit_trace_handler(
+                State(state.clone()),
+                auth_headers("token-a"),
+                Json(envelope),
+            )
+            .await
+            .expect("training submission succeeds");
+        }
+        let Json(credit) = utility_credit_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceUtilityCreditJobRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.0,
+                reason: "frontier lab admin limited settlement value".to_string(),
+                external_ref: "frontier:admin-limited-settlement".to_string(),
+                submission_ids,
+            }),
+        )
+        .await
+        .expect("utility worker can append training credits");
+        assert_eq!(credit.appended_count, 3);
+        let first_source_event_id = read_all_credit_events(temp.path(), "tenant-a")
+            .expect("credit events read")
+            .into_iter()
+            .map(|event| event.event_id)
+            .min()
+            .expect("at least one credit event exists");
+        let expected_source_list_hash =
+            source_credit_event_ids_hash("trace-credit-policy-v1", &[first_source_event_id]);
+        let approval_hash = sha256_prefixed("admin limited source-list approval");
+
+        let drill_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlement-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "policy_version": "trace-credit-policy-v1",
+                            "issuer_approval_evidence_hash": approval_hash,
+                            "source_event_limit": 1,
+                            "require_near_contract": false,
+                            "require_near_submitter": false,
+                            "require_near_confirmer": false
+                        })
+                        .to_string(),
+                    ))
+                    .expect("admin limited drill request builds"),
+            )
+            .await
+            .expect("admin limited drill response");
+        assert_eq!(drill_response.status(), StatusCode::OK);
+        let drill_body = axum::body::to_bytes(drill_response.into_body(), 16384)
+            .await
+            .expect("admin limited drill body reads");
+        let drill: serde_json::Value =
+            serde_json::from_slice(&drill_body).expect("admin limited drill json parses");
+        assert_eq!(
+            drill["settlement"]["source_list_hash"],
+            serde_json::json!(expected_source_list_hash)
+        );
+
+        let Json(_) = credit_settlement_approval_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementIssuerApprovalRequest {
+                policy_version: "trace-credit-policy-v1".to_string(),
+                source_list_hash: expected_source_list_hash,
+                evidence_hash: approval_hash.clone(),
+                reason: "central issuer approved admin limited source-list batch".to_string(),
+                evidence_ref: Some("private-lab-review:admin-limited-source-list".to_string()),
+            }),
+        )
+        .await
+        .expect("admin records approval for the limited source list");
+
+        let settlement_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlements")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "dry_run": false,
+                            "policy_version": "trace-credit-policy-v1",
+                            "reason": "admin finalized first approved limited settlement",
+                            "issuer_approval_evidence_hash": approval_hash,
+                            "source_event_limit": 1
+                        })
+                        .to_string(),
+                    ))
+                    .expect("admin limited settlement request builds"),
+            )
+            .await
+            .expect("admin limited settlement response");
+        assert_eq!(settlement_response.status(), StatusCode::OK);
+        let settlement_body = axum::body::to_bytes(settlement_response.into_body(), 16384)
+            .await
+            .expect("admin limited settlement body reads");
+        let settlement: serde_json::Value =
+            serde_json::from_slice(&settlement_body).expect("admin limited settlement json parses");
         assert_eq!(
             settlement["settled_source_event_count"],
             serde_json::json!(1)
