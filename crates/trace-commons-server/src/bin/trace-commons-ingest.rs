@@ -13316,6 +13316,7 @@ async fn run_near_credit_outbox_submit_worker(
     };
     if request.dry_run {
         append_near_credit_outbox_submit_audit(state, tenant, &response).await?;
+        log_near_credit_outbox_submit_worker_summary(tenant, &response);
         return Ok(response);
     }
 
@@ -13329,6 +13330,12 @@ async fn run_near_credit_outbox_submit_worker(
             Ok(request) => request,
             Err(error) => {
                 let last_error_hash = sha256_prefixed(&safe_worker_error(&error));
+                tracing::warn!(
+                    tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+                    near_outbox_id = %item.near_outbox_id,
+                    error_hash = %last_error_hash,
+                    "Trace Commons NEAR credit outbox submit skipped invalid method call"
+                );
                 update_near_credit_outbox_item_status_with_db_mirror(
                     state,
                     tenant,
@@ -13376,6 +13383,12 @@ async fn run_near_credit_outbox_submit_worker(
             }
             Err(error) => {
                 let last_error_hash = sha256_prefixed(&safe_worker_error(&error));
+                tracing::warn!(
+                    tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+                    near_outbox_id = %item.near_outbox_id,
+                    error_hash = %last_error_hash,
+                    "Trace Commons NEAR credit outbox submit failed"
+                );
                 update_near_credit_outbox_item_status_with_db_mirror(
                     state,
                     tenant,
@@ -13397,6 +13410,7 @@ async fn run_near_credit_outbox_submit_worker(
     }
     response.pending = pending_total.saturating_sub(response.submitted);
     append_near_credit_outbox_submit_audit(state, tenant, &response).await?;
+    log_near_credit_outbox_submit_worker_summary(tenant, &response);
     Ok(response)
 }
 
@@ -13433,6 +13447,7 @@ async fn run_near_credit_outbox_confirm_worker(
     };
     if request.dry_run {
         append_near_credit_outbox_confirm_audit(state, tenant, &response).await?;
+        log_near_credit_outbox_confirm_worker_summary(tenant, &response);
         return Ok(response);
     }
 
@@ -13446,6 +13461,12 @@ async fn run_near_credit_outbox_confirm_worker(
             Ok(request) => request,
             Err(error) => {
                 let last_error_hash = sha256_prefixed(&safe_worker_error(&error));
+                tracing::warn!(
+                    tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+                    near_outbox_id = %item.near_outbox_id,
+                    error_hash = %last_error_hash,
+                    "Trace Commons NEAR credit outbox confirmation skipped invalid method call"
+                );
                 let near_transaction_hash = item
                     .near_transaction_hash
                     .as_deref()
@@ -13506,6 +13527,12 @@ async fn run_near_credit_outbox_confirm_worker(
                                 .context("NEAR credit confirmation requires near_transaction_hash")
                                 .and_then(normalize_near_transaction_hash)?;
                             let last_error_hash = sha256_prefixed(&safe_worker_error(&error));
+                            tracing::warn!(
+                                tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+                                near_outbox_id = %item.near_outbox_id,
+                                error_hash = %last_error_hash,
+                                "Trace Commons NEAR credit outbox confirmation rejected adapter receipt"
+                            );
                             update_near_credit_outbox_item_status_with_db_mirror(
                                 state,
                                 tenant,
@@ -13533,6 +13560,12 @@ async fn run_near_credit_outbox_confirm_worker(
                         .filter(|value| !value.is_empty())
                         .context("failed NEAR credit response requires error_detail")?;
                     let last_error_hash = sha256_prefixed(error_detail);
+                    tracing::warn!(
+                        tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+                        near_outbox_id = %item.near_outbox_id,
+                        error_hash = %last_error_hash,
+                        "Trace Commons NEAR credit outbox confirmation failed at adapter"
+                    );
                     update_near_credit_outbox_item_status_with_db_mirror(
                         state,
                         tenant,
@@ -13559,9 +13592,11 @@ async fn run_near_credit_outbox_confirm_worker(
                 TraceNearCreditConfirmationStatus::Pending => {}
             },
             Err(error) => {
+                let error_hash = sha256_prefixed(&safe_worker_error(&error));
                 tracing::warn!(
-                    %error,
+                    tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
                     near_outbox_id = %item.near_outbox_id,
+                    error_hash = %error_hash,
                     "Trace Commons NEAR credit confirmation poll failed"
                 );
                 response.failed += 1;
@@ -13569,7 +13604,100 @@ async fn run_near_credit_outbox_confirm_worker(
         }
     }
     append_near_credit_outbox_confirm_audit(state, tenant, &response).await?;
+    log_near_credit_outbox_confirm_worker_summary(tenant, &response);
     Ok(response)
+}
+
+#[derive(Debug)]
+struct TraceNearCreditOutboxSubmitWorkerLogFields {
+    tenant_storage_ref: String,
+    purpose_hash: String,
+    dry_run: bool,
+    checked: usize,
+    submitted: usize,
+    failed: usize,
+    skipped: usize,
+    pending: usize,
+}
+
+fn near_credit_outbox_submit_worker_log_fields(
+    tenant: &TenantAuth,
+    response: &TraceNearCreditOutboxSubmitWorkerResponse,
+) -> TraceNearCreditOutboxSubmitWorkerLogFields {
+    TraceNearCreditOutboxSubmitWorkerLogFields {
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        purpose_hash: sha256_prefixed(&response.purpose),
+        dry_run: response.dry_run,
+        checked: response.checked,
+        submitted: response.submitted,
+        failed: response.failed,
+        skipped: response.skipped,
+        pending: response.pending,
+    }
+}
+
+fn log_near_credit_outbox_submit_worker_summary(
+    tenant: &TenantAuth,
+    response: &TraceNearCreditOutboxSubmitWorkerResponse,
+) {
+    let fields = near_credit_outbox_submit_worker_log_fields(tenant, response);
+    tracing::info!(
+        tenant_storage_ref = %fields.tenant_storage_ref,
+        purpose_hash = %fields.purpose_hash,
+        dry_run = fields.dry_run,
+        checked_count = fields.checked,
+        submitted_count = fields.submitted,
+        failed_count = fields.failed,
+        skipped_count = fields.skipped,
+        pending_count = fields.pending,
+        "Trace Commons NEAR credit outbox submit worker completed"
+    );
+}
+
+#[derive(Debug)]
+struct TraceNearCreditOutboxConfirmWorkerLogFields {
+    tenant_storage_ref: String,
+    purpose_hash: String,
+    dry_run: bool,
+    checked: usize,
+    confirmed: usize,
+    failed: usize,
+    skipped: usize,
+    pending: usize,
+}
+
+fn near_credit_outbox_confirm_worker_log_fields(
+    tenant: &TenantAuth,
+    response: &TraceNearCreditOutboxConfirmWorkerResponse,
+) -> TraceNearCreditOutboxConfirmWorkerLogFields {
+    TraceNearCreditOutboxConfirmWorkerLogFields {
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        purpose_hash: sha256_prefixed(&response.purpose),
+        dry_run: response.dry_run,
+        checked: response.checked,
+        confirmed: response.confirmed,
+        failed: response.failed,
+        skipped: response.skipped,
+        pending: response.pending,
+    }
+}
+
+fn log_near_credit_outbox_confirm_worker_summary(
+    tenant: &TenantAuth,
+    response: &TraceNearCreditOutboxConfirmWorkerResponse,
+) {
+    let fields = near_credit_outbox_confirm_worker_log_fields(tenant, response);
+    tracing::info!(
+        tenant_storage_ref = %fields.tenant_storage_ref,
+        purpose_hash = %fields.purpose_hash,
+        dry_run = fields.dry_run,
+        checked_count = fields.checked,
+        confirmed_count = fields.confirmed,
+        failed_count = fields.failed,
+        skipped_count = fields.skipped,
+        pending_count = fields.pending,
+        "Trace Commons NEAR credit outbox confirm worker completed"
+    );
 }
 
 fn confirmed_near_transaction_hash_for_outbox_item(
@@ -94989,6 +95117,60 @@ mod tests {
             "ranking_worker_run_actionable_skips=3"
         );
         assert_eq!(fields.ranking_worker_run_actionable_skip_count, 3);
+    }
+
+    #[test]
+    fn near_credit_submit_worker_log_fields_hash_sensitive_values() {
+        let auth = test_reviewer_auth("tenant-a");
+        let response = TraceNearCreditOutboxSubmitWorkerResponse {
+            purpose: "review settlement for frontier lab batch 42".to_string(),
+            dry_run: false,
+            checked: 5,
+            submitted: 3,
+            failed: 1,
+            skipped: 2,
+            pending: 4,
+        };
+
+        let fields = near_credit_outbox_submit_worker_log_fields(&auth, &response);
+
+        assert_eq!(fields.tenant_storage_ref, tenant_storage_ref("tenant-a"));
+        assert_eq!(fields.purpose_hash, sha256_prefixed(&response.purpose));
+        assert!(!fields.purpose_hash.contains("frontier"));
+        assert!(!fields.purpose_hash.contains("batch"));
+        assert!(!fields.dry_run);
+        assert_eq!(fields.checked, 5);
+        assert_eq!(fields.submitted, 3);
+        assert_eq!(fields.failed, 1);
+        assert_eq!(fields.skipped, 2);
+        assert_eq!(fields.pending, 4);
+    }
+
+    #[test]
+    fn near_credit_confirm_worker_log_fields_hash_sensitive_values() {
+        let auth = test_reviewer_auth("tenant-a");
+        let response = TraceNearCreditOutboxConfirmWorkerResponse {
+            purpose: "confirm settlement for frontier lab batch 42".to_string(),
+            dry_run: true,
+            checked: 4,
+            confirmed: 2,
+            failed: 1,
+            skipped: 3,
+            pending: 1,
+        };
+
+        let fields = near_credit_outbox_confirm_worker_log_fields(&auth, &response);
+
+        assert_eq!(fields.tenant_storage_ref, tenant_storage_ref("tenant-a"));
+        assert_eq!(fields.purpose_hash, sha256_prefixed(&response.purpose));
+        assert!(!fields.purpose_hash.contains("frontier"));
+        assert!(!fields.purpose_hash.contains("batch"));
+        assert!(fields.dry_run);
+        assert_eq!(fields.checked, 4);
+        assert_eq!(fields.confirmed, 2);
+        assert_eq!(fields.failed, 1);
+        assert_eq!(fields.skipped, 3);
+        assert_eq!(fields.pending, 1);
     }
 
     #[test]
