@@ -30799,14 +30799,19 @@ struct TraceBenchmarkReadinessDrillResponse {
     published_count: usize,
     revoked_count: usize,
     registry_submitter_configured: bool,
+    registry_submitter_auth_configured: bool,
     registry_confirmer_configured: bool,
+    registry_confirmer_auth_configured: bool,
+    registry_require_adapter_auth: bool,
     external_evaluator_configured: bool,
     registry_outbox_pending_count: usize,
     registry_outbox_submitted_count: usize,
     registry_outbox_confirmed_count: usize,
     registry_outbox_failed_count: usize,
     registry_outbox_pending_without_submitter_count: usize,
+    registry_outbox_pending_without_submitter_auth_count: usize,
     registry_outbox_submitted_without_confirmer_count: usize,
+    registry_outbox_submitted_without_confirmer_auth_count: usize,
     publishable_without_external_evaluator_count: usize,
     external_registry_adapter_gap_count: usize,
     external_registry_invalidation_gap_count: usize,
@@ -32153,7 +32158,10 @@ async fn run_benchmark_readiness_drill(
         published_count: summary.published_count,
         revoked_count: summary.revoked_count,
         registry_submitter_configured: summary.registry_submitter_configured,
+        registry_submitter_auth_configured: summary.registry_submitter_auth_configured,
         registry_confirmer_configured: summary.registry_confirmer_configured,
+        registry_confirmer_auth_configured: summary.registry_confirmer_auth_configured,
+        registry_require_adapter_auth: summary.registry_require_adapter_auth,
         external_evaluator_configured: summary.external_evaluator_configured,
         registry_outbox_pending_count: summary.registry_outbox_pending_count,
         registry_outbox_submitted_count: summary.registry_outbox_submitted_count,
@@ -32161,8 +32169,12 @@ async fn run_benchmark_readiness_drill(
         registry_outbox_failed_count: summary.registry_outbox_failed_count,
         registry_outbox_pending_without_submitter_count: summary
             .registry_outbox_pending_without_submitter_count,
+        registry_outbox_pending_without_submitter_auth_count: summary
+            .registry_outbox_pending_without_submitter_auth_count,
         registry_outbox_submitted_without_confirmer_count: summary
             .registry_outbox_submitted_without_confirmer_count,
+        registry_outbox_submitted_without_confirmer_auth_count: summary
+            .registry_outbox_submitted_without_confirmer_auth_count,
         publishable_without_external_evaluator_count: summary
             .publishable_without_external_evaluator_count,
         external_registry_adapter_gap_count: summary.external_registry_adapter_gap_count,
@@ -34025,14 +34037,19 @@ fn benchmark_readiness_drill_evidence_hash(
             "published_count": response.published_count,
             "revoked_count": response.revoked_count,
             "registry_submitter_configured": response.registry_submitter_configured,
+            "registry_submitter_auth_configured": response.registry_submitter_auth_configured,
             "registry_confirmer_configured": response.registry_confirmer_configured,
+            "registry_confirmer_auth_configured": response.registry_confirmer_auth_configured,
+            "registry_require_adapter_auth": response.registry_require_adapter_auth,
             "external_evaluator_configured": response.external_evaluator_configured,
             "registry_outbox_pending_count": response.registry_outbox_pending_count,
             "registry_outbox_submitted_count": response.registry_outbox_submitted_count,
             "registry_outbox_confirmed_count": response.registry_outbox_confirmed_count,
             "registry_outbox_failed_count": response.registry_outbox_failed_count,
             "registry_outbox_pending_without_submitter_count": response.registry_outbox_pending_without_submitter_count,
+            "registry_outbox_pending_without_submitter_auth_count": response.registry_outbox_pending_without_submitter_auth_count,
             "registry_outbox_submitted_without_confirmer_count": response.registry_outbox_submitted_without_confirmer_count,
+            "registry_outbox_submitted_without_confirmer_auth_count": response.registry_outbox_submitted_without_confirmer_auth_count,
             "publishable_without_external_evaluator_count": response.publishable_without_external_evaluator_count,
             "external_registry_adapter_gap_count": response.external_registry_adapter_gap_count,
             "external_registry_invalidation_gap_count": response.external_registry_invalidation_gap_count,
@@ -76314,6 +76331,117 @@ mod tests {
                         && reason.contains("status=failed")
                 })
         }));
+    }
+
+    #[tokio::test]
+    async fn admin_benchmark_readiness_drill_reports_adapter_auth_gaps() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).benchmark_registry_submitter =
+            Some(Arc::new(FakeBenchmarkRegistrySubmitter::default()));
+        Arc::make_mut(&mut state).benchmark_registry_confirmer =
+            Some(Arc::new(FakeBenchmarkRegistryConfirmer::default()));
+        Arc::make_mut(&mut state).benchmark_registry_require_adapter_auth = true;
+        let pending_item = pending_benchmark_registry_outbox_item(Uuid::new_v4());
+        let submitted_item = submitted_benchmark_registry_outbox_item(
+            Uuid::new_v4(),
+            StorageTraceBenchmarkRegistryOutboxOperation::Publish,
+        );
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &pending_item)
+            .expect("pending benchmark registry outbox writes");
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &submitted_item)
+            .expect("submitted benchmark registry outbox writes");
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/benchmark-readiness-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator benchmark registry auth drill",
+                            "require_artifacts": false,
+                            "require_external_evaluator": false,
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("admin response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16384)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("benchmark readiness drill parses");
+
+        assert_eq!(value["ready"], serde_json::json!(false));
+        assert_eq!(
+            value["registry_submitter_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["registry_submitter_auth_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["registry_confirmer_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["registry_confirmer_auth_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["registry_require_adapter_auth"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["registry_outbox_pending_without_submitter_count"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            value["registry_outbox_pending_without_submitter_auth_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            value["registry_outbox_submitted_without_confirmer_count"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            value["registry_outbox_submitted_without_confirmer_auth_count"],
+            serde_json::json!(1)
+        );
+        assert!(
+            value["blocker_reasons"]
+                .as_array()
+                .expect("blocker reasons is an array")
+                .contains(&serde_json::json!(
+                    "benchmark_registry_outbox_pending_without_submitter_auth=1"
+                ))
+        );
+        assert!(
+            value["blocking_gaps"]
+                .as_array()
+                .expect("blocking gaps is an array")
+                .contains(&serde_json::json!(
+                    "benchmark_registry_outbox_submitted_without_confirmer_auth=1"
+                ))
+        );
+        assert_eq!(
+            value["recorded_evidence"]["status"],
+            serde_json::json!("failed")
+        );
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("external-registry:receipt"));
     }
 
     #[tokio::test]
