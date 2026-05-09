@@ -1158,6 +1158,10 @@ However, when `TRACE_COMMONS_RANKING_MIN_LABEL_SOURCE_COUNT` requires multiple
 joined sources, those sources must also be written by at least that many distinct
 actor principals; otherwise the run records
 `insufficient_label_actor_diversity` and remains non-promotable.
+If production later raises that floor, active model-risk and readiness reports
+also re-check stored calibration runs and emit
+`calibration_label_actor_underdiverse` for legacy runs whose source count clears
+the floor but actor-principal count does not.
 
 Process-evaluation-derived ranking labels are intended as auxiliary evaluator
 evidence, not direct credit authority. They participate in the same calibration,
@@ -1264,7 +1268,7 @@ the stale-run promotion blocker.
 
 `GET /v1/admin/ranking/model-backtest-report` recomputes the same current calibration, pairwise, and label-adjudication checks for latest candidate and active model/target-use pairs. Each row reports current joined-evidence hashes, latest calibration run/report hashes, joined label counts, aggregate and per-source error metrics, low-confidence counts, pairwise evidence, pairwise source/actor diversity, pairwise accuracy, pass/fail status, and machine-readable reason codes so operators can evaluate a candidate before promotion or credit issuance without exposing trace bodies or raw lab references.
 
-`GET /v1/admin/ranking/model-risk-report` recomputes the current joined-evidence hash for each active model/target-use pair and reports post-calibration prediction/label counts, current joined-label source diversity, current calibration thresholds, current aggregate/per-label-source error metrics, pairwise preference evidence counts, pairwise source/actor diversity counts, pairwise policy thresholds, pairwise ordering accuracy, unresolved label-adjudication blockers, low-confidence fresh predictions, stale or non-promotable calibration status, training/calibration dataset overlap, evidence-hash drift, aggregate risk-code counts, and per-model machine-readable risk codes without exposing trace bodies or raw lab references.
+`GET /v1/admin/ranking/model-risk-report` recomputes the current joined-evidence hash for each active model/target-use pair and reports post-calibration prediction/label counts, current joined-label source and actor diversity, current calibration thresholds, current aggregate/per-label-source error metrics, pairwise preference evidence counts, pairwise source/actor diversity counts, pairwise policy thresholds, pairwise ordering accuracy, unresolved label-adjudication blockers, low-confidence fresh predictions, stale or non-promotable calibration status, training/calibration dataset overlap, evidence-hash drift, aggregate risk-code counts, and per-model machine-readable risk codes without exposing trace bodies or raw lab references.
 
 `GET /v1/admin/ranking/credit-readiness-report` lists pending positive `ranking_utility` credit events that have not already settled and explains whether each can settle under the referenced active-model prediction. Blocked rows include machine-readable reasons such as missing prediction refs, missing or inactive models, missing/stale/non-promotable/under-diverse calibration, score mismatches, held credit accounts, low-confidence predictions, and uncleared active-model risk codes such as current evidence drift, plus the calibration run/report/joined-evidence hashes when available.
 

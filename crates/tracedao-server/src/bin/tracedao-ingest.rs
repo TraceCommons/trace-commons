@@ -23235,6 +23235,12 @@ fn ranking_model_risk_record(
             if run.joined_label_source_count < state.ranking_min_label_source_count {
                 risk_codes.push("calibration_label_source_underdiverse".to_string());
             }
+            if ranking_calibration_run_label_actor_underdiverse(
+                run,
+                state.ranking_min_label_source_count,
+            ) {
+                risk_codes.push("calibration_label_actor_underdiverse".to_string());
+            }
             if joined_evidence_changed {
                 risk_codes.push("joined_evidence_changed_since_calibration".to_string());
             }
@@ -23552,6 +23558,12 @@ fn ranking_dataset_target_readiness_record(
             if run.joined_label_source_count < state.ranking_min_label_source_count {
                 reason_codes.push("calibration_label_source_underdiverse".to_string());
             }
+            if ranking_calibration_run_label_actor_underdiverse(
+                run,
+                state.ranking_min_label_source_count,
+            ) {
+                reason_codes.push("calibration_label_actor_underdiverse".to_string());
+            }
             if joined_evidence_changed {
                 reason_codes.push("joined_evidence_changed_since_calibration".to_string());
             }
@@ -23867,6 +23879,12 @@ fn ranking_credit_readiness_event(
                     }
                     if run.joined_label_source_count < state.ranking_min_label_source_count {
                         reason_codes.push("calibration_label_source_underdiverse".to_string());
+                    }
+                    if ranking_calibration_run_label_actor_underdiverse(
+                        run,
+                        state.ranking_min_label_source_count,
+                    ) {
+                        reason_codes.push("calibration_label_actor_underdiverse".to_string());
                     }
                     if prediction.confidence < run.confidence_threshold {
                         reason_codes.push("low_confidence_prediction".to_string());
@@ -24212,6 +24230,20 @@ impl RankingCalibrationGateContext {
             }
         }
     }
+
+    fn actor_underdiverse_message(self) -> &'static str {
+        match self {
+            Self::ModelPromotion => {
+                "ranking model promotion requires calibration label-actor diversity"
+            }
+            Self::PredictionCredit => {
+                "ranking prediction credit requires calibration label-actor diversity"
+            }
+            Self::Settlement => {
+                "ranking utility settlement requires calibration label-actor diversity"
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -24354,7 +24386,21 @@ fn ensure_ranking_calibration_label_source_diversity(
             context.underdiverse_message(),
         ));
     }
+    if ranking_calibration_run_label_actor_underdiverse(run, state.ranking_min_label_source_count) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            context.actor_underdiverse_message(),
+        ));
+    }
     Ok(())
+}
+
+fn ranking_calibration_run_label_actor_underdiverse(
+    run: &TraceRankingCalibrationRunRecord,
+    min_label_source_count: usize,
+) -> bool {
+    run.joined_label_source_count >= min_label_source_count
+        && run.joined_label_actor_count < min_label_source_count
 }
 
 async fn ranking_settlement_calibration_gate(
@@ -99684,6 +99730,96 @@ mod tests {
             !model
                 .risk_codes
                 .contains(&"pairwise_accuracy_below_threshold".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn active_ranking_model_risk_report_flags_legacy_calibration_label_actor_underdiversity()
+    {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let (candidate, prediction) = seed_credit_cycle_candidate_with_prediction(
+            state.clone(),
+            "trace-ranker-calibration-actor-diversity-v1",
+        )
+        .await;
+        for (label_source, suffix) in [
+            (StorageTraceRankingLabelSource::FrontierLab, "frontier"),
+            (StorageTraceRankingLabelSource::Reviewer, "reviewer"),
+        ] {
+            let _ = ranking_label_handler(
+                State(state.clone()),
+                auth_headers("admin-token-a"),
+                Json(TraceRankingLabelRequest {
+                    submission_id: prediction.submission_id,
+                    target_use: TraceAllowedUse::RankingModelTraining,
+                    label_source,
+                    utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                    label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                    utility_delta_micros: 1_250_000,
+                    evidence_hash: sha256_prefixed(&format!(
+                        "calibration-actor-diversity-{suffix}"
+                    )),
+                    external_ref: format!("private-calibration-actor-diversity-{suffix}"),
+                }),
+            )
+            .await
+            .expect("admin can record legacy same-actor calibration labels");
+        }
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("legacy calibration can persist under single-source floor");
+        assert!(calibration.promotable);
+        assert_eq!(calibration.joined_label_source_count, 2);
+        assert_eq!(calibration.joined_label_actor_count, 1);
+
+        let Json(promotion) = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "activate legacy calibration before actor diversity floor".to_string(),
+            }),
+        )
+        .await
+        .expect("legacy source-diverse calibration can activate before actor floor rises");
+        assert!(promotion.promoted);
+
+        Arc::make_mut(&mut state).ranking_min_label_source_count = 2;
+        let Json(report) =
+            ranking_model_risk_report_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect active model actor-diversity risk");
+        assert_eq!(
+            report
+                .risk_code_counts
+                .get("calibration_label_actor_underdiverse"),
+            Some(&1)
+        );
+        let model = report
+            .models
+            .iter()
+            .find(|model| model.model_version == candidate.model_version)
+            .expect("active model risk record exists");
+        assert!(
+            model
+                .risk_codes
+                .contains(&"calibration_label_actor_underdiverse".to_string())
         );
     }
 
