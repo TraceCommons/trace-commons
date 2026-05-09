@@ -85,8 +85,12 @@ dry-runs and drills available. When that principal allowlist is configured,
 unlisted admins can still inspect dry-runs but cannot record issuer approvals,
 finalize live settlement, manually mark NEAR credit outbox rows, or create NEAR
 account freeze/unfreeze transitions from credit holds, and unlisted
-utility-worker principals cannot start live settlement, credit-cycle, or NEAR
-credit outbox schedulers or run live NEAR submit/confirm workers. Admin
+reviewer/admin/worker principals cannot create positive credit through manual
+credit mutation, utility credit/attestation, prediction-credit, process-evaluation
+utility credit, or credit-bearing export generation. Those paths fail before
+source reads or derived artifact writes. Unlisted utility-worker principals
+cannot start live settlement, credit-cycle, or NEAR credit outbox schedulers or
+run live NEAR submit/confirm workers. Admin
 config status returns safe missing-control names for that central issuer profile
 so operators can see which gate still needs configuration without exposing
 adapter URLs, bearer tokens, approval evidence, or account refs. The

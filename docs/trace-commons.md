@@ -628,7 +628,9 @@ dry-runs but cannot record source-list issuer approvals or finalize live
 settlement, unlisted reviewer/admin/worker principals cannot create positive
 credit ledger entries through delayed-credit mutation, utility-credit jobs,
 utility attestations, ranking prediction-credit, or export-generated utility
-credit, unlisted utility-worker principals cannot start live settlement or
+credit. Those positive-credit paths fail before source reads, process-evaluation
+envelope rewrites, benchmark artifacts, ranker provenance, or worker-run ledgers
+are created. Unlisted utility-worker principals cannot start live settlement or
 credit-cycle schedulers, and unlisted benchmark-worker principals cannot submit,
 confirm, manually mark, or schedule live benchmark registry outbox mutations.
 Non-positive reviewer adjustments, such as abuse penalties, remain available

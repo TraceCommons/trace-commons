@@ -12698,17 +12698,6 @@ async fn append_credit_event_handler(
             "credit_points_delta must be finite",
         ));
     }
-
-    let submission = read_reviewer_submission_record(state.as_ref(), &tenant, submission_id)
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
-    if submission.is_terminal() {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            "terminal trace submissions are not eligible for delayed credit",
-        ));
-    }
     if body.credit_points_delta.abs() > MAX_DELAYED_CREDIT_POINTS_DELTA {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
@@ -12720,6 +12709,16 @@ async fn append_credit_event_handler(
         &tenant,
         body.credit_points_delta,
     )?;
+    let submission = read_reviewer_submission_record(state.as_ref(), &tenant, submission_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
+    if submission.is_terminal() {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "terminal trace submissions are not eligible for delayed credit",
+        ));
+    }
     let reason = body
         .reason
         .as_deref()
@@ -12866,6 +12865,11 @@ async fn utility_credit_handler(
             "credit_points_delta exceeds the delayed credit policy limit",
         ));
     }
+    require_positive_credit_issuance_principal_if_configured(
+        state.as_ref(),
+        &tenant,
+        body.credit_points_delta,
+    )?;
     let reason = body.reason.trim().to_string();
     if reason.is_empty() {
         return Err(api_error(
@@ -12984,6 +12988,11 @@ async fn utility_attestation_handler(
             "credit_points_delta exceeds the delayed credit policy limit",
         ));
     }
+    require_positive_credit_issuance_principal_if_configured(
+        state.as_ref(),
+        &tenant,
+        body.credit_points_delta,
+    )?;
     let use_category = body.use_category.trim().to_string();
     if use_category.is_empty() {
         return Err(api_error(
@@ -20545,6 +20554,7 @@ async fn ranking_prediction_credit_handler(
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_utility_operator(&tenant)?;
     let reason = validate_ranking_prediction_credit_reason(&body.reason)?;
+    require_positive_credit_issuance_principal_if_configured(state.as_ref(), &tenant, 1.0)?;
 
     let predictions = read_ranking_predictions_for_admin(state.as_ref(), &tenant)
         .await
@@ -20581,6 +20591,9 @@ async fn ranking_prediction_credit_run_handler(
             StatusCode::BAD_REQUEST,
             "ranking prediction credit run limit must be between 1 and 500",
         ));
+    }
+    if !body.dry_run {
+        require_positive_credit_issuance_principal_if_configured(state.as_ref(), &tenant, 1.0)?;
     }
     let model_version = optional_ranking_identifier(body.model_version, "model_version")?;
     let policy_version = optional_ranking_identifier(body.policy_version, "policy_version")?;
@@ -21114,6 +21127,9 @@ async fn append_ranking_prediction_credit_for_record(
             StatusCode::CONFLICT,
             "ranking prediction credit requires a positive settlement score",
         ));
+    }
+    if !dry_run {
+        require_positive_credit_issuance_principal_if_configured(state, tenant, 1.0)?;
     }
 
     let submission = read_ranking_source_submission(
@@ -26245,6 +26261,13 @@ async fn run_process_evaluation_job(
     let utility_credit_request = body
         .utility_credit_points_delta
         .zip(utility_external_ref.clone());
+    if let Some((credit_points_delta, _)) = utility_credit_request.as_ref() {
+        require_positive_credit_issuance_principal_if_configured(
+            state,
+            tenant,
+            *credit_points_delta,
+        )?;
+    }
 
     let mut record = read_utility_submission_record(state, tenant, body.submission_id)
         .await
@@ -29367,6 +29390,7 @@ async fn execute_claimed_export_job(
             })
         }
         TraceExportDatasetKind::BenchmarkConversion => {
+            require_positive_credit_issuance_principal_if_configured(state, tenant, 1.0)?;
             let body = benchmark_conversion_request_from_claimed_job(&job)?;
             let (consent_scope, tenant_policy, purpose) =
                 prepare_benchmark_conversion_execution(state, tenant, &body).await?;
@@ -29388,6 +29412,7 @@ async fn execute_claimed_export_job(
             })
         }
         TraceExportDatasetKind::RankerTrainingCandidates => {
+            require_positive_credit_issuance_principal_if_configured(state, tenant, 1.0)?;
             let query = ranker_training_export_query_from_claimed_job(&job)?;
             let (consent_scope, tenant_policy, purpose) = prepare_ranker_training_export_execution(
                 state,
@@ -29415,6 +29440,7 @@ async fn execute_claimed_export_job(
             })
         }
         TraceExportDatasetKind::RankerTrainingPairs => {
+            require_positive_credit_issuance_principal_if_configured(state, tenant, 1.0)?;
             let query = ranker_training_export_query_from_claimed_job(&job)?;
             let (consent_scope, tenant_policy, purpose) = prepare_ranker_training_export_execution(
                 state,
@@ -36726,6 +36752,7 @@ async fn run_benchmark_conversion(
     tenant: &TenantAuth,
     body: BenchmarkConversionRequest,
 ) -> ApiResult<Json<TraceBenchmarkConversionArtifact>> {
+    require_positive_credit_issuance_principal_if_configured(state, tenant, 1.0)?;
     let now = Utc::now();
     let purpose = normalized_export_purpose(
         body.purpose.as_deref(),
@@ -36749,6 +36776,7 @@ async fn run_benchmark_conversion_with_grant(
     grant: TraceExportAccessGrant,
     now: DateTime<Utc>,
 ) -> ApiResult<Json<TraceBenchmarkConversionArtifact>> {
+    require_positive_credit_issuance_principal_if_configured(state, tenant, 1.0)?;
     let (consent_scope, tenant_policy, purpose) =
         prepare_benchmark_conversion_execution(state, tenant, &body).await?;
     let job = create_validated_export_job_slice(
@@ -37324,6 +37352,7 @@ async fn run_ranker_training_candidates_export_with_grant(
     grant: TraceExportAccessGrant,
     now: DateTime<Utc>,
 ) -> ApiResult<Json<TraceRankerTrainingCandidateExport>> {
+    require_positive_credit_issuance_principal_if_configured(state, tenant, 1.0)?;
     let (consent_scope, tenant_policy, purpose) = prepare_ranker_training_export_execution(
         state,
         tenant,
@@ -37692,6 +37721,7 @@ async fn run_ranker_training_pairs_export_with_grant(
     grant: TraceExportAccessGrant,
     now: DateTime<Utc>,
 ) -> ApiResult<Json<TraceRankerTrainingPairExport>> {
+    require_positive_credit_issuance_principal_if_configured(state, tenant, 1.0)?;
     let (consent_scope, tenant_policy, purpose) = prepare_ranker_training_export_execution(
         state,
         tenant,
@@ -96188,14 +96218,14 @@ mod tests {
 
         let tenant_b_credit_error = ranking_prediction_credit_handler(
             State(state.clone()),
-            auth_headers("review-token-b"),
+            auth_headers("admin-token-b"),
             Json(TraceRankingPredictionCreditRequest {
                 ranking_prediction_id: prediction.ranking_prediction_id,
                 reason: "tenant-b cannot credit tenant-a prediction".to_string(),
             }),
         )
         .await
-        .expect_err("tenant-b reviewer cannot credit tenant-a prediction");
+        .expect_err("tenant-b admin cannot credit tenant-a prediction");
         assert_eq!(tenant_b_credit_error.0, StatusCode::NOT_FOUND);
         assert!(
             read_all_credit_events(temp.path(), "tenant-b")
@@ -114367,6 +114397,40 @@ mod tests {
                 .is_empty()
         );
 
+        let prediction_credit_error = ranking_prediction_credit_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionCreditRequest {
+                ranking_prediction_id: Uuid::new_v4(),
+                reason: "unlisted utility worker must not mint prediction credit".to_string(),
+            }),
+        )
+        .await
+        .expect_err("unlisted utility worker cannot issue prediction credit");
+        assert_eq!(prediction_credit_error.0, StatusCode::FORBIDDEN);
+
+        let prediction_credit_run_error = ranking_prediction_credit_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionCreditRunRequest {
+                dry_run: false,
+                allow_at_risk_models: false,
+                reason: "unlisted utility worker must not run live prediction credit".to_string(),
+                limit: Some(1),
+                model_version: None,
+                target_use: None,
+                policy_version: None,
+            }),
+        )
+        .await
+        .expect_err("unlisted utility worker cannot start live prediction credit run");
+        assert_eq!(prediction_credit_run_error.0, StatusCode::FORBIDDEN);
+        assert!(
+            read_all_ranking_worker_runs(temp.path(), "tenant-a")
+                .expect("worker run reads after blocked prediction credit")
+                .is_empty()
+        );
+
         let attestation_error = utility_attestation_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
@@ -114458,6 +114522,131 @@ mod tests {
                 .expect("authorized attestations read")
                 .len(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn central_issuer_allowlist_blocks_credit_bearing_process_evaluation_before_mutation() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
+            Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("accepted submission succeeds");
+
+        let error = process_evaluation_worker_handler(
+            State(state.clone()),
+            auth_headers("process-eval-worker-token-a"),
+            Json(TraceProcessEvaluationJobRequest {
+                submission_id,
+                process_evaluation: ProcessEvaluationLabels {
+                    evaluator_name: Some("trajectory-judge".to_string()),
+                    evaluator_version: "judge-v1".to_string(),
+                    overall_score: Some(0.91),
+                    ..ProcessEvaluationLabels::default()
+                },
+                reason: "unlisted process evaluator must not mint training credit".to_string(),
+                utility_credit_points_delta: Some(0.85),
+                utility_external_ref: Some("process-eval:central-issuer-blocked".to_string()),
+                ranking_label: None,
+            }),
+        )
+        .await
+        .expect_err("unlisted process evaluator cannot issue positive credit");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.1.0.error,
+            "positive credit issuance requires an authorized central issuer principal"
+        );
+
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let stored = read_envelope_by_record(state.as_ref(), &record).expect("envelope reads");
+        assert!(
+            stored.process_evaluation.is_none(),
+            "central issuer rejection must happen before process-evaluation envelope mutation"
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit reads after blocked process evaluation")
+                .is_empty()
+        );
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        assert!(audit_events.iter().all(|event| {
+            event.submission_id != submission_id || event.kind != "process_evaluation"
+        }));
+    }
+
+    #[tokio::test]
+    async fn central_issuer_allowlist_blocks_credit_bearing_exports_before_artifacts() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
+            Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+
+        let benchmark_error = benchmark_worker_convert_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(1),
+                purpose: Some("central_issuer_blocked_benchmark".to_string()),
+                consent_scope: Some("benchmark_only".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: Some("central-issuer-blocked-benchmark".to_string()),
+            }),
+        )
+        .await
+        .expect_err("unlisted benchmark worker cannot create credit-bearing benchmark artifacts");
+        assert_eq!(benchmark_error.0, StatusCode::FORBIDDEN);
+
+        let ranker_error = worker_ranker_training_candidates_body_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Json(RankerTrainingExportQuery {
+                limit: Some(1),
+                purpose: Some("central_issuer_blocked_ranker".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking_training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect_err("unlisted export worker cannot create credit-bearing ranker artifacts");
+        assert_eq!(ranker_error.0, StatusCode::FORBIDDEN);
+
+        let tenant_dir = temp
+            .path()
+            .join("tenants")
+            .join(tenant_storage_key("tenant-a"));
+        assert!(
+            !tenant_dir.join("benchmarks").exists(),
+            "central issuer rejection must happen before benchmark artifacts are written"
+        );
+        assert!(
+            !tenant_dir.join("ranker_exports").exists(),
+            "central issuer rejection must happen before ranker provenance is written"
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit reads after blocked exports")
+                .is_empty()
+        );
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        assert!(
+            audit_events
+                .iter()
+                .all(|event| event.kind != "benchmark_conversion" && event.kind != "ranker_export")
         );
     }
 
