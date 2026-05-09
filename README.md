@@ -68,10 +68,11 @@ Set `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE=true` for
 the early production mode where TraceCommons centrally runs issuance instead of
 trusting a broader actor reputation system. That profile fails startup unless
 DB mirror writes and PostgreSQL RLS readiness are fail-closed, per-account caps
-are configured, tenant access-grant enforcement is enabled for exact issuer
-principals, fresh central source-list approvals are required, a single NEAR
-credit contract is pinned and required, NEAR submit/confirm adapters are
-configured, and adapter bearer auth is required for both directions. Admin
+are configured, managed EdDSA signed-token enforcement plus tenant access-grant
+enforcement are enabled for exact issuer principals, fresh central source-list
+approvals are required, a single NEAR credit contract is pinned and required,
+NEAR submit/confirm adapters are configured, and adapter bearer auth is required
+for both directions. Admin
 config status returns safe missing-control names for that central issuer profile
 so operators can see which gate still needs configuration without exposing
 adapter URLs, bearer tokens, approval evidence, or account refs.
