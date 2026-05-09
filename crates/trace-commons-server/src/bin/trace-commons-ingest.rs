@@ -11301,24 +11301,28 @@ struct TraceRankingLabelerReliabilityReport {
 #[derive(Debug, Serialize)]
 struct TraceRankingLabelSourceReliabilityRecord {
     label_source: StorageTraceRankingLabelSource,
+    label_count: usize,
     absolute_label_count: usize,
     preference_label_count: usize,
     disputed_label_count: usize,
     absolute_conflict_count: usize,
     pairwise_conflict_count: usize,
     issue_count: usize,
+    issue_rate_micros: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
 struct TraceRankingLabelActorReliabilityRecord {
     actor_principal_hash: String,
     label_source_counts: BTreeMap<String, usize>,
+    label_count: usize,
     absolute_label_count: usize,
     preference_label_count: usize,
     disputed_label_count: usize,
     absolute_conflict_count: usize,
     pairwise_conflict_count: usize,
     issue_count: usize,
+    issue_rate_micros: Option<i64>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -11330,6 +11334,12 @@ struct TraceRankingLabelerReliabilityStats {
     absolute_conflict_count: usize,
     pairwise_conflict_count: usize,
     issue_count: usize,
+}
+
+impl TraceRankingLabelerReliabilityStats {
+    fn label_count(&self) -> usize {
+        self.absolute_label_count + self.preference_label_count
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -22483,8 +22493,11 @@ fn ranking_labeler_reliability_report(
 
     let sources = source_stats
         .into_iter()
-        .map(
-            |(label_source, stats)| TraceRankingLabelSourceReliabilityRecord {
+        .map(|(label_source, stats)| {
+            let label_count = stats.label_count();
+            let issue_rate_micros = reliability_issue_rate_micros(&stats);
+            TraceRankingLabelSourceReliabilityRecord {
+                label_count,
                 label_source,
                 absolute_label_count: stats.absolute_label_count,
                 preference_label_count: stats.preference_label_count,
@@ -22492,23 +22505,28 @@ fn ranking_labeler_reliability_report(
                 absolute_conflict_count: stats.absolute_conflict_count,
                 pairwise_conflict_count: stats.pairwise_conflict_count,
                 issue_count: stats.issue_count,
-            },
-        )
+                issue_rate_micros,
+            }
+        })
         .collect::<Vec<_>>();
     let actors = actor_stats
         .into_iter()
-        .map(
-            |(actor_principal_hash, stats)| TraceRankingLabelActorReliabilityRecord {
+        .map(|(actor_principal_hash, stats)| {
+            let label_count = stats.label_count();
+            let issue_rate_micros = reliability_issue_rate_micros(&stats);
+            TraceRankingLabelActorReliabilityRecord {
                 actor_principal_hash,
                 label_source_counts: stats.label_source_counts,
+                label_count,
                 absolute_label_count: stats.absolute_label_count,
                 preference_label_count: stats.preference_label_count,
                 disputed_label_count: stats.disputed_label_count,
                 absolute_conflict_count: stats.absolute_conflict_count,
                 pairwise_conflict_count: stats.pairwise_conflict_count,
                 issue_count: stats.issue_count,
-            },
-        )
+                issue_rate_micros,
+            }
+        })
         .collect::<Vec<_>>();
 
     TraceRankingLabelerReliabilityReport {
@@ -22550,6 +22568,14 @@ fn increment_labeler_reliability_source(
         &mut stats.label_source_counts,
         &serde_enum_tag(&label_source),
     );
+}
+
+fn reliability_issue_rate_micros(stats: &TraceRankingLabelerReliabilityStats) -> Option<i64> {
+    let label_count = stats.label_count();
+    if label_count == 0 {
+        return None;
+    }
+    Some(((stats.issue_count as i128 * 1_000_000i128) / label_count as i128) as i64)
 }
 
 fn preference_label_matches_adjudication_pair(
@@ -96835,16 +96861,20 @@ mod tests {
             .find(|source| source["label_source"] == serde_json::json!("reviewer"))
             .expect("reviewer source reliability exists");
         for source in [frontier, reviewer] {
+            assert_eq!(source["label_count"], serde_json::json!(2));
             assert_eq!(source["absolute_conflict_count"], serde_json::json!(1));
             assert_eq!(source["pairwise_conflict_count"], serde_json::json!(1));
             assert_eq!(source["issue_count"], serde_json::json!(2));
+            assert_eq!(source["issue_rate_micros"], serde_json::json!(1_000_000));
         }
         for actor in report["actors"].as_array().expect("actors array") {
             let actor_hash = actor["actor_principal_hash"]
                 .as_str()
                 .expect("actor hash string");
             assert!(actor_hash.starts_with("sha256:"));
+            assert_eq!(actor["label_count"], serde_json::json!(2));
             assert_eq!(actor["issue_count"], serde_json::json!(2));
+            assert_eq!(actor["issue_rate_micros"], serde_json::json!(1_000_000));
         }
         let report_text = serde_json::to_string(&report).expect("report serializes");
         assert!(!report_text.contains("private-reliability"));

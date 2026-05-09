@@ -1182,8 +1182,9 @@ remain non-promotable while any unresolved issue exists for the target use, so
 stored model-quality evidence cannot advance credit issuance ahead of label
 review. `GET /v1/admin/ranking/labeler-reliability-report` projects the same
 issue participation into source-level and hashed-actor rows, including
-absolute-label, preference-label, dispute, conflict, and total issue counts
-without exposing raw actor principals or external refs.
+absolute-label, preference-label, total-label, dispute, conflict, total issue,
+and issue-rate-micros fields without exposing raw actor principals or external
+refs.
 
 When a central NEAR credit contract is configured, credit holds also mirror
 account-state transitions into the NEAR outbox: the first active hold for an
