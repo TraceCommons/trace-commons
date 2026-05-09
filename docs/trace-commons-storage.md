@@ -127,6 +127,8 @@ This first production-storage slice is now owned by the TraceDAO server repo. It
 
 The dedicated `POST /v1/workers/vector-index` route now runs the same vector metadata writer without entering the broader retention-maintenance path. It requires the DB mirror up front, applies a bounded `limit` with a default of 100 and a maximum of 500, rejects invalid explicit limits with a client error before DB mirror checks, returns checked/indexed/skipped/pending counts, and leaves expiration, purge, retention-ledger, and reconciliation work to the admin or retention worker routes. The optional `TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_TOKEN` loop calls this route with the configured interval, limit, dry-run flag, and purpose, after startup validation proves the token has vector-worker authority and the DB mirror exists.
 
+Review-lease audit backfill preserves both the typed safe metadata and the semantic `Review` audit action, so DB audit projection round-trips file-backed `review_lease` rows instead of collapsing them into generic read events.
+
 Submitted audit-event backfill enriches typed `Submission` metadata from the matching file submission record when available, preserving the stored status and privacy risk instead of falling back to `unknown`. Reconciliation also reports `db_audit_submission_metadata_mismatches` when submitted-audit metadata carries a stale privacy-risk projection for the DB submission row, and treats it as a promotion blocker.
 
 Export-job control rows preserve `trace_export_job_request.v1` metadata across
