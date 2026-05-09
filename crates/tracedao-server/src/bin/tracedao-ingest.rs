@@ -11379,6 +11379,8 @@ struct TraceRankingPairwiseEvaluationModelReport {
     prediction_count: usize,
     preference_label_count: usize,
     joined_pair_prediction_count: usize,
+    joined_label_source_count: usize,
+    joined_label_actor_count: usize,
     correct_pair_count: usize,
     reversed_pair_count: usize,
     tied_pair_count: usize,
@@ -11434,6 +11436,8 @@ struct TraceRankingModelRiskRecord {
     pairwise_min_accuracy_micros: i64,
     pairwise_preference_label_count: usize,
     pairwise_joined_pair_prediction_count: usize,
+    pairwise_joined_label_source_count: usize,
+    pairwise_joined_label_actor_count: usize,
     pairwise_correct_pair_count: usize,
     pairwise_reversed_pair_count: usize,
     pairwise_tied_pair_count: usize,
@@ -11489,6 +11493,8 @@ struct TraceRankingModelBacktestRecord {
     pairwise_min_accuracy_micros: i64,
     pairwise_preference_label_count: usize,
     pairwise_joined_pair_prediction_count: usize,
+    pairwise_joined_label_source_count: usize,
+    pairwise_joined_label_actor_count: usize,
     pairwise_correct_pair_count: usize,
     pairwise_reversed_pair_count: usize,
     pairwise_tied_pair_count: usize,
@@ -22767,6 +22773,8 @@ fn ranking_pairwise_evaluation_model_report(
     let mut min_preferred_margin_micros: Option<i64> = None;
     let mut max_preferred_margin_micros: Option<i64> = None;
     let mut joined_label_source_counts = BTreeMap::new();
+    let mut joined_label_sources = BTreeSet::new();
+    let mut joined_label_actors = BTreeSet::new();
     for label in &matching_preferences {
         let Some(preferred_prediction) =
             latest_prediction_by_submission.get(&label.preferred_submission_id)
@@ -22789,6 +22797,8 @@ fn ranking_pairwise_evaluation_model_report(
         *joined_label_source_counts
             .entry(label.label_source)
             .or_insert(0usize) += 1;
+        joined_label_sources.insert(label.label_source);
+        joined_label_actors.insert(label.actor_principal_ref.as_str());
         match margin.cmp(&0) {
             std::cmp::Ordering::Greater => correct_pair_count += 1,
             std::cmp::Ordering::Less => reversed_pair_count += 1,
@@ -22805,6 +22815,8 @@ fn ranking_pairwise_evaluation_model_report(
         prediction_count: matching_predictions.len(),
         preference_label_count: matching_preferences.len(),
         joined_pair_prediction_count,
+        joined_label_source_count: joined_label_sources.len(),
+        joined_label_actor_count: joined_label_actors.len(),
         correct_pair_count,
         reversed_pair_count,
         tied_pair_count,
@@ -23072,6 +23084,8 @@ fn ranking_model_backtest_report(
                 pairwise_min_accuracy_micros: risk.pairwise_min_accuracy_micros,
                 pairwise_preference_label_count: risk.pairwise_preference_label_count,
                 pairwise_joined_pair_prediction_count: risk.pairwise_joined_pair_prediction_count,
+                pairwise_joined_label_source_count: risk.pairwise_joined_label_source_count,
+                pairwise_joined_label_actor_count: risk.pairwise_joined_label_actor_count,
                 pairwise_correct_pair_count: risk.pairwise_correct_pair_count,
                 pairwise_reversed_pair_count: risk.pairwise_reversed_pair_count,
                 pairwise_tied_pair_count: risk.pairwise_tied_pair_count,
@@ -23236,6 +23250,19 @@ fn ranking_model_risk_record(
     if pairwise.joined_pair_prediction_count < state.ranking_min_pairwise_label_count {
         risk_codes.push("pairwise_evidence_below_threshold".to_string());
     }
+    let pairwise_diversity_required = state.ranking_min_pairwise_label_count > 0
+        && state.ranking_min_label_source_count > 1
+        && pairwise.joined_pair_prediction_count >= state.ranking_min_pairwise_label_count;
+    if pairwise_diversity_required
+        && pairwise.joined_label_source_count < state.ranking_min_label_source_count
+    {
+        risk_codes.push("pairwise_label_source_underdiverse".to_string());
+    }
+    if pairwise_diversity_required
+        && pairwise.joined_label_actor_count < state.ranking_min_label_source_count
+    {
+        risk_codes.push("pairwise_label_actor_underdiverse".to_string());
+    }
     if pairwise.joined_pair_prediction_count > 0
         && pairwise
             .pairwise_accuracy_micros
@@ -23297,6 +23324,8 @@ fn ranking_model_risk_record(
         pairwise_min_accuracy_micros: state.ranking_min_pairwise_accuracy_micros,
         pairwise_preference_label_count: pairwise.preference_label_count,
         pairwise_joined_pair_prediction_count: pairwise.joined_pair_prediction_count,
+        pairwise_joined_label_source_count: pairwise.joined_label_source_count,
+        pairwise_joined_label_actor_count: pairwise.joined_label_actor_count,
         pairwise_correct_pair_count: pairwise.correct_pair_count,
         pairwise_reversed_pair_count: pairwise.reversed_pair_count,
         pairwise_tied_pair_count: pairwise.tied_pair_count,
@@ -99312,6 +99341,128 @@ mod tests {
             !model
                 .risk_codes
                 .contains(&"pairwise_evidence_below_threshold".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn ranking_model_promotion_rejects_pairwise_labels_from_single_actor_even_across_sources()
+    {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let (candidate, calibrated_prediction) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-pairwise-actor-v1")
+                .await;
+        let _ = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: calibrated_prediction.submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_250_000,
+                evidence_hash: sha256_prefixed("pairwise-actor-reviewer-absolute-label"),
+                external_ref: "reviewer-private-pairwise-actor-absolute".to_string(),
+            }),
+        )
+        .await
+        .expect("reviewer can add absolute label diversity for calibration");
+        Arc::make_mut(&mut state).ranking_min_label_source_count = 2;
+        Arc::make_mut(&mut state).ranking_min_pairwise_label_count = 2;
+        Arc::make_mut(&mut state).ranking_min_pairwise_accuracy_micros = 600_000;
+
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist source-diverse calibration");
+        assert!(calibration.promotable);
+        assert_eq!(calibration.joined_label_source_count, 2);
+        assert_eq!(calibration.joined_label_actor_count, 2);
+
+        let lower_scored = seed_pairwise_ranking_prediction_source(
+            state.clone(),
+            &candidate,
+            "pairwise-actor",
+            500_000,
+        )
+        .await;
+        for (label_source, suffix) in [
+            (StorageTraceRankingLabelSource::Reviewer, "reviewer"),
+            (StorageTraceRankingLabelSource::FrontierLab, "frontier"),
+        ] {
+            let _ = ranking_preference_label_handler(
+                State(state.clone()),
+                auth_headers("admin-token-a"),
+                Json(TraceRankingPreferenceLabelRequest {
+                    preferred_submission_id: calibrated_prediction.submission_id,
+                    rejected_submission_id: lower_scored.submission_id,
+                    target_use: TraceAllowedUse::RankingModelTraining,
+                    label_source,
+                    utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                    preference_strength_micros: 800_000,
+                    evidence_hash: sha256_prefixed(&format!("pairwise-actor-{suffix}-evidence")),
+                    external_ref: format!("admin-private-pairwise-actor-{suffix}"),
+                }),
+            )
+            .await
+            .expect("admin can record pairwise labels across source categories");
+        }
+
+        let Json(backtest) = ranking_model_backtest_report_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+        )
+        .await
+        .expect("admin can inspect pairwise actor-diversity backtest");
+        assert_eq!(backtest.failing_model_target_count, 1);
+        assert_eq!(
+            backtest
+                .reason_code_counts
+                .get("pairwise_label_actor_underdiverse"),
+            Some(&1)
+        );
+        let model_value = serde_json::to_value(&backtest.models[0]).expect("model serializes");
+        assert_eq!(
+            model_value["pairwise_joined_label_source_count"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            model_value["pairwise_joined_label_actor_count"],
+            serde_json::json!(1)
+        );
+
+        let promotion_error = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version,
+                reason: "same actor pairwise labels should not support promotion".to_string(),
+            }),
+        )
+        .await
+        .expect_err("same actor pairwise labels block model promotion");
+        assert_eq!(promotion_error.0, StatusCode::CONFLICT);
+        assert!(
+            promotion_error
+                .1
+                .0
+                .error
+                .contains("pairwise_label_actor_underdiverse")
         );
     }
 
