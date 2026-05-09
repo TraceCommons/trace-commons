@@ -41950,6 +41950,7 @@ async fn run_revocation_propagation_worker(
 
     if request.dry_run {
         append_revocation_propagation_audit(state, tenant, &response).await?;
+        log_revocation_propagation_worker_summary(tenant, &response);
         return Ok(response);
     }
 
@@ -42051,7 +42052,57 @@ async fn run_revocation_propagation_worker(
     }
 
     append_revocation_propagation_audit(state, tenant, &response).await?;
+    log_revocation_propagation_worker_summary(tenant, &response);
     Ok(response)
+}
+
+#[derive(Debug)]
+struct TraceRevocationPropagationWorkerLogFields {
+    tenant_storage_ref: String,
+    purpose_hash: String,
+    dry_run: bool,
+    checked: usize,
+    completed: usize,
+    failed: usize,
+    skipped: usize,
+    pending: usize,
+    next_attempt_scheduled: usize,
+}
+
+fn revocation_propagation_worker_log_fields(
+    tenant: &TenantAuth,
+    response: &TraceRevocationPropagationWorkerResponse,
+) -> TraceRevocationPropagationWorkerLogFields {
+    TraceRevocationPropagationWorkerLogFields {
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        purpose_hash: sha256_prefixed(&response.purpose),
+        dry_run: response.dry_run,
+        checked: response.checked,
+        completed: response.completed,
+        failed: response.failed,
+        skipped: response.skipped,
+        pending: response.pending,
+        next_attempt_scheduled: response.next_attempt_scheduled,
+    }
+}
+
+fn log_revocation_propagation_worker_summary(
+    tenant: &TenantAuth,
+    response: &TraceRevocationPropagationWorkerResponse,
+) {
+    let fields = revocation_propagation_worker_log_fields(tenant, response);
+    tracing::info!(
+        tenant_storage_ref = %fields.tenant_storage_ref,
+        purpose_hash = %fields.purpose_hash,
+        dry_run = fields.dry_run,
+        checked_count = fields.checked,
+        completed_count = fields.completed,
+        failed_count = fields.failed,
+        skipped_count = fields.skipped,
+        pending_count = fields.pending,
+        next_attempt_scheduled_count = fields.next_attempt_scheduled,
+        "Trace Commons revocation propagation worker completed"
+    );
 }
 
 async fn apply_revocation_propagation_item(
@@ -109661,6 +109712,35 @@ mod tests {
         assert_eq!(fields.failed, 1);
         assert_eq!(fields.skipped, 2);
         assert_eq!(fields.pending, 1);
+    }
+
+    #[test]
+    fn revocation_propagation_worker_log_fields_hash_sensitive_values() {
+        let auth = test_reviewer_auth("tenant-a");
+        let response = TraceRevocationPropagationWorkerResponse {
+            purpose: "propagate revocation for frontier lab batch 42".to_string(),
+            dry_run: false,
+            checked: 8,
+            completed: 4,
+            failed: 1,
+            skipped: 2,
+            pending: 1,
+            next_attempt_scheduled: 1,
+        };
+
+        let fields = revocation_propagation_worker_log_fields(&auth, &response);
+
+        assert_eq!(fields.tenant_storage_ref, tenant_storage_ref("tenant-a"));
+        assert_eq!(fields.purpose_hash, sha256_prefixed(&response.purpose));
+        assert!(!fields.purpose_hash.contains("frontier"));
+        assert!(!fields.purpose_hash.contains("batch"));
+        assert!(!fields.dry_run);
+        assert_eq!(fields.checked, 8);
+        assert_eq!(fields.completed, 4);
+        assert_eq!(fields.failed, 1);
+        assert_eq!(fields.skipped, 2);
+        assert_eq!(fields.pending, 1);
+        assert_eq!(fields.next_attempt_scheduled, 1);
     }
 
     #[test]
