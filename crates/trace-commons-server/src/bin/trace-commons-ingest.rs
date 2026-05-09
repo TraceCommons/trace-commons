@@ -12960,6 +12960,9 @@ fn credit_cycle_scheduler_candidate_skip_reason(
                 .unwrap_or_else(|| "calibration_not_promotable".to_string()),
         );
     }
+    if ranking_model_training_calibration_datasets_overlap(candidate) {
+        return Some("training_calibration_dataset_overlap".to_string());
+    }
     if let Some(reason) = ranking_calibration_labeler_reliability_reason_codes(
         state,
         &tenant.tenant_id,
@@ -96933,6 +96936,78 @@ mod tests {
         assert_eq!(
             scheduler.decisions[0].skip_reason.as_deref(),
             Some("calibration_label_source_reliability_support_below_threshold")
+        );
+        assert!(scheduler.cycles.is_empty());
+        assert!(
+            read_all_ranking_worker_runs(temp.path(), "tenant-a")
+                .expect("worker runs read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit events read")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_preflight_blocks_legacy_training_calibration_overlap() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let (candidate, _) = seed_credit_cycle_ready_candidate(
+            state.clone(),
+            "trace-ranker-credit-cycle-legacy-overlap-v1",
+        )
+        .await;
+        let mut legacy_overlap = candidate.clone();
+        legacy_overlap.training_dataset_hash = legacy_overlap.calibration_dataset_hash.clone();
+        legacy_overlap.created_at = Utc::now() + Duration::seconds(1);
+        append_ranking_model_version(temp.path(), "tenant-a", &legacy_overlap)
+            .expect("legacy overlapping manifest can exist on disk");
+
+        let Json(scheduler) = credit_cycle_scheduler_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleSchedulerRunRequest {
+                dry_run: false,
+                preflight_only: true,
+                submit_near_outbox: false,
+                confirm_near_outbox: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: Some(legacy_overlap.model_version.clone()),
+                policy_version: Some(legacy_overlap.policy_version.clone()),
+                reason: "preflight should block legacy training calibration overlap".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: Some(1),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect("scheduler preflight evaluates legacy dataset isolation");
+
+        assert_eq!(scheduler.checked_count, 1);
+        assert_eq!(scheduler.eligible_count, 0);
+        assert_eq!(scheduler.started_count, 0);
+        assert_eq!(scheduler.skipped_count, 1);
+        assert_eq!(
+            scheduler
+                .skipped_reason_counts
+                .get("training_calibration_dataset_overlap"),
+            Some(&1)
+        );
+        assert_eq!(
+            scheduler.decisions[0].skip_reason.as_deref(),
+            Some("training_calibration_dataset_overlap")
         );
         assert!(scheduler.cycles.is_empty());
         assert!(
