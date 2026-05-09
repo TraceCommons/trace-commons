@@ -6402,6 +6402,8 @@ async fn validate_trace_near_credit_outbox_scheduler_config(
         .await
         .map_err(trace_near_credit_outbox_scheduler_config_error)?;
     require_utility_operator(&auth).map_err(trace_near_credit_outbox_scheduler_config_error)?;
+    require_near_credit_outbox_principal_if_configured(state, &auth, config.dry_run)
+        .map_err(trace_near_credit_outbox_scheduler_config_error)?;
     if !config.dry_run {
         anyhow::ensure!(
             state.near_credit_submitter.is_some(),
@@ -14594,6 +14596,46 @@ fn require_credit_settlement_approval_principal_if_configured(
     ))
 }
 
+fn require_near_credit_outbox_principal_if_configured(
+    state: &AppState,
+    tenant: &TenantAuth,
+    dry_run: bool,
+) -> ApiResult<()> {
+    if dry_run
+        || state
+            .credit_settlement_central_issuer_principal_refs
+            .is_empty()
+        || state
+            .credit_settlement_central_issuer_principal_refs
+            .contains(&tenant.principal_ref)
+    {
+        return Ok(());
+    }
+    Err(api_error(
+        StatusCode::FORBIDDEN,
+        "live NEAR credit outbox requires an authorized central issuer principal",
+    ))
+}
+
+fn require_near_credit_outbox_status_principal_if_configured(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> ApiResult<()> {
+    if state
+        .credit_settlement_central_issuer_principal_refs
+        .is_empty()
+        || state
+            .credit_settlement_central_issuer_principal_refs
+            .contains(&tenant.principal_ref)
+    {
+        return Ok(());
+    }
+    Err(api_error(
+        StatusCode::FORBIDDEN,
+        "NEAR credit outbox status updates require an authorized central issuer principal",
+    ))
+}
+
 async fn require_credit_settlement_rollout_smoke_ready_if_configured(
     state: &AppState,
     tenant: &TenantAuth,
@@ -15238,6 +15280,7 @@ async fn near_credit_outbox_submit_worker_handler(
         TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_MAX_LIMIT,
         "NEAR credit outbox submit worker",
     )?;
+    require_near_credit_outbox_principal_if_configured(state.as_ref(), &tenant, body.dry_run)?;
     if !body.dry_run && state.near_credit_submitter.is_none() {
         return Err(api_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -15271,6 +15314,7 @@ async fn near_credit_outbox_confirm_worker_handler(
         TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_MAX_LIMIT,
         "NEAR credit outbox confirm worker",
     )?;
+    require_near_credit_outbox_principal_if_configured(state.as_ref(), &tenant, body.dry_run)?;
     if !body.dry_run && state.near_credit_confirmer.is_none() {
         return Err(api_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -15345,6 +15389,7 @@ async fn mark_near_credit_outbox_status_handler(
     } else {
         None
     };
+    require_near_credit_outbox_status_principal_if_configured(state.as_ref(), &tenant)?;
     require_near_credit_manual_status_adapter_auth(state.as_ref(), status)?;
     let existing = read_near_credit_outbox_items_for_admin(state.as_ref(), &tenant)
         .await
@@ -69238,6 +69283,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn near_credit_outbox_scheduler_requires_authorized_central_issuer_for_live() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
+            Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+        Arc::make_mut(&mut state).near_credit_submitter =
+            Some(Arc::new(FakeNearCreditSubmitter::default()));
+        Arc::make_mut(&mut state).near_credit_confirmer =
+            Some(Arc::new(FakeNearCreditConfirmer::default()));
+
+        let live_error = validate_trace_near_credit_outbox_scheduler_config(
+            state.as_ref(),
+            Some(&TraceNearCreditOutboxSchedulerConfig {
+                worker_token: SecretString::from("utility-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                submit_limit: 5,
+                confirm_limit: 5,
+                dry_run: false,
+                purpose: "scheduled live NEAR credit outbox from unlisted principal".to_string(),
+            }),
+        )
+        .await
+        .expect_err("live NEAR outbox scheduler requires listed central issuer principal");
+        assert!(
+            live_error.to_string().contains(
+                "live NEAR credit outbox requires an authorized central issuer principal"
+            )
+        );
+
+        validate_trace_near_credit_outbox_scheduler_config(
+            state.as_ref(),
+            Some(&TraceNearCreditOutboxSchedulerConfig {
+                worker_token: SecretString::from("utility-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                submit_limit: 5,
+                confirm_limit: 5,
+                dry_run: true,
+                purpose: "scheduled dry-run NEAR credit outbox from unlisted principal".to_string(),
+            }),
+        )
+        .await
+        .expect("dry-run NEAR outbox scheduler can inspect from unlisted principal");
+    }
+
+    #[tokio::test]
     async fn credit_settlement_scheduler_config_requires_utility_worker_auth_and_live_contract() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
@@ -88880,6 +88970,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn near_credit_outbox_mark_status_requires_authorized_central_issuer() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
+            Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+
+        let pending_outbox_id = Uuid::new_v4();
+        let mut pending_item =
+            submitted_near_credit_outbox_item(pending_outbox_id, TEST_NEAR_TX_HASH_1, 1_000_000);
+        pending_item.status = StorageTraceCreditSettlementNearStatus::Pending;
+        pending_item.submitted_at = None;
+        pending_item.near_transaction_hash = None;
+        append_near_credit_outbox_item(temp.path(), "tenant-a", &pending_item)
+            .expect("pending NEAR outbox file writes");
+
+        let error = mark_near_credit_outbox_status_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxStatusRequest {
+                near_outbox_id: pending_outbox_id,
+                status: StorageTraceCreditSettlementNearStatus::Submitted,
+                near_transaction_hash: Some(TEST_NEAR_TX_HASH_1.to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect_err("manual NEAR outbox status requires listed central issuer principal");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.1.0.error,
+            "NEAR credit outbox status updates require an authorized central issuer principal"
+        );
+
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(
+            outbox[0].status,
+            StorageTraceCreditSettlementNearStatus::Pending
+        );
+        assert!(outbox[0].near_transaction_hash.is_none());
+    }
+
+    #[tokio::test]
     async fn near_credit_outbox_confirm_worker_requires_configured_confirmer_for_live_run() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -89005,6 +89139,120 @@ mod tests {
                 .expect("fake confirmer calls lock")
                 .is_empty()
         );
+
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert_eq!(outbox.len(), 2);
+        assert!(outbox.iter().any(|item| {
+            item.near_outbox_id == pending_item.near_outbox_id
+                && item.status == StorageTraceCreditSettlementNearStatus::Pending
+                && item.near_transaction_hash.is_none()
+        }));
+        assert!(outbox.iter().any(|item| {
+            item.near_outbox_id == submitted_item.near_outbox_id
+                && item.status == StorageTraceCreditSettlementNearStatus::Submitted
+                && item.near_transaction_hash.as_deref() == Some(TEST_NEAR_TX_HASH_2)
+        }));
+    }
+
+    #[tokio::test]
+    async fn near_credit_outbox_workers_require_authorized_central_issuer_for_live() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let fake_submitter = FakeNearCreditSubmitter::default();
+        let submitter_calls = fake_submitter.calls.clone();
+        let fake_confirmer = FakeNearCreditConfirmer::default();
+        let confirmer_calls = fake_confirmer.calls.clone();
+        Arc::make_mut(&mut state).near_credit_submitter = Some(Arc::new(fake_submitter));
+        Arc::make_mut(&mut state).near_credit_confirmer = Some(Arc::new(fake_confirmer));
+        Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
+            Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+
+        let mut pending_item =
+            submitted_near_credit_outbox_item(Uuid::new_v4(), TEST_NEAR_TX_HASH_1, 1_000_000);
+        pending_item.status = StorageTraceCreditSettlementNearStatus::Pending;
+        pending_item.submitted_at = None;
+        pending_item.near_transaction_hash = None;
+        let submitted_item =
+            submitted_near_credit_outbox_item(Uuid::new_v4(), TEST_NEAR_TX_HASH_2, 1_000_000);
+        append_near_credit_outbox_item(temp.path(), "tenant-a", &pending_item)
+            .expect("pending NEAR outbox file writes");
+        append_near_credit_outbox_item(temp.path(), "tenant-a", &submitted_item)
+            .expect("submitted NEAR outbox file writes");
+
+        let submit_error = near_credit_outbox_submit_worker_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxSubmitWorkerRequest {
+                purpose: Some("submit_near_unlisted_principal".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect_err("live submit worker requires listed central issuer principal");
+        assert_eq!(submit_error.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            submit_error.1.0.error,
+            "live NEAR credit outbox requires an authorized central issuer principal"
+        );
+        assert!(
+            submitter_calls
+                .lock()
+                .expect("fake submitter calls lock")
+                .is_empty()
+        );
+
+        let confirm_error = near_credit_outbox_confirm_worker_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxConfirmWorkerRequest {
+                purpose: Some("confirm_near_unlisted_principal".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect_err("live confirm worker requires listed central issuer principal");
+        assert_eq!(confirm_error.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            confirm_error.1.0.error,
+            "live NEAR credit outbox requires an authorized central issuer principal"
+        );
+        assert!(
+            confirmer_calls
+                .lock()
+                .expect("fake confirmer calls lock")
+                .is_empty()
+        );
+
+        let Json(submit_dry_run) = near_credit_outbox_submit_worker_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxSubmitWorkerRequest {
+                purpose: Some("submit_near_unlisted_principal_dry_run".to_string()),
+                dry_run: true,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("dry-run submit worker can inspect from unlisted principal");
+        assert_eq!(submit_dry_run.checked, 1);
+        assert_eq!(submit_dry_run.submitted, 0);
+
+        let Json(confirm_dry_run) = near_credit_outbox_confirm_worker_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxConfirmWorkerRequest {
+                purpose: Some("confirm_near_unlisted_principal_dry_run".to_string()),
+                dry_run: true,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("dry-run confirm worker can inspect from unlisted principal");
+        assert_eq!(confirm_dry_run.checked, 1);
+        assert_eq!(confirm_dry_run.confirmed, 0);
 
         let outbox =
             read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
