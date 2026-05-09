@@ -75793,6 +75793,162 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn object_primary_replay_export_tenant_allowlist_keeps_fallback_tenant_file_backed() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let artifact_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            test_artifact_store(artifact_temp.path()),
+        );
+        let mut state =
+            test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
+                temp.path().to_path_buf(),
+                Some(backend.clone()),
+                Some(artifact_store),
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                BTreeMap::new(),
+                false,
+                false,
+                true,
+                false,
+            );
+        {
+            let state_mut = Arc::make_mut(&mut state);
+            state_mut.tenant_rollout_gates = TraceTenantRolloutGates::default()
+                .with_feature(
+                    TraceTenantRolloutFeature::ObjectPrimarySubmitReview,
+                    &["tenant-a"],
+                )
+                .with_feature(
+                    TraceTenantRolloutFeature::DbReplayExportReads,
+                    &["tenant-a"],
+                )
+                .with_feature(
+                    TraceTenantRolloutFeature::DbReplayExportRequireObjectRefs,
+                    &["tenant-a"],
+                )
+                .with_feature(
+                    TraceTenantRolloutFeature::ObjectPrimaryReplayExport,
+                    &["tenant-a"],
+                );
+        }
+
+        let mut tenant_a_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_a_envelope);
+        tenant_a_envelope.consent.scopes = vec![ConsentScope::DebuggingEvaluation];
+        tenant_a_envelope.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        tenant_a_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::Evaluation];
+        set_metadata_only_user_message(
+            &mut tenant_a_envelope,
+            "tenant-a object-primary replay export canary",
+        );
+        let tenant_a_submission_id = tenant_a_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(tenant_a_envelope),
+        )
+        .await
+        .expect("tenant-a object-primary submission succeeds");
+
+        let tenant_a_record =
+            read_submission_record(temp.path(), "tenant-a", tenant_a_submission_id)
+                .expect("tenant-a record reads")
+                .expect("tenant-a record exists");
+        assert!(
+            !temp.path().join(&tenant_a_record.object_key).exists(),
+            "tenant-a object-primary submit must not write a plaintext envelope body"
+        );
+
+        let Json(tenant_a_export) = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("tenant_a_object_primary_replay_canary".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: Some("debugging_evaluation".to_string()),
+            }),
+        )
+        .await
+        .expect("tenant-a replay export reads body through object ref");
+        assert_eq!(tenant_a_export.item_count, 1);
+        assert_eq!(
+            tenant_a_export.items[0].submission_id,
+            tenant_a_submission_id
+        );
+        assert!(
+            tenant_a_export.items[0].object_ref_id.is_some(),
+            "tenant-a object-primary replay export must carry the DB object ref used for the body read"
+        );
+
+        let mut tenant_b_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_b_envelope);
+        tenant_b_envelope.consent.scopes = vec![ConsentScope::DebuggingEvaluation];
+        tenant_b_envelope.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        tenant_b_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::Evaluation];
+        set_metadata_only_user_message(
+            &mut tenant_b_envelope,
+            "tenant-b file-backed replay export fallback",
+        );
+        let tenant_b_submission_id = tenant_b_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_envelope),
+        )
+        .await
+        .expect("tenant-b fallback submission succeeds");
+
+        let tenant_b_record =
+            read_submission_record(temp.path(), "tenant-b", tenant_b_submission_id)
+                .expect("tenant-b record reads")
+                .expect("tenant-b record exists");
+        assert!(
+            temp.path().join(&tenant_b_record.object_key).exists(),
+            "tenant-b must keep the file-backed envelope body during tenant-a canary rollout"
+        );
+
+        let Json(tenant_b_export) = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-b"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("tenant_b_replay_fallback".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: Some("debugging_evaluation".to_string()),
+            }),
+        )
+        .await
+        .expect("tenant-b replay export keeps file-backed fallback");
+        assert_eq!(tenant_b_export.item_count, 1);
+        assert_eq!(
+            tenant_b_export.items[0].submission_id,
+            tenant_b_submission_id
+        );
+        assert!(
+            tenant_b_export.items[0].object_ref_id.is_none(),
+            "tenant-b fallback export should not be forced through DB object refs by tenant-a rollout"
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+    }
+
+    #[tokio::test]
     async fn object_store_migration_drill_records_hash_only_probe_evidence() {
         use axum::body::Body;
         use tower::ServiceExt;
