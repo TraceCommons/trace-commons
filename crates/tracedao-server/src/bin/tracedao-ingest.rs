@@ -17142,8 +17142,8 @@ async fn append_near_credit_outbox_submit_audit(
             actor_role: Some(tenant.role),
             actor_principal_ref: Some(tenant.principal_ref.clone()),
             reason: Some(format!(
-                "purpose={};dry_run={};checked={};submitted={};failed={};skipped={};pending={}",
-                response.purpose,
+                "purpose_hash={};dry_run={};checked={};submitted={};failed={};skipped={};pending={}",
+                sha256_prefixed(&response.purpose),
                 response.dry_run,
                 response.checked,
                 response.submitted,
@@ -17205,8 +17205,8 @@ async fn append_near_credit_outbox_confirm_audit(
             actor_role: Some(tenant.role),
             actor_principal_ref: Some(tenant.principal_ref.clone()),
             reason: Some(format!(
-                "purpose={};dry_run={};checked={};confirmed={};failed={};skipped={};pending={}",
-                response.purpose,
+                "purpose_hash={};dry_run={};checked={};confirmed={};failed={};skipped={};pending={}",
+                sha256_prefixed(&response.purpose),
                 response.dry_run,
                 response.checked,
                 response.confirmed,
@@ -90548,11 +90548,12 @@ mod tests {
         append_near_credit_outbox_item(temp.path(), "tenant-b", &tenant_b_item)
             .expect("tenant-b NEAR outbox file writes");
 
+        let confirm_purpose = "confirm settlement for frontier lab batch 42";
         let Json(response) = near_credit_outbox_confirm_worker_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
             Json(TraceNearCreditOutboxConfirmWorkerRequest {
-                purpose: Some("confirm_near_receipts".to_string()),
+                purpose: Some(confirm_purpose.to_string()),
                 dry_run: false,
                 limit: 10,
             }),
@@ -90612,6 +90613,22 @@ mod tests {
             tenant_b_outbox[0].near_transaction_hash.as_deref(),
             Some(TEST_NEAR_TX_HASH_3)
         );
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        let confirm_audit = audit_events
+            .iter()
+            .find(|event| event.kind == "near_credit_outbox_confirm")
+            .expect("confirm worker audit exists");
+        let confirm_reason = confirm_audit
+            .reason
+            .as_deref()
+            .expect("confirm worker audit reason exists");
+        assert!(confirm_reason.contains(&format!(
+            "purpose_hash={}",
+            sha256_prefixed(confirm_purpose)
+        )));
+        assert!(!confirm_reason.contains(confirm_purpose));
+        assert!(!confirm_reason.contains("frontier"));
+        assert!(!confirm_reason.contains("batch 42"));
     }
 
     #[tokio::test]
@@ -91601,11 +91618,12 @@ mod tests {
         );
         assert!(tenant_b_outbox_before[0].near_transaction_hash.is_none());
 
+        let submit_purpose = "submit settlement for frontier lab batch 42";
         let Json(response) = near_credit_outbox_submit_worker_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
             Json(TraceNearCreditOutboxSubmitWorkerRequest {
-                purpose: Some("submit_near_receipts".to_string()),
+                purpose: Some(submit_purpose.to_string()),
                 dry_run: false,
                 limit: 10,
             }),
@@ -91646,6 +91664,21 @@ mod tests {
             StorageTraceCreditSettlementNearStatus::Pending
         );
         assert!(tenant_b_outbox_after[0].near_transaction_hash.is_none());
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        let submit_audit = audit_events
+            .iter()
+            .find(|event| event.kind == "near_credit_outbox_submit")
+            .expect("submit worker audit exists");
+        let submit_reason = submit_audit
+            .reason
+            .as_deref()
+            .expect("submit worker audit reason exists");
+        assert!(
+            submit_reason.contains(&format!("purpose_hash={}", sha256_prefixed(submit_purpose)))
+        );
+        assert!(!submit_reason.contains(submit_purpose));
+        assert!(!submit_reason.contains("frontier"));
+        assert!(!submit_reason.contains("batch 42"));
     }
 
     #[tokio::test]
