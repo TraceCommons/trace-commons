@@ -12561,6 +12561,13 @@ async fn credit_cycle_scheduler_run_handler(
         } else {
             None
         };
+    let source_list_approval_skip_reason =
+        if !body.dry_run && !body.preflight_only && state.credit_settlement_require_issuer_approval
+        {
+            Some("credit_settlement_source_list_approval_required")
+        } else {
+            None
+        };
 
     let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
         .await
@@ -12666,6 +12673,17 @@ async fn credit_cycle_scheduler_run_handler(
             continue;
         }
         if let Some(skip_reason) = rollout_smoke_skip_reason {
+            credit_cycle_scheduler_record_skip(&mut response, skip_reason);
+            credit_cycle_scheduler_record_decision(
+                &mut response,
+                &candidate,
+                body.target_use,
+                TraceCreditCycleSchedulerDecisionAction::Skipped,
+                Some(skip_reason.to_string()),
+            );
+            continue;
+        }
+        if let Some(skip_reason) = source_list_approval_skip_reason {
             credit_cycle_scheduler_record_skip(&mut response, skip_reason);
             credit_cycle_scheduler_record_decision(
                 &mut response,
@@ -96290,6 +96308,85 @@ mod tests {
                 .skipped_reason_counts
                 .get("credit_settlement_central_issuer_profile_incomplete"),
             Some(&1)
+        );
+        assert!(scheduler.cycles.is_empty());
+        assert!(
+            read_all_ranking_worker_runs(temp.path(), "tenant-a")
+                .expect("worker runs read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit events read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement batches read")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_live_skips_source_list_approval_gate_before_claiming() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
+        let (candidate, _) = seed_credit_cycle_ready_candidate(
+            state.clone(),
+            "trace-ranker-credit-cycle-source-approval-scheduler-v1",
+        )
+        .await;
+
+        let Json(scheduler) = credit_cycle_scheduler_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleSchedulerRunRequest {
+                dry_run: false,
+                preflight_only: false,
+                submit_near_outbox: true,
+                confirm_near_outbox: true,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: None,
+                policy_version: Some(candidate.policy_version.clone()),
+                reason: "scheduled blocked source-list approval credit cycle".to_string(),
+                issuer_approval_evidence_hash: Some(sha256_prefixed(
+                    "scheduled source-list approval",
+                )),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: Some(1),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect("live scheduler skips source-list approval gate");
+
+        assert_eq!(scheduler.checked_count, 1);
+        assert_eq!(scheduler.started_count, 0);
+        assert_eq!(scheduler.skipped_count, 1);
+        assert_eq!(
+            scheduler
+                .skipped_reason_counts
+                .get("credit_settlement_source_list_approval_required"),
+            Some(&1)
+        );
+        assert_eq!(
+            scheduler.decisions[0].skip_reason.as_deref(),
+            Some("credit_settlement_source_list_approval_required")
         );
         assert!(scheduler.cycles.is_empty());
         assert!(
