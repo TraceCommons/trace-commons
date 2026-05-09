@@ -1837,7 +1837,9 @@ with no matching prediction evidence, no target labels, no labels that join to
 the model's matching predictions, non-promotable current calibration evidence,
 or uncleared pairwise evidence, diversity, or accuracy policy risk are reported as scheduler
 skips without creating credit-cycle worker rows, credit events, settlement
-batches, or NEAR outbox items. The response reports
+batches, or NEAR outbox items. That preflight applies the deployment-owned
+minimum label count, minimum confidence threshold, and maximum average absolute
+error ceiling even when a scheduler request supplies looser per-run values. The response reports
 checked, started, skipped, active-claim skipped, still-pending, and skip-reason
 counts plus a per-candidate decision list and the nested cycle responses.
 Requests with `preflight_only: true` stop after eligibility checks and return
