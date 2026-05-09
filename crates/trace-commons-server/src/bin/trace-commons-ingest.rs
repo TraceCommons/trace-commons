@@ -17268,8 +17268,8 @@ async fn append_benchmark_registry_outbox_submit_audit(
             actor_role: Some(tenant.role),
             actor_principal_ref: Some(tenant.principal_ref.clone()),
             reason: Some(format!(
-                "purpose={};dry_run={};checked={};submitted={};failed={};skipped={};pending={}",
-                response.purpose,
+                "purpose_hash={};dry_run={};checked={};submitted={};failed={};skipped={};pending={}",
+                sha256_prefixed(&response.purpose),
                 response.dry_run,
                 response.checked,
                 response.submitted,
@@ -17331,8 +17331,8 @@ async fn append_benchmark_registry_outbox_confirm_audit(
             actor_role: Some(tenant.role),
             actor_principal_ref: Some(tenant.principal_ref.clone()),
             reason: Some(format!(
-                "purpose={};dry_run={};checked={};confirmed={};failed={};skipped={};pending={}",
-                response.purpose,
+                "purpose_hash={};dry_run={};checked={};confirmed={};failed={};skipped={};pending={}",
+                sha256_prefixed(&response.purpose),
                 response.dry_run,
                 response.checked,
                 response.confirmed,
@@ -42797,8 +42797,8 @@ async fn append_revocation_propagation_audit(
             actor_role: Some(tenant.role),
             actor_principal_ref: Some(tenant.principal_ref.clone()),
             reason: Some(format!(
-                "purpose={};dry_run={};checked={};completed={};failed={};skipped={};pending={}",
-                response.purpose,
+                "purpose_hash={};dry_run={};checked={};completed={};failed={};skipped={};pending={}",
+                sha256_prefixed(&response.purpose),
                 response.dry_run,
                 response.checked,
                 response.completed,
@@ -77008,6 +77008,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revocation_propagation_audit_reason_hashes_worker_purpose() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let purpose = "propagate revocation for frontier lab batch 42";
+        let auth = TenantAuth {
+            tenant_id: "tenant-a".to_string(),
+            role: TokenRole::RevocationWorker,
+            principal_ref: principal_storage_ref("revocation-worker-token-a"),
+            expires_at: None,
+            auth_method: TraceAuthMethod::StaticToken,
+            signed_claim_issuer: None,
+            signed_claim_audiences: BTreeSet::new(),
+            signed_claim_subject: None,
+            allowed_consent_scopes: BTreeSet::new(),
+            allowed_uses: BTreeSet::new(),
+        };
+        append_revocation_propagation_audit(
+            state.as_ref(),
+            &auth,
+            &TraceRevocationPropagationWorkerResponse {
+                purpose: purpose.to_string(),
+                dry_run: false,
+                checked: 3,
+                completed: 1,
+                failed: 0,
+                skipped: 1,
+                pending: 1,
+                next_attempt_scheduled: 0,
+            },
+        )
+        .await
+        .expect("revocation propagation audit writes");
+
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        let propagation_audit = audit_events
+            .iter()
+            .find(|event| event.kind == "revocation_propagation")
+            .expect("revocation propagation worker audit exists");
+        let propagation_reason = propagation_audit
+            .reason
+            .as_deref()
+            .expect("revocation propagation worker audit reason exists");
+        assert!(propagation_reason.contains(&format!("purpose_hash={}", sha256_prefixed(purpose))));
+        assert!(!propagation_reason.contains(purpose));
+        assert!(!propagation_reason.contains("frontier"));
+        assert!(!propagation_reason.contains("batch 42"));
+    }
+
+    #[tokio::test]
     async fn revocation_propagation_scheduler_tick_dry_run_keeps_due_items_pending() {
         let Some(backend) = postgres_backend_for_ingest_test().await else {
             return;
@@ -77530,6 +77579,7 @@ mod tests {
             .await
             .expect("disabled remote propagation item writes");
 
+        let revocation_purpose = "propagate revocation for frontier lab batch 42";
         let response = app(state.clone())
             .oneshot(
                 axum::http::Request::builder()
@@ -77539,7 +77589,7 @@ mod tests {
                     .header(CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         serde_json::json!({
-                            "purpose": "disabled remote revocation payload delete",
+                            "purpose": revocation_purpose,
                             "dry_run": false,
                             "limit": 1
                         })
@@ -77636,6 +77686,22 @@ mod tests {
         assert!(!propagation_items.iter().any(|item| {
             item.action == StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt
         }));
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        let propagation_audit = audit_events
+            .iter()
+            .find(|event| event.kind == "revocation_propagation")
+            .expect("revocation propagation worker audit exists");
+        let propagation_reason = propagation_audit
+            .reason
+            .as_deref()
+            .expect("revocation propagation worker audit reason exists");
+        assert!(propagation_reason.contains(&format!(
+            "purpose_hash={}",
+            sha256_prefixed(revocation_purpose)
+        )));
+        assert!(!propagation_reason.contains(revocation_purpose));
+        assert!(!propagation_reason.contains("frontier"));
+        assert!(!propagation_reason.contains("batch 42"));
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
@@ -89711,11 +89777,12 @@ mod tests {
         upsert_benchmark_registry_outbox_item(temp.path(), "tenant-b", &tenant_b_item)
             .expect("tenant-b benchmark registry outbox file writes");
 
+        let submit_purpose = "publish benchmark artifact for frontier lab batch 42";
         let Json(response) = benchmark_registry_outbox_submit_worker_handler(
             State(state.clone()),
             auth_headers("benchmark-worker-token-a"),
             Json(TraceBenchmarkRegistryOutboxSubmitWorkerRequest {
-                purpose: Some("submit_benchmark_registry_items".to_string()),
+                purpose: Some(submit_purpose.to_string()),
                 dry_run: false,
                 limit: 10,
             }),
@@ -89769,6 +89836,21 @@ mod tests {
             StorageTraceBenchmarkRegistryOutboxStatus::Pending
         );
         assert!(tenant_b_outbox[0].external_receipt_ref.is_none());
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        let submit_audit = audit_events
+            .iter()
+            .find(|event| event.kind == "benchmark_registry_outbox_submit")
+            .expect("benchmark registry submit worker audit exists");
+        let submit_reason = submit_audit
+            .reason
+            .as_deref()
+            .expect("benchmark registry submit worker audit reason exists");
+        assert!(
+            submit_reason.contains(&format!("purpose_hash={}", sha256_prefixed(submit_purpose)))
+        );
+        assert!(!submit_reason.contains(submit_purpose));
+        assert!(!submit_reason.contains("frontier"));
+        assert!(!submit_reason.contains("batch 42"));
     }
 
     #[tokio::test]
@@ -89911,11 +89993,12 @@ mod tests {
         upsert_benchmark_registry_outbox_item(temp.path(), "tenant-b", &tenant_b_item)
             .expect("tenant-b benchmark registry outbox file writes");
 
+        let confirm_purpose = "confirm benchmark artifact for frontier lab batch 42";
         let Json(response) = benchmark_registry_outbox_confirm_worker_handler(
             State(state.clone()),
             auth_headers("benchmark-worker-token-a"),
             Json(TraceBenchmarkRegistryOutboxConfirmWorkerRequest {
-                purpose: Some("confirm_benchmark_registry_items".to_string()),
+                purpose: Some(confirm_purpose.to_string()),
                 dry_run: false,
                 limit: 10,
             }),
@@ -89974,6 +90057,22 @@ mod tests {
             StorageTraceBenchmarkRegistryOutboxStatus::Submitted
         );
         assert!(tenant_b_outbox[0].confirmed_at.is_none());
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        let confirm_audit = audit_events
+            .iter()
+            .find(|event| event.kind == "benchmark_registry_outbox_confirm")
+            .expect("benchmark registry confirm worker audit exists");
+        let confirm_reason = confirm_audit
+            .reason
+            .as_deref()
+            .expect("benchmark registry confirm worker audit reason exists");
+        assert!(confirm_reason.contains(&format!(
+            "purpose_hash={}",
+            sha256_prefixed(confirm_purpose)
+        )));
+        assert!(!confirm_reason.contains(confirm_purpose));
+        assert!(!confirm_reason.contains("frontier"));
+        assert!(!confirm_reason.contains("batch 42"));
     }
 
     #[tokio::test]
