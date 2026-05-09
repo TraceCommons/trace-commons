@@ -40346,12 +40346,12 @@ fn require_vector_operator(auth: &TenantAuth) -> ApiResult<()> {
 }
 
 fn require_retention_operator(auth: &TenantAuth) -> ApiResult<()> {
-    if auth.role.can_review() || auth.role == TokenRole::RetentionWorker {
+    if auth.role.can_admin() || auth.role == TokenRole::RetentionWorker {
         Ok(())
     } else {
         Err(api_error(
             StatusCode::FORBIDDEN,
-            "reviewer, admin, or retention worker token required",
+            "admin or retention worker token required",
         ))
     }
 }
@@ -72937,7 +72937,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("reviewer, admin, or retention worker token required")
+                .contains("admin or retention worker token required")
         );
 
         validate_trace_retention_maintenance_scheduler_config(
@@ -77627,6 +77627,28 @@ mod tests {
         artifact_store
             .read_artifact(&tenant_storage_ref("tenant-b"), &tenant_b_receipt)
             .expect("tenant-a purge keeps tenant-b encrypted artifact");
+    }
+
+    #[tokio::test]
+    async fn retention_worker_route_rejects_reviewer_tokens() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = retention_maintenance_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceRetentionMaintenanceRequest {
+                purpose: Some("reviewer must use admin maintenance surfaces".to_string()),
+                dry_run: true,
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect_err("reviewer token must not run the dedicated retention worker route");
+
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
