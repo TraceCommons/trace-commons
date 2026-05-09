@@ -42658,6 +42658,20 @@ async fn append_audit_event_with_db_mirror(
     action: StorageTraceAuditAction,
     metadata: StorageTraceAuditSafeMetadata,
 ) -> anyhow::Result<()> {
+    if state.require_db_mirror_writes {
+        let mirror_result = mirror_audit_event_to_db(state, tenant, &event, action, metadata).await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                error_hash = %safe_display_error_hash(error),
+                event_id = %event.event_id,
+                "Trace Commons DB dual-write audit mirror failed"
+            );
+        }
+        enforce_db_mirror_write_result(state, "audit event", mirror_result)?;
+        append_audit_event(&state.root, &tenant.tenant_id, event)?;
+        return Ok(());
+    }
+
     let event = append_audit_event(&state.root, &tenant.tenant_id, event)?;
     let mirror_result = mirror_audit_event_to_db(state, tenant, &event, action, metadata).await;
     if let Err(error) = &mirror_result {
@@ -42680,8 +42694,30 @@ async fn append_trace_content_read_audit(
     purpose: Option<&str>,
 ) -> anyhow::Result<()> {
     let event = TraceCommonsAuditEvent::trace_content_read(tenant, submission_id, surface, purpose);
-    let event = append_audit_event(&state.root, &tenant.tenant_id, event)?;
     let metadata = trace_content_read_audit_metadata(surface, purpose);
+    if state.require_db_mirror_writes {
+        let mirror_result = mirror_audit_event_to_db_with_object_ref(
+            state,
+            tenant,
+            &event,
+            StorageTraceAuditAction::Read,
+            metadata,
+            object_ref_id,
+        )
+        .await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                error_hash = %safe_display_error_hash(error),
+                event_id = %event.event_id,
+                "Trace Commons DB dual-write audit mirror failed"
+            );
+        }
+        enforce_db_mirror_write_result(state, "trace content read audit event", mirror_result)?;
+        append_audit_event(&state.root, &tenant.tenant_id, event)?;
+        return Ok(());
+    }
+
+    let event = append_audit_event(&state.root, &tenant.tenant_id, event)?;
     let mirror_result = mirror_audit_event_to_db_with_object_ref(
         state,
         tenant,
@@ -59277,6 +59313,40 @@ mod tests {
         let reason = broad_release_audits[0].reason.as_deref().expect("reason");
         assert!(reason.contains("privacy_epsilon_micros=100"));
         assert!(reason.contains("privacy_epsilon_remaining_micros=0"));
+    }
+
+    #[tokio::test]
+    async fn analytics_read_requires_db_mirror_before_file_audit_when_required() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let envelope = sample_envelope().await;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds before required DB mirror mode");
+
+        Arc::make_mut(&mut state).require_db_mirror_writes = true;
+        let error = analytics_handler(
+            State(state),
+            Query(TraceAnalyticsQuery::default()),
+            auth_headers("review-token-a"),
+        )
+        .await
+        .expect_err("missing required DB mirror fails analytics read");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        assert!(
+            audit_events.iter().all(|event| {
+                event.kind != "read"
+                    || trace_audit_reason_value(event.reason.as_deref(), "surface")
+                        != Some("analytics_summary")
+            }),
+            "required DB mirror failure must not leave file-only analytics read audit rows"
+        );
     }
 
     #[tokio::test]
