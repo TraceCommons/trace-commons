@@ -333,6 +333,28 @@ const TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_DRY_RUN: &str =
     "TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_DRY_RUN";
 const TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_PURPOSE: &str =
     "TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_PURPOSE";
+const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_ENABLED: &str =
+    "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_ENABLED";
+const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_TOKEN: &str =
+    "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_TOKEN";
+const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_INTERVAL_SECONDS";
+const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_EVALUATION_LIMIT: &str =
+    "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_EVALUATION_LIMIT";
+const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_PUBLICATION_LIMIT: &str =
+    "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_PUBLICATION_LIMIT";
+const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_DRY_RUN: &str =
+    "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_DRY_RUN";
+const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REQUIRE_EXTERNAL_EVALUATOR: &str =
+    "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REQUIRE_EXTERNAL_EVALUATOR";
+const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_EVALUATOR_REF: &str =
+    "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_EVALUATOR_REF";
+const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REGISTRY_REF_PREFIX: &str =
+    "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REGISTRY_REF_PREFIX";
+const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_MIN_SCORE: &str =
+    "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_MIN_SCORE";
+const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON: &str =
+    "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON";
 const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED: &str =
     "TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED";
 const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TOKEN: &str =
@@ -458,6 +480,10 @@ const TRACE_VECTOR_INDEX_SCHEDULER_DEFAULT_PURPOSE: &str = "scheduled trace vect
 const TRACE_BENCHMARK_REGISTRY_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 60;
 const TRACE_BENCHMARK_REGISTRY_SCHEDULER_DEFAULT_PURPOSE: &str =
     "scheduled trace benchmark registry outbox";
+const TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 60;
+const TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_REASON: &str =
+    "scheduled trace benchmark pipeline";
+const TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_MIN_SCORE: f32 = 1.0;
 const TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 300;
 const TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_REASON: &str = "scheduled trace credit cycle";
 const TRACE_RANKING_DEFAULT_MIN_LABEL_COUNT: usize = 25;
@@ -503,6 +529,11 @@ async fn main() -> anyhow::Result<()> {
         state.benchmark_registry_scheduler.as_ref(),
     )
     .await?;
+    validate_trace_benchmark_pipeline_scheduler_config(
+        state.as_ref(),
+        state.benchmark_pipeline_scheduler.as_ref(),
+    )
+    .await?;
     validate_trace_credit_cycle_scheduler_config(
         state.as_ref(),
         state.credit_cycle_scheduler.as_ref(),
@@ -514,6 +545,10 @@ async fn main() -> anyhow::Result<()> {
     spawn_trace_benchmark_registry_scheduler_task(
         &state,
         state.benchmark_registry_scheduler.clone(),
+    );
+    spawn_trace_benchmark_pipeline_scheduler_task(
+        &state,
+        state.benchmark_pipeline_scheduler.clone(),
     );
     spawn_trace_credit_cycle_scheduler_task(&state, state.credit_cycle_scheduler.clone());
     let bind = std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
@@ -596,6 +631,7 @@ struct AppState {
     export_job_scheduler: Option<TraceExportJobSchedulerConfig>,
     vector_index_scheduler: Option<TraceVectorIndexSchedulerConfig>,
     benchmark_registry_scheduler: Option<TraceBenchmarkRegistrySchedulerConfig>,
+    benchmark_pipeline_scheduler: Option<TraceBenchmarkPipelineSchedulerConfig>,
     credit_cycle_scheduler: Option<TraceCreditCycleSchedulerConfig>,
     ranking_calibration_max_age: Option<Duration>,
     ranking_require_calibration_dataset_registry: bool,
@@ -634,6 +670,12 @@ struct TraceBenchmarkRegistrySchedulerTickSummary {
     confirm: TraceBenchmarkRegistryOutboxConfirmWorkerResponse,
 }
 
+#[derive(Debug)]
+struct TraceBenchmarkPipelineSchedulerTickSummary {
+    evaluation: BenchmarkEvaluationWorkerRunResponse,
+    publication: BenchmarkRegistryPublicationWorkerRunResponse,
+}
+
 #[derive(Clone)]
 struct TraceAnalyticsNoiseConfig {
     key: SecretString,
@@ -663,6 +705,20 @@ struct TraceBenchmarkRegistrySchedulerConfig {
     confirm_limit: u32,
     dry_run: bool,
     purpose: String,
+}
+
+#[derive(Clone)]
+struct TraceBenchmarkPipelineSchedulerConfig {
+    worker_token: SecretString,
+    interval: StdDuration,
+    evaluation_limit: usize,
+    publication_limit: usize,
+    dry_run: bool,
+    require_external_evaluator: bool,
+    evaluator_ref: String,
+    registry_ref_prefix: String,
+    min_score: f32,
+    reason: String,
 }
 
 #[derive(Clone)]
@@ -2062,6 +2118,8 @@ impl AppState {
         let vector_index_scheduler = parse_trace_vector_index_scheduler_config_from_env()?;
         let benchmark_registry_scheduler =
             parse_trace_benchmark_registry_scheduler_config_from_env()?;
+        let benchmark_pipeline_scheduler =
+            parse_trace_benchmark_pipeline_scheduler_config_from_env()?;
         let credit_cycle_scheduler = parse_trace_credit_cycle_scheduler_config_from_env()?;
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
         let ranking_require_calibration_dataset_registry =
@@ -2265,6 +2323,7 @@ impl AppState {
             export_job_scheduler,
             vector_index_scheduler,
             benchmark_registry_scheduler,
+            benchmark_pipeline_scheduler,
             credit_cycle_scheduler,
             ranking_calibration_max_age,
             ranking_require_calibration_dataset_registry,
@@ -3320,6 +3379,83 @@ fn parse_trace_benchmark_registry_scheduler_config_from_env()
     }))
 }
 
+fn parse_trace_benchmark_pipeline_scheduler_config_from_env()
+-> anyhow::Result<Option<TraceBenchmarkPipelineSchedulerConfig>> {
+    let enabled = env_truthy(TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_ENABLED);
+    let worker_token = optional_trimmed_env(TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_TOKEN)?;
+    if !enabled && worker_token.is_none() {
+        return Ok(None);
+    }
+    let Some(worker_token) = worker_token else {
+        anyhow::bail!(
+            "{TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_TOKEN}"
+        );
+    };
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_INTERVAL_SECONDS,
+        TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
+        5,
+        86_400,
+    )?;
+    let evaluation_limit = parse_optional_scheduler_usize_env(
+        TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_EVALUATION_LIMIT,
+        TRACE_BENCHMARK_EVALUATION_WORKER_RUN_DEFAULT_LIMIT,
+        1,
+        TRACE_BENCHMARK_EVALUATION_WORKER_RUN_MAX_LIMIT,
+    )?;
+    let publication_limit = parse_optional_scheduler_usize_env(
+        TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_PUBLICATION_LIMIT,
+        TRACE_BENCHMARK_REGISTRY_PUBLICATION_WORKER_RUN_DEFAULT_LIMIT,
+        1,
+        TRACE_BENCHMARK_REGISTRY_PUBLICATION_WORKER_RUN_MAX_LIMIT,
+    )?;
+    let evaluator_ref =
+        optional_trimmed_env(TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_EVALUATOR_REF)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_TOKEN} requires {TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_EVALUATOR_REF}"
+                )
+            })
+            .and_then(|configured| {
+                normalize_required_benchmark_evaluator_ref(Some(configured))
+                    .map_err(|error| anyhow::anyhow!(error.1.0.error))
+            })?;
+    let registry_ref_prefix =
+        optional_trimmed_env(TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REGISTRY_REF_PREFIX)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_TOKEN} requires {TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REGISTRY_REF_PREFIX}"
+                )
+            })
+            .and_then(|configured| {
+                normalize_benchmark_registry_ref_prefix(Some(configured))
+                    .map_err(|error| anyhow::anyhow!(error.1.0.error))
+            })?;
+    let min_score = optional_trimmed_env(TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_MIN_SCORE)?
+        .map(|configured| parse_benchmark_pipeline_scheduler_min_score(&configured))
+        .transpose()?
+        .unwrap_or(TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_MIN_SCORE);
+    let reason = optional_trimmed_env(TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON)?
+        .unwrap_or_else(|| TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_REASON.to_string());
+    let reason = validate_benchmark_pipeline_scheduler_reason(&reason)
+        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    Ok(Some(TraceBenchmarkPipelineSchedulerConfig {
+        worker_token: SecretString::from(worker_token),
+        interval: StdDuration::from_secs(interval_seconds),
+        evaluation_limit,
+        publication_limit,
+        dry_run: env_truthy(TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_DRY_RUN),
+        require_external_evaluator: parse_optional_scheduler_bool_env(
+            TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REQUIRE_EXTERNAL_EVALUATOR,
+            true,
+        )?,
+        evaluator_ref,
+        registry_ref_prefix,
+        min_score,
+        reason,
+    }))
+}
+
 fn parse_trace_credit_cycle_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceCreditCycleSchedulerConfig>> {
     let enabled = env_truthy(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED);
@@ -3447,6 +3583,17 @@ fn parse_optional_scheduler_u32_env(
         "{name} must be between {min} and {max}"
     );
     Ok(value)
+}
+
+fn parse_optional_scheduler_bool_env(name: &'static str, default: bool) -> anyhow::Result<bool> {
+    let Some(configured) = optional_trimmed_env(name)? else {
+        return Ok(default);
+    };
+    match configured.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => anyhow::bail!("{name} must be true or false"),
+    }
 }
 
 fn parse_optional_scheduler_i64_env(
@@ -5242,6 +5389,55 @@ fn spawn_trace_benchmark_registry_scheduler_task(
     });
 }
 
+fn spawn_trace_benchmark_pipeline_scheduler_task(
+    state: &Arc<AppState>,
+    config: Option<TraceBenchmarkPipelineSchedulerConfig>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    let state = state.clone();
+    tracing::info!(
+        interval_seconds = config.interval.as_secs(),
+        evaluation_limit = config.evaluation_limit,
+        publication_limit = config.publication_limit,
+        min_score = config.min_score,
+        dry_run = config.dry_run,
+        require_external_evaluator = config.require_external_evaluator,
+        evaluator_ref_configured = !config.evaluator_ref.is_empty(),
+        registry_ref_prefix_configured = !config.registry_ref_prefix.is_empty(),
+        "Trace Commons benchmark pipeline scheduler enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(config.interval).await;
+            match run_trace_benchmark_pipeline_scheduler_tick(state.clone(), &config).await {
+                Ok(summary) => {
+                    tracing::info!(
+                        evaluation_checked = summary.evaluation.checked_count,
+                        evaluated = summary.evaluation.evaluated_count,
+                        passed = summary.evaluation.passed_count,
+                        failed = summary.evaluation.failed_count,
+                        evaluation_pending = summary.evaluation.pending_after_count,
+                        publication_checked = summary.publication.checked_count,
+                        published = summary.publication.published_count,
+                        publication_pending = summary.publication.pending_after_count,
+                        dry_run = summary.evaluation.dry_run || summary.publication.dry_run,
+                        "Trace Commons benchmark pipeline scheduler tick completed"
+                    );
+                }
+                Err((status, Json(error))) => {
+                    tracing::warn!(
+                        status = %status,
+                        error_hash = %safe_display_error_hash(&error.error),
+                        "Trace Commons benchmark pipeline scheduler tick failed"
+                    );
+                }
+            }
+        }
+    });
+}
+
 fn spawn_trace_credit_cycle_scheduler_task(
     state: &Arc<AppState>,
     config: Option<TraceCreditCycleSchedulerConfig>,
@@ -5376,6 +5572,38 @@ fn trace_benchmark_registry_scheduler_config_error(
 ) -> anyhow::Error {
     anyhow::anyhow!(
         "invalid Trace Commons benchmark registry scheduler configuration: status={}, error={}",
+        error.0,
+        error.1.0.error
+    )
+}
+
+async fn validate_trace_benchmark_pipeline_scheduler_config(
+    state: &AppState,
+    config: Option<&TraceBenchmarkPipelineSchedulerConfig>,
+) -> anyhow::Result<()> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
+        .map_err(trace_benchmark_pipeline_scheduler_config_error)?;
+    let auth = authenticate_with_tenant_access_grant(state, &headers)
+        .await
+        .map_err(trace_benchmark_pipeline_scheduler_config_error)?;
+    require_benchmarker(&auth).map_err(trace_benchmark_pipeline_scheduler_config_error)?;
+    if config.require_external_evaluator {
+        anyhow::ensure!(
+            state.benchmark_evaluator.is_some(),
+            "invalid Trace Commons benchmark pipeline scheduler configuration: TRACE_COMMONS_BENCHMARK_EVALUATOR_URL is required when TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REQUIRE_EXTERNAL_EVALUATOR is true"
+        );
+    }
+    Ok(())
+}
+
+fn trace_benchmark_pipeline_scheduler_config_error(
+    error: (StatusCode, Json<ApiError>),
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "invalid Trace Commons benchmark pipeline scheduler configuration: status={}, error={}",
         error.0,
         error.1.0.error
     )
@@ -6365,6 +6593,15 @@ struct TraceCommonsConfigStatusResponse {
     benchmark_registry_scheduler_submit_limit: Option<u32>,
     benchmark_registry_scheduler_confirm_limit: Option<u32>,
     benchmark_registry_scheduler_dry_run: Option<bool>,
+    benchmark_pipeline_scheduler_configured: bool,
+    benchmark_pipeline_scheduler_interval_seconds: Option<u64>,
+    benchmark_pipeline_scheduler_evaluation_limit: Option<usize>,
+    benchmark_pipeline_scheduler_publication_limit: Option<usize>,
+    benchmark_pipeline_scheduler_dry_run: Option<bool>,
+    benchmark_pipeline_scheduler_require_external_evaluator: Option<bool>,
+    benchmark_pipeline_scheduler_evaluator_ref_configured: Option<bool>,
+    benchmark_pipeline_scheduler_registry_ref_prefix_configured: Option<bool>,
+    benchmark_pipeline_scheduler_min_score: Option<f32>,
     credit_cycle_worker_step_count: usize,
     credit_cycle_scheduler_default_limit: usize,
     credit_cycle_scheduler_max_limit: usize,
@@ -6645,6 +6882,39 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .benchmark_registry_scheduler
             .as_ref()
             .map(|config| config.dry_run),
+        benchmark_pipeline_scheduler_configured: state.benchmark_pipeline_scheduler.is_some(),
+        benchmark_pipeline_scheduler_interval_seconds: state
+            .benchmark_pipeline_scheduler
+            .as_ref()
+            .map(|config| config.interval.as_secs()),
+        benchmark_pipeline_scheduler_evaluation_limit: state
+            .benchmark_pipeline_scheduler
+            .as_ref()
+            .map(|config| config.evaluation_limit),
+        benchmark_pipeline_scheduler_publication_limit: state
+            .benchmark_pipeline_scheduler
+            .as_ref()
+            .map(|config| config.publication_limit),
+        benchmark_pipeline_scheduler_dry_run: state
+            .benchmark_pipeline_scheduler
+            .as_ref()
+            .map(|config| config.dry_run),
+        benchmark_pipeline_scheduler_require_external_evaluator: state
+            .benchmark_pipeline_scheduler
+            .as_ref()
+            .map(|config| config.require_external_evaluator),
+        benchmark_pipeline_scheduler_evaluator_ref_configured: state
+            .benchmark_pipeline_scheduler
+            .as_ref()
+            .map(|config| !config.evaluator_ref.is_empty()),
+        benchmark_pipeline_scheduler_registry_ref_prefix_configured: state
+            .benchmark_pipeline_scheduler
+            .as_ref()
+            .map(|config| !config.registry_ref_prefix.is_empty()),
+        benchmark_pipeline_scheduler_min_score: state
+            .benchmark_pipeline_scheduler
+            .as_ref()
+            .map(|config| config.min_score),
         credit_cycle_worker_step_count: TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT,
         credit_cycle_scheduler_default_limit: TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_LIMIT,
         credit_cycle_scheduler_max_limit: TRACE_CREDIT_CYCLE_SCHEDULER_MAX_LIMIT,
@@ -19444,6 +19714,32 @@ fn validate_benchmark_registry_scheduler_purpose(purpose: &str) -> ApiResult<Str
     Ok(purpose)
 }
 
+fn validate_benchmark_pipeline_scheduler_reason(reason: &str) -> ApiResult<String> {
+    let reason = reason.trim().to_string();
+    if reason.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "benchmark pipeline scheduler requires a non-empty reason",
+        ));
+    }
+    if reason.len() > 1024 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "benchmark pipeline scheduler reason is too long",
+        ));
+    }
+    Ok(reason)
+}
+
+fn parse_benchmark_pipeline_scheduler_min_score(configured: &str) -> anyhow::Result<f32> {
+    let parsed = configured.trim().parse::<f32>().with_context(|| {
+        format!("{TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_MIN_SCORE} must be a number")
+    })?;
+    validate_unit_score(parsed, "benchmark pipeline scheduler min_score")
+        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    Ok(parsed)
+}
+
 async fn append_ranking_model_version_with_db_mirror(
     state: &AppState,
     tenant: &TenantAuth,
@@ -25855,6 +26151,41 @@ async fn run_trace_benchmark_registry_scheduler_tick(
     )
     .await?;
     Ok(TraceBenchmarkRegistrySchedulerTickSummary { submit, confirm })
+}
+
+async fn run_trace_benchmark_pipeline_scheduler_tick(
+    state: Arc<AppState>,
+    config: &TraceBenchmarkPipelineSchedulerConfig,
+) -> ApiResult<TraceBenchmarkPipelineSchedulerTickSummary> {
+    let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())?;
+    let Json(evaluation) = benchmark_evaluation_worker_run_handler(
+        State(state.clone()),
+        headers.clone(),
+        Json(BenchmarkEvaluationWorkerRunRequest {
+            limit: Some(config.evaluation_limit),
+            dry_run: Some(config.dry_run),
+            evaluator_ref: Some(config.evaluator_ref.clone()),
+            require_external_evaluator: Some(config.require_external_evaluator),
+            min_score: Some(config.min_score),
+            reason: Some(config.reason.clone()),
+        }),
+    )
+    .await?;
+    let Json(publication) = benchmark_registry_publication_worker_run_handler(
+        State(state),
+        headers,
+        Json(BenchmarkRegistryPublicationWorkerRunRequest {
+            limit: Some(config.publication_limit),
+            dry_run: Some(config.dry_run),
+            registry_ref_prefix: Some(config.registry_ref_prefix.clone()),
+            reason: Some(config.reason.clone()),
+        }),
+    )
+    .await?;
+    Ok(TraceBenchmarkPipelineSchedulerTickSummary {
+        evaluation,
+        publication,
+    })
 }
 
 async fn run_trace_credit_cycle_scheduler_tick(
@@ -55183,6 +55514,7 @@ mod tests {
             export_job_scheduler: None,
             vector_index_scheduler: None,
             benchmark_registry_scheduler: None,
+            benchmark_pipeline_scheduler: None,
             credit_cycle_scheduler: None,
             ranking_calibration_max_age: None,
             ranking_require_calibration_dataset_registry: false,
@@ -59725,6 +60057,93 @@ mod tests {
         let object = value.as_object().expect("config status is object");
         assert!(!object.contains_key("benchmark_registry_scheduler_token"));
         assert!(!object.contains_key("benchmark_registry_scheduler_purpose"));
+    }
+
+    #[tokio::test]
+    async fn admin_config_status_reports_benchmark_pipeline_scheduler_without_secrets_or_refs() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).benchmark_pipeline_scheduler =
+            Some(TraceBenchmarkPipelineSchedulerConfig {
+                worker_token: SecretString::from(
+                    "config-status-benchmark-pipeline-token".to_string(),
+                ),
+                interval: StdDuration::from_secs(95),
+                evaluation_limit: 11,
+                publication_limit: 13,
+                dry_run: true,
+                require_external_evaluator: true,
+                evaluator_ref: "external-benchmark-evaluator:config-status".to_string(),
+                registry_ref_prefix: "benchmark-registry:config-status".to_string(),
+                min_score: 0.87,
+                reason: "do not expose raw benchmark pipeline scheduler note".to_string(),
+            });
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/config-status")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("config status response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body bytes");
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(
+            value["benchmark_pipeline_scheduler_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["benchmark_pipeline_scheduler_interval_seconds"],
+            serde_json::json!(95)
+        );
+        assert_eq!(
+            value["benchmark_pipeline_scheduler_evaluation_limit"],
+            serde_json::json!(11)
+        );
+        assert_eq!(
+            value["benchmark_pipeline_scheduler_publication_limit"],
+            serde_json::json!(13)
+        );
+        assert_eq!(
+            value["benchmark_pipeline_scheduler_dry_run"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["benchmark_pipeline_scheduler_require_external_evaluator"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["benchmark_pipeline_scheduler_evaluator_ref_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["benchmark_pipeline_scheduler_registry_ref_prefix_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["benchmark_pipeline_scheduler_min_score"],
+            serde_json::json!(0.87)
+        );
+        assert!(!body_text.contains("config-status-benchmark-pipeline-token"));
+        assert!(!body_text.contains("do not expose raw benchmark pipeline scheduler note"));
+        assert!(!body_text.contains("external-benchmark-evaluator:config-status"));
+        assert!(!body_text.contains("benchmark-registry:config-status"));
+        let object = value.as_object().expect("config status is object");
+        assert!(!object.contains_key("benchmark_pipeline_scheduler_token"));
+        assert!(!object.contains_key("benchmark_pipeline_scheduler_reason"));
+        assert!(!object.contains_key("benchmark_pipeline_scheduler_evaluator_ref"));
+        assert!(!object.contains_key("benchmark_pipeline_scheduler_registry_ref_prefix"));
     }
 
     #[tokio::test]
@@ -65924,6 +66343,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn benchmark_pipeline_scheduler_config_requires_benchmark_worker_auth_and_external_evaluator_when_required()
+     {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+
+        let error = validate_trace_benchmark_pipeline_scheduler_config(
+            state.as_ref(),
+            Some(&TraceBenchmarkPipelineSchedulerConfig {
+                worker_token: SecretString::from("token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                evaluation_limit: 5,
+                publication_limit: 5,
+                dry_run: false,
+                require_external_evaluator: false,
+                evaluator_ref: "deterministic-benchmark-evaluator:v1".to_string(),
+                registry_ref_prefix: "benchmark-registry:tenant-a".to_string(),
+                min_score: 1.0,
+                reason: "scheduled benchmark pipeline".to_string(),
+            }),
+        )
+        .await
+        .expect_err("contributor token must not start benchmark pipeline scheduler");
+
+        assert!(
+            error
+                .to_string()
+                .contains("reviewer, admin, or benchmark worker token required")
+        );
+
+        let missing_evaluator = validate_trace_benchmark_pipeline_scheduler_config(
+            state.as_ref(),
+            Some(&TraceBenchmarkPipelineSchedulerConfig {
+                worker_token: SecretString::from("benchmark-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                evaluation_limit: 5,
+                publication_limit: 5,
+                dry_run: false,
+                require_external_evaluator: true,
+                evaluator_ref: "external-benchmark-evaluator:v1".to_string(),
+                registry_ref_prefix: "benchmark-registry:tenant-a".to_string(),
+                min_score: 0.8,
+                reason: "scheduled external benchmark pipeline".to_string(),
+            }),
+        )
+        .await
+        .expect_err("required external evaluator must be configured");
+        assert!(
+            missing_evaluator
+                .to_string()
+                .contains(TRACE_COMMONS_BENCHMARK_EVALUATOR_URL)
+        );
+
+        let fake_evaluator = FakeBenchmarkEvaluator::default();
+        Arc::make_mut(&mut state).benchmark_evaluator = Some(Arc::new(fake_evaluator));
+        validate_trace_benchmark_pipeline_scheduler_config(
+            state.as_ref(),
+            Some(&TraceBenchmarkPipelineSchedulerConfig {
+                worker_token: SecretString::from("benchmark-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                evaluation_limit: 5,
+                publication_limit: 5,
+                dry_run: false,
+                require_external_evaluator: true,
+                evaluator_ref: "external-benchmark-evaluator:v1".to_string(),
+                registry_ref_prefix: "benchmark-registry:tenant-a".to_string(),
+                min_score: 0.8,
+                reason: "scheduled external benchmark pipeline".to_string(),
+            }),
+        )
+        .await
+        .expect("benchmark pipeline scheduler can start with worker auth and evaluator");
+    }
+
+    #[tokio::test]
     async fn credit_cycle_scheduler_config_requires_utility_worker_auth_and_live_near_adapters() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -70538,6 +71031,7 @@ mod tests {
             export_job_scheduler: None,
             vector_index_scheduler: None,
             benchmark_registry_scheduler: None,
+            benchmark_pipeline_scheduler: None,
             credit_cycle_scheduler: None,
             ranking_calibration_max_age: None,
             ranking_require_calibration_dataset_registry: false,
@@ -81747,6 +82241,216 @@ mod tests {
             StorageTraceBenchmarkRegistryOutboxStatus::Pending
         );
         assert!(tenant_b_outbox[0].external_receipt_ref.is_none());
+    }
+
+    #[tokio::test]
+    async fn benchmark_pipeline_scheduler_tick_evaluates_then_publishes_passed_artifacts() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let fake_evaluator = FakeBenchmarkEvaluator::default();
+        let evaluator_calls = fake_evaluator.calls.clone();
+        Arc::make_mut(&mut state).benchmark_evaluator = Some(Arc::new(fake_evaluator));
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::BenchmarkOnly];
+        envelope.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::BenchmarkGeneration];
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("benchmark source submission succeeds");
+
+        let Json(benchmark) = benchmark_worker_convert_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("benchmark_pipeline_scheduler_candidate".to_string()),
+                consent_scope: Some("benchmark_only".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: Some("benchmark:pipeline-scheduler".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark worker conversion succeeds");
+
+        let summary = run_trace_benchmark_pipeline_scheduler_tick(
+            state.clone(),
+            &TraceBenchmarkPipelineSchedulerConfig {
+                worker_token: SecretString::from("benchmark-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                evaluation_limit: 10,
+                publication_limit: 10,
+                dry_run: false,
+                require_external_evaluator: true,
+                evaluator_ref: "external-benchmark-evaluator:v1".to_string(),
+                registry_ref_prefix: "benchmark-registry:tenant-a".to_string(),
+                min_score: 0.75,
+                reason: "scheduled external benchmark pipeline".to_string(),
+            },
+        )
+        .await
+        .expect("benchmark pipeline scheduler tick evaluates then publishes");
+
+        assert_eq!(summary.evaluation.checked_count, 1);
+        assert_eq!(summary.evaluation.evaluated_count, 1);
+        assert_eq!(summary.evaluation.passed_count, 1);
+        assert_eq!(summary.publication.checked_count, 1);
+        assert_eq!(summary.publication.published_count, 1);
+        assert_eq!(
+            summary.publication.published_conversion_ids,
+            vec![benchmark.conversion_id]
+        );
+
+        let calls = evaluator_calls
+            .lock()
+            .expect("fake benchmark evaluator calls lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].evaluator_ref, "external-benchmark-evaluator:v1");
+        assert_eq!(calls[0].min_score, 0.75);
+
+        let persisted: TraceBenchmarkConversionArtifact = serde_json::from_str(
+            &std::fs::read_to_string(benchmark_artifact_path(
+                temp.path(),
+                "tenant-a",
+                benchmark.conversion_id,
+            ))
+            .expect("benchmark artifact reads"),
+        )
+        .expect("benchmark artifact parses");
+        assert_eq!(
+            persisted.evaluation.status,
+            TraceBenchmarkEvaluationStatus::Passed
+        );
+        assert_eq!(
+            persisted.evaluation.evaluator_ref.as_deref(),
+            Some("external-benchmark-evaluator:v1")
+        );
+        assert_eq!(persisted.evaluation.score, Some(0.875));
+        assert_eq!(
+            persisted.registry.status,
+            TraceBenchmarkRegistryStatus::Published
+        );
+        let expected_registry_ref =
+            format!("benchmark-registry:tenant-a:{}", benchmark.conversion_id);
+        assert_eq!(
+            persisted.registry.registry_ref.as_deref(),
+            Some(expected_registry_ref.as_str())
+        );
+
+        let outbox = read_all_benchmark_registry_outbox_items(temp.path(), "tenant-a")
+            .expect("benchmark registry outbox reads");
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox[0].conversion_id, benchmark.conversion_id);
+        assert_eq!(
+            outbox[0].status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Pending
+        );
+        assert_eq!(outbox[0].registry_ref, expected_registry_ref);
+    }
+
+    #[tokio::test]
+    async fn benchmark_pipeline_scheduler_tick_dry_run_leaves_lifecycle_and_outbox_unchanged() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let fake_evaluator = FakeBenchmarkEvaluator::default();
+        let evaluator_calls = fake_evaluator.calls.clone();
+        Arc::make_mut(&mut state).benchmark_evaluator = Some(Arc::new(fake_evaluator));
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::BenchmarkOnly];
+        envelope.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::BenchmarkGeneration];
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("benchmark source submission succeeds");
+
+        let Json(benchmark) = benchmark_worker_convert_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("benchmark_pipeline_scheduler_dry_run_candidate".to_string()),
+                consent_scope: Some("benchmark_only".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: Some("benchmark:pipeline-scheduler-dry-run".to_string()),
+            }),
+        )
+        .await
+        .expect("benchmark worker conversion succeeds");
+
+        let summary = run_trace_benchmark_pipeline_scheduler_tick(
+            state,
+            &TraceBenchmarkPipelineSchedulerConfig {
+                worker_token: SecretString::from("benchmark-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                evaluation_limit: 10,
+                publication_limit: 10,
+                dry_run: true,
+                require_external_evaluator: true,
+                evaluator_ref: "external-benchmark-evaluator:v1".to_string(),
+                registry_ref_prefix: "benchmark-registry:tenant-a".to_string(),
+                min_score: 0.75,
+                reason: "scheduled external benchmark pipeline dry run".to_string(),
+            },
+        )
+        .await
+        .expect("benchmark pipeline scheduler dry-run tick succeeds");
+
+        assert!(summary.evaluation.dry_run);
+        assert_eq!(summary.evaluation.checked_count, 1);
+        assert_eq!(summary.evaluation.evaluated_count, 0);
+        assert_eq!(
+            summary
+                .evaluation
+                .skipped_reason_counts
+                .get("external_evaluator_dry_run")
+                .copied(),
+            Some(1)
+        );
+        assert!(summary.publication.dry_run);
+        assert_eq!(summary.publication.checked_count, 1);
+        assert_eq!(summary.publication.published_count, 0);
+        assert!(
+            evaluator_calls
+                .lock()
+                .expect("fake benchmark evaluator calls lock")
+                .is_empty()
+        );
+
+        let persisted: TraceBenchmarkConversionArtifact = serde_json::from_str(
+            &std::fs::read_to_string(benchmark_artifact_path(
+                temp.path(),
+                "tenant-a",
+                benchmark.conversion_id,
+            ))
+            .expect("benchmark artifact reads"),
+        )
+        .expect("benchmark artifact parses");
+        assert_eq!(
+            persisted.evaluation.status,
+            TraceBenchmarkEvaluationStatus::NotRun
+        );
+        assert_eq!(
+            persisted.registry.status,
+            TraceBenchmarkRegistryStatus::Candidate
+        );
+        let outbox = read_all_benchmark_registry_outbox_items(temp.path(), "tenant-a")
+            .expect("benchmark registry outbox reads");
+        assert!(outbox.is_empty());
     }
 
     #[tokio::test]
