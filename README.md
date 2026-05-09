@@ -84,7 +84,10 @@ rows; dry-runs remain available for diagnosis.
 The worker `POST /v1/workers/credit-cycle/run` route can run the production
 credit path in bounded steps for a single model/version:
 calibration, model promotion, prediction credit, settlement, then a NEAR outbox
-dry-run, explicit submit, or explicit confirmation poll. Settlement retries repair missing NEAR outbox rows
+dry-run, explicit submit, or explicit confirmation poll. Live credit-cycle runs
+also fail before claiming work when the central issuer profile is required but
+incomplete, and scheduler preflight reports the same blocker as a skip reason.
+Settlement retries repair missing NEAR outbox rows
 from finalized batches, and revocation propagation can append deterministic
 negative ledger rows plus `reverse_credit_receipt` NEAR outbox calls for settled
 revoked sources. Reviewer/admin credit summaries report tenant-wide settled line

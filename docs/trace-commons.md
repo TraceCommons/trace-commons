@@ -703,6 +703,12 @@ summary and metrics also surface missing credit-settlement cap, required NEAR
 contract, NEAR submitter/confirmer adapter, required adapter bearer auth, and
 central issuer approval gates when positive delayed credit exists, even before
 any NEAR outbox side effect has been created.
+When `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE=true`,
+live credit-cycle automation checks the same profile before claiming work, and
+the scheduler preflight returns
+`credit_settlement_central_issuer_profile_incomplete` as a safe skip reason
+instead of starting calibration, promotion, prediction-credit, or settlement
+side effects.
 Admins can inspect `GET /v1/admin/credit-risk-summary` before issuing credit to
 see tenant-scoped pending, held, and over-cap totals grouped by deterministic
 credit-account hash. The response is bounded by `limit` (default 100, max 500)
