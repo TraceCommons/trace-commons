@@ -39807,6 +39807,7 @@ fn write_submission_record(
     root: &Path,
     record: &TraceCommonsSubmissionRecord,
 ) -> anyhow::Result<()> {
+    ensure_submission_record_tenant(record, &record.tenant_id)?;
     let path = submission_metadata_path(root, &record.tenant_id, record.submission_id);
     write_json_file(&path, record, "trace contribution metadata")
 }
@@ -41197,6 +41198,7 @@ where
 }
 
 fn write_derived_record(root: &Path, record: &TraceCommonsDerivedRecord) -> anyhow::Result<()> {
+    ensure_derived_record_tenant(record, &record.tenant_id)?;
     let path = derived_record_path(root, &record.tenant_id, record.submission_id);
     write_json_file(&path, record, "trace derived record")
 }
@@ -42380,6 +42382,7 @@ fn source_credit_event_ids_hash(policy_version: &str, source_credit_event_ids: &
 }
 
 fn write_revocation(root: &Path, tombstone: &TraceCommonsRevocation) -> anyhow::Result<()> {
+    ensure_revocation_tenant(tombstone, &tombstone.tenant_id)?;
     let tenant_key = tenant_storage_key(&tombstone.tenant_id);
     let path = root
         .join("tenants")
@@ -54850,6 +54853,78 @@ mod tests {
                 .is_none()
         );
         assert!(!audit_log_path(temp.path(), "tenant-b").exists());
+    }
+
+    #[tokio::test]
+    async fn file_backed_metadata_writes_reject_tenant_storage_drift_before_write() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let envelope = sample_envelope().await;
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+            .await
+            .expect("tenant-a submission succeeds");
+
+        let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("tenant-a record reads")
+            .expect("tenant-a record exists");
+        record.tenant_storage_ref = tenant_storage_ref("tenant-b");
+        let record_error = write_submission_record(temp.path(), &record)
+            .expect_err("metadata write rejects tenant storage drift");
+        assert!(
+            record_error
+                .to_string()
+                .contains("trace metadata tenant storage ref mismatch")
+        );
+        let record_after = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("tenant-a record reads after rejected write")
+            .expect("tenant-a record remains");
+        assert_eq!(
+            record_after.tenant_storage_ref,
+            tenant_storage_ref("tenant-a")
+        );
+
+        let mut derived = read_derived_record(temp.path(), "tenant-a", submission_id)
+            .expect("tenant-a derived reads")
+            .expect("tenant-a derived exists");
+        derived.tenant_storage_ref = tenant_storage_ref("tenant-b");
+        let derived_error = write_derived_record(temp.path(), &derived)
+            .expect_err("derived write rejects tenant storage drift");
+        assert!(
+            derived_error
+                .to_string()
+                .contains("trace derived record tenant storage ref mismatch")
+        );
+        let derived_after = read_derived_record(temp.path(), "tenant-a", submission_id)
+            .expect("tenant-a derived reads after rejected write")
+            .expect("tenant-a derived remains");
+        assert_eq!(
+            derived_after.tenant_storage_ref,
+            tenant_storage_ref("tenant-a")
+        );
+
+        let tombstone = TraceCommonsRevocation {
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-b"),
+            submission_id,
+            revoked_at: Utc::now(),
+            reason: "tenant drift tombstone should not persist".to_string(),
+            redaction_hash: None,
+            canonical_summary_hash: None,
+        };
+        let tombstone_error = write_revocation(temp.path(), &tombstone)
+            .expect_err("revocation write rejects tenant storage drift");
+        assert!(
+            tombstone_error
+                .to_string()
+                .contains("trace revocation tenant storage ref mismatch")
+        );
+        assert!(
+            read_revocation(temp.path(), "tenant-a", submission_id)
+                .expect("tenant-a tombstone lookup succeeds")
+                .is_none()
+        );
     }
 
     #[tokio::test]
