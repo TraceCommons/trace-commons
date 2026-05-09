@@ -6707,7 +6707,8 @@ async fn validate_trace_benchmark_registry_scheduler_config(
     let auth = authenticate_with_tenant_access_grant(state, &headers)
         .await
         .map_err(trace_benchmark_registry_scheduler_config_error)?;
-    require_benchmarker(&auth).map_err(trace_benchmark_registry_scheduler_config_error)?;
+    require_benchmark_worker_operator(&auth)
+        .map_err(trace_benchmark_registry_scheduler_config_error)?;
     require_benchmark_registry_outbox_principal_if_configured(state, &auth, config.dry_run)
         .map_err(trace_benchmark_registry_scheduler_config_error)?;
     if !config.dry_run {
@@ -6745,7 +6746,8 @@ async fn validate_trace_benchmark_pipeline_scheduler_config(
     let auth = authenticate_with_tenant_access_grant(state, &headers)
         .await
         .map_err(trace_benchmark_pipeline_scheduler_config_error)?;
-    require_benchmarker(&auth).map_err(trace_benchmark_pipeline_scheduler_config_error)?;
+    require_benchmark_worker_operator(&auth)
+        .map_err(trace_benchmark_pipeline_scheduler_config_error)?;
     if config.require_external_evaluator {
         anyhow::ensure!(
             state.benchmark_evaluator.is_some(),
@@ -16184,7 +16186,7 @@ async fn benchmark_registry_outbox_submit_worker_handler(
     Json(body): Json<TraceBenchmarkRegistryOutboxSubmitWorkerRequest>,
 ) -> ApiResult<Json<TraceBenchmarkRegistryOutboxSubmitWorkerResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_benchmarker(&tenant)?;
+    require_benchmark_worker_operator(&tenant)?;
     validate_u32_worker_limit(
         body.limit,
         TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_MAX_LIMIT,
@@ -16213,7 +16215,7 @@ async fn benchmark_registry_outbox_confirm_worker_handler(
     Json(body): Json<TraceBenchmarkRegistryOutboxConfirmWorkerRequest>,
 ) -> ApiResult<Json<TraceBenchmarkRegistryOutboxConfirmWorkerResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_benchmarker(&tenant)?;
+    require_benchmark_worker_operator(&tenant)?;
     validate_u32_worker_limit(
         body.limit,
         TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_MAX_LIMIT,
@@ -16525,7 +16527,7 @@ async fn mark_benchmark_registry_outbox_status_handler(
     Json(body): Json<TraceBenchmarkRegistryOutboxStatusRequest>,
 ) -> ApiResult<Json<TraceBenchmarkRegistryOutboxItem>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_benchmarker(&tenant)?;
+    require_benchmark_worker_operator(&tenant)?;
     let status = body.status;
     if !matches!(
         status,
@@ -36324,7 +36326,7 @@ async fn benchmark_worker_convert_handler(
     Json(body): Json<BenchmarkConversionRequest>,
 ) -> ApiResult<Json<TraceBenchmarkConversionArtifact>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_benchmarker(&tenant)?;
+    require_benchmark_worker_operator(&tenant)?;
     run_benchmark_conversion(state.as_ref(), &tenant, body).await
 }
 
@@ -36345,7 +36347,7 @@ async fn benchmark_evaluation_worker_run_handler(
     Json(body): Json<BenchmarkEvaluationWorkerRunRequest>,
 ) -> ApiResult<Json<BenchmarkEvaluationWorkerRunResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_benchmarker(&tenant)?;
+    require_benchmark_worker_operator(&tenant)?;
     run_benchmark_evaluation_worker(state.as_ref(), &tenant, body)
         .await
         .map(Json)
@@ -36559,7 +36561,7 @@ async fn benchmark_registry_publication_worker_run_handler(
     Json(body): Json<BenchmarkRegistryPublicationWorkerRunRequest>,
 ) -> ApiResult<Json<BenchmarkRegistryPublicationWorkerRunResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_benchmarker(&tenant)?;
+    require_benchmark_worker_operator(&tenant)?;
     run_benchmark_registry_publication_worker(state.as_ref(), &tenant, body)
         .await
         .map(Json)
@@ -40330,6 +40332,17 @@ fn require_benchmarker(auth: &TenantAuth) -> ApiResult<()> {
         Err(api_error(
             StatusCode::FORBIDDEN,
             "reviewer, admin, or benchmark worker token required",
+        ))
+    }
+}
+
+fn require_benchmark_worker_operator(auth: &TenantAuth) -> ApiResult<()> {
+    if auth.role.can_admin() || auth.role == TokenRole::BenchmarkWorker {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::FORBIDDEN,
+            "admin or benchmark worker token required",
         ))
     }
 }
@@ -72998,7 +73011,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("reviewer, admin, or benchmark worker token required")
+                .contains("admin or benchmark worker token required")
         );
 
         let missing_adapter = validate_trace_benchmark_registry_scheduler_config(
@@ -73114,7 +73127,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("reviewer, admin, or benchmark worker token required")
+                .contains("admin or benchmark worker token required")
         );
 
         let missing_evaluator = validate_trace_benchmark_pipeline_scheduler_config(
@@ -74397,6 +74410,85 @@ mod tests {
             event.kind == "benchmark_lifecycle_update"
                 && event.export_id == Some(benchmark.conversion_id)
         }));
+    }
+
+    #[tokio::test]
+    async fn benchmark_worker_routes_reject_reviewer_tokens_before_preconditions() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let convert_error = benchmark_worker_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(1),
+                purpose: Some("reviewer_worker_convert_boundary".to_string()),
+                consent_scope: Some("benchmark_only".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect_err("reviewer token must not reach benchmark worker conversion checks");
+        assert_eq!(convert_error.0, StatusCode::FORBIDDEN);
+
+        let evaluation_error = benchmark_evaluation_worker_run_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkEvaluationWorkerRunRequest {
+                limit: Some(1),
+                dry_run: Some(false),
+                evaluator_ref: Some("external-benchmark-evaluator:v1".to_string()),
+                require_external_evaluator: Some(true),
+                min_score: Some(0.8),
+                reason: Some("reviewer_worker_evaluation_boundary".to_string()),
+            }),
+        )
+        .await
+        .expect_err("reviewer token must not reach benchmark evaluator preconditions");
+        assert_eq!(evaluation_error.0, StatusCode::FORBIDDEN);
+
+        let publication_error = benchmark_registry_publication_worker_run_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkRegistryPublicationWorkerRunRequest {
+                limit: Some(1),
+                dry_run: Some(false),
+                registry_ref_prefix: Some("benchmark-registry:auth-boundary".to_string()),
+                reason: Some("reviewer_worker_publication_boundary".to_string()),
+            }),
+        )
+        .await
+        .expect_err("reviewer token must not reach benchmark registry publication checks");
+        assert_eq!(publication_error.0, StatusCode::FORBIDDEN);
+
+        let confirm_error = benchmark_registry_outbox_confirm_worker_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceBenchmarkRegistryOutboxConfirmWorkerRequest {
+                purpose: Some("reviewer_worker_confirm_boundary".to_string()),
+                dry_run: true,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect_err("reviewer token must not reach benchmark registry confirm checks");
+        assert_eq!(confirm_error.0, StatusCode::FORBIDDEN);
+
+        let status_error = mark_benchmark_registry_outbox_status_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceBenchmarkRegistryOutboxStatusRequest {
+                benchmark_outbox_id: Uuid::new_v4(),
+                status: StorageTraceBenchmarkRegistryOutboxStatus::Submitted,
+                external_receipt_ref: Some("external-registry:auth-boundary".to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect_err("reviewer token must not reach benchmark registry status checks");
+        assert_eq!(status_error.0, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -93067,6 +93159,19 @@ mod tests {
         .await
         .expect_err("live submit worker requires configured registry submitter");
         assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+
+        let reviewer_error = benchmark_registry_outbox_submit_worker_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceBenchmarkRegistryOutboxSubmitWorkerRequest {
+                purpose: Some("reviewer must not run benchmark registry worker".to_string()),
+                dry_run: true,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect_err("reviewer token must not reach benchmark registry worker checks");
+        assert_eq!(reviewer_error.0, StatusCode::FORBIDDEN);
 
         let Json(dry_run) = benchmark_registry_outbox_submit_worker_handler(
             State(state),

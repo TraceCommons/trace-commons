@@ -603,7 +603,11 @@ The names below are intentionally close to the MVP concepts, but are not propose
 
 Access grants authorize service operations. Envelope contributor fields remain attribution only.
 In the current ingest service, `export_worker` is limited to replay/ranker export surfaces,
-`benchmark_worker` is limited to benchmark conversion, benchmark evaluation batches, and benchmark registry publication batches, `retention_worker` is limited to
+`benchmark_worker` is limited to benchmark automation surfaces. Dedicated benchmark
+worker routes for conversion, evaluation batches, registry publication batches, and
+registry outbox submit/confirm/status automation reject ordinary reviewer tokens, while
+reviewer-compatible benchmark conversion and lifecycle surfaces remain available where
+manual reviewer operations are intended. `retention_worker` is limited to
 retention/cache cleanup maintenance, and the dedicated retention worker route rejects ordinary reviewer tokens even though admins may still use the route for operations. `revocation_worker` is limited to the
 revocation-propagation worker route, whose dedicated worker surface also rejects ordinary reviewer tokens before DB mirror checks, `vector_worker` is limited to vector-index
 maintenance, whose dedicated worker surface rejects ordinary reviewer tokens before DB/vector adapter checks, and `utility_worker` is limited to credit utility, settlement, NEAR outbox, ranking automation, and utility-attestation routes whose worker surfaces reject ordinary reviewer tokens before source or settlement checks. `process_eval_worker` is limited to writing bounded process-evaluation
