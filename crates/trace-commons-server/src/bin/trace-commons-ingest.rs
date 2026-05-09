@@ -327,6 +327,8 @@ const TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN: &str =
     "TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN";
 const TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS: &str =
     "TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS";
+const TRACE_COMMONS_BENCHMARK_REGISTRY_REQUIRE_ADAPTER_AUTH: &str =
+    "TRACE_COMMONS_BENCHMARK_REGISTRY_REQUIRE_ADAPTER_AUTH";
 const TRACE_COMMONS_BENCHMARK_EVALUATOR_URL: &str = "TRACE_COMMONS_BENCHMARK_EVALUATOR_URL";
 const TRACE_COMMONS_BENCHMARK_EVALUATOR_BEARER_TOKEN: &str =
     "TRACE_COMMONS_BENCHMARK_EVALUATOR_BEARER_TOKEN";
@@ -801,8 +803,11 @@ struct AppState {
     near_credit_outbox_scheduler: Option<TraceNearCreditOutboxSchedulerConfig>,
     benchmark_registry_submitter: Option<Arc<dyn TraceBenchmarkRegistrySubmitter>>,
     benchmark_registry_submitter_timeout_ms: Option<u64>,
+    benchmark_registry_submitter_auth_configured: bool,
     benchmark_registry_confirmer: Option<Arc<dyn TraceBenchmarkRegistryConfirmer>>,
     benchmark_registry_confirmer_timeout_ms: Option<u64>,
+    benchmark_registry_confirmer_auth_configured: bool,
+    benchmark_registry_require_adapter_auth: bool,
     benchmark_evaluator: Option<Arc<dyn TraceBenchmarkEvaluator>>,
     benchmark_evaluator_timeout_ms: Option<u64>,
     process_evaluator: Option<Arc<dyn TraceProcessEvaluator>>,
@@ -2363,14 +2368,38 @@ impl AppState {
         let benchmark_registry_submitter_timeout_ms = benchmark_registry_submitter_config
             .as_ref()
             .map(|config| config.timeout_ms);
+        let benchmark_registry_submitter_auth_configured = benchmark_registry_submitter_config
+            .as_ref()
+            .is_some_and(|config| config.auth_configured);
         let benchmark_registry_submitter =
             benchmark_registry_submitter_config.map(|config| config.submitter);
         let benchmark_registry_confirmer_config = trace_benchmark_registry_confirmer_from_env()?;
         let benchmark_registry_confirmer_timeout_ms = benchmark_registry_confirmer_config
             .as_ref()
             .map(|config| config.timeout_ms);
+        let benchmark_registry_confirmer_auth_configured = benchmark_registry_confirmer_config
+            .as_ref()
+            .is_some_and(|config| config.auth_configured);
         let benchmark_registry_confirmer =
             benchmark_registry_confirmer_config.map(|config| config.confirmer);
+        let benchmark_registry_require_adapter_auth =
+            env_truthy(TRACE_COMMONS_BENCHMARK_REGISTRY_REQUIRE_ADAPTER_AUTH);
+        if benchmark_registry_require_adapter_auth
+            && benchmark_registry_submitter_timeout_ms.is_some()
+            && !benchmark_registry_submitter_auth_configured
+        {
+            anyhow::bail!(
+                "{TRACE_COMMONS_BENCHMARK_REGISTRY_REQUIRE_ADAPTER_AUTH} requires {TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN} when {TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL} is configured"
+            );
+        }
+        if benchmark_registry_require_adapter_auth
+            && benchmark_registry_confirmer_timeout_ms.is_some()
+            && !benchmark_registry_confirmer_auth_configured
+        {
+            anyhow::bail!(
+                "{TRACE_COMMONS_BENCHMARK_REGISTRY_REQUIRE_ADAPTER_AUTH} requires {TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN} when {TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_URL} is configured"
+            );
+        }
         let benchmark_evaluator_config = trace_benchmark_evaluator_from_env()?;
         let benchmark_evaluator_timeout_ms = benchmark_evaluator_config
             .as_ref()
@@ -2644,8 +2673,11 @@ impl AppState {
             near_credit_outbox_scheduler,
             benchmark_registry_submitter,
             benchmark_registry_submitter_timeout_ms,
+            benchmark_registry_submitter_auth_configured,
             benchmark_registry_confirmer,
             benchmark_registry_confirmer_timeout_ms,
+            benchmark_registry_confirmer_auth_configured,
+            benchmark_registry_require_adapter_auth,
             benchmark_evaluator,
             benchmark_evaluator_timeout_ms,
             process_evaluator,
@@ -2975,11 +3007,13 @@ struct ConfiguredTraceNearCreditConfirmer {
 struct ConfiguredTraceBenchmarkRegistrySubmitter {
     submitter: Arc<dyn TraceBenchmarkRegistrySubmitter>,
     timeout_ms: u64,
+    auth_configured: bool,
 }
 
 struct ConfiguredTraceBenchmarkRegistryConfirmer {
     confirmer: Arc<dyn TraceBenchmarkRegistryConfirmer>,
     timeout_ms: u64,
+    auth_configured: bool,
 }
 
 struct ConfiguredTraceBenchmarkEvaluator {
@@ -3091,16 +3125,18 @@ fn trace_benchmark_registry_submitter_from_env()
         .user_agent("trace-commons-benchmark-registry-submitter/0.1")
         .build()
         .context("failed to build benchmark registry submitter HTTP client")?;
+    let bearer_token =
+        optional_trimmed_env(TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN)?
+            .map(SecretString::from);
+    let auth_configured = bearer_token.is_some();
     Ok(Some(ConfiguredTraceBenchmarkRegistrySubmitter {
         submitter: Arc::new(HttpTraceBenchmarkRegistrySubmitter {
             client,
             url,
-            bearer_token: optional_trimmed_env(
-                TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN,
-            )?
-            .map(SecretString::from),
+            bearer_token,
         }),
         timeout_ms,
+        auth_configured,
     }))
 }
 
@@ -3121,16 +3157,18 @@ fn trace_benchmark_registry_confirmer_from_env()
         .user_agent("trace-commons-benchmark-registry-confirmer/0.1")
         .build()
         .context("failed to build benchmark registry confirmer HTTP client")?;
+    let bearer_token =
+        optional_trimmed_env(TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN)?
+            .map(SecretString::from);
+    let auth_configured = bearer_token.is_some();
     Ok(Some(ConfiguredTraceBenchmarkRegistryConfirmer {
         confirmer: Arc::new(HttpTraceBenchmarkRegistryConfirmer {
             client,
             url,
-            bearer_token: optional_trimmed_env(
-                TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN,
-            )?
-            .map(SecretString::from),
+            bearer_token,
         }),
         timeout_ms,
+        auth_configured,
     }))
 }
 
@@ -6721,6 +6759,16 @@ async fn validate_trace_benchmark_registry_scheduler_config(
             state.benchmark_registry_confirmer.is_some(),
             "invalid Trace Commons benchmark registry scheduler configuration: TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_URL is required"
         );
+        if state.benchmark_registry_require_adapter_auth {
+            anyhow::ensure!(
+                state.benchmark_registry_submitter_auth_configured,
+                "invalid Trace Commons benchmark registry scheduler configuration: TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN is required"
+            );
+            anyhow::ensure!(
+                state.benchmark_registry_confirmer_auth_configured,
+                "invalid Trace Commons benchmark registry scheduler configuration: TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN is required"
+            );
+        }
     }
     Ok(())
 }
@@ -7984,10 +8032,13 @@ struct TraceCommonsConfigStatusResponse {
     near_credit_outbox_scheduler_dry_run: Option<bool>,
     benchmark_registry_submitter_configured: bool,
     benchmark_registry_submitter_timeout_ms: Option<u64>,
+    benchmark_registry_submitter_auth_configured: bool,
     benchmark_registry_outbox_submit_default_limit: u32,
     benchmark_registry_outbox_submit_max_limit: u32,
     benchmark_registry_confirmer_configured: bool,
     benchmark_registry_confirmer_timeout_ms: Option<u64>,
+    benchmark_registry_confirmer_auth_configured: bool,
+    benchmark_registry_require_adapter_auth: bool,
     benchmark_registry_outbox_confirm_default_limit: u32,
     benchmark_registry_outbox_confirm_max_limit: u32,
     benchmark_evaluator_configured: bool,
@@ -8310,12 +8361,17 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .map(|config| config.dry_run),
         benchmark_registry_submitter_configured: state.benchmark_registry_submitter.is_some(),
         benchmark_registry_submitter_timeout_ms: state.benchmark_registry_submitter_timeout_ms,
+        benchmark_registry_submitter_auth_configured: state
+            .benchmark_registry_submitter_auth_configured,
         benchmark_registry_outbox_submit_default_limit:
             TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_DEFAULT_LIMIT,
         benchmark_registry_outbox_submit_max_limit:
             TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_MAX_LIMIT,
         benchmark_registry_confirmer_configured: state.benchmark_registry_confirmer.is_some(),
         benchmark_registry_confirmer_timeout_ms: state.benchmark_registry_confirmer_timeout_ms,
+        benchmark_registry_confirmer_auth_configured: state
+            .benchmark_registry_confirmer_auth_configured,
+        benchmark_registry_require_adapter_auth: state.benchmark_registry_require_adapter_auth,
         benchmark_registry_outbox_confirm_default_limit:
             TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_DEFAULT_LIMIT,
         benchmark_registry_outbox_confirm_max_limit:
@@ -16227,6 +16283,15 @@ async fn benchmark_registry_outbox_submit_worker_handler(
             "benchmark registry outbox submit worker requires TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL",
         ));
     }
+    if !body.dry_run
+        && state.benchmark_registry_require_adapter_auth
+        && !state.benchmark_registry_submitter_auth_configured
+    {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "benchmark registry outbox submit worker requires TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN",
+        ));
+    }
     let response = run_benchmark_registry_outbox_submit_worker(state.as_ref(), &tenant, body)
         .await
         .map_err(maintenance_error)?;
@@ -16254,6 +16319,15 @@ async fn benchmark_registry_outbox_confirm_worker_handler(
         return Err(api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "benchmark registry outbox confirm worker requires TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_URL",
+        ));
+    }
+    if !body.dry_run
+        && state.benchmark_registry_require_adapter_auth
+        && !state.benchmark_registry_confirmer_auth_configured
+    {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "benchmark registry outbox confirm worker requires TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN",
         ));
     }
     let response = run_benchmark_registry_outbox_confirm_worker(state.as_ref(), &tenant, body)
@@ -16467,6 +16541,36 @@ fn require_near_credit_manual_status_adapter_auth(
     }
 }
 
+fn require_benchmark_registry_manual_status_adapter_auth(
+    state: &AppState,
+    status: StorageTraceBenchmarkRegistryOutboxStatus,
+) -> ApiResult<()> {
+    if !state.benchmark_registry_require_adapter_auth {
+        return Ok(());
+    }
+    match status {
+        StorageTraceBenchmarkRegistryOutboxStatus::Submitted
+            if state.benchmark_registry_submitter.is_none()
+                || !state.benchmark_registry_submitter_auth_configured =>
+        {
+            Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "manual submitted benchmark registry outbox status requires TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL and TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN when TRACE_COMMONS_BENCHMARK_REGISTRY_REQUIRE_ADAPTER_AUTH is enabled",
+            ))
+        }
+        StorageTraceBenchmarkRegistryOutboxStatus::Confirmed
+            if state.benchmark_registry_confirmer.is_none()
+                || !state.benchmark_registry_confirmer_auth_configured =>
+        {
+            Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "manual confirmed benchmark registry outbox status requires TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_URL and TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN when TRACE_COMMONS_BENCHMARK_REGISTRY_REQUIRE_ADAPTER_AUTH is enabled",
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn ensure_near_manual_status_transition(
     item: &TraceNearCreditOutboxItem,
     status: StorageTraceCreditSettlementNearStatus,
@@ -16585,6 +16689,7 @@ async fn mark_benchmark_registry_outbox_status_handler(
         None
     };
     require_benchmark_registry_outbox_status_principal_if_configured(state.as_ref(), &tenant)?;
+    require_benchmark_registry_manual_status_adapter_auth(state.as_ref(), status)?;
     let existing = read_benchmark_registry_outbox_items_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?
@@ -60121,8 +60226,11 @@ mod tests {
             near_credit_outbox_scheduler: None,
             benchmark_registry_submitter: None,
             benchmark_registry_submitter_timeout_ms: None,
+            benchmark_registry_submitter_auth_configured: false,
             benchmark_registry_confirmer: None,
             benchmark_registry_confirmer_timeout_ms: None,
+            benchmark_registry_confirmer_auth_configured: false,
+            benchmark_registry_require_adapter_auth: false,
             benchmark_evaluator: None,
             benchmark_evaluator_timeout_ms: None,
             process_evaluator: None,
@@ -64652,6 +64760,8 @@ mod tests {
         Arc::make_mut(&mut state).benchmark_registry_submitter =
             Some(Arc::new(FakeBenchmarkRegistrySubmitter::default()));
         Arc::make_mut(&mut state).benchmark_registry_submitter_timeout_ms = Some(2_345);
+        Arc::make_mut(&mut state).benchmark_registry_submitter_auth_configured = true;
+        Arc::make_mut(&mut state).benchmark_registry_require_adapter_auth = true;
 
         let response = app(state)
             .oneshot(
@@ -64676,6 +64786,14 @@ mod tests {
         assert_eq!(
             value["benchmark_registry_submitter_timeout_ms"],
             serde_json::json!(2_345)
+        );
+        assert_eq!(
+            value["benchmark_registry_submitter_auth_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["benchmark_registry_require_adapter_auth"],
+            serde_json::json!(true)
         );
         assert_eq!(
             value["benchmark_registry_outbox_submit_default_limit"],
@@ -64705,6 +64823,8 @@ mod tests {
         Arc::make_mut(&mut state).benchmark_registry_confirmer =
             Some(Arc::new(FakeBenchmarkRegistryConfirmer::default()));
         Arc::make_mut(&mut state).benchmark_registry_confirmer_timeout_ms = Some(3_456);
+        Arc::make_mut(&mut state).benchmark_registry_confirmer_auth_configured = true;
+        Arc::make_mut(&mut state).benchmark_registry_require_adapter_auth = true;
 
         let response = app(state)
             .oneshot(
@@ -64729,6 +64849,14 @@ mod tests {
         assert_eq!(
             value["benchmark_registry_confirmer_timeout_ms"],
             serde_json::json!(3_456)
+        );
+        assert_eq!(
+            value["benchmark_registry_confirmer_auth_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["benchmark_registry_require_adapter_auth"],
+            serde_json::json!(true)
         );
         assert_eq!(
             value["benchmark_registry_outbox_confirm_default_limit"],
@@ -73490,6 +73618,62 @@ mod tests {
         )
         .await
         .expect("listed central issuer principal can start live scheduler");
+
+        Arc::make_mut(&mut state).benchmark_registry_require_adapter_auth = true;
+        let missing_submitter_auth = validate_trace_benchmark_registry_scheduler_config(
+            state.as_ref(),
+            Some(&TraceBenchmarkRegistrySchedulerConfig {
+                worker_token: SecretString::from("admin-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                submit_limit: 5,
+                confirm_limit: 5,
+                dry_run: false,
+                purpose: "scheduled live benchmark registry outbox requires auth".to_string(),
+            }),
+        )
+        .await
+        .expect_err("live scheduler requires submitter bearer auth when configured");
+        assert!(
+            missing_submitter_auth
+                .to_string()
+                .contains(TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN)
+        );
+
+        Arc::make_mut(&mut state).benchmark_registry_submitter_auth_configured = true;
+        let missing_confirmer_auth = validate_trace_benchmark_registry_scheduler_config(
+            state.as_ref(),
+            Some(&TraceBenchmarkRegistrySchedulerConfig {
+                worker_token: SecretString::from("admin-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                submit_limit: 5,
+                confirm_limit: 5,
+                dry_run: false,
+                purpose: "scheduled live benchmark registry outbox requires confirm auth"
+                    .to_string(),
+            }),
+        )
+        .await
+        .expect_err("live scheduler requires confirmation bearer auth when configured");
+        assert!(
+            missing_confirmer_auth
+                .to_string()
+                .contains(TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN)
+        );
+
+        Arc::make_mut(&mut state).benchmark_registry_confirmer_auth_configured = true;
+        validate_trace_benchmark_registry_scheduler_config(
+            state.as_ref(),
+            Some(&TraceBenchmarkRegistrySchedulerConfig {
+                worker_token: SecretString::from("admin-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                submit_limit: 5,
+                confirm_limit: 5,
+                dry_run: false,
+                purpose: "scheduled live benchmark registry outbox with auth".to_string(),
+            }),
+        )
+        .await
+        .expect("listed central issuer principal can start auth-required live scheduler");
     }
 
     #[tokio::test]
@@ -78905,8 +79089,11 @@ mod tests {
             near_credit_outbox_scheduler: None,
             benchmark_registry_submitter: None,
             benchmark_registry_submitter_timeout_ms: None,
+            benchmark_registry_submitter_auth_configured: false,
             benchmark_registry_confirmer: None,
             benchmark_registry_confirmer_timeout_ms: None,
+            benchmark_registry_confirmer_auth_configured: false,
+            benchmark_registry_require_adapter_auth: false,
             benchmark_evaluator: None,
             benchmark_evaluator_timeout_ms: None,
             process_evaluator: None,
@@ -93337,6 +93524,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn benchmark_registry_outbox_mark_status_requires_adapter_auth_when_configured() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).benchmark_registry_submitter =
+            Some(Arc::new(FakeBenchmarkRegistrySubmitter::default()));
+        Arc::make_mut(&mut state).benchmark_registry_confirmer =
+            Some(Arc::new(FakeBenchmarkRegistryConfirmer::default()));
+        Arc::make_mut(&mut state).benchmark_registry_require_adapter_auth = true;
+
+        let pending_outbox_id = Uuid::new_v4();
+        let pending_item = pending_benchmark_registry_outbox_item(pending_outbox_id);
+        let submitted_outbox_id = Uuid::new_v4();
+        let submitted_item = submitted_benchmark_registry_outbox_item(
+            submitted_outbox_id,
+            StorageTraceBenchmarkRegistryOutboxOperation::Publish,
+        );
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &pending_item)
+            .expect("pending benchmark registry outbox file writes");
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &submitted_item)
+            .expect("submitted benchmark registry outbox file writes");
+
+        let submit_error = mark_benchmark_registry_outbox_status_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxStatusRequest {
+                benchmark_outbox_id: pending_outbox_id,
+                status: StorageTraceBenchmarkRegistryOutboxStatus::Submitted,
+                external_receipt_ref: Some("external-registry:manual-submit".to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect_err("manual submitted status requires adapter bearer auth when configured");
+        assert_eq!(submit_error.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            submit_error
+                .1
+                .0
+                .error
+                .contains(TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN)
+        );
+
+        let confirm_error = mark_benchmark_registry_outbox_status_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxStatusRequest {
+                benchmark_outbox_id: submitted_outbox_id,
+                status: StorageTraceBenchmarkRegistryOutboxStatus::Confirmed,
+                external_receipt_ref: Some("external-registry:manual-confirm".to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect_err("manual confirmed status requires adapter bearer auth when configured");
+        assert_eq!(confirm_error.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            confirm_error
+                .1
+                .0
+                .error
+                .contains(TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN)
+        );
+
+        let outbox = read_all_benchmark_registry_outbox_items(temp.path(), "tenant-a")
+            .expect("benchmark registry outbox reads");
+        assert!(outbox.iter().any(|item| {
+            item.benchmark_outbox_id == pending_outbox_id
+                && item.status == StorageTraceBenchmarkRegistryOutboxStatus::Pending
+                && item.external_receipt_ref.is_none()
+        }));
+        assert!(outbox.iter().any(|item| {
+            item.benchmark_outbox_id == submitted_outbox_id
+                && item.status == StorageTraceBenchmarkRegistryOutboxStatus::Submitted
+                && item.external_receipt_ref.as_deref() == Some("external-registry:receipt:publish")
+        }));
+
+        let Json(failed) = mark_benchmark_registry_outbox_status_handler(
+            State(state),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxStatusRequest {
+                benchmark_outbox_id: pending_outbox_id,
+                status: StorageTraceBenchmarkRegistryOutboxStatus::Failed,
+                external_receipt_ref: None,
+                error_detail: Some("bounded registry failure".to_string()),
+            }),
+        )
+        .await
+        .expect("manual failed status remains available for recovery evidence");
+        assert_eq!(
+            failed.status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Failed
+        );
+        assert!(failed.last_error_hash.is_some());
+    }
+
+    #[tokio::test]
     async fn benchmark_registry_outbox_mark_status_rejects_invalid_manual_transitions() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -93675,6 +93958,94 @@ mod tests {
         assert_eq!(dry_run.checked, 1);
         assert_eq!(dry_run.submitted, 0);
         assert_eq!(dry_run.pending, 1);
+    }
+
+    #[tokio::test]
+    async fn benchmark_registry_outbox_workers_require_adapter_auth_when_configured() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let fake_submitter = FakeBenchmarkRegistrySubmitter::default();
+        let submitter_calls = fake_submitter.calls.clone();
+        let fake_confirmer = FakeBenchmarkRegistryConfirmer::default();
+        let confirmer_calls = fake_confirmer.calls.clone();
+        Arc::make_mut(&mut state).benchmark_registry_submitter = Some(Arc::new(fake_submitter));
+        Arc::make_mut(&mut state).benchmark_registry_confirmer = Some(Arc::new(fake_confirmer));
+        Arc::make_mut(&mut state).benchmark_registry_require_adapter_auth = true;
+
+        let pending_item = pending_benchmark_registry_outbox_item(Uuid::new_v4());
+        let submitted_item = submitted_benchmark_registry_outbox_item(
+            Uuid::new_v4(),
+            StorageTraceBenchmarkRegistryOutboxOperation::Publish,
+        );
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &pending_item)
+            .expect("pending benchmark registry outbox file writes");
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &submitted_item)
+            .expect("submitted benchmark registry outbox file writes");
+
+        let submit_error = benchmark_registry_outbox_submit_worker_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxSubmitWorkerRequest {
+                purpose: Some("submit_benchmark_registry_requires_auth".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect_err("live submit worker requires bearer auth when configured");
+        assert_eq!(submit_error.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            submit_error
+                .1
+                .0
+                .error
+                .contains(TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN)
+        );
+        assert!(
+            submitter_calls
+                .lock()
+                .expect("fake submitter calls lock")
+                .is_empty()
+        );
+
+        let confirm_error = benchmark_registry_outbox_confirm_worker_handler(
+            State(state),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxConfirmWorkerRequest {
+                purpose: Some("confirm_benchmark_registry_requires_auth".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect_err("live confirm worker requires bearer auth when configured");
+        assert_eq!(confirm_error.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            confirm_error
+                .1
+                .0
+                .error
+                .contains(TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN)
+        );
+        assert!(
+            confirmer_calls
+                .lock()
+                .expect("fake confirmer calls lock")
+                .is_empty()
+        );
+
+        let outbox = read_all_benchmark_registry_outbox_items(temp.path(), "tenant-a")
+            .expect("benchmark registry outbox reads");
+        assert!(outbox.iter().any(|item| {
+            item.benchmark_outbox_id == pending_item.benchmark_outbox_id
+                && item.status == StorageTraceBenchmarkRegistryOutboxStatus::Pending
+                && item.external_receipt_ref.is_none()
+        }));
+        assert!(outbox.iter().any(|item| {
+            item.benchmark_outbox_id == submitted_item.benchmark_outbox_id
+                && item.status == StorageTraceBenchmarkRegistryOutboxStatus::Submitted
+                && item.external_receipt_ref == submitted_item.external_receipt_ref
+        }));
     }
 
     #[tokio::test]
