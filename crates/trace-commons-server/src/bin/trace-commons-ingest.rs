@@ -12993,20 +12993,9 @@ async fn utility_attestation_handler(
         &tenant,
         body.credit_points_delta,
     )?;
-    let use_category = body.use_category.trim().to_string();
-    if use_category.is_empty() {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "utility attestations require use_category",
-        ));
-    }
-    let policy_version = body.policy_version.trim().to_string();
-    if policy_version.is_empty() {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "utility attestations require policy_version",
-        ));
-    }
+    let use_category = validate_utility_attestation_use_category(&body.use_category)?;
+    let policy_version =
+        validate_credit_policy_version(&body.policy_version, "utility attestation")?;
     let evidence_hash = body.evidence_hash.trim().to_string();
     if !is_canonical_sha256_prefixed_hash(&evidence_hash) {
         return Err(api_error(
@@ -15116,6 +15105,32 @@ impl TraceCreditSettlementIssuerApprovalResponse {
 
 fn validate_credit_settlement_policy_version(value: &str) -> ApiResult<String> {
     validate_credit_policy_version(value, "credit settlement")
+}
+
+fn validate_utility_attestation_use_category(value: &str) -> ApiResult<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "utility attestations require use_category",
+        ));
+    }
+    if value.len() > 128 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "utility attestations use_category is too long",
+        ));
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':'))
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "utility attestations use_category contains unsupported characters",
+        ));
+    }
+    Ok(value.to_string())
 }
 
 fn credit_settlement_policy_version_allowed(state: &AppState, policy_version: &str) -> bool {
@@ -106441,6 +106456,68 @@ mod tests {
         assert!(
             read_all_credit_events(temp.path(), "tenant-a")
                 .expect("tenant-a credit reads")
+                .is_empty()
+        );
+
+        let unsafe_use_category_error = utility_attestation_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceUtilityAttestationRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 2.0,
+                use_category: "frontier lab training;raw=do-not-store".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                evidence_hash:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_string(),
+                reason: "unsafe utility attestation category must not record".to_string(),
+                external_ref: "frontier-lab:unsafe-utility-attestation-category".to_string(),
+                source_submission_ids: vec![submission_id],
+            }),
+        )
+        .await
+        .expect_err("unsafe utility attestation use_category is rejected");
+        assert_eq!(unsafe_use_category_error.0, StatusCode::BAD_REQUEST);
+        assert!(unsafe_use_category_error.1.0.error.contains("use_category"));
+        assert!(
+            read_all_utility_attestations(temp.path(), "tenant-a")
+                .expect("tenant-a attestations read after unsafe use category")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("tenant-a credit reads after unsafe use category")
+                .is_empty()
+        );
+
+        let unsafe_policy_error = utility_attestation_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceUtilityAttestationRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 2.0,
+                use_category: "frontier_lab_training".to_string(),
+                policy_version: "trace-credit-policy-v1;raw=do-not-store".to_string(),
+                evidence_hash:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_string(),
+                reason: "unsafe utility attestation policy must not record".to_string(),
+                external_ref: "frontier-lab:unsafe-utility-attestation-policy".to_string(),
+                source_submission_ids: vec![submission_id],
+            }),
+        )
+        .await
+        .expect_err("unsafe utility attestation policy_version is rejected");
+        assert_eq!(unsafe_policy_error.0, StatusCode::BAD_REQUEST);
+        assert!(unsafe_policy_error.1.0.error.contains("policy_version"));
+        assert!(
+            read_all_utility_attestations(temp.path(), "tenant-a")
+                .expect("tenant-a attestations read after unsafe policy")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("tenant-a credit reads after unsafe policy")
                 .is_empty()
         );
 

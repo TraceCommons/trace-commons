@@ -15,7 +15,8 @@ locally: the `TraceCorpusStore` trait, PostgreSQL backend, server migrations,
 RLS diagnostics, encrypted artifact-store provider code, contribution envelope
 DTOs, status DTOs, and deterministic redaction helpers live in this repo.
 It also owns the first server-side Trace Credits settlement surface: hash-only
-utility attestations, admin-triggered dry-run/final settlement batches, credit
+utility attestations with bounded category/policy identifiers,
+admin-triggered dry-run/final settlement batches, credit
 holds, contributor pending/settled/held projections, and a NEAR non-transferable
 credit receipt outbox. Utility workers can also run a bounded credit-cycle
 coordinator that sequences calibration, model promotion, prediction credit,
