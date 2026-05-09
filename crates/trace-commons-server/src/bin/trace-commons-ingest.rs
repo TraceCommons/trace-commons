@@ -10342,6 +10342,22 @@ async fn credit_settlement_approval_handler(
     Ok(Json(response))
 }
 
+async fn append_control_plane_read_audit(
+    state: &AppState,
+    tenant: &TenantAuth,
+    surface: &str,
+    item_count: usize,
+) -> anyhow::Result<()> {
+    append_audit_event_with_db_mirror(
+        state,
+        tenant,
+        TraceCommonsAuditEvent::read(tenant, surface, item_count),
+        StorageTraceAuditAction::Read,
+        trace_read_audit_metadata(surface, item_count),
+    )
+    .await
+}
+
 async fn credit_settlement_approvals_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -10351,16 +10367,11 @@ async fn credit_settlement_approvals_handler(
     let approvals = read_credit_settlement_issuer_approvals_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
-    append_audit_event_with_db_mirror(
+    append_control_plane_read_audit(
         state.as_ref(),
         &tenant,
-        TraceCommonsAuditEvent::read(
-            &tenant,
-            "credit_settlement_issuer_approvals",
-            approvals.len(),
-        ),
-        StorageTraceAuditAction::Read,
-        trace_read_audit_metadata("credit_settlement_issuer_approvals", approvals.len()),
+        "credit_settlement_issuer_approvals",
+        approvals.len(),
     )
     .await
     .map_err(internal_error)?;
@@ -12453,6 +12464,9 @@ async fn credit_settlements_handler(
     let batches = read_credit_settlement_batches_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    append_control_plane_read_audit(state.as_ref(), &tenant, "credit_settlements", batches.len())
+        .await
+        .map_err(internal_error)?;
     Ok(Json(batches))
 }
 
@@ -12492,16 +12506,11 @@ async fn credit_risk_summary_handler(
     require_admin(&tenant)?;
     let account_limit = validate_credit_risk_summary_account_limit(query.limit)?;
     let response = build_credit_risk_summary(state.as_ref(), &tenant, account_limit).await?;
-    append_audit_event_with_db_mirror(
+    append_control_plane_read_audit(
         state.as_ref(),
         &tenant,
-        TraceCommonsAuditEvent::read(
-            &tenant,
-            "credit_risk_summary",
-            response.returned_account_count,
-        ),
-        StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Empty,
+        "credit_risk_summary",
+        response.returned_account_count,
     )
     .await
     .map_err(internal_error)?;
@@ -12650,6 +12659,9 @@ async fn credit_holds_handler(
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
     let holds = read_credit_holds_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    append_control_plane_read_audit(state.as_ref(), &tenant, "credit_holds", holds.len())
         .await
         .map_err(internal_error)?;
     Ok(Json(holds))
@@ -12806,6 +12818,14 @@ async fn credit_attestations_handler(
     let attestations = read_utility_attestations_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &tenant,
+        "utility_attestations",
+        attestations.len(),
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(attestations))
 }
 
@@ -12816,6 +12836,9 @@ async fn near_credit_outbox_handler(
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
     let items = read_near_credit_outbox_items_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    append_control_plane_read_audit(state.as_ref(), &tenant, "near_credit_outbox", items.len())
         .await
         .map_err(internal_error)?;
     Ok(Json(items))
@@ -12830,6 +12853,14 @@ async fn benchmark_registry_outbox_handler(
     let items = read_benchmark_registry_outbox_items_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &tenant,
+        "benchmark_registry_outbox",
+        items.len(),
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(items))
 }
 
@@ -88927,6 +88958,58 @@ mod tests {
         let invalid_limit_text =
             String::from_utf8(invalid_limit_body.to_vec()).expect("invalid limit body is utf8");
         assert!(invalid_limit_text.contains("credit risk summary limit must be between 1 and 500"));
+    }
+
+    #[tokio::test]
+    async fn admin_credit_control_plane_reads_append_audit_breadcrumbs() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let Json(settlements) =
+            credit_settlements_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list settlement batches");
+        assert!(settlements.is_empty());
+        let Json(holds) = credit_holds_handler(State(state.clone()), auth_headers("admin-token-a"))
+            .await
+            .expect("admin can list credit holds");
+        assert!(holds.is_empty());
+        let Json(attestations) =
+            credit_attestations_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list utility attestations");
+        assert!(attestations.is_empty());
+        let Json(near_outbox) =
+            near_credit_outbox_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list NEAR credit outbox rows");
+        assert!(near_outbox.is_empty());
+        let Json(registry_outbox) =
+            benchmark_registry_outbox_handler(State(state), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list benchmark registry outbox rows");
+        assert!(registry_outbox.is_empty());
+
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        let read_surfaces = audit_events
+            .iter()
+            .filter(|event| event.kind == "read")
+            .map(|event| {
+                let reason = event.reason.as_deref();
+                (
+                    trace_audit_reason_value(reason, "surface").map(str::to_string),
+                    trace_audit_reason_u32(reason, "item_count"),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let expected_surfaces = BTreeSet::from([
+            (Some("credit_settlements".to_string()), Some(0)),
+            (Some("credit_holds".to_string()), Some(0)),
+            (Some("utility_attestations".to_string()), Some(0)),
+            (Some("near_credit_outbox".to_string()), Some(0)),
+            (Some("benchmark_registry_outbox".to_string()), Some(0)),
+        ]);
+        assert_eq!(read_surfaces, expected_surfaces);
     }
 
     #[tokio::test]
