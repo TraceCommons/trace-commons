@@ -29787,6 +29787,20 @@ async fn read_trace_operational_summary(
     let TraceCommonsMetadataView { records, derived } =
         read_reviewer_metadata_view(state, tenant.auth()).await?;
     let credit_events = read_operational_credit_events(state, tenant.auth(), &records).await?;
+    let credit_risk = build_credit_risk_summary(
+        state,
+        tenant.auth(),
+        TRACE_CREDIT_RISK_SUMMARY_DEFAULT_ACCOUNT_LIMIT,
+    )
+    .await
+    .map_err(|(status, Json(error))| {
+        anyhow::anyhow!(
+            "failed to build operational credit risk summary: status={}, error={}",
+            status,
+            error.error
+        )
+    })?;
+    let credit_risk = TraceOperationalCreditRiskSummary::from_response(&credit_risk);
     let db_summary = read_operational_db_summary(state, tenant.auth()).await?;
     let ranking =
         read_operational_ranking_summary(state, tenant.auth(), &credit_events, generated_at)
@@ -29807,6 +29821,7 @@ async fn read_trace_operational_summary(
             records,
             derived,
             credit_events,
+            credit_risk,
             db_summary,
             benchmark_artifacts,
             benchmark_registry_outbox,
@@ -35077,6 +35092,48 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         &[("tenant_storage_ref", &response.tenant_storage_ref)],
         response.delayed_credit.reversal_event_count,
     );
+    body.push_str("# HELP trace_commons_operational_credit_risk Credit settlement risk projection aggregates without account refs.\n");
+    body.push_str("# TYPE trace_commons_operational_credit_risk gauge\n");
+    for (state, value) in [
+        ("accounts", response.credit_risk.account_count),
+        (
+            "returned_accounts",
+            response.credit_risk.returned_account_count,
+        ),
+        ("truncated", usize::from(response.credit_risk.truncated)),
+        (
+            "pending_accounts",
+            response.credit_risk.pending_account_count,
+        ),
+        ("held_accounts", response.credit_risk.held_account_count),
+        (
+            "over_cap_accounts",
+            response.credit_risk.over_cap_account_count,
+        ),
+        (
+            "pending_credit_micros",
+            response.credit_risk.pending_credit_micros.max(0) as usize,
+        ),
+        (
+            "held_credit_micros",
+            response.credit_risk.held_credit_micros.max(0) as usize,
+        ),
+        (
+            "over_cap_credit_micros",
+            response.credit_risk.over_cap_credit_micros.max(0) as usize,
+        ),
+    ] {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "trace_commons_operational_credit_risk",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("state", state),
+            ],
+            value,
+        );
+    }
     body.push_str("# HELP trace_commons_operational_credit_settlement_readiness Credit settlement governance readiness states.\n");
     body.push_str("# TYPE trace_commons_operational_credit_settlement_readiness gauge\n");
     for (state, value) in [
@@ -35148,6 +35205,26 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
                 response
                     .promotion_gates
                     .credit_settlement_policy_allowlist_missing,
+            ),
+        ),
+        (
+            "held_account_count",
+            response
+                .promotion_gates
+                .credit_settlement_held_account_count,
+        ),
+        (
+            "over_cap_account_count",
+            response
+                .promotion_gates
+                .credit_settlement_over_cap_account_count,
+        ),
+        (
+            "risk_summary_truncated",
+            usize::from(
+                response
+                    .promotion_gates
+                    .credit_settlement_risk_summary_truncated,
             ),
         ),
         (
@@ -56824,6 +56901,7 @@ struct TraceOperationalSummaryResponse {
     ranking: TraceOperationalRankingSummary,
     near_credit: TraceOperationalNearCreditSummary,
     delayed_credit: TraceOperationalDelayedCreditSummary,
+    credit_risk: TraceOperationalCreditRiskSummary,
 }
 
 #[derive(Debug, Serialize)]
@@ -56841,6 +56919,7 @@ struct TraceOperationalSummaryInputs<'a> {
     records: Vec<TraceCommonsSubmissionRecord>,
     derived: Vec<TraceCommonsDerivedRecord>,
     credit_events: Vec<TraceCommonsCreditLedgerRecord>,
+    credit_risk: TraceOperationalCreditRiskSummary,
     db_summary: TraceOperationalDbSummary,
     benchmark_artifacts: Vec<TraceBenchmarkConversionArtifact>,
     benchmark_registry_outbox: Vec<TraceBenchmarkRegistryOutboxItem>,
@@ -56858,6 +56937,7 @@ impl TraceOperationalSummaryResponse {
             TraceOperationalReviewSlaSummary::from_records(&inputs.records, inputs.generated_at);
         let delayed_credit =
             TraceOperationalDelayedCreditSummary::from_events(&inputs.credit_events);
+        let credit_risk = inputs.credit_risk;
         let exports = TraceOperationalExportSummary::from_db_summary(
             &inputs.db_summary,
             inputs.generated_at,
@@ -56899,6 +56979,7 @@ impl TraceOperationalSummaryResponse {
                 ranking: &inputs.ranking,
                 near_credit: &near_credit,
                 delayed_credit: &delayed_credit,
+                credit_risk: &credit_risk,
                 revocation_propagation: &inputs.revocation_propagation,
             },
         );
@@ -56925,6 +57006,7 @@ impl TraceOperationalSummaryResponse {
             ranking: inputs.ranking,
             near_credit,
             delayed_credit,
+            credit_risk,
         }
     }
 }
@@ -57536,6 +57618,9 @@ struct TraceOperationalPromotionGateSummary {
     credit_settlement_account_cap_missing: bool,
     credit_settlement_policy_allowlist_configured: bool,
     credit_settlement_policy_allowlist_missing: bool,
+    credit_settlement_held_account_count: usize,
+    credit_settlement_over_cap_account_count: usize,
+    credit_settlement_risk_summary_truncated: bool,
     credit_settlement_near_contract_required: bool,
     credit_settlement_near_contract_configured: bool,
     credit_settlement_near_contract_missing: bool,
@@ -57570,6 +57655,7 @@ struct TraceOperationalPromotionGateInputs<'a> {
     ranking: &'a TraceOperationalRankingSummary,
     near_credit: &'a TraceOperationalNearCreditSummary,
     delayed_credit: &'a TraceOperationalDelayedCreditSummary,
+    credit_risk: &'a TraceOperationalCreditRiskSummary,
     revocation_propagation: &'a TraceOperationalRevocationPropagationSummary,
 }
 
@@ -57585,6 +57671,7 @@ impl TraceOperationalPromotionGateSummary {
         let ranking = inputs.ranking;
         let near_credit = inputs.near_credit;
         let delayed_credit = inputs.delayed_credit;
+        let credit_risk = inputs.credit_risk;
         let db_mirror_configured = state.db_mirror.is_some();
         let tenant_rollout_gate_counts = state.tenant_rollout_gates.status_counts();
         let tenant_rollout_gate_count = tenant_rollout_gate_counts.values().sum();
@@ -57686,6 +57773,9 @@ impl TraceOperationalPromotionGateSummary {
             !state.credit_settlement_allowed_policy_versions.is_empty();
         let credit_settlement_policy_allowlist_missing =
             delayed_credit.points_positive > 0.0 && !credit_settlement_policy_allowlist_configured;
+        let credit_settlement_held_account_count = credit_risk.held_account_count;
+        let credit_settlement_over_cap_account_count = credit_risk.over_cap_account_count;
+        let credit_settlement_risk_summary_truncated = credit_risk.truncated;
         let credit_settlement_near_contract_required =
             state.credit_settlement_require_near_contract;
         let credit_settlement_near_contract_configured =
@@ -57909,6 +57999,19 @@ impl TraceOperationalPromotionGateSummary {
         if credit_settlement_policy_allowlist_missing {
             blocking_gates.push("credit_settlement_policy_allowlist_missing".to_string());
         }
+        push_gap_count(
+            &mut blocking_gates,
+            "held_credit_accounts_present",
+            credit_settlement_held_account_count,
+        );
+        push_gap_count(
+            &mut blocking_gates,
+            "over_cap_credit_accounts_present",
+            credit_settlement_over_cap_account_count,
+        );
+        if credit_settlement_risk_summary_truncated {
+            blocking_gates.push("credit_risk_summary_truncated".to_string());
+        }
         if credit_settlement_near_contract_missing {
             blocking_gates.push("credit_settlement_near_contract_missing".to_string());
         }
@@ -58050,6 +58153,9 @@ impl TraceOperationalPromotionGateSummary {
             credit_settlement_account_cap_missing,
             credit_settlement_policy_allowlist_configured,
             credit_settlement_policy_allowlist_missing,
+            credit_settlement_held_account_count,
+            credit_settlement_over_cap_account_count,
+            credit_settlement_risk_summary_truncated,
             credit_settlement_near_contract_required,
             credit_settlement_near_contract_configured,
             credit_settlement_near_contract_missing,
@@ -58913,6 +59019,35 @@ impl TraceOperationalDelayedCreditSummary {
             );
         }
         summary
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
+struct TraceOperationalCreditRiskSummary {
+    account_count: usize,
+    returned_account_count: usize,
+    truncated: bool,
+    pending_account_count: usize,
+    held_account_count: usize,
+    over_cap_account_count: usize,
+    pending_credit_micros: i64,
+    held_credit_micros: i64,
+    over_cap_credit_micros: i64,
+}
+
+impl TraceOperationalCreditRiskSummary {
+    fn from_response(response: &TraceCreditRiskSummaryResponse) -> Self {
+        Self {
+            account_count: response.account_count,
+            returned_account_count: response.returned_account_count,
+            truncated: response.truncated,
+            pending_account_count: response.pending_account_count,
+            held_account_count: response.held_account_count,
+            over_cap_account_count: response.over_cap_account_count,
+            pending_credit_micros: response.pending_credit_micros,
+            held_credit_micros: response.held_credit_micros,
+            over_cap_credit_micros: response.over_cap_credit_micros,
+        }
     }
 }
 
@@ -89481,6 +89616,214 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn operational_summary_blocks_credit_settlement_with_held_or_over_cap_accounts() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_max_micros_per_account = Some(1_000_000);
+
+        let mut first = sample_envelope().await;
+        make_metadata_only_low_risk(&mut first);
+        first.consent.scopes = vec![ConsentScope::ModelTraining];
+        first.trace_card.consent_scope = ConsentScope::ModelTraining;
+        first.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let first_submission_id = first.submission_id;
+        let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
+            .await
+            .expect("first submission succeeds");
+        let Json(first_event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(first_submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.75,
+                reason: Some("frontier lab over cap operational probe".to_string()),
+                external_ref: Some("lab-attestation:operational-risk-over-cap".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append high utility credit");
+
+        let mut second = sample_envelope().await;
+        make_metadata_only_low_risk(&mut second);
+        second.consent.scopes = vec![ConsentScope::ModelTraining];
+        second.trace_card.consent_scope = ConsentScope::ModelTraining;
+        second.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let second_submission_id = second.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a-2"),
+            Json(second),
+        )
+        .await
+        .expect("second submission succeeds");
+        let Json(second_event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(second_submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 0.5,
+                reason: Some("frontier lab held operational probe".to_string()),
+                external_ref: Some("lab-attestation:operational-risk-held".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append held utility credit");
+        let Json(_) = credit_hold_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditHoldRequest {
+                credit_account_ref: second_event.auth_principal_ref.clone(),
+                reason: StorageTraceCreditHoldReason::AttestationDispute,
+                reason_detail: "do not expose held-account operational reason".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can place held-account review hold");
+
+        let summary_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-summary")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("summary request builds"),
+            )
+            .await
+            .expect("summary response");
+        assert_eq!(summary_response.status(), StatusCode::OK);
+        let summary_body = axum::body::to_bytes(summary_response.into_body(), 128 * 1024)
+            .await
+            .expect("summary body reads");
+        let summary: serde_json::Value =
+            serde_json::from_slice(&summary_body).expect("summary json parses");
+        assert_eq!(
+            summary["credit_risk"]["account_count"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            summary["credit_risk"]["returned_account_count"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            summary["credit_risk"]["truncated"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            summary["credit_risk"]["pending_account_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            summary["credit_risk"]["held_account_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            summary["credit_risk"]["over_cap_account_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            summary["credit_risk"]["pending_credit_micros"],
+            serde_json::json!(1_750_000)
+        );
+        assert_eq!(
+            summary["credit_risk"]["held_credit_micros"],
+            serde_json::json!(500_000)
+        );
+        assert_eq!(
+            summary["credit_risk"]["over_cap_credit_micros"],
+            serde_json::json!(1_750_000)
+        );
+        assert_eq!(
+            summary["promotion_gates"]["credit_settlement_held_account_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            summary["promotion_gates"]["credit_settlement_over_cap_account_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            summary["promotion_gates"]["credit_settlement_risk_summary_truncated"],
+            serde_json::json!(false)
+        );
+        let blocking_gates = summary["promotion_gates"]["blocking_gates"]
+            .as_array()
+            .expect("blocking gates are an array");
+        assert!(blocking_gates.contains(&serde_json::json!("held_credit_accounts_present=1")));
+        assert!(blocking_gates.contains(&serde_json::json!("over_cap_credit_accounts_present=1")));
+        let summary_text = std::str::from_utf8(&summary_body).expect("summary body is utf8");
+        assert!(!summary_text.contains("admin-token-a"));
+        assert!(!summary_text.contains("token-a"));
+        assert!(!summary_text.contains("token-a-2"));
+        assert!(!summary_text.contains(&first_event.event_id.to_string()));
+        assert!(!summary_text.contains(&second_event.event_id.to_string()));
+        assert!(!summary_text.contains("frontier lab over cap operational probe"));
+        assert!(!summary_text.contains("frontier lab held operational probe"));
+        assert!(!summary_text.contains("do not expose held-account operational reason"));
+        assert!(!summary_text.contains(&first_event.auth_principal_ref));
+        assert!(!summary_text.contains(&second_event.auth_principal_ref));
+
+        let metrics_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-metrics")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("metrics request builds"),
+            )
+            .await
+            .expect("metrics response");
+        assert_eq!(metrics_response.status(), StatusCode::OK);
+        let metrics_body = axum::body::to_bytes(metrics_response.into_body(), 128 * 1024)
+            .await
+            .expect("metrics body reads");
+        let metrics_text = std::str::from_utf8(&metrics_body).expect("metrics body is utf8");
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(metrics_text.contains(&format!(
+            "trace_commons_operational_credit_risk{{tenant_storage_ref=\"{tenant_ref}\",state=\"held_accounts\"}} 1"
+        )));
+        assert!(metrics_text.contains(&format!(
+            "trace_commons_operational_credit_risk{{tenant_storage_ref=\"{tenant_ref}\",state=\"over_cap_accounts\"}} 1"
+        )));
+        assert!(metrics_text.contains(&format!(
+            "trace_commons_operational_credit_risk{{tenant_storage_ref=\"{tenant_ref}\",state=\"pending_credit_micros\"}} 1750000"
+        )));
+        assert!(metrics_text.contains(&format!(
+            "trace_commons_operational_credit_risk{{tenant_storage_ref=\"{tenant_ref}\",state=\"held_credit_micros\"}} 500000"
+        )));
+        assert!(metrics_text.contains(&format!(
+            "trace_commons_operational_credit_risk{{tenant_storage_ref=\"{tenant_ref}\",state=\"over_cap_credit_micros\"}} 1750000"
+        )));
+        assert!(metrics_text.contains(&format!(
+            "trace_commons_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"held_account_count\"}} 1"
+        )));
+        assert!(metrics_text.contains(&format!(
+            "trace_commons_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"over_cap_account_count\"}} 1"
+        )));
+        assert!(metrics_text.contains(&format!(
+            "trace_commons_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"risk_summary_truncated\"}} 0"
+        )));
+        assert!(metrics_text.contains(&format!(
+            "trace_commons_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"held_credit_accounts_present\"}} 1"
+        )));
+        assert!(metrics_text.contains(&format!(
+            "trace_commons_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"over_cap_credit_accounts_present\"}} 1"
+        )));
+        assert!(!metrics_text.contains("frontier lab over cap operational probe"));
+        assert!(!metrics_text.contains("frontier lab held operational probe"));
+        assert!(!metrics_text.contains("do not expose held-account operational reason"));
+        assert!(!metrics_text.contains("token-a"));
+        assert!(!metrics_text.contains("token-a-2"));
+        assert!(!metrics_text.contains(&first_event.auth_principal_ref));
+        assert!(!metrics_text.contains(&second_event.auth_principal_ref));
+    }
+
+    #[tokio::test]
     async fn operational_summary_blocks_credit_settlement_without_near_adapter_auth() {
         use axum::body::Body;
         use tower::ServiceExt;
@@ -110298,6 +110641,7 @@ mod tests {
             records: Vec::new(),
             derived: Vec::new(),
             credit_events: Vec::new(),
+            credit_risk: TraceOperationalCreditRiskSummary::default(),
             db_summary: TraceOperationalDbSummary {
                 db_available: true,
                 trace_corpus_rls: Some(production_ready_rls_diagnostics_for_tests()),
@@ -110415,6 +110759,7 @@ mod tests {
             records: Vec::new(),
             derived,
             credit_events: Vec::new(),
+            credit_risk: TraceOperationalCreditRiskSummary::default(),
             db_summary: TraceOperationalDbSummary {
                 db_available: true,
                 trace_corpus_rls: Some(production_ready_rls_diagnostics_for_tests()),
@@ -111679,6 +112024,7 @@ mod tests {
             },
             near_credit: TraceOperationalNearCreditSummary::default(),
             delayed_credit: TraceOperationalDelayedCreditSummary::default(),
+            credit_risk: TraceOperationalCreditRiskSummary::default(),
         };
 
         let (metrics, _) = trace_operational_metrics_body(&response);
@@ -111755,6 +112101,7 @@ mod tests {
                 submitted_without_confirmer_count: 1,
             },
             delayed_credit: TraceOperationalDelayedCreditSummary::default(),
+            credit_risk: TraceOperationalCreditRiskSummary::default(),
         };
 
         let (metrics, _) = trace_operational_metrics_body(&response);
@@ -112574,6 +112921,7 @@ mod tests {
             ranking: TraceOperationalRankingSummary::default(),
             near_credit: TraceOperationalNearCreditSummary::default(),
             delayed_credit: TraceOperationalDelayedCreditSummary::default(),
+            credit_risk: TraceOperationalCreditRiskSummary::default(),
         };
 
         assert!(operational_summary_promotion_gate_log_fields(&response).is_none());
@@ -112608,6 +112956,7 @@ mod tests {
             ranking: TraceOperationalRankingSummary::default(),
             near_credit: TraceOperationalNearCreditSummary::default(),
             delayed_credit: TraceOperationalDelayedCreditSummary::default(),
+            credit_risk: TraceOperationalCreditRiskSummary::default(),
         };
 
         let fields = operational_summary_promotion_gate_log_fields(&response)
@@ -112813,6 +113162,7 @@ mod tests {
             ranking: TraceOperationalRankingSummary::default(),
             near_credit: TraceOperationalNearCreditSummary::default(),
             delayed_credit: TraceOperationalDelayedCreditSummary::default(),
+            credit_risk: TraceOperationalCreditRiskSummary::default(),
         };
 
         let fields = operational_summary_promotion_gate_metric_fields(&response);
@@ -112851,6 +113201,7 @@ mod tests {
             records: Vec::new(),
             derived: Vec::new(),
             credit_events: Vec::new(),
+            credit_risk: TraceOperationalCreditRiskSummary::default(),
             db_summary: TraceOperationalDbSummary {
                 db_available: true,
                 trace_corpus_rls: Some(unsafe_rls),
@@ -112925,6 +113276,7 @@ mod tests {
             records: Vec::new(),
             derived: Vec::new(),
             credit_events: Vec::new(),
+            credit_risk: TraceOperationalCreditRiskSummary::default(),
             db_summary: TraceOperationalDbSummary {
                 db_available: true,
                 trace_corpus_rls: Some(production_ready_rls_diagnostics_for_tests()),

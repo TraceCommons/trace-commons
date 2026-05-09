@@ -458,7 +458,12 @@ checked/completed/failed/skipped/pending counts, plus one finite per-check
 rollout-smoke state gauge for dashboarding missing, failed, stale, and passed
 rehearsal evidence. It also exports safe ranking model, backtest,
 label-adjudication, blocked ranking-credit, calibration manifest-conflict, and
-reason-code gauges for dashboards. Operational summary also projects analytics
+reason-code gauges for dashboards. The same surfaces now expose a safe
+credit-risk projection with account counts, returned-account/truncation state,
+pending/held/over-cap account counts, and aggregate credit micros only; held
+accounts, over-cap accounts, and truncated credit-risk pages become explicit
+promotion blockers without leaking account refs or hold reasons. Operational
+summary also projects analytics
 broad-release min-cell and count-noise readiness, safe vector-infrastructure
 readiness booleans alongside vector coverage, ranking backtest pass/fail
 counts, label-adjudication issue counts, and reason-code totals into the
@@ -574,7 +579,9 @@ a pilot rehearsal, can require authenticated NEAR adapters through either
 by default unless `require_account_cap` is explicitly disabled, and requires a
 canonical lowercase `sha256:<64 hex>` `issuer_approval_evidence_hash` when
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` or the request
-sets `require_issuer_approval: true`. Approval evidence is source-list bound:
+sets `require_issuer_approval: true`. Held accounts, accounts over the cap, and
+truncated credit-risk summaries are surfaced as aggregate blocker codes rather
+than account refs. Approval evidence is source-list bound:
 operators first run the drill or settlement dry-run to obtain the exact
 `source_list_hash`, then record a hash-only approval with
 `POST /v1/admin/credit-settlement-approvals` for that `policy_version`,
