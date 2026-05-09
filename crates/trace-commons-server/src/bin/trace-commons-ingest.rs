@@ -51006,12 +51006,12 @@ fn validate_rollout_smoke_check_name(value: &str) -> ApiResult<String> {
 
 fn validate_rollout_smoke_evidence_hash(value: &str) -> ApiResult<String> {
     let value = value.trim();
-    if value.starts_with("sha256:") {
+    if is_canonical_sha256_prefixed_hash(value) {
         Ok(value.to_string())
     } else {
         Err(api_error(
             StatusCode::BAD_REQUEST,
-            "rollout smoke evidence_hash must be a sha256-prefixed hash",
+            "rollout smoke evidence_hash must be a canonical sha256-prefixed hex digest",
         ))
     }
 }
@@ -51091,7 +51091,7 @@ fn trace_rollout_smoke_evidence_from_audit_event(
             .context("rollout smoke evidence audit event missing evidence_hash")?
             .to_string();
         anyhow::ensure!(
-            evidence_hash.starts_with("sha256:"),
+            is_canonical_sha256_prefixed_hash(&evidence_hash),
             "rollout smoke evidence audit event has unsupported evidence_hash"
         );
         Ok(TraceRolloutSmokeEvidenceResponse {
@@ -59258,6 +59258,46 @@ mod tests {
     }
 
     #[test]
+    fn rollout_smoke_audit_projection_rejects_noncanonical_hashes() {
+        let auth = TenantAuth {
+            tenant_id: "tenant-a".to_string(),
+            role: TokenRole::Admin,
+            principal_ref: principal_storage_ref("admin-token-a"),
+            expires_at: None,
+            auth_method: TraceAuthMethod::StaticToken,
+            signed_claim_issuer: None,
+            signed_claim_audiences: BTreeSet::new(),
+            signed_claim_subject: None,
+            allowed_consent_scopes: BTreeSet::new(),
+            allowed_uses: BTreeSet::new(),
+        };
+        let evidence = TraceRolloutSmokeEvidenceResponse::from_request(
+            &auth,
+            TraceRolloutSmokeEvidenceRequest {
+                check_name: "submit_status".to_string(),
+                status: TraceRolloutSmokeEvidenceStatus::Passed,
+                evidence_hash: sha256_prefixed("db smoke evidence projection"),
+                evidence_ref: None,
+            },
+        )
+        .expect("evidence request is valid");
+        let mut audit_event = TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence);
+        audit_event.reason = audit_event.reason.map(|reason| {
+            reason.replace(
+                &format!("evidence_hash={}", evidence.evidence_hash),
+                "evidence_hash=sha256:not-canonical",
+            )
+        });
+
+        let parsed = trace_rollout_smoke_evidence_from_audit_event(&audit_event)
+            .expect("audit event is rollout smoke evidence");
+        match parsed {
+            Ok(_) => panic!("noncanonical rollout evidence hash should not parse"),
+            Err(error) => assert!(error.to_string().contains("unsupported evidence_hash")),
+        }
+    }
+
+    #[test]
     fn db_audit_projection_preserves_credit_settlement_issuer_approval_kind() {
         let auth = TenantAuth {
             tenant_id: "tenant-a".to_string(),
@@ -65108,6 +65148,38 @@ mod tests {
             .await
             .expect("contributor response");
         assert_eq!(contributor_response.status(), StatusCode::FORBIDDEN);
+
+        let malformed_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/rollout-smoke/evidence")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "check_name": "submit_status",
+                            "status": "passed",
+                            "evidence_hash": "sha256:not-canonical",
+                            "evidence_ref": "runbook://trace-commons/smoke/malformed"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("malformed response");
+        assert_eq!(malformed_response.status(), StatusCode::BAD_REQUEST);
+        let malformed_body = axum::body::to_bytes(malformed_response.into_body(), 8192)
+            .await
+            .expect("malformed body reads");
+        let malformed_text = std::str::from_utf8(&malformed_body).expect("body is utf8");
+        assert!(malformed_text.contains("canonical sha256"));
+        assert!(
+            read_all_audit_events(temp.path(), "tenant-a")
+                .expect("audit reads")
+                .is_empty()
+        );
 
         let admin_response = app(state.clone())
             .oneshot(

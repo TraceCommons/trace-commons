@@ -446,8 +446,9 @@ without stitching together operational-summary and evidence-list reads.
 Operators inspect and capture evidence history with admin-only `GET` and `POST`
 `/v1/admin/rollout-smoke/evidence`; `GET` can collapse history to the latest
 record per check with `latest_only=true`, and writes name one required check, a
-`passed` or `failed` status, a sha256-prefixed evidence hash, and an optional
-external reference that is stored only as a hash in the tenant audit chain.
+`passed` or `failed` status, a canonical `sha256:<64 hex>` evidence hash, and
+an optional external reference that is stored only as a hash in the tenant audit
+chain.
 `POST /v1/admin/canary-read-drill` turns an existing canary submission into
 hash-only evidence for `submit_status`, `tenant_canary_isolation`,
 `contributor_credit`, `reviewer_metadata`, `replay_export_selection`, and
