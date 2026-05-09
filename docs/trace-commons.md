@@ -98,7 +98,8 @@ credit workers can append idempotent delayed utility credit through their
 dedicated route for accepted traces only and can run the bounded credit-cycle
 coordinator for one model/policy/target, or the scheduler route that selects the
 next eligible candidate/active model for one target/policy and skips existing
-live claims, without access to reviewer bonus, abuse penalty, review queues,
+live claims; utility worker routes reject ordinary reviewer tokens before source
+or settlement checks and do not grant access to reviewer bonus, abuse penalty, review queues,
 audit logs, or tenant policy administration.
 As an alternative to configured static bearer tokens, internal deployments can
 set `TRACE_COMMONS_SIGNED_TOKEN_SECRET` to accept HS256 signed tenant claims.
@@ -1937,7 +1938,9 @@ If rollout-smoke readiness is required, live scheduler runs also skip candidates
 with `credit_settlement_rollout_smoke_not_ready` until every required smoke
 check has fresh passing hash-only evidence.
 
-Trusted offline utility workers use a narrower bulk route for accepted traces:
+Trusted offline utility workers use a narrower bulk route for accepted traces.
+The worker route accepts admin or utility-worker credentials and rejects ordinary
+reviewer tokens before source lookup or credit append checks:
 
 ```http
 POST /v1/workers/utility-credit
