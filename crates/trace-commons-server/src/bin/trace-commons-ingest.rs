@@ -20209,7 +20209,9 @@ async fn append_ranking_prediction_credit_for_record(
     .await?;
     let calibration_thresholds =
         effective_ranking_calibration_thresholds(state, Some(&calibration_run));
-    if state.ranking_max_labeler_issue_rate_micros.is_some() {
+    if state.ranking_max_labeler_issue_rate_micros.is_some()
+        || state.ranking_min_labeler_reliability_label_count.is_some()
+    {
         let predictions = read_ranking_predictions_for_admin(state, tenant)
             .await
             .map_err(internal_error)?;
@@ -93540,6 +93542,32 @@ mod tests {
         .await
         .expect_err("support floor blocks direct prediction credit");
         assert_eq!(credit_error.0, StatusCode::CONFLICT);
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit reads")
+                .is_empty()
+        );
+
+        let Json(run) = ranking_prediction_credit_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionCreditRunRequest {
+                dry_run: false,
+                allow_at_risk_models: true,
+                reason: "risk override must not bypass cold-start calibration labelers".to_string(),
+                limit: Some(10),
+                model_version: Some(candidate.model_version.clone()),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                policy_version: Some(candidate.policy_version.clone()),
+            }),
+        )
+        .await
+        .expect("labeler support gate skips ineligible prediction");
+        assert!(run.allow_at_risk_models);
+        assert_eq!(run.checked_count, 1);
+        assert_eq!(run.credited_count, 0);
+        assert_eq!(run.skipped_ineligible_count, 1);
+        assert_eq!(run.pending_after_count, 1);
         assert!(
             read_all_credit_events(temp.path(), "tenant-a")
                 .expect("credit reads")
