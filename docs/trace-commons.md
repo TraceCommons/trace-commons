@@ -994,7 +994,7 @@ The service exposes:
 - `GET|POST /v1/workers/ranker/training-candidates`
 - `GET|POST /v1/workers/ranker/training-pairs`
 - `POST /v1/workers/utility-credit`
-- `POST /v1/workers/utility-attestations` with a canonical lowercase `sha256:<64 hex>` evidence hash
+- `POST /v1/workers/utility-attestations` with bounded safe use-category/policy-version identifiers and a canonical lowercase `sha256:<64 hex>` evidence hash
 - `GET /v1/admin/credit-attestations`
 - `GET|POST /v1/admin/credit-holds`
 - `POST /v1/admin/credit-holds/{hold_id}/release`
