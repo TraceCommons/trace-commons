@@ -319,14 +319,7 @@ impl FileRemoteTraceArtifactProvider {
         object_ref: &TraceArtifactObjectRef,
     ) -> anyhow::Result<FileRemoteTraceArtifactRecord> {
         let path = self.object_path(object_ref)?;
-        let body = std::fs::read_to_string(&path).with_context(|| {
-            format!(
-                "failed to read remote trace artifact object {}",
-                path.display()
-            )
-        })?;
-        let record: FileRemoteTraceArtifactRecord =
-            serde_json::from_str(&body).context("failed to parse remote trace artifact record")?;
+        let record = Self::read_record_at_path(&path)?;
         anyhow::ensure!(
             record.object_ref == *object_ref,
             "remote trace artifact object ref mismatch"
@@ -334,8 +327,25 @@ impl FileRemoteTraceArtifactProvider {
         Ok(record)
     }
 
+    fn read_record_at_path(path: &Path) -> anyhow::Result<FileRemoteTraceArtifactRecord> {
+        let body = std::fs::read_to_string(path).with_context(|| {
+            format!(
+                "failed to read remote trace artifact object {}",
+                path.display()
+            )
+        })?;
+        serde_json::from_str(&body).context("failed to parse remote trace artifact record")
+    }
+
     fn write_record(&self, record: &FileRemoteTraceArtifactRecord) -> anyhow::Result<()> {
         let path = self.object_path(&record.object_ref)?;
+        if path.exists() {
+            let existing = Self::read_record_at_path(&path)?;
+            anyhow::ensure!(
+                existing.object_ref == record.object_ref,
+                "remote trace artifact object key already exists for a different object ref"
+            );
+        }
         write_json_file(&path, record)
     }
 
@@ -1733,6 +1743,50 @@ mod tests {
             .read_scoped_json(&scope, &receipt.object_ref)
             .expect("failed tamper write must not overwrite original artifact");
         assert_eq!(round_trip, payload);
+    }
+
+    #[test]
+    fn file_remote_provider_rejects_same_key_different_object_ref_overwrite() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let key = crate::secrets::keychain::generate_master_key_hex();
+        let config = TraceArtifactProviderConfig::service_owned_remote("trace-commons-prod")
+            .expect("remote provider config");
+        let store = ServiceOwnedTraceArtifactStore::new(
+            config,
+            SecretsCrypto::new(SecretString::from(key)).expect("test crypto"),
+            FileRemoteTraceArtifactProvider::new(temp.path()),
+        );
+        let scope = TraceArtifactScope::new("tenant:sha256:alpha", "submission-alpha");
+        let object_id = "submitted-envelope";
+        let first_payload = json!({"stored": "first"});
+        let second_payload = json!({"stored": "second"});
+
+        let first_receipt = store
+            .put_scoped_json(
+                &scope,
+                TraceArtifactKind::ContributionEnvelope,
+                object_id,
+                &first_payload,
+            )
+            .expect("first remote artifact writes");
+        let second_error = store
+            .put_scoped_json(
+                &scope,
+                TraceArtifactKind::ContributionEnvelope,
+                object_id,
+                &second_payload,
+            )
+            .expect_err("same object key with a different object ref must fail closed");
+        assert!(
+            second_error
+                .to_string()
+                .contains("already exists for a different object ref")
+        );
+
+        let round_trip: serde_json::Value = store
+            .read_scoped_json(&scope, &first_receipt.object_ref)
+            .expect("failed overwrite must keep first artifact readable");
+        assert_eq!(round_trip, first_payload);
     }
 
     #[test]
