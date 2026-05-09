@@ -8792,6 +8792,7 @@ async fn submit_trace_handler(
         purged_at: None,
         object_key: stored_envelope.object_key,
         artifact_receipt: stored_envelope.artifact_receipt,
+        artifact_object_store: stored_envelope.artifact_object_store,
     };
     if state.require_db_mirror_writes {
         let mirror_result =
@@ -25017,6 +25018,7 @@ async fn run_process_evaluation_job(
     .map_err(internal_error)?;
     record.object_key = stored.object_key;
     record.artifact_receipt = stored.artifact_receipt;
+    record.artifact_object_store = stored.artifact_object_store;
     if submission_metadata_path(&state.root, &tenant.tenant_id, record.submission_id).exists() {
         write_submission_record(&state.root, &record).map_err(internal_error)?;
     }
@@ -26155,6 +26157,7 @@ async fn apply_review_decision(
             .map_err(internal_error)?;
             record.object_key = stored.object_key;
             record.artifact_receipt = stored.artifact_receipt;
+            record.artifact_object_store = stored.artifact_object_store;
         }
         TraceReviewDecision::Reject => {
             record.status = TraceCorpusStatus::Rejected;
@@ -26175,6 +26178,7 @@ async fn apply_review_decision(
             .map_err(internal_error)?;
             record.object_key = stored.object_key;
             record.artifact_receipt = stored.artifact_receipt;
+            record.artifact_object_store = stored.artifact_object_store;
         }
     }
     clear_review_lease_metadata(&mut record);
@@ -39259,6 +39263,7 @@ fn trace_commons_record_from_storage_submission(
             purged_at: record.purged_at,
             object_key,
             artifact_receipt: None,
+            artifact_object_store: None,
         })
     })())
 }
@@ -39962,6 +39967,7 @@ fn delayed_credit_applies_to_record(record: &TraceCommonsSubmissionRecord) -> bo
 struct StoredTraceEnvelope {
     object_key: String,
     artifact_receipt: Option<EncryptedTraceArtifactReceipt>,
+    artifact_object_store: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -40057,8 +40063,10 @@ fn store_envelope(
         let path = state.root.join(&object_key);
         write_json_file(&path, envelope, "trace contribution envelope")?;
     }
-    let artifact_receipt = if let Some(store) = state.artifact_store.as_ref() {
-        Some(store.put_json(
+    let (artifact_receipt, artifact_object_store) = if let Some(store) =
+        state.artifact_store.as_ref()
+    {
+        let receipt = store.put_json(
             &tenant_storage_ref(tenant_id),
             TraceArtifactKind::ContributionEnvelope,
             &trace_envelope_artifact_object_id(
@@ -40067,17 +40075,19 @@ fn store_envelope(
                 artifact_snapshot_label,
             ),
             envelope,
-        )?)
+        )?;
+        (Some(receipt), Some(store.object_store_name().to_string()))
     } else {
         anyhow::ensure!(
             !object_primary_submit_review,
             "{TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW} requires a configured encrypted object store"
         );
-        None
+        (None, None)
     };
     Ok(StoredTraceEnvelope {
         object_key,
         artifact_receipt,
+        artifact_object_store,
     })
 }
 
@@ -40120,11 +40130,7 @@ fn trace_object_ref_write_from_record(
     let (object_store, object_key, content_sha256) =
         if let Some(receipt) = record.artifact_receipt.as_ref() {
             (
-                state
-                    .artifact_store
-                    .as_ref()
-                    .map(|store| store.object_store_name().to_string())
-                    .unwrap_or_else(|| TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE.to_string()),
+                trace_record_artifact_object_store_for_ref(state, record, receipt),
                 receipt.object_key.clone(),
                 format!("sha256:{}", receipt.ciphertext_sha256),
             )
@@ -40151,6 +40157,41 @@ fn trace_object_ref_write_from_record(
         },
         content_sha256,
     ))
+}
+
+fn trace_record_explicit_artifact_object_store<'a>(
+    record: &'a TraceCommonsSubmissionRecord,
+    receipt: &EncryptedTraceArtifactReceipt,
+) -> Option<&'a str> {
+    record.artifact_object_store.as_deref().or_else(|| {
+        receipt
+            .object_key
+            .starts_with("v1/tenants/")
+            .then_some(TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE)
+    })
+}
+
+fn trace_record_artifact_object_store_for_ref(
+    state: &AppState,
+    record: &TraceCommonsSubmissionRecord,
+    receipt: &EncryptedTraceArtifactReceipt,
+) -> String {
+    if let Some(object_store) = trace_record_explicit_artifact_object_store(record, receipt) {
+        return object_store.to_string();
+    }
+    state
+        .artifact_store
+        .as_ref()
+        .map(|store| store.object_store_name())
+        .filter(|object_store| {
+            matches!(
+                *object_store,
+                TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE
+                    | TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+            )
+        })
+        .unwrap_or(TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE)
+        .to_string()
 }
 
 fn envelope_plaintext_hash(envelope: &TraceContributionEnvelope) -> anyhow::Result<String> {
@@ -42815,7 +42856,11 @@ fn read_envelope_by_record(
     let envelope = if let (Some(store), Some(receipt)) = (
         state.artifact_store.as_ref(),
         record.artifact_receipt.as_ref(),
-    ) {
+    ) && trace_record_artifact_receipt_matches_store(
+        record,
+        receipt,
+        store.object_store_name(),
+    )? {
         store.get_json(&record.tenant_storage_ref, receipt)?
     } else {
         let path = state.root.join(&record.object_key);
@@ -42826,6 +42871,25 @@ fn read_envelope_by_record(
     };
     ensure_envelope_tenant_scope(&envelope, &record.tenant_id)?;
     Ok(envelope)
+}
+
+fn trace_record_artifact_receipt_matches_store(
+    record: &TraceCommonsSubmissionRecord,
+    receipt: &EncryptedTraceArtifactReceipt,
+    configured_object_store: &str,
+) -> anyhow::Result<bool> {
+    if let Some(object_store) = trace_record_explicit_artifact_object_store(record, receipt) {
+        anyhow::ensure!(
+            object_store == configured_object_store,
+            "configured trace artifact store does not match submission artifact store"
+        );
+        return Ok(true);
+    }
+    Ok(matches!(
+        configured_object_store,
+        TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE
+            | TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+    ))
 }
 
 fn ensure_envelope_tenant_scope(
@@ -43089,6 +43153,10 @@ fn read_envelope_from_object_ref(
                 .artifact_store
                 .as_ref()
                 .context("encrypted trace artifact store is not configured")?;
+            anyhow::ensure!(
+                store.object_store_name() == object_ref.object_store,
+                "configured trace envelope store does not match object ref store"
+            );
             store.get_json_by_object_key(
                 &tenant_storage_ref(tenant_id),
                 TraceArtifactKind::ContributionEnvelope,
@@ -50332,6 +50400,8 @@ struct TraceCommonsSubmissionRecord {
     object_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     artifact_receipt: Option<EncryptedTraceArtifactReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    artifact_object_store: Option<String>,
 }
 
 impl TraceCommonsSubmissionRecord {
@@ -62758,6 +62828,10 @@ mod tests {
             .artifact_receipt
             .as_ref()
             .expect("encrypted artifact receipt should be persisted");
+        assert_eq!(
+            record.artifact_object_store.as_deref(),
+            Some(TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE)
+        );
         let encrypted = artifact_store
             .read_artifact(&record.tenant_storage_ref, receipt)
             .expect("encrypted artifact reads");
@@ -62767,6 +62841,178 @@ mod tests {
         let round_trip =
             read_envelope_by_record(state.as_ref(), &record).expect("encrypted envelope reads");
         assert_eq!(round_trip.submission_id, submission_id);
+    }
+
+    #[tokio::test]
+    async fn backfill_object_ref_preserves_record_artifact_store_across_store_cutover() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let artifact_store = test_artifact_store(artifact_temp.path());
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            None,
+            Some(artifact_store),
+            false,
+            false,
+            false,
+            false,
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("legacy encrypted submission succeeds");
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let stored_envelope =
+            read_envelope_by_record(state.as_ref(), &record).expect("legacy artifact reads");
+
+        let remote_temp = tempfile::tempdir().expect("remote artifact temp dir");
+        let key = tracedao_server::secrets::keychain::generate_master_key_hex();
+        let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("file_system"),
+            Some(remote_temp.path().to_str().expect("utf8 temp path")),
+            Some("test-kms-key-ref"),
+            Some("test-credential-ref"),
+        )
+        .expect("filesystem remote config parses");
+        let remote_store =
+            ConfiguredTraceArtifactStore::remote_service(remote_config, SecretString::from(key))
+                .expect("filesystem remote service store builds");
+        let remote_state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            None,
+            Some(remote_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+
+        let (explicit_object_ref, _) = trace_object_ref_write_from_record(
+            remote_state.as_ref(),
+            "backfill-submitted-envelope",
+            StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            &record,
+            &stored_envelope,
+        )
+        .expect("object ref builds from explicit artifact store");
+        assert_eq!(
+            explicit_object_ref.object_store,
+            TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE
+        );
+
+        let mut legacy_record_without_alias = record.clone();
+        legacy_record_without_alias.artifact_object_store = None;
+        let (legacy_object_ref, _) = trace_object_ref_write_from_record(
+            remote_state.as_ref(),
+            "backfill-submitted-envelope-without-alias",
+            StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            &legacy_record_without_alias,
+            &stored_envelope,
+        )
+        .expect("legacy object ref builds without fabricating remote store");
+        assert_eq!(
+            legacy_object_ref.object_store,
+            TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE
+        );
+
+        let mut remote_shaped_record = legacy_record_without_alias;
+        remote_shaped_record
+            .artifact_receipt
+            .as_mut()
+            .expect("artifact receipt exists")
+            .object_key =
+            "v1/tenants/test/submissions/test/contribution_envelope/test.json".to_string();
+        let (remote_object_ref, _) = trace_object_ref_write_from_record(
+            remote_state.as_ref(),
+            "backfill-remote-submitted-envelope",
+            StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            &remote_shaped_record,
+            &stored_envelope,
+        )
+        .expect("remote-shaped object ref builds");
+        assert_eq!(
+            remote_object_ref.object_store,
+            TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE
+        );
+    }
+
+    #[tokio::test]
+    async fn encrypted_object_ref_reads_require_matching_configured_store_alias() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let artifact_store = test_artifact_store(artifact_temp.path());
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            None,
+            Some(artifact_store),
+            false,
+            false,
+            false,
+            false,
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("encrypted submission succeeds");
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let stored_envelope =
+            read_envelope_by_record(state.as_ref(), &record).expect("encrypted envelope reads");
+        let (object_ref, content_sha256) = trace_object_ref_write_from_record(
+            state.as_ref(),
+            "submitted-envelope-object-ref",
+            StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            &record,
+            &stored_envelope,
+        )
+        .expect("object ref builds");
+        let mismatched_ref = StorageTraceObjectRefRecord {
+            tenant_id: object_ref.tenant_id,
+            submission_id: object_ref.submission_id,
+            object_ref_id: object_ref.object_ref_id,
+            artifact_kind: object_ref.artifact_kind,
+            object_store: TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE.to_string(),
+            object_key: object_ref.object_key,
+            content_sha256,
+            encryption_key_ref: object_ref.encryption_key_ref,
+            size_bytes: object_ref.size_bytes,
+            compression: object_ref.compression,
+            created_by_job_id: object_ref.created_by_job_id,
+            invalidated_at: None,
+            deleted_at: None,
+            updated_at: Utc::now(),
+            created_at: Utc::now(),
+        };
+
+        let error = read_envelope_from_object_ref(state.as_ref(), "tenant-a", &mismatched_ref)
+            .expect_err("mismatched encrypted object store must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("configured trace envelope store does not match object ref store")
+        );
     }
 
     #[tokio::test]
