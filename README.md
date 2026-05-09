@@ -161,7 +161,12 @@ optional bearer auth and timeout are controlled by
 `TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_URL` to let benchmark workers
 poll submitted rows to confirmation; optional bearer auth and timeout are
 controlled by `TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_BEARER_TOKEN` and
-`TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS`.
+`TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS`. Production registry
+outbox deployments can set
+`TRACE_COMMONS_BENCHMARK_REGISTRY_REQUIRE_ADAPTER_AUTH=true` so live submit,
+confirm, scheduler, and manual submitted/confirmed fallback paths fail closed
+unless the corresponding adapter bearer token is configured; failed-status
+fallback remains available for bounded recovery evidence.
 
 The NEAR path is intentionally an outbox of deterministic method-call payloads
 for a non-transferable receipt contract. The payload builder only emits
