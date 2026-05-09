@@ -12960,6 +12960,20 @@ fn credit_cycle_scheduler_candidate_skip_reason(
                 .unwrap_or_else(|| "calibration_not_promotable".to_string()),
         );
     }
+    if let Some(reason) = ranking_calibration_labeler_reliability_reason_codes(
+        state,
+        &tenant.tenant_id,
+        candidate,
+        target_use,
+        evidence.predictions,
+        evidence.labels,
+        evidence.preference_labels,
+    )
+    .into_iter()
+    .next()
+    {
+        return Some(reason);
+    }
     if !options.allow_at_risk_models {
         let pairwise = ranking_pairwise_evaluation_model_report(
             candidate,
@@ -96851,6 +96865,74 @@ mod tests {
         assert_eq!(
             scheduler.decisions[0].skip_reason.as_deref(),
             Some("pairwise_label_actor_underdiverse")
+        );
+        assert!(scheduler.cycles.is_empty());
+        assert!(
+            read_all_ranking_worker_runs(temp.path(), "tenant-a")
+                .expect("worker runs read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit events read")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_preflight_blocks_cold_start_calibration_labelers() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let (candidate, _) = seed_credit_cycle_ready_candidate(
+            state.clone(),
+            "trace-ranker-credit-cycle-labeler-support-v1",
+        )
+        .await;
+        Arc::make_mut(&mut state).ranking_min_labeler_reliability_label_count = Some(2);
+
+        let Json(scheduler) = credit_cycle_scheduler_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleSchedulerRunRequest {
+                dry_run: false,
+                preflight_only: true,
+                submit_near_outbox: false,
+                confirm_near_outbox: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: None,
+                policy_version: Some(candidate.policy_version.clone()),
+                reason: "preflight should block cold-start calibration labelers".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: Some(1),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect("scheduler preflight evaluates labeler reliability support");
+
+        assert_eq!(scheduler.checked_count, 1);
+        assert_eq!(scheduler.eligible_count, 0);
+        assert_eq!(scheduler.started_count, 0);
+        assert_eq!(scheduler.skipped_count, 1);
+        assert_eq!(
+            scheduler
+                .skipped_reason_counts
+                .get("calibration_label_source_reliability_support_below_threshold"),
+            Some(&1)
+        );
+        assert_eq!(
+            scheduler.decisions[0].skip_reason.as_deref(),
+            Some("calibration_label_source_reliability_support_below_threshold")
         );
         assert!(scheduler.cycles.is_empty());
         assert!(
