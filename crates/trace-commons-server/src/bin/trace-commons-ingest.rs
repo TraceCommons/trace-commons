@@ -462,6 +462,8 @@ const TRACE_COMMONS_REMOTE_OBJECT_DELETER_BEARER_TOKEN: &str =
     "TRACE_COMMONS_REMOTE_OBJECT_DELETER_BEARER_TOKEN";
 const TRACE_COMMONS_REMOTE_OBJECT_DELETER_TIMEOUT_MS: &str =
     "TRACE_COMMONS_REMOTE_OBJECT_DELETER_TIMEOUT_MS";
+const TRACE_COMMONS_REMOTE_OBJECT_DELETER_REQUIRE_EXTERNAL: &str =
+    "TRACE_COMMONS_REMOTE_OBJECT_DELETER_REQUIRE_EXTERNAL";
 const TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_URL: &str =
     "TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_URL";
 const TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_BEARER_TOKEN: &str =
@@ -806,6 +808,7 @@ struct AppState {
     process_evaluator_timeout_ms: Option<u64>,
     remote_object_deleter: Option<Arc<dyn TraceRemoteObjectDeleter>>,
     remote_object_deleter_timeout_ms: Option<u64>,
+    require_external_remote_object_deleter: bool,
     worker_cache_invalidator: Option<Arc<dyn TraceWorkerCacheInvalidator>>,
     worker_cache_invalidator_timeout_ms: Option<u64>,
     require_external_worker_cache_invalidator: bool,
@@ -2382,6 +2385,13 @@ impl AppState {
             .as_ref()
             .map(|config| config.timeout_ms);
         let remote_object_deleter = remote_object_deleter_config.map(|config| config.deleter);
+        let require_external_remote_object_deleter =
+            env_truthy(TRACE_COMMONS_REMOTE_OBJECT_DELETER_REQUIRE_EXTERNAL);
+        if require_external_remote_object_deleter && remote_object_deleter.is_none() {
+            anyhow::bail!(
+                "{TRACE_COMMONS_REMOTE_OBJECT_DELETER_REQUIRE_EXTERNAL} requires {TRACE_COMMONS_REMOTE_OBJECT_DELETER_URL}"
+            );
+        }
         let worker_cache_invalidator_config = trace_worker_cache_invalidator_from_env()?;
         let worker_cache_invalidator_timeout_ms = worker_cache_invalidator_config
             .as_ref()
@@ -2641,6 +2651,7 @@ impl AppState {
             process_evaluator_timeout_ms,
             remote_object_deleter,
             remote_object_deleter_timeout_ms,
+            require_external_remote_object_deleter,
             worker_cache_invalidator,
             worker_cache_invalidator_timeout_ms,
             require_external_worker_cache_invalidator,
@@ -7982,6 +7993,7 @@ struct TraceCommonsConfigStatusResponse {
     process_evaluator_timeout_ms: Option<u64>,
     remote_object_deleter_configured: bool,
     remote_object_deleter_timeout_ms: Option<u64>,
+    remote_object_deleter_required: bool,
     worker_cache_invalidator_configured: bool,
     worker_cache_invalidator_timeout_ms: Option<u64>,
     worker_cache_invalidator_required: bool,
@@ -8311,6 +8323,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         process_evaluator_timeout_ms: state.process_evaluator_timeout_ms,
         remote_object_deleter_configured: state.remote_object_deleter.is_some(),
         remote_object_deleter_timeout_ms: state.remote_object_deleter_timeout_ms,
+        remote_object_deleter_required: state.require_external_remote_object_deleter,
         worker_cache_invalidator_configured: state.worker_cache_invalidator.is_some(),
         worker_cache_invalidator_timeout_ms: state.worker_cache_invalidator_timeout_ms,
         worker_cache_invalidator_required: state.require_external_worker_cache_invalidator,
@@ -56953,15 +56966,18 @@ impl TraceOperationalObjectStoreSummary {
     fn from_state(state: &AppState) -> Self {
         let remote_object_deleter_configured = state.remote_object_deleter.is_some();
         let Some(store) = state.artifact_store.as_ref() else {
+            let remote_object_deleter_required = state.require_external_remote_object_deleter;
             return Self {
                 versioning_required: state.require_object_store_versioning,
+                remote_object_deleter_required,
                 remote_object_deleter_configured,
-                remote_object_deleter_ready: true,
+                remote_object_deleter_ready: !remote_object_deleter_required
+                    || remote_object_deleter_configured,
                 ..Self::default()
             };
         };
-        let remote_object_deleter_required =
-            store.object_store_name() == TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE;
+        let remote_object_deleter_required = state.require_external_remote_object_deleter
+            || store.object_store_name() == TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE;
         Self {
             configured: true,
             object_store_name: Some(store.object_store_name().to_string()),
@@ -57624,9 +57640,12 @@ impl TraceOperationalPromotionGateSummary {
             .artifact_store
             .as_ref()
             .is_some_and(|store| store.restore_after_delete_supported());
-        let remote_object_deleter_required = state.artifact_store.as_ref().is_some_and(|store| {
-            store.object_store_name() == TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE
-        });
+        let disabled_remote_object_deleter_required =
+            state.artifact_store.as_ref().is_some_and(|store| {
+                store.object_store_name() == TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE
+            });
+        let remote_object_deleter_required =
+            state.require_external_remote_object_deleter || disabled_remote_object_deleter_required;
         let remote_object_deleter_configured = state.remote_object_deleter.is_some();
         let remote_object_deleter_missing =
             remote_object_deleter_required && !remote_object_deleter_configured;
@@ -57795,8 +57814,10 @@ impl TraceOperationalPromotionGateSummary {
         if object_store_versioning_required && !object_store_restore_after_delete_supported {
             blocking_gates.push("object_store_restore_required_unsupported".to_string());
         }
-        if remote_object_deleter_missing {
+        if disabled_remote_object_deleter_required && !remote_object_deleter_configured {
             blocking_gates.push("disabled_remote_object_deleter_missing".to_string());
+        } else if remote_object_deleter_missing {
+            blocking_gates.push("remote_object_deleter_required_missing".to_string());
         }
         if db_summary.db_available {
             match trace_corpus_rls_ready {
@@ -59791,6 +59812,7 @@ mod tests {
             process_evaluator_timeout_ms: None,
             remote_object_deleter: None,
             remote_object_deleter_timeout_ms: None,
+            require_external_remote_object_deleter: false,
             worker_cache_invalidator: None,
             worker_cache_invalidator_timeout_ms: None,
             require_external_worker_cache_invalidator: false,
@@ -64424,6 +64446,7 @@ mod tests {
         Arc::make_mut(&mut state).remote_object_deleter =
             Some(Arc::new(FakeRemoteObjectDeleter::default()));
         Arc::make_mut(&mut state).remote_object_deleter_timeout_ms = Some(7_123);
+        Arc::make_mut(&mut state).require_external_remote_object_deleter = true;
         Arc::make_mut(&mut state).worker_cache_invalidator =
             Some(Arc::new(FakeWorkerCacheInvalidator::default()));
         Arc::make_mut(&mut state).worker_cache_invalidator_timeout_ms = Some(7_890);
@@ -64479,6 +64502,10 @@ mod tests {
         assert_eq!(
             value["remote_object_deleter_timeout_ms"],
             serde_json::json!(7_123)
+        );
+        assert_eq!(
+            value["remote_object_deleter_required"],
+            serde_json::json!(true)
         );
         assert_eq!(
             value["worker_cache_invalidator_configured"],
@@ -75462,6 +75489,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn operational_summary_blocks_required_remote_object_deleter_without_adapter() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).require_external_remote_object_deleter = true;
+
+        let Json(operational) =
+            operational_summary_handler(State(state), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary");
+        let value = serde_json::to_value(&operational).expect("operational summary serializes");
+        assert_eq!(
+            value["object_store"]["configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["object_store"]["remote_object_deleter_required"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["object_store"]["remote_object_deleter_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["object_store"]["remote_object_deleter_ready"],
+            serde_json::json!(false)
+        );
+        assert!(
+            operational
+                .promotion_gates
+                .blocking_gates
+                .contains(&"remote_object_deleter_required_missing".to_string())
+        );
+        assert!(
+            !operational
+                .promotion_gates
+                .blocking_gates
+                .contains(&"disabled_remote_object_deleter_missing".to_string())
+        );
+
+        let (metrics, _) = trace_operational_metrics_body(&operational);
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"remote_object_deleter_required_missing\"}} 1"
+        )));
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"remote_object_deleter_required\"}} 1"
+        )));
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"remote_object_deleter_configured\"}} 0"
+        )));
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"remote_object_deleter_ready\"}} 0"
+        )));
+        assert!(!metrics.contains("admin-token-a"));
+    }
+
+    #[tokio::test]
     async fn operational_summary_blocks_required_object_versioning_without_support() {
         use axum::body::Body;
         use tower::ServiceExt;
@@ -78121,6 +78205,7 @@ mod tests {
             process_evaluator_timeout_ms: None,
             remote_object_deleter: None,
             remote_object_deleter_timeout_ms: None,
+            require_external_remote_object_deleter: false,
             worker_cache_invalidator: None,
             worker_cache_invalidator_timeout_ms: None,
             require_external_worker_cache_invalidator: false,
