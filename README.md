@@ -171,6 +171,10 @@ feature hashes, model predictions, lab/reviewer/evaluator labels, and calibratio
 runs that record aggregate error, confidence, threshold policy, per-source
 quality gates, joined label-source and label-actor diversity, joined-evidence
 hashes, reason codes, and a hash-only report digest.
+Client-supplied ranking evidence hashes must be canonical `sha256:<64 hex>`
+digests across model manifests, calibration dataset manifests, feature evidence,
+label/preference evidence, and calibration run evaluation datasets; symbolic
+`sha256:` placeholders are rejected before persistence.
 For an existing `(calibration_dataset_hash, target_use, policy_version)` holdout
 key, lifecycle status updates must keep the source manifest hash and count
 metadata unchanged; changing those manifest fields requires a new dataset hash
