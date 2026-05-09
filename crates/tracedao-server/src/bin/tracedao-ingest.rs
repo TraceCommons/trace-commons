@@ -47518,6 +47518,12 @@ fn normalize_audit_event_metadata(
         };
     }
     if trace_maintenance_audit_kind(&event.kind) {
+        if trace_audit_reason_value(event.reason.as_deref(), "purpose").is_some() {
+            anyhow::bail!(
+                "maintenance audit event {} requires hashed purpose reason fields",
+                event.event_id
+            );
+        }
         if trace_maintenance_audit_reason_has_invalid_hash(event.reason.as_deref()) {
             anyhow::bail!(
                 "maintenance audit event {} requires canonical hash reason fields",
@@ -66848,6 +66854,53 @@ mod tests {
             error
                 .to_string()
                 .contains("requires canonical hash reason fields")
+        );
+    }
+
+    #[test]
+    fn audit_mirror_normalization_rejects_raw_maintenance_purpose() {
+        let raw_purpose = "frontier lab maintenance batch 77";
+        let audit_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: Uuid::nil(),
+            kind: "maintenance".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Admin),
+            actor_principal_ref: Some(principal_storage_ref("admin-token-a")),
+            reason: Some(format!(
+                "purpose={raw_purpose};dry_run=false;records_marked_revoked=1"
+            )),
+            export_count: Some(1),
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+
+        let (_action, backfill_metadata) = audit_backfill_storage_projection(&audit_event);
+        let StorageTraceAuditSafeMetadata::Maintenance { purpose_hash, .. } = backfill_metadata
+        else {
+            panic!("legacy maintenance purpose should backfill as maintenance metadata");
+        };
+        let expected_purpose_hash = sha256_prefixed(raw_purpose);
+        assert_eq!(
+            purpose_hash.as_deref(),
+            Some(expected_purpose_hash.as_str())
+        );
+
+        let error = normalize_audit_event_metadata(
+            &audit_event,
+            StorageTraceAuditAction::Retain,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .expect_err("live maintenance mirror must reject raw purpose text");
+
+        assert!(
+            error
+                .to_string()
+                .contains("requires hashed purpose reason fields")
         );
     }
 
