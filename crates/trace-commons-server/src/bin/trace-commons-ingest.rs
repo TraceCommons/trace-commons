@@ -11406,6 +11406,7 @@ async fn run_credit_settlement(
     let issuer_approval_evidence_hash = validate_credit_settlement_issuer_approval_evidence_hash(
         body.issuer_approval_evidence_hash.as_deref(),
     )?;
+    require_credit_settlement_central_issuer_profile_if_configured(state, body.dry_run)?;
     require_credit_settlement_issuer_approval_if_configured(
         state,
         body.dry_run,
@@ -12201,6 +12202,23 @@ fn require_credit_settlement_issuer_approval_if_configured(
         ));
     }
     Ok(())
+}
+
+fn require_credit_settlement_central_issuer_profile_if_configured(
+    state: &AppState,
+    dry_run: bool,
+) -> ApiResult<()> {
+    if dry_run || !state.credit_settlement_require_central_issuer_profile {
+        return Ok(());
+    }
+    let config = credit_settlement_central_issuer_profile_config_from_state(state);
+    if credit_settlement_central_issuer_profile_missing_config(&config).is_empty() {
+        return Ok(());
+    }
+    Err(api_error(
+        StatusCode::CONFLICT,
+        "live credit settlement requires complete central issuer profile",
+    ))
 }
 
 async fn require_recorded_credit_settlement_issuer_approval_if_configured(
@@ -77638,6 +77656,97 @@ mod tests {
                 .expect("outbox reads")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn live_credit_settlement_blocks_incomplete_central_issuer_profile() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_require_central_issuer_profile = true;
+        Arc::make_mut(&mut state).credit_settlement_max_micros_per_account = Some(2_000_000);
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 0.75,
+                reason: Some("frontier lab central issuer profile live probe".to_string()),
+                external_ref: Some("lab-attestation:central-issuer-profile-live".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+
+        let Json(dry_run) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: true,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "dry-run settlement with incomplete central issuer profile".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("dry-run settlement remains available for diagnosis");
+        assert_eq!(dry_run.settled_source_event_count, 1);
+
+        let error = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "live settlement with incomplete central issuer profile".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect_err("live settlement rejects incomplete central issuer profile");
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        let Json(error_body) = error.1;
+        assert_eq!(
+            error_body.error,
+            "live credit settlement requires complete central issuer profile"
+        );
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement reads")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads")
+                .is_empty()
+        );
+        let error_text = serde_json::to_string(&error_body).expect("error serializes");
+        assert!(!error_text.contains("admin-token-a"));
+        assert!(!error_text.contains("token-a"));
+        assert!(!error_text.contains(&event.event_id.to_string()));
+        assert!(!error_text.contains("frontier lab central issuer profile live probe"));
+        assert!(!error_text.contains("lab-attestation:central-issuer-profile-live"));
     }
 
     #[tokio::test]

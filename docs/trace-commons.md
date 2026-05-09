@@ -558,6 +558,9 @@ EdDSA signed-token enforcement and tenant access-grant enforcement for exact
 issuer principals. Operational summary and metrics expose the same central
 issuer profile as aggregate safe signals: required, ready,
 missing-control-count, managed-EdDSA enforcement, and tenant-grant enforcement.
+Live settlement re-checks the profile before writing settlement batches or NEAR
+outbox rows, while dry-run settlement and the drill stay available for
+diagnostics.
 Final settlement requests can include `issuer_approval_evidence_hash` to bind
 the batch to a central operator approval artifact. Set
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` to reject live
