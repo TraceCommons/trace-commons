@@ -12938,14 +12938,17 @@ fn credit_cycle_scheduler_candidate_skip_reason(
             evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
             min_label_count: options
                 .min_label_count
-                .unwrap_or(state.ranking_min_label_count),
+                .unwrap_or(state.ranking_min_label_count)
+                .max(state.ranking_min_label_count),
             min_label_source_count: state.ranking_min_label_source_count,
             confidence_threshold: options
                 .confidence_threshold
-                .unwrap_or(state.ranking_min_confidence_threshold),
+                .unwrap_or(state.ranking_min_confidence_threshold)
+                .max(state.ranking_min_confidence_threshold),
             max_average_absolute_error_micros: options
                 .max_average_absolute_error_micros
-                .unwrap_or(state.ranking_max_average_absolute_error_micros),
+                .unwrap_or(state.ranking_max_average_absolute_error_micros)
+                .min(state.ranking_max_average_absolute_error_micros),
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
         },
@@ -97090,6 +97093,224 @@ mod tests {
         assert_eq!(
             scheduler.decisions[0].skip_reason.as_deref(),
             Some("calibration_dataset_not_registered")
+        );
+        assert!(scheduler.cycles.is_empty());
+        assert!(
+            read_all_ranking_worker_runs(temp.path(), "tenant-a")
+                .expect("worker runs read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit events read")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_preflight_applies_server_min_label_floor() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).ranking_min_label_count = 2;
+        let (candidate, _) = seed_credit_cycle_ready_candidate(
+            state.clone(),
+            "trace-ranker-credit-cycle-server-label-floor-v1",
+        )
+        .await;
+
+        let Json(scheduler) = credit_cycle_scheduler_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleSchedulerRunRequest {
+                dry_run: false,
+                preflight_only: true,
+                submit_near_outbox: false,
+                confirm_near_outbox: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: Some(candidate.model_version.clone()),
+                policy_version: Some(candidate.policy_version.clone()),
+                reason: "preflight should apply server min label floor".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: Some(1),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect("scheduler preflight applies server-owned label floor");
+
+        assert_eq!(scheduler.checked_count, 1);
+        assert_eq!(scheduler.eligible_count, 0);
+        assert_eq!(scheduler.started_count, 0);
+        assert_eq!(scheduler.skipped_count, 1);
+        assert_eq!(
+            scheduler.skipped_reason_counts.get("insufficient_labels"),
+            Some(&1)
+        );
+        assert_eq!(
+            scheduler.decisions[0].skip_reason.as_deref(),
+            Some("insufficient_labels")
+        );
+        assert!(scheduler.cycles.is_empty());
+        assert!(
+            read_all_ranking_worker_runs(temp.path(), "tenant-a")
+                .expect("worker runs read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit events read")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_preflight_applies_server_confidence_floor() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).ranking_min_confidence_threshold = 0.95;
+        let (candidate, _) = seed_credit_cycle_ready_candidate(
+            state.clone(),
+            "trace-ranker-credit-cycle-server-confidence-floor-v1",
+        )
+        .await;
+
+        let Json(scheduler) = credit_cycle_scheduler_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleSchedulerRunRequest {
+                dry_run: false,
+                preflight_only: true,
+                submit_near_outbox: false,
+                confirm_near_outbox: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: Some(candidate.model_version.clone()),
+                policy_version: Some(candidate.policy_version.clone()),
+                reason: "preflight should apply server confidence floor".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: Some(1),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect("scheduler preflight applies server-owned confidence floor");
+
+        assert_eq!(scheduler.checked_count, 1);
+        assert_eq!(scheduler.eligible_count, 0);
+        assert_eq!(scheduler.started_count, 0);
+        assert_eq!(scheduler.skipped_count, 1);
+        assert_eq!(
+            scheduler
+                .skipped_reason_counts
+                .get("low_confidence_predictions_present"),
+            Some(&1)
+        );
+        assert_eq!(
+            scheduler.decisions[0].skip_reason.as_deref(),
+            Some("low_confidence_predictions_present")
+        );
+        assert!(scheduler.cycles.is_empty());
+        assert!(
+            read_all_ranking_worker_runs(temp.path(), "tenant-a")
+                .expect("worker runs read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit events read")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_preflight_applies_server_error_ceiling() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).ranking_max_average_absolute_error_micros = 50_000;
+        let (candidate, prediction) = seed_credit_cycle_candidate_with_prediction(
+            state.clone(),
+            "trace-ranker-credit-cycle-server-error-ceiling-v1",
+        )
+        .await;
+        let _ = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: prediction.submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: prediction.predicted_utility_micros + 100_000,
+                evidence_hash: sha256_prefixed("scheduler-server-error-ceiling-label"),
+                external_ref: "private-scheduler-server-error-ceiling-label".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write mismatched ranking label");
+
+        let Json(scheduler) = credit_cycle_scheduler_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleSchedulerRunRequest {
+                dry_run: false,
+                preflight_only: true,
+                submit_near_outbox: false,
+                confirm_near_outbox: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: Some(candidate.model_version.clone()),
+                policy_version: Some(candidate.policy_version.clone()),
+                reason: "preflight should apply server error ceiling".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: Some(1),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(1_000_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect("scheduler preflight applies server-owned error ceiling");
+
+        assert_eq!(scheduler.checked_count, 1);
+        assert_eq!(scheduler.eligible_count, 0);
+        assert_eq!(scheduler.started_count, 0);
+        assert_eq!(scheduler.skipped_count, 1);
+        assert_eq!(
+            scheduler
+                .skipped_reason_counts
+                .get("average_error_above_threshold"),
+            Some(&1)
+        );
+        assert_eq!(
+            scheduler.decisions[0].skip_reason.as_deref(),
+            Some("average_error_above_threshold")
         );
         assert!(scheduler.cycles.is_empty());
         assert!(
