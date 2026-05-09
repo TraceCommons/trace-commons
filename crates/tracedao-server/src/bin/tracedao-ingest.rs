@@ -28694,14 +28694,21 @@ async fn worker_export_job_claim_next_handler(
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_export_worker_operator(&tenant)?;
     let db = trace_export_control_db(state.as_ref())?;
-    let dataset_kind = body
+    let requested_dataset_kind = body
         .dataset_kind
         .as_deref()
-        .map(normalized_export_dataset_kind_filter);
+        .map(trace_export_dataset_kind_from_storage_name)
+        .transpose()?;
+    require_export_job_claim_central_issuer_if_configured(
+        state.as_ref(),
+        &tenant,
+        requested_dataset_kind,
+    )?;
+    let dataset_kind = requested_dataset_kind.map(|dataset_kind| dataset_kind.storage_name());
     let claimed = db
         .claim_next_trace_export_job(
             &tenant.tenant_id,
-            dataset_kind.as_deref(),
+            dataset_kind,
             Utc::now(),
             &tenant.principal_ref,
         )
@@ -28737,6 +28744,11 @@ async fn worker_export_job_claim_and_run_handler(
         .map(trace_export_dataset_kind_from_storage_name)
         .transpose()?
         .unwrap_or(TraceExportDatasetKind::ReplayDataset);
+    require_export_job_claim_central_issuer_if_configured(
+        state.as_ref(),
+        &tenant,
+        Some(requested_dataset_kind),
+    )?;
     let db = trace_export_control_db(state.as_ref())?;
     let claimed = db
         .claim_next_trace_export_job(
@@ -28805,6 +28817,11 @@ async fn worker_export_jobs_run_queued_handler(
         .as_deref()
         .map(trace_export_dataset_kind_from_storage_name)
         .transpose()?;
+    require_export_job_claim_central_issuer_if_configured(
+        state.as_ref(),
+        &tenant,
+        requested_dataset_kind,
+    )?;
     let requested_dataset_kind_storage =
         requested_dataset_kind.map(|dataset_kind| dataset_kind.storage_name().to_string());
     let max_jobs = validate_usize_worker_limit(
@@ -29524,6 +29541,26 @@ fn trace_export_dataset_kind_from_storage_name(value: &str) -> ApiResult<TraceEx
             format!("unsupported export dataset kind: {value}"),
         )),
     }
+}
+
+fn trace_export_dataset_kind_creates_positive_credit(kind: TraceExportDatasetKind) -> bool {
+    matches!(
+        kind,
+        TraceExportDatasetKind::BenchmarkConversion
+            | TraceExportDatasetKind::RankerTrainingCandidates
+            | TraceExportDatasetKind::RankerTrainingPairs
+    )
+}
+
+fn require_export_job_claim_central_issuer_if_configured(
+    state: &AppState,
+    tenant: &TenantAuth,
+    dataset_kind: Option<TraceExportDatasetKind>,
+) -> ApiResult<()> {
+    if dataset_kind.is_none_or(trace_export_dataset_kind_creates_positive_credit) {
+        require_positive_credit_issuance_principal_if_configured(state, tenant, 1.0)?;
+    }
+    Ok(())
 }
 
 fn replay_export_query_from_claimed_job(
@@ -71413,6 +71450,153 @@ mod tests {
             1,
             "queued benchmark execution credits included source once"
         );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn central_issuer_allowlist_blocks_credit_bearing_export_job_claims_before_claim() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
+            Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+        let now = Utc::now();
+        let benchmark_job_id = Uuid::new_v4();
+        let ranker_job_id = Uuid::new_v4();
+        for (export_job_id, dataset_kind, purpose, consent_scope) in [
+            (
+                benchmark_job_id,
+                TraceExportDatasetKind::BenchmarkConversion,
+                "central issuer blocked queued benchmark",
+                ConsentScope::BenchmarkOnly,
+            ),
+            (
+                ranker_job_id,
+                TraceExportDatasetKind::RankerTrainingCandidates,
+                "central issuer blocked queued ranker",
+                ConsentScope::RankingTraining,
+            ),
+        ] {
+            let grant_id = Uuid::new_v4();
+            backend
+                .upsert_trace_export_access_grant(StorageTraceExportAccessGrantWrite {
+                    tenant_id: "tenant-a".to_string(),
+                    export_job_id,
+                    grant_id,
+                    caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+                    requested_dataset_kind: dataset_kind.storage_name().to_string(),
+                    purpose: purpose.to_string(),
+                    max_item_cap: Some(5),
+                    status: StorageTraceExportAccessGrantStatus::Active,
+                    requested_at: now - Duration::minutes(5),
+                    expires_at: now + Duration::minutes(30),
+                    metadata: BTreeMap::from([("grant_type".to_string(), "queued".to_string())]),
+                })
+                .await
+                .expect("export grant writes");
+            backend
+                .upsert_trace_export_job(StorageTraceExportJobWrite {
+                    tenant_id: "tenant-a".to_string(),
+                    export_job_id,
+                    grant_id,
+                    caller_principal_ref: principal_storage_ref("export-worker-token-a"),
+                    requested_dataset_kind: dataset_kind.storage_name().to_string(),
+                    purpose: purpose.to_string(),
+                    max_item_cap: Some(5),
+                    status: StorageTraceExportJobStatus::Queued,
+                    requested_at: now - Duration::minutes(5),
+                    started_at: None,
+                    finished_at: None,
+                    expires_at: now + Duration::minutes(30),
+                    result_manifest_id: None,
+                    item_count: None,
+                    last_error: None,
+                    metadata: export_job_request_metadata(
+                        Some(5),
+                        Some(TraceCorpusStatus::Accepted),
+                        Some(ResidualPiiRisk::Low),
+                        Some(consent_scope),
+                        None,
+                    ),
+                })
+                .await
+                .expect("queued export job writes");
+        }
+
+        let claim_next_error = worker_export_job_claim_next_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Json(TraceExportJobClaimNextRequest {
+                dataset_kind: Some(
+                    TraceExportDatasetKind::BenchmarkConversion
+                        .storage_name()
+                        .to_string(),
+                ),
+            }),
+        )
+        .await
+        .expect_err("unlisted export worker cannot claim credit-bearing benchmark jobs");
+        assert_eq!(claim_next_error.0, StatusCode::FORBIDDEN);
+
+        let claim_and_run_error = worker_export_job_claim_and_run_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Json(TraceExportJobClaimAndRunRequest {
+                dataset_kind: Some(
+                    TraceExportDatasetKind::BenchmarkConversion
+                        .storage_name()
+                        .to_string(),
+                ),
+            }),
+        )
+        .await
+        .expect_err("unlisted export worker cannot claim-and-run credit-bearing benchmark jobs");
+        assert_eq!(claim_and_run_error.0, StatusCode::FORBIDDEN);
+
+        let run_queued_error = worker_export_jobs_run_queued_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+            Json(TraceExportJobsRunQueuedRequest {
+                dataset_kind: Some(
+                    TraceExportDatasetKind::RankerTrainingCandidates
+                        .storage_name()
+                        .to_string(),
+                ),
+                max_jobs: Some(1),
+            }),
+        )
+        .await
+        .expect_err("unlisted export worker cannot run queued credit-bearing ranker jobs");
+        assert_eq!(run_queued_error.0, StatusCode::FORBIDDEN);
+
+        let jobs = backend
+            .list_trace_export_jobs("tenant-a")
+            .await
+            .expect("jobs list");
+        for export_job_id in [benchmark_job_id, ranker_job_id] {
+            let job = jobs
+                .iter()
+                .find(|job| job.export_job_id == export_job_id)
+                .expect("queued job remains");
+            assert_eq!(job.status, StorageTraceExportJobStatus::Queued);
+            assert!(job.started_at.is_none());
+            assert!(job.finished_at.is_none());
+            assert!(job.last_error.is_none());
+        }
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
@@ -114648,6 +114832,44 @@ mod tests {
                 .iter()
                 .all(|event| event.kind != "benchmark_conversion" && event.kind != "ranker_export")
         );
+    }
+
+    #[test]
+    fn central_issuer_allowlist_classifies_credit_bearing_export_job_claims() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
+            Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+        let tenant = authenticate(state.as_ref(), &auth_headers("export-worker-token-a"))
+            .expect("export worker auth");
+
+        require_export_job_claim_central_issuer_if_configured(
+            state.as_ref(),
+            &tenant,
+            Some(TraceExportDatasetKind::ReplayDataset),
+        )
+        .expect("replay claim does not create positive credit");
+
+        let benchmark_error = require_export_job_claim_central_issuer_if_configured(
+            state.as_ref(),
+            &tenant,
+            Some(TraceExportDatasetKind::BenchmarkConversion),
+        )
+        .expect_err("benchmark claim can create positive credit");
+        assert_eq!(benchmark_error.0, StatusCode::FORBIDDEN);
+
+        let ranker_error = require_export_job_claim_central_issuer_if_configured(
+            state.as_ref(),
+            &tenant,
+            Some(TraceExportDatasetKind::RankerTrainingCandidates),
+        )
+        .expect_err("ranker claim can create positive credit");
+        assert_eq!(ranker_error.0, StatusCode::FORBIDDEN);
+
+        let unscoped_error =
+            require_export_job_claim_central_issuer_if_configured(state.as_ref(), &tenant, None)
+                .expect_err("unscoped claim may select a credit-bearing job");
+        assert_eq!(unscoped_error.0, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

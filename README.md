@@ -88,9 +88,10 @@ account freeze/unfreeze transitions from credit holds, and unlisted
 reviewer/admin/worker principals cannot create positive credit through manual
 credit mutation, utility credit/attestation, prediction-credit, process-evaluation
 utility credit, or credit-bearing export generation. Those paths fail before
-source reads or derived artifact writes. Unlisted utility-worker principals
-cannot start live settlement, credit-cycle, or NEAR credit outbox schedulers or
-run live NEAR submit/confirm workers. Admin
+source reads, derived artifact writes, or queued benchmark/ranker export-job
+claims. Unlisted utility-worker principals cannot start live settlement,
+credit-cycle, or NEAR credit outbox schedulers or run live NEAR submit/confirm
+workers. Admin
 config status returns safe missing-control names for that central issuer profile
 so operators can see which gate still needs configuration without exposing
 adapter URLs, bearer tokens, approval evidence, or account refs. The
