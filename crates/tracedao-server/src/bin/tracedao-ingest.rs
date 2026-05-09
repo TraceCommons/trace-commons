@@ -5846,6 +5846,7 @@ struct TraceCommonsConfigStatusResponse {
     credit_settlement_issuer_approval_max_age_hours: Option<i64>,
     credit_settlement_require_central_issuer_profile: bool,
     credit_settlement_central_issuer_profile_ready: bool,
+    credit_settlement_central_issuer_profile_missing_controls: Vec<&'static str>,
     credit_settlement_near_contract_configured: bool,
     credit_settlement_require_near_contract: bool,
     submission_quota: TraceSubmissionQuotaConfig,
@@ -5933,6 +5934,9 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         .and_then(|refresh| refresh.max_stale);
     let central_issuer_profile_config =
         credit_settlement_central_issuer_profile_config_from_state(state);
+    let central_issuer_profile_missing_controls =
+        credit_settlement_central_issuer_profile_missing_config(&central_issuer_profile_config);
+    let central_issuer_profile_ready = central_issuer_profile_missing_controls.is_empty();
     TraceCommonsConfigStatusResponse {
         schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION,
         db_mirror_configured: state.db_mirror.is_some(),
@@ -6044,8 +6048,9 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .map(|max_age| max_age.num_hours()),
         credit_settlement_require_central_issuer_profile: state
             .credit_settlement_require_central_issuer_profile,
-        credit_settlement_central_issuer_profile_ready:
-            credit_settlement_central_issuer_profile_ready(&central_issuer_profile_config),
+        credit_settlement_central_issuer_profile_ready: central_issuer_profile_ready,
+        credit_settlement_central_issuer_profile_missing_controls:
+            central_issuer_profile_missing_controls,
         credit_settlement_near_contract_configured: state
             .credit_settlement_near_contract_id
             .is_some(),
@@ -56553,6 +56558,20 @@ mod tests {
             value["credit_settlement_central_issuer_profile_ready"],
             serde_json::json!(false)
         );
+        let central_issuer_missing_controls =
+            value["credit_settlement_central_issuer_profile_missing_controls"]
+                .as_array()
+                .expect("central issuer missing controls is an array");
+        assert!(
+            central_issuer_missing_controls
+                .contains(&serde_json::json!("TRACE_COMMONS_DB_DUAL_WRITE"))
+        );
+        assert!(central_issuer_missing_controls.contains(&serde_json::json!(
+            TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL
+        )));
+        assert!(central_issuer_missing_controls.contains(&serde_json::json!(
+            TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN
+        )));
         assert_eq!(
             value["credit_settlement_near_contract_configured"],
             serde_json::json!(false)
