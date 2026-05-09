@@ -578,7 +578,14 @@ sets `require_issuer_approval: true`. Approval evidence is source-list bound:
 operators first run the drill or settlement dry-run to obtain the exact
 `source_list_hash`, then record a hash-only approval with
 `POST /v1/admin/credit-settlement-approvals` for that `policy_version`,
-`source_list_hash`, and canonical approval `evidence_hash`. The drill returns only safe
+`source_list_hash`, and canonical approval `evidence_hash`. The drill accepts
+`source_event_limit` with the same 1..=500 bounds used by live settlement
+surfaces, so operators can rehearse and approve one partial issuance batch
+without approving the full backlog. For a bounded batch, pass the same source
+event bound to the drill as the live finalization path will use: admin
+settlement uses `source_event_limit`, while the worker route and scheduler use
+`limit`. Omit the bound only when the approval should cover the whole current
+backlog. The drill returns only safe
 account hashes, aggregate risk counts, settlement exclusion reason counts,
 blocker codes, NEAR adapter readiness/auth booleans, issuer-approval configured
 and recorded booleans, central issuer profile readiness booleans, safe central
@@ -603,8 +610,10 @@ required, live settlement then requires `rollout_smoke.ready: true` and rejects
 with safe status/count fields before any live repair or write path, while
 dry-run settlement, credit-cycle preflight, and the drill stay available for
 diagnostics.
-Final settlement requests can include `issuer_approval_evidence_hash` to bind
-the batch to a central operator approval artifact. Set
+Final admin settlement requests can include `source_event_limit` plus
+`issuer_approval_evidence_hash` to bind the batch to a central operator
+approval artifact; worker and scheduler settlement requests use `limit` for the
+same bounded source-list shape. Set
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` to reject live
 settlement without that hash; dry-runs remain non-mutating, and the drill now
 fails readiness until the approval-evidence hash is present.
@@ -616,7 +625,10 @@ then calls the same `/v1/workers/credit-settlements/run` route with
 `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION`, the bounded
 `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_LIMIT` (1..=500, default 100),
 `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_DRY_RUN`, and optional
-source-list approval, NEAR contract, ranking model, and target-use gates.
+source-list approval, NEAR contract, ranking model, and target-use gates. When
+issuer approval is required, the scheduler limit must match the bounded
+source-list hash that was rehearsed in the drill and recorded through
+`/v1/admin/credit-settlement-approvals`.
 Startup validates the scheduler token through utility-worker auth, validates
 the configured policy and contract identifiers, rejects unlisted live scheduler
 principals when the central issuer principal allowlist is configured, and
@@ -765,11 +777,14 @@ look rollout-ready before policy versions are pinned.
 central-issuer fail-closed gate: live admin or worker settlement requests must
 carry a canonical `sha256:<64 hex>` `issuer_approval_evidence_hash` that has
 already been recorded through `/v1/admin/credit-settlement-approvals` for the
-exact tenant, policy version, and canonical dry-run `source_list_hash`. The
-hash is persisted on the settlement batch and folded into newly queued NEAR
-receipt attestation and issuer-signature hashes. Dry-runs remain approval-free
-so operators can produce
-or inspect the source-list hash before granting non-transferable credits;
+exact tenant, policy version, and canonical dry-run `source_list_hash`. That
+source-list hash can describe the whole current backlog or one bounded batch:
+use `source_event_limit` on the drill/admin route and `limit` on the
+worker/scheduler route, and keep the value identical between rehearsal,
+approval, and live settlement. The hash is persisted on the settlement batch
+and folded into newly queued NEAR receipt attestation and issuer-signature
+hashes. Dry-runs remain approval-free so operators can produce or inspect the
+source-list hash before granting non-transferable credits;
 production credit-settlement drills report
 `issuer_approval_evidence_hash_missing` when no hash is supplied and
 `issuer_approval_evidence_hash_unrecorded` when the hash has not been recorded
