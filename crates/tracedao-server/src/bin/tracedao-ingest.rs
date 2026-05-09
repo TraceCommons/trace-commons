@@ -12561,6 +12561,11 @@ async fn credit_cycle_scheduler_run_handler(
 ) -> ApiResult<Json<TraceCreditCycleSchedulerRunResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_utility_operator(&tenant)?;
+    require_credit_settlement_central_issuer_principal_if_configured(
+        state.as_ref(),
+        &tenant,
+        body.dry_run || body.preflight_only,
+    )?;
     let reason = validate_credit_cycle_scheduler_reason(&body.reason)?;
     let limit = validate_credit_cycle_scheduler_limit(body.limit)?;
     let model_version = optional_ranking_identifier(body.model_version, "model_version")?;
@@ -96808,6 +96813,58 @@ mod tests {
         assert!(
             read_all_near_credit_outbox_items(temp.path(), "tenant-a")
                 .expect("outbox reads")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_route_rejects_unlisted_live_central_issuer_before_discovery() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
+            Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/workers/credit-cycle/scheduler/run")
+                    .header(AUTHORIZATION, "Bearer utility-worker-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "dry_run": false,
+                            "preflight_only": false,
+                            "submit_near_outbox": false,
+                            "confirm_near_outbox": false,
+                            "target_use": "ranking_model_training",
+                            "reason": "unlisted live scheduler should fail before discovery",
+                            "near_contract_id": "trace-credits.testnet",
+                            "limit": 1
+                        })
+                        .to_string(),
+                    ))
+                    .expect("unlisted live scheduler request builds"),
+            )
+            .await
+            .expect("unlisted live scheduler response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .expect("unlisted live scheduler body reads");
+        let body_text = String::from_utf8(body.to_vec()).expect("response body is utf8");
+        assert!(
+            body_text
+                .contains("live credit settlement requires an authorized central issuer principal")
+        );
+        assert!(!body_text.contains("unlisted live scheduler should fail before discovery"));
+        assert!(
+            read_all_ranking_worker_runs(temp.path(), "tenant-a")
+                .expect("worker runs read")
                 .is_empty()
         );
     }
