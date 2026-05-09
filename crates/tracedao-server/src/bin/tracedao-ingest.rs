@@ -7677,19 +7677,28 @@ fn ranking_calibration_dataset_quarantine_audit_metadata_from_reason(
 ) -> Option<StorageTraceAuditSafeMetadata> {
     Some(
         StorageTraceAuditSafeMetadata::RankingCalibrationDatasetQuarantine {
-            calibration_dataset_hash: trace_audit_reason_value(reason, "calibration_dataset_hash")?
-                .to_string(),
+            calibration_dataset_hash: trace_audit_reason_canonical_sha256_value(
+                reason,
+                "calibration_dataset_hash",
+            )?,
             target_use: trace_audit_reason_value(reason, "target_use")?.to_string(),
             policy_version: trace_audit_reason_value(reason, "policy_version")?.to_string(),
-            archived_source_manifest_hash: trace_audit_reason_value(
+            archived_source_manifest_hash: trace_audit_reason_canonical_sha256_value(
                 reason,
                 "archived_source_manifest_hash",
-            )?
-            .to_string(),
-            conflict_key_hash: trace_audit_reason_value(reason, "conflict_key_hash")?.to_string(),
-            reason_hash: trace_audit_reason_value(reason, "reason_hash")?.to_string(),
+            )?,
+            conflict_key_hash: trace_audit_reason_canonical_sha256_value(
+                reason,
+                "conflict_key_hash",
+            )?,
+            reason_hash: trace_audit_reason_canonical_sha256_value(reason, "reason_hash")?,
         },
     )
+}
+
+fn trace_audit_reason_canonical_sha256_value(reason: Option<&str>, key: &str) -> Option<String> {
+    let value = trace_audit_reason_value(reason, key)?;
+    is_canonical_sha256_prefixed_hash(value).then(|| value.to_string())
 }
 
 fn trace_review_lease_reason(
@@ -73675,12 +73684,12 @@ mod tests {
         };
         let conflict_key = ranking_calibration_dataset_file_key(&record)
             .expect("calibration dataset key serializes");
-        let reason_hash = "sha256:quarantine-reason";
+        let reason_hash = sha256_prefixed("quarantine-reason");
         let event = TraceCommonsAuditEvent::ranking_calibration_dataset_quarantine(
             &auth,
             &record,
             &conflict_key,
-            reason_hash,
+            &reason_hash,
         );
 
         let (action, metadata) = audit_backfill_storage_projection(&event);
@@ -73697,9 +73706,42 @@ mod tests {
                 policy_version: record.policy_version,
                 archived_source_manifest_hash: record.source_manifest_hash,
                 conflict_key_hash: sha256_prefixed(&conflict_key),
-                reason_hash: reason_hash.to_string(),
+                reason_hash,
             }
         );
+    }
+
+    #[test]
+    fn audit_backfill_rejects_noncanonical_calibration_dataset_quarantine_hash_metadata() {
+        let event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: Uuid::nil(),
+            kind: "ranking_calibration_dataset_quarantine".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Admin),
+            actor_principal_ref: Some(principal_storage_ref("admin-token-a")),
+            reason: Some(format!(
+                "calibration_dataset_hash={};target_use=ranking_model_training;policy_version=trace-credit-policy-v1;archived_source_manifest_hash={};conflict_key_hash={};reason_hash=sha256:not-canonical",
+                sha256_prefixed("quarantine-holdout"),
+                sha256_prefixed("quarantine-manifest"),
+                sha256_prefixed("quarantine-conflict-key"),
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+
+        let (action, metadata) = audit_backfill_storage_projection(&event);
+
+        assert_eq!(
+            action,
+            StorageTraceAuditAction::RankingCalibrationDatasetQuarantine
+        );
+        assert_eq!(metadata, StorageTraceAuditSafeMetadata::Empty);
     }
 
     #[test]
