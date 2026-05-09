@@ -553,7 +553,8 @@ sha256-prefixed evidence hash, and can append `credit_settlement` rollout-smoke
 evidence directly. When
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE=true`, the drill
 reports `credit_settlement_central_issuer_profile_incomplete` until the same
-central issuance controls required at startup are configured.
+central issuance controls required at startup are configured, including tenant
+access-grant enforcement for exact issuer principals.
 Final settlement requests can include `issuer_approval_evidence_hash` to bind
 the batch to a central operator approval artifact. Set
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` to reject live
@@ -1636,10 +1637,11 @@ Early deployments do not need a complex multi-actor trust model for issuance.
 When TraceCommons centrally runs the issuer, set
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE=true`; startup
 then requires fail-closed DB mirror writes, PostgreSQL RLS readiness, a
-per-account settlement cap, required fresh source-list issuer approval, a pinned
-required NEAR credit contract, configured NEAR submit/confirm adapters, and
-bearer auth on both adapter directions before the service is considered ready
-for live non-transferable credit issuance.
+per-account settlement cap, tenant access-grant enforcement for exact issuer
+principals, required fresh source-list issuer approval, a pinned required NEAR
+credit contract, configured NEAR submit/confirm adapters, and bearer auth on
+both adapter directions before the service is considered ready for live
+non-transferable credit issuance.
 
 For unattended cron-style operation, utility workers can call
 `POST /v1/workers/credit-cycle/scheduler/run` instead. The scheduler takes one
