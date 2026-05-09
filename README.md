@@ -177,8 +177,8 @@ so tampered local/DB rows fail closed as retryable outbox failures instead of
 leaving the server boundary. Configure
 `TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL` to let the scoped submit worker hand
 pending or failed-retry calls to an operator-owned NEAR relayer; the server then
-records the public 43-44 character base58 NEAR transaction hash or a hashed
-failure. Configure
+records the public 43-44 character base58 NEAR transaction hash or a bounded
+failure hash. Configure
 `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL` to let the scoped confirm worker
 poll submitted transactions through an operator-owned confirmer and move rows to
 confirmed or failed status. Workers can still manually mark items submitted,

@@ -548,6 +548,7 @@ const TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_DEFAULT_LIMIT: u32 = 100;
 const TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_MAX_LIMIT: u32 = 500;
 const TRACE_NEAR_TRANSACTION_HASH_MIN_LEN: usize = 43;
 const TRACE_NEAR_TRANSACTION_HASH_MAX_LEN: usize = 44;
+const TRACE_OUTBOX_ERROR_DETAIL_MAX_LEN: usize = 1024;
 const TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_DEFAULT_LIMIT: u32 = 100;
 const TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_MAX_LIMIT: u32 = 500;
 const TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_DEFAULT_LIMIT: u32 = 100;
@@ -11331,15 +11332,11 @@ impl TraceNearCreditConfirmer for HttpTraceNearCreditConfirmer {
         {
             anyhow::bail!("confirmed NEAR credit response requires near_transaction_hash");
         }
-        if response.status == TraceNearCreditConfirmationStatus::Failed
-            && response
-                .error_detail
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .is_none()
-        {
-            anyhow::bail!("failed NEAR credit response requires error_detail");
+        if response.status == TraceNearCreditConfirmationStatus::Failed {
+            response.error_detail = Some(normalize_outbox_error_detail(
+                response.error_detail.as_deref().unwrap_or_default(),
+                "failed NEAR credit response",
+            )?);
         }
         Ok(response)
     }
@@ -11496,15 +11493,11 @@ impl TraceBenchmarkRegistryConfirmer for HttpTraceBenchmarkRegistryConfirmer {
         {
             anyhow::bail!("confirmed benchmark registry response requires external_receipt_ref");
         }
-        if response.status == TraceBenchmarkRegistryConfirmationStatus::Failed
-            && response
-                .error_detail
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .is_none()
-        {
-            anyhow::bail!("failed benchmark registry response requires error_detail");
+        if response.status == TraceBenchmarkRegistryConfirmationStatus::Failed {
+            response.error_detail = Some(normalize_outbox_error_detail(
+                response.error_detail.as_deref().unwrap_or_default(),
+                "failed benchmark registry response",
+            )?);
         }
         Ok(response)
     }
@@ -16387,18 +16380,11 @@ async fn mark_near_credit_outbox_status_handler(
         ));
     }
     let last_error_hash = if status == StorageTraceCreditSettlementNearStatus::Failed {
-        let error_detail = body
-            .error_detail
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                api_error(
-                    StatusCode::BAD_REQUEST,
-                    "failed status requires error_detail",
-                )
-            })?;
-        Some(sha256_prefixed(error_detail))
+        let error_detail = body.error_detail.as_deref().unwrap_or_default();
+        Some(
+            outbox_error_detail_hash(error_detail, "failed status")
+                .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?,
+        )
     } else {
         None
     };
@@ -16602,18 +16588,11 @@ async fn mark_benchmark_registry_outbox_status_handler(
         ));
     }
     let last_error_hash = if status == StorageTraceBenchmarkRegistryOutboxStatus::Failed {
-        let error_detail = body
-            .error_detail
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                api_error(
-                    StatusCode::BAD_REQUEST,
-                    "failed status requires error_detail",
-                )
-            })?;
-        Some(sha256_prefixed(error_detail))
+        let error_detail = body.error_detail.as_deref().unwrap_or_default();
+        Some(
+            outbox_error_detail_hash(error_detail, "failed status")
+                .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?,
+        )
     } else {
         None
     };
@@ -16960,13 +16939,10 @@ async fn run_benchmark_registry_outbox_confirm_worker(
                     response.pending = response.pending.saturating_sub(1);
                 }
                 TraceBenchmarkRegistryConfirmationStatus::Failed => {
-                    let error_detail = match confirm_response
-                        .error_detail
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .context("failed benchmark registry response requires error_detail")
-                    {
+                    let error_detail = match normalize_outbox_error_detail(
+                        confirm_response.error_detail.as_deref().unwrap_or_default(),
+                        "failed benchmark registry response",
+                    ) {
                         Ok(error_detail) => error_detail,
                         Err(error) => {
                             let last_error_hash = sha256_prefixed(&safe_worker_error(&error));
@@ -16999,7 +16975,7 @@ async fn run_benchmark_registry_outbox_confirm_worker(
                             continue;
                         }
                     };
-                    let last_error_hash = sha256_prefixed(error_detail);
+                    let last_error_hash = sha256_prefixed(&error_detail);
                     tracing::warn!(
                         tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
                         benchmark_outbox_id = %item.benchmark_outbox_id,
@@ -17483,13 +17459,43 @@ async fn run_near_credit_outbox_confirm_worker(
                     }
                 }
                 TraceNearCreditConfirmationStatus::Failed => {
-                    let error_detail = confirm_response
-                        .error_detail
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .context("failed NEAR credit response requires error_detail")?;
-                    let last_error_hash = sha256_prefixed(error_detail);
+                    let error_detail = match normalize_outbox_error_detail(
+                        confirm_response.error_detail.as_deref().unwrap_or_default(),
+                        "failed NEAR credit response",
+                    ) {
+                        Ok(error_detail) => error_detail,
+                        Err(error) => {
+                            let last_error_hash = sha256_prefixed(&safe_worker_error(&error));
+                            tracing::warn!(
+                                tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+                                near_outbox_id = %item.near_outbox_id,
+                                error_hash = %last_error_hash,
+                                "Trace Commons NEAR credit outbox confirmation returned malformed failure"
+                            );
+                            let near_transaction_hash = item
+                                .near_transaction_hash
+                                .as_deref()
+                                .and_then(|hash| normalize_near_transaction_hash(hash).ok());
+                            update_near_credit_outbox_item_status_with_db_mirror(
+                                state,
+                                tenant,
+                                item.near_outbox_id,
+                                StorageTraceCreditSettlementNearStatus::Submitted,
+                                near_transaction_hash,
+                                Some(last_error_hash),
+                            )
+                            .await?
+                            .with_context(|| {
+                                format!(
+                                    "NEAR credit outbox item {} disappeared before malformed-failure status update",
+                                    item.near_outbox_id
+                                )
+                            })?;
+                            response.failed += 1;
+                            continue;
+                        }
+                    };
+                    let last_error_hash = sha256_prefixed(&error_detail);
                     tracing::warn!(
                         tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
                         near_outbox_id = %item.near_outbox_id,
@@ -17763,6 +17769,21 @@ fn normalize_near_transaction_hash(hash: &str) -> anyhow::Result<String> {
         "near_transaction_hash contains non-base58 characters"
     );
     Ok(hash.to_string())
+}
+
+fn normalize_outbox_error_detail(value: &str, surface: &str) -> anyhow::Result<String> {
+    let value = value.trim();
+    anyhow::ensure!(!value.is_empty(), "{surface} requires error_detail");
+    anyhow::ensure!(
+        value.len() <= TRACE_OUTBOX_ERROR_DETAIL_MAX_LEN,
+        "{surface} error_detail is too long"
+    );
+    Ok(value.to_string())
+}
+
+fn outbox_error_detail_hash(value: &str, surface: &str) -> anyhow::Result<String> {
+    let value = normalize_outbox_error_detail(value, surface)?;
+    Ok(sha256_prefixed(&value))
 }
 
 fn is_near_base58_character(character: char) -> bool {
@@ -93417,6 +93438,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn benchmark_registry_outbox_mark_status_rejects_oversized_error_detail_before_mutation()
+    {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let benchmark_outbox_id = Uuid::new_v4();
+        let item = pending_benchmark_registry_outbox_item(benchmark_outbox_id);
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &item)
+            .expect("benchmark registry outbox file writes");
+
+        let error = mark_benchmark_registry_outbox_status_handler(
+            State(state),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxStatusRequest {
+                benchmark_outbox_id,
+                status: StorageTraceBenchmarkRegistryOutboxStatus::Failed,
+                external_receipt_ref: None,
+                error_detail: Some("x".repeat(2048)),
+            }),
+        )
+        .await
+        .expect_err("manual benchmark failure details must be bounded before mutation");
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.0.error.contains("error_detail"));
+        let outbox = read_all_benchmark_registry_outbox_items(temp.path(), "tenant-a")
+            .expect("benchmark registry outbox reads");
+        assert_eq!(
+            outbox[0].status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Pending
+        );
+        assert!(outbox[0].last_error_hash.is_none());
+    }
+
+    #[tokio::test]
     async fn benchmark_registry_outbox_submit_worker_sends_pending_items_and_marks_submitted() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
@@ -94725,6 +94781,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn near_credit_outbox_confirm_worker_keeps_oversized_failure_detail_hash_only() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).near_credit_confirmer = Some(Arc::new(FakeNearCreditConfirmer {
+            status: TraceNearCreditConfirmationStatus::Failed,
+            error_detail: Some("x".repeat(2048)),
+            ..FakeNearCreditConfirmer::default()
+        }));
+
+        let near_outbox_id = Uuid::new_v4();
+        let item =
+            submitted_near_credit_outbox_item(near_outbox_id, TEST_NEAR_TX_HASH_1, 1_000_000);
+        append_near_credit_outbox_item(temp.path(), "tenant-a", &item)
+            .expect("NEAR outbox file writes");
+
+        let Json(response) = near_credit_outbox_confirm_worker_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxConfirmWorkerRequest {
+                purpose: Some("confirm_near_oversized_failed_detail".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("oversized adapter failure detail is recorded as item retry state");
+
+        assert_eq!(response.checked, 1);
+        assert_eq!(response.confirmed, 0);
+        assert_eq!(response.failed, 1);
+        assert_eq!(response.pending, 1);
+
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(
+            outbox[0].status,
+            StorageTraceCreditSettlementNearStatus::Submitted
+        );
+        assert_eq!(
+            outbox[0].near_transaction_hash.as_deref(),
+            Some(TEST_NEAR_TX_HASH_1)
+        );
+        assert!(outbox[0].confirmed_at.is_none());
+        assert!(outbox[0].last_error_hash.is_some());
+    }
+
+    #[tokio::test]
     async fn near_credit_outbox_confirm_worker_rejects_tampered_method_call_before_confirmer() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
@@ -94888,6 +94992,43 @@ mod tests {
             StorageTraceCreditSettlementNearStatus::Pending
         );
         assert!(outbox[0].near_transaction_hash.is_none());
+    }
+
+    #[tokio::test]
+    async fn near_credit_outbox_mark_status_rejects_oversized_error_detail_before_mutation() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let near_outbox_id = Uuid::new_v4();
+        let mut item =
+            submitted_near_credit_outbox_item(near_outbox_id, TEST_NEAR_TX_HASH_1, 1_000_000);
+        item.status = StorageTraceCreditSettlementNearStatus::Pending;
+        item.submitted_at = None;
+        item.near_transaction_hash = None;
+        append_near_credit_outbox_item(temp.path(), "tenant-a", &item)
+            .expect("NEAR outbox file writes");
+
+        let error = mark_near_credit_outbox_status_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxStatusRequest {
+                near_outbox_id,
+                status: StorageTraceCreditSettlementNearStatus::Failed,
+                near_transaction_hash: None,
+                error_detail: Some("x".repeat(2048)),
+            }),
+        )
+        .await
+        .expect_err("manual status failure details must be bounded before mutation");
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.0.error.contains("error_detail"));
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert_eq!(
+            outbox[0].status,
+            StorageTraceCreditSettlementNearStatus::Pending
+        );
+        assert!(outbox[0].last_error_hash.is_none());
     }
 
     #[tokio::test]
