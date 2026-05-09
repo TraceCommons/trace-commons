@@ -12713,6 +12713,11 @@ async fn append_credit_event_handler(
             "credit_points_delta exceeds the delayed credit policy limit",
         ));
     }
+    require_positive_credit_issuance_principal_if_configured(
+        state.as_ref(),
+        &tenant,
+        body.credit_points_delta,
+    )?;
     let reason = body
         .reason
         .as_deref()
@@ -12938,8 +12943,7 @@ async fn utility_credit_handler(
         },
         sources,
     )
-    .await
-    .map_err(internal_error)?;
+    .await?;
 
     Ok(Json(TraceUtilityCreditJobResponse {
         tenant_id: tenant.tenant_id.clone(),
@@ -13091,8 +13095,7 @@ async fn utility_attestation_handler(
         },
         sources,
     )
-    .await
-    .map_err(internal_error)?;
+    .await?;
 
     let attestation = TraceUtilityAttestationRecord {
         attestation_id: Uuid::new_v4(),
@@ -15532,6 +15535,27 @@ fn require_credit_hold_control_principal_if_configured(
     Err(api_error(
         StatusCode::FORBIDDEN,
         "credit hold mutations require an authorized central issuer principal",
+    ))
+}
+
+fn require_positive_credit_issuance_principal_if_configured(
+    state: &AppState,
+    tenant: &TenantAuth,
+    credit_points_delta: f32,
+) -> ApiResult<()> {
+    if credit_points_delta <= 0.0
+        || state
+            .credit_settlement_central_issuer_principal_refs
+            .is_empty()
+        || state
+            .credit_settlement_central_issuer_principal_refs
+            .contains(&tenant.principal_ref)
+    {
+        return Ok(());
+    }
+    Err(api_error(
+        StatusCode::FORBIDDEN,
+        "positive credit issuance requires an authorized central issuer principal",
     ))
 }
 
@@ -21240,8 +21264,7 @@ async fn append_ranking_prediction_credit_for_record(
                 auth_principal_ref: submission.auth_principal_ref,
             }],
         )
-        .await
-        .map_err(internal_error)?
+        .await?
     };
 
     Ok(TraceRankingPredictionCreditResponse {
@@ -26365,8 +26388,7 @@ async fn run_process_evaluation_job(
                     auth_principal_ref: record.auth_principal_ref.clone(),
                 }],
             )
-            .await
-            .map_err(internal_error)?
+            .await?
         } else {
             AutomaticUtilityCreditAppendCounts::default()
         };
@@ -27205,7 +27227,7 @@ async fn append_automatic_utility_credit_events_once(
     tenant: &TenantAuth,
     config: AutomaticUtilityCreditConfig,
     sources: impl IntoIterator<Item = AutomaticUtilityCreditSource>,
-) -> anyhow::Result<usize> {
+) -> ApiResult<usize> {
     Ok(
         append_automatic_utility_credit_events_once_with_counts(state, tenant, config, sources)
             .await?
@@ -27218,8 +27240,14 @@ async fn append_automatic_utility_credit_events_once_with_counts(
     tenant: &TenantAuth,
     config: AutomaticUtilityCreditConfig,
     sources: impl IntoIterator<Item = AutomaticUtilityCreditSource>,
-) -> anyhow::Result<AutomaticUtilityCreditAppendCounts> {
-    let mut existing_event_ids = read_all_credit_events(&state.root, &tenant.tenant_id)?
+) -> ApiResult<AutomaticUtilityCreditAppendCounts> {
+    require_positive_credit_issuance_principal_if_configured(
+        state,
+        tenant,
+        config.credit_points_delta,
+    )?;
+    let mut existing_event_ids = read_all_credit_events(&state.root, &tenant.tenant_id)
+        .map_err(internal_error)?
         .into_iter()
         .map(|event| event.event_id)
         .collect::<BTreeSet<_>>();
@@ -27258,7 +27286,7 @@ async fn append_automatic_utility_credit_events_once_with_counts(
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
         };
-        append_credit_event(&state.root, &tenant.tenant_id, &event)?;
+        append_credit_event(&state.root, &tenant.tenant_id, &event).map_err(internal_error)?;
         let mirror_result = mirror_credit_event_to_db(state, &event).await;
         if let Err(error) = &mirror_result {
             tracing::warn!(
@@ -27267,7 +27295,8 @@ async fn append_automatic_utility_credit_events_once_with_counts(
                 "Trace Commons DB dual-write automatic credit mirror failed"
             );
         }
-        enforce_db_mirror_write_result(state, "automatic credit ledger event", mirror_result)?;
+        enforce_db_mirror_write_result(state, "automatic credit ledger event", mirror_result)
+            .map_err(internal_error)?;
         append_audit_event_with_db_mirror(
             state,
             tenant,
@@ -27285,7 +27314,8 @@ async fn append_automatic_utility_credit_events_once_with_counts(
                 external_ref_hash: event.external_ref.as_deref().map(sha256_prefixed),
             },
         )
-        .await?;
+        .await
+        .map_err(internal_error)?;
         existing_event_ids.insert(event_id);
         counts.appended += 1;
     }
@@ -37061,8 +37091,7 @@ async fn run_benchmark_conversion_job(
             .iter()
             .map(AutomaticUtilityCreditSource::from_benchmark_candidate),
     )
-    .await
-    .map_err(internal_error)?;
+    .await?;
     enforce_export_job_mirror_result(
         state,
         "benchmark export job completion",
@@ -37573,8 +37602,7 @@ async fn run_ranker_training_candidates_export_job(
             .iter()
             .map(AutomaticUtilityCreditSource::from_ranker_candidate),
     )
-    .await
-    .map_err(internal_error)?;
+    .await?;
     enforce_export_job_mirror_result(
         state,
         "ranker candidate export job completion",
@@ -37927,8 +37955,7 @@ async fn run_ranker_training_pairs_export_job(
         },
         pair_credit_sources,
     )
-    .await
-    .map_err(internal_error)?;
+    .await?;
     enforce_export_job_mirror_result(
         state,
         "ranker pair export job completion",
@@ -104052,7 +104079,7 @@ mod tests {
         .expect("submission succeeds");
         let Json(event) = append_credit_event_handler(
             State(state.clone()),
-            auth_headers("review-token-a"),
+            auth_headers("admin-token-a"),
             AxumPath(submission_id),
             Json(TraceCreditLedgerAppendRequest {
                 event_type: TraceCreditLedgerEventType::TrainingUtility,
@@ -104062,7 +104089,7 @@ mod tests {
             }),
         )
         .await
-        .expect("reviewer can append delayed utility credit");
+        .expect("authorized central issuer can append delayed utility credit");
 
         let hold_error = credit_hold_handler(
             State(state.clone()),
@@ -113735,6 +113762,169 @@ mod tests {
         .await
         .expect_err("contributor cannot append delayed credit");
         assert_eq!(error.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn central_issuer_allowlist_blocks_positive_credit_issuance() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
+            Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let manual_error = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.0,
+                reason: Some("unlisted reviewer must not mint utility credit".to_string()),
+                external_ref: Some("frontier:blocked-manual-credit".to_string()),
+            }),
+        )
+        .await
+        .expect_err("unlisted reviewer cannot issue positive credit");
+        assert_eq!(manual_error.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            manual_error.1.0.error,
+            "positive credit issuance requires an authorized central issuer principal"
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit reads after blocked manual credit")
+                .is_empty()
+        );
+
+        let utility_error = utility_credit_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceUtilityCreditJobRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.0,
+                reason: "unlisted utility worker must not mint credit".to_string(),
+                external_ref: "frontier:blocked-utility-credit".to_string(),
+                submission_ids: vec![submission_id],
+            }),
+        )
+        .await
+        .expect_err("unlisted utility worker cannot issue positive credit");
+        assert_eq!(utility_error.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            utility_error.1.0.error,
+            "positive credit issuance requires an authorized central issuer principal"
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit reads after blocked utility credit")
+                .is_empty()
+        );
+
+        let attestation_error = utility_attestation_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceUtilityAttestationRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.0,
+                use_category: "frontier_lab_training".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                evidence_hash:
+                    "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                        .to_string(),
+                reason: "unlisted utility worker must not attest credit".to_string(),
+                external_ref: "frontier-lab:blocked-attestation".to_string(),
+                source_submission_ids: vec![submission_id],
+            }),
+        )
+        .await
+        .expect_err("unlisted utility worker cannot attest positive credit");
+        assert_eq!(attestation_error.0, StatusCode::FORBIDDEN);
+        assert!(
+            read_all_utility_attestations(temp.path(), "tenant-a")
+                .expect("attestations read after blocked attestation")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit reads after blocked attestation")
+                .is_empty()
+        );
+
+        let Json(penalty) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::AbusePenalty,
+                credit_points_delta: -1.0,
+                reason: Some("reviewer can still record a negative adjustment".to_string()),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("negative credit adjustment is not positive issuance");
+        assert_eq!(penalty.credit_points_delta, -1.0);
+
+        let Json(manual_credit) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.0,
+                reason: Some("central issuer can mint manual utility credit".to_string()),
+                external_ref: Some("frontier:authorized-manual-credit".to_string()),
+            }),
+        )
+        .await
+        .expect("authorized central issuer can issue manual positive credit");
+        assert_eq!(manual_credit.credit_points_delta, 1.0);
+
+        let Json(attestation) = utility_attestation_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceUtilityAttestationRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.0,
+                use_category: "frontier_lab_training".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                evidence_hash:
+                    "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                        .to_string(),
+                reason: "central issuer records frontier lab evidence".to_string(),
+                external_ref: "frontier-lab:authorized-attestation".to_string(),
+                source_submission_ids: vec![submission_id],
+            }),
+        )
+        .await
+        .expect("authorized central issuer can attest positive credit");
+        assert_eq!(attestation.appended_count, 1);
+
+        assert_eq!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("authorized credit events read")
+                .len(),
+            3
+        );
+        assert_eq!(
+            read_all_utility_attestations(temp.path(), "tenant-a")
+                .expect("authorized attestations read")
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
