@@ -324,7 +324,10 @@ an admin-only stale export-job recovery route, PostgreSQL RLS readiness aggregat
 counts, safe
 promotion-gate counts in the read audit row, and structured warning logs for the
 aggregate gate set plus each individual promotion gate whenever promotion gates
-are blocked or warning. Admins can also scrape `/v1/admin/operational-metrics`
+are blocked or warning. NEAR credit and benchmark registry outbox workers also
+emit safe completion/failure logs with tenant refs, purpose hashes, row ids, and
+counts only, avoiding adapter URLs, raw receipts, transaction hashes, account
+hashes, or raw error text. Admins can also scrape `/v1/admin/operational-metrics`
 for a Prometheus-text snapshot of the same safe promotion, per-gate,
 worker-skip, rollout-smoke, submission, review SLA, export, retention, vector,
 benchmark, and delayed-credit gauges. The same summary response includes a
