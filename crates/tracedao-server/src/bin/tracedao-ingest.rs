@@ -78186,6 +78186,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn db_reviewer_reads_tenant_allowlist_keeps_fallback_tenant_file_backed() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(backend.clone()),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+            TraceTenantRolloutFeature::DbReviewerReads,
+            &["tenant-a"],
+        );
+
+        let tenant_a_envelope = sample_envelope().await;
+        let tenant_a_submission_id = tenant_a_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(tenant_a_envelope),
+        )
+        .await
+        .expect("tenant-a submission mirrors to DB");
+        let tenant_a_metadata_path =
+            submission_metadata_path(temp.path(), "tenant-a", tenant_a_submission_id);
+        assert!(tenant_a_metadata_path.exists());
+        std::fs::remove_file(&tenant_a_metadata_path)
+            .expect("tenant-a file metadata removed for DB-read canary");
+        assert!(
+            !tenant_a_metadata_path.exists(),
+            "tenant-a reviewer read canary must not depend on file metadata"
+        );
+
+        let tenant_b_file_envelope = sample_envelope().await;
+        let tenant_b_file_submission_id = tenant_b_file_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_file_envelope),
+        )
+        .await
+        .expect("tenant-b file-backed submission mirrors to DB");
+
+        let tenant_b_db_only_envelope = sample_envelope().await;
+        let tenant_b_db_only_submission_id = tenant_b_db_only_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_db_only_envelope),
+        )
+        .await
+        .expect("tenant-b DB-mirrored submission succeeds");
+        let tenant_b_db_only_metadata_path =
+            submission_metadata_path(temp.path(), "tenant-b", tenant_b_db_only_submission_id);
+        assert!(tenant_b_db_only_metadata_path.exists());
+        std::fs::remove_file(&tenant_b_db_only_metadata_path)
+            .expect("tenant-b DB-only metadata removed");
+
+        let Json(tenant_a_queue) = review_quarantine_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(ReviewQueueQuery::default()),
+        )
+        .await
+        .expect("tenant-a allowlisted reviewer read uses DB metadata");
+        assert_eq!(tenant_a_queue.len(), 1);
+        assert_eq!(tenant_a_queue[0].submission_id, tenant_a_submission_id);
+
+        let Json(tenant_b_queue) = review_quarantine_handler(
+            State(state.clone()),
+            auth_headers("review-token-b"),
+            Query(ReviewQueueQuery::default()),
+        )
+        .await
+        .expect("tenant-b non-allowlisted reviewer read uses file metadata");
+        assert_eq!(tenant_b_queue.len(), 1);
+        assert_eq!(tenant_b_queue[0].submission_id, tenant_b_file_submission_id);
+        assert_ne!(
+            tenant_b_queue[0].submission_id, tenant_b_db_only_submission_id,
+            "tenant-b fallback must ignore DB-mirrored rows when file metadata is absent"
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+    }
+
+    #[tokio::test]
     async fn maintenance_reconciliation_reports_ranking_control_plane_gaps() {
         let Some(backend) = postgres_backend_for_ingest_test().await else {
             return;
