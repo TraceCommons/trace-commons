@@ -254,6 +254,8 @@ const TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE";
+const TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_NEAR_CONTRACT: &str =
@@ -756,6 +758,7 @@ struct AppState {
     credit_settlement_require_issuer_approval: bool,
     credit_settlement_issuer_approval_max_age: Option<Duration>,
     credit_settlement_require_central_issuer_profile: bool,
+    credit_settlement_require_rollout_smoke_ready: bool,
     credit_settlement_near_contract_id: Option<String>,
     credit_settlement_require_near_contract: bool,
     submission_quota: TraceSubmissionQuotaConfig,
@@ -2233,6 +2236,8 @@ impl AppState {
         )?;
         let credit_settlement_require_central_issuer_profile =
             env_truthy(TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE);
+        let credit_settlement_require_rollout_smoke_ready =
+            env_truthy(TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY);
         let credit_settlement_near_contract_id =
             parse_credit_settlement_near_contract_id_from_env()?;
         let credit_settlement_require_near_contract =
@@ -2299,6 +2304,7 @@ impl AppState {
                 require_issuer_approval: credit_settlement_require_issuer_approval,
                 issuer_approval_freshness_configured: credit_settlement_issuer_approval_max_age
                     .is_some(),
+                require_rollout_smoke_ready: credit_settlement_require_rollout_smoke_ready,
                 near_contract_configured: credit_settlement_near_contract_id.is_some(),
                 require_near_contract: credit_settlement_require_near_contract,
                 near_submitter_configured: near_credit_submitter.is_some(),
@@ -2548,6 +2554,7 @@ impl AppState {
             credit_settlement_require_issuer_approval,
             credit_settlement_issuer_approval_max_age,
             credit_settlement_require_central_issuer_profile,
+            credit_settlement_require_rollout_smoke_ready,
             credit_settlement_near_contract_id,
             credit_settlement_require_near_contract,
             submission_quota,
@@ -6994,6 +7001,7 @@ struct CreditSettlementCentralIssuerProfileConfig {
     policy_version_allowlist_configured: bool,
     require_issuer_approval: bool,
     issuer_approval_freshness_configured: bool,
+    require_rollout_smoke_ready: bool,
     near_contract_configured: bool,
     require_near_contract: bool,
     near_submitter_configured: bool,
@@ -7020,6 +7028,7 @@ fn credit_settlement_central_issuer_profile_config_from_state(
         issuer_approval_freshness_configured: state
             .credit_settlement_issuer_approval_max_age
             .is_some(),
+        require_rollout_smoke_ready: state.credit_settlement_require_rollout_smoke_ready,
         near_contract_configured: state.credit_settlement_near_contract_id.is_some(),
         require_near_contract: state.credit_settlement_require_near_contract,
         near_submitter_configured: state.near_credit_submitter.is_some(),
@@ -7060,6 +7069,9 @@ fn credit_settlement_central_issuer_profile_missing_config(
     }
     if !config.issuer_approval_freshness_configured {
         missing.push(TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS);
+    }
+    if !config.require_rollout_smoke_ready {
+        missing.push(TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY);
     }
     if !config.near_contract_configured {
         missing.push(TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID);
@@ -7597,6 +7609,7 @@ struct TraceCommonsConfigStatusResponse {
     credit_settlement_require_issuer_approval: bool,
     credit_settlement_issuer_approval_max_age_hours: Option<i64>,
     credit_settlement_require_central_issuer_profile: bool,
+    credit_settlement_require_rollout_smoke_ready: bool,
     credit_settlement_central_issuer_profile_ready: bool,
     credit_settlement_central_issuer_profile_missing_controls: Vec<&'static str>,
     credit_settlement_near_contract_configured: bool,
@@ -7863,6 +7876,8 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .map(|max_age| max_age.num_hours()),
         credit_settlement_require_central_issuer_profile: state
             .credit_settlement_require_central_issuer_profile,
+        credit_settlement_require_rollout_smoke_ready: state
+            .credit_settlement_require_rollout_smoke_ready,
         credit_settlement_central_issuer_profile_ready: central_issuer_profile_ready,
         credit_settlement_central_issuer_profile_missing_controls:
             central_issuer_profile_missing_controls,
@@ -12409,6 +12424,16 @@ async fn credit_cycle_scheduler_run_handler(
     } else {
         None
     };
+    let rollout_smoke_skip_reason =
+        if !body.dry_run && state.credit_settlement_require_rollout_smoke_ready {
+            let tenant_ctx = TenantCtx::from_auth(tenant.clone());
+            let summary = read_trace_operational_summary(state.as_ref(), &tenant_ctx, Utc::now())
+                .await
+                .map_err(internal_error)?;
+            (!summary.rollout_smoke.ready).then_some("credit_settlement_rollout_smoke_not_ready")
+        } else {
+            None
+        };
 
     let model_versions = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
         .await
@@ -12503,6 +12528,17 @@ async fn credit_cycle_scheduler_run_handler(
             continue;
         }
         if let Some(skip_reason) = central_issuer_profile_skip_reason {
+            credit_cycle_scheduler_record_skip(&mut response, skip_reason);
+            credit_cycle_scheduler_record_decision(
+                &mut response,
+                &candidate,
+                body.target_use,
+                TraceCreditCycleSchedulerDecisionAction::Skipped,
+                Some(skip_reason.to_string()),
+            );
+            continue;
+        }
+        if let Some(skip_reason) = rollout_smoke_skip_reason {
             credit_cycle_scheduler_record_skip(&mut response, skip_reason);
             credit_cycle_scheduler_record_decision(
                 &mut response,
@@ -12826,6 +12862,12 @@ async fn credit_cycle_worker_run_handler(
         body.dry_run,
         body.near_contract_id.as_deref(),
     )?;
+    require_credit_settlement_rollout_smoke_ready_if_configured(
+        state.as_ref(),
+        &tenant,
+        body.dry_run,
+    )
+    .await?;
 
     ensure_no_overlapping_live_ranking_worker_run(
         state.as_ref(),
@@ -13549,6 +13591,8 @@ async fn run_credit_settlement(
         body.dry_run,
         body.near_contract_id.as_deref(),
     )?;
+    require_credit_settlement_rollout_smoke_ready_if_configured(state, tenant, body.dry_run)
+        .await?;
     let ranking_model_version = match body.ranking_model_version.as_deref().map(str::trim) {
         Some("") => {
             return Err(api_error(
@@ -14373,6 +14417,41 @@ fn require_credit_settlement_central_issuer_profile_if_configured(
     Err(api_error(
         StatusCode::CONFLICT,
         "live credit settlement requires complete central issuer profile",
+    ))
+}
+
+async fn require_credit_settlement_rollout_smoke_ready_if_configured(
+    state: &AppState,
+    tenant: &TenantAuth,
+    dry_run: bool,
+) -> ApiResult<()> {
+    if dry_run || !state.credit_settlement_require_rollout_smoke_ready {
+        return Ok(());
+    }
+    let tenant_ctx = TenantCtx::from_auth(tenant.clone());
+    let summary = read_trace_operational_summary(state, &tenant_ctx, Utc::now())
+        .await
+        .map_err(internal_error)?;
+    if summary.rollout_smoke.ready {
+        return Ok(());
+    }
+    let rehearsal_evidence_status = if summary.rollout_smoke.missing_evidence_count > 0 {
+        "missing_rehearsal_evidence"
+    } else if summary.rollout_smoke.failed_evidence_count > 0 {
+        "failed_rehearsal_evidence"
+    } else if summary.rollout_smoke.stale_evidence_count > 0 {
+        "stale_rehearsal_evidence"
+    } else {
+        "ready"
+    };
+    Err(api_error(
+        StatusCode::CONFLICT,
+        format!(
+            "live credit settlement requires rollout-smoke readiness; evidence_status={}; rehearsal_evidence_status={}; blocker_count={}",
+            summary.rollout_smoke.evidence_status,
+            rehearsal_evidence_status,
+            summary.rollout_smoke.blocker_reasons.len()
+        ),
     ))
 }
 
@@ -57152,6 +57231,7 @@ mod tests {
             credit_settlement_require_issuer_approval: false,
             credit_settlement_issuer_approval_max_age: None,
             credit_settlement_require_central_issuer_profile: false,
+            credit_settlement_require_rollout_smoke_ready: false,
             credit_settlement_near_contract_id: None,
             credit_settlement_require_near_contract: false,
             submission_quota: TraceSubmissionQuotaConfig::default(),
@@ -58932,6 +59012,7 @@ mod tests {
                 policy_version_allowlist_configured: false,
                 require_issuer_approval: false,
                 issuer_approval_freshness_configured: false,
+                require_rollout_smoke_ready: false,
                 near_contract_configured: false,
                 require_near_contract: false,
                 near_submitter_configured: false,
@@ -58955,6 +59036,7 @@ mod tests {
                 policy_version_allowlist_configured: true,
                 require_issuer_approval: true,
                 issuer_approval_freshness_configured: true,
+                require_rollout_smoke_ready: true,
                 near_contract_configured: true,
                 require_near_contract: true,
                 near_submitter_configured: true,
@@ -58985,6 +59067,7 @@ mod tests {
                 policy_version_allowlist_configured: true,
                 require_issuer_approval: true,
                 issuer_approval_freshness_configured: true,
+                require_rollout_smoke_ready: true,
                 near_contract_configured: true,
                 require_near_contract: true,
                 near_submitter_configured: true,
@@ -60427,6 +60510,10 @@ mod tests {
             serde_json::json!(false)
         );
         assert_eq!(
+            value["credit_settlement_require_rollout_smoke_ready"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
             value["credit_settlement_central_issuer_profile_ready"],
             serde_json::json!(false)
         );
@@ -60443,6 +60530,9 @@ mod tests {
         )));
         assert!(central_issuer_missing_controls.contains(&serde_json::json!(
             TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS
+        )));
+        assert!(central_issuer_missing_controls.contains(&serde_json::json!(
+            TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY
         )));
         assert!(central_issuer_missing_controls.contains(&serde_json::json!(
             TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS
@@ -73666,6 +73756,7 @@ mod tests {
             credit_settlement_require_issuer_approval: false,
             credit_settlement_issuer_approval_max_age: None,
             credit_settlement_require_central_issuer_profile: false,
+            credit_settlement_require_rollout_smoke_ready: false,
             credit_settlement_near_contract_id: None,
             credit_settlement_require_near_contract: false,
             submission_quota: TraceSubmissionQuotaConfig::default(),
@@ -82406,7 +82497,7 @@ mod tests {
         );
         assert_eq!(
             summary_json["promotion_gates"]["credit_settlement_central_issuer_profile_missing_control_count"],
-            serde_json::json!(16)
+            serde_json::json!(17)
         );
         assert_eq!(
             summary_json["promotion_gates"]["credit_settlement_managed_eddsa_signed_tokens_required"],
@@ -82443,7 +82534,7 @@ mod tests {
             "tracedao_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"central_issuer_profile_ready\"}} 0"
         )));
         assert!(metrics.contains(&format!(
-            "tracedao_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"central_issuer_profile_missing_control_count\"}} 16"
+            "tracedao_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"central_issuer_profile_missing_control_count\"}} 17"
         )));
         assert!(metrics.contains(&format!(
             "tracedao_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"managed_eddsa_signed_tokens_required\"}} 0"
@@ -83010,6 +83101,9 @@ mod tests {
         assert!(missing_controls.contains(&serde_json::json!(
             TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS
         )));
+        assert!(missing_controls.contains(&serde_json::json!(
+            TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY
+        )));
         assert_eq!(
             value["blocking_gaps"],
             serde_json::json!(["credit_settlement_central_issuer_profile_incomplete"])
@@ -83126,6 +83220,102 @@ mod tests {
         assert!(!error_text.contains(&event.event_id.to_string()));
         assert!(!error_text.contains("frontier lab central issuer profile live probe"));
         assert!(!error_text.contains("lab-attestation:central-issuer-profile-live"));
+    }
+
+    #[tokio::test]
+    async fn live_credit_settlement_blocks_without_rollout_smoke_when_required() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_require_rollout_smoke_ready = true;
+        Arc::make_mut(&mut state).credit_settlement_max_micros_per_account = Some(2_000_000);
+        Arc::make_mut(&mut state).credit_settlement_allowed_policy_versions =
+            Arc::new(BTreeSet::from(["trace-credit-policy-v1".to_string()]));
+        Arc::make_mut(&mut state).near_credit_submitter =
+            Some(Arc::new(FakeNearCreditSubmitter::default()));
+        Arc::make_mut(&mut state).near_credit_confirmer =
+            Some(Arc::new(FakeNearCreditConfirmer::default()));
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 0.75,
+                reason: Some("frontier lab rollout smoke live probe".to_string()),
+                external_ref: Some("lab-attestation:rollout-smoke-live".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+
+        let Json(dry_run) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: true,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "dry-run settlement before rollout smoke evidence".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("dry-run settlement remains available for rollout-smoke diagnosis");
+        assert_eq!(dry_run.settled_source_event_count, 1);
+
+        let error = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "live settlement without rollout smoke evidence".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect_err("live settlement rejects missing rollout-smoke evidence");
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        let Json(error_body) = error.1;
+        assert!(error_body.error.contains("rollout-smoke readiness"));
+        assert!(error_body.error.contains("missing_rehearsal_evidence"));
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement reads")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads")
+                .is_empty()
+        );
+        let error_text = serde_json::to_string(&error_body).expect("error serializes");
+        assert!(!error_text.contains("admin-token-a"));
+        assert!(!error_text.contains("token-a"));
+        assert!(!error_text.contains(&event.event_id.to_string()));
+        assert!(!error_text.contains("frontier lab rollout smoke live probe"));
+        assert!(!error_text.contains("lab-attestation:rollout-smoke-live"));
     }
 
     #[tokio::test]
@@ -92623,6 +92813,87 @@ mod tests {
         assert!(
             read_all_credit_events(temp.path(), "tenant-a")
                 .expect("credit events read")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_preflight_reports_rollout_smoke_not_ready_when_required() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_require_rollout_smoke_ready = true;
+        let (candidate, _) = seed_credit_cycle_ready_candidate(
+            state.clone(),
+            "trace-ranker-credit-cycle-rollout-smoke-preflight-v1",
+        )
+        .await;
+        let request = serde_json::from_value(serde_json::json!({
+            "dry_run": false,
+            "preflight_only": true,
+            "submit_near_outbox": false,
+            "target_use": "ranking_model_training",
+            "policy_version": candidate.policy_version,
+            "reason": "preview blocked rollout smoke credit cycle",
+            "near_contract_id": "trace-credits.testnet",
+            "limit": 1,
+            "calibration_limit": 10,
+            "model_promotion_limit": 10,
+            "prediction_credit_limit": 10,
+            "credit_settlement_limit": 10,
+            "near_outbox_limit": 10,
+            "min_label_count": 1,
+            "confidence_threshold": 0.5,
+            "max_average_absolute_error_micros": 100000,
+            "allow_at_risk_models": false
+        }))
+        .expect("preflight-only request deserializes");
+
+        let Json(scheduler) = credit_cycle_scheduler_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(request),
+        )
+        .await
+        .expect("scheduler preflight reports rollout-smoke blocker");
+
+        let scheduler_value =
+            serde_json::to_value(&scheduler).expect("scheduler response serializes");
+        assert_eq!(scheduler.checked_count, 1);
+        assert_eq!(scheduler.started_count, 0);
+        assert_eq!(scheduler.skipped_count, 1);
+        assert_eq!(scheduler_value["eligible_count"].as_u64(), Some(0));
+        assert_eq!(
+            scheduler_value["skipped_reason_counts"]["credit_settlement_rollout_smoke_not_ready"]
+                .as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            scheduler_value["decisions"][0]["action"].as_str(),
+            Some("skipped")
+        );
+        assert_eq!(
+            scheduler_value["decisions"][0]["skip_reason"].as_str(),
+            Some("credit_settlement_rollout_smoke_not_ready")
+        );
+        assert!(scheduler.cycles.is_empty());
+        assert!(
+            read_all_ranking_worker_runs(temp.path(), "tenant-a")
+                .expect("worker runs read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit events read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement reads")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads")
                 .is_empty()
         );
     }
