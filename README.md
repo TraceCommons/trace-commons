@@ -134,7 +134,8 @@ Benchmark registry status is treated as a credit-readiness input, not as a raw
 artifact transport. Published benchmark artifacts enqueue durable outbox rows
 containing ids, registry refs, artifact/source hashes, evaluator refs, scores,
 and lifecycle status only. The operational summary counts pending, submitted,
-confirmed, and failed registry outbox work, and a published artifact remains in
+confirmed, and failed registry outbox work plus safe adapter/auth readiness, and
+a published artifact remains in
 the external-registry-adapter gap until a confirmed outbox receipt is recorded;
 a revoked artifact with a registry ref remains in the external-registry
 invalidation gap until a confirmed revoke receipt is recorded.
