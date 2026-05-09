@@ -588,6 +588,21 @@ the batch to a central operator approval artifact. Set
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` to reject live
 settlement without that hash; dry-runs remain non-mutating, and the drill now
 fails readiness until the approval-evidence hash is present.
+Deployments that want the server to own the manual settlement cadence can set
+`TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN` to a utility-worker bearer
+token. The optional in-process loop sleeps for
+`TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_INTERVAL_SECONDS` (default 300),
+then calls the same `/v1/workers/credit-settlements/run` route with
+`TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION`, the bounded
+`TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_LIMIT` (1..=500, default 100),
+`TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_DRY_RUN`, and optional
+source-list approval, NEAR contract, ranking model, and target-use gates.
+Startup validates the scheduler token through utility-worker auth, validates
+the configured policy and contract identifiers, and rejects live scheduler
+startup when required central issuer approval or a required NEAR contract is
+missing. Raw scheduler tokens, reasons, policy versions, approval hashes,
+contract ids, and ranking model ids are not returned by config-status,
+operational summary, or metrics.
 Set `TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID` to bind live issuance to
 one central non-transferable credit contract, and
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_NEAR_CONTRACT=true` to reject live
@@ -642,7 +657,19 @@ and automation gates: `ranking_min_label_count`,
 `credit_settlement_near_contract_configured`, and
 `credit_settlement_require_near_contract` so operators can see whether live
 settlement requires central approval evidence and a centrally configured NEAR
-contract without exposing that contract id. It also reports safe NEAR
+contract without exposing that contract id. It also reports safe settlement
+scheduler readiness fields:
+`credit_settlement_scheduler_configured`,
+`credit_settlement_scheduler_interval_seconds`,
+`credit_settlement_scheduler_dry_run`,
+`credit_settlement_scheduler_policy_version_configured`,
+`credit_settlement_scheduler_issuer_approval_evidence_hash_configured`,
+`credit_settlement_scheduler_near_contract_configured`,
+`credit_settlement_scheduler_ranking_model_version_configured`,
+`credit_settlement_scheduler_ranking_target_use`, and
+`credit_settlement_scheduler_limit`, without exposing the scheduler token,
+reason, policy version, source-list approval hash, NEAR contract id, or ranking
+model id. It also reports safe NEAR
 settlement readiness fields: `near_credit_submitter_configured`,
 `near_credit_submitter_timeout_ms`, `near_credit_outbox_submit_default_limit`,
 `near_credit_outbox_submit_max_limit`,
