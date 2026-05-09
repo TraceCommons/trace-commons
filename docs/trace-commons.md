@@ -688,7 +688,10 @@ comma-separated list of centrally approved settlement policy versions. Dry-runs
 and drills can still inspect an unlisted policy version and report
 `policy_version_allowed: false`, but live settlement rejects unlisted policy
 versions before writing settlement batches or NEAR outbox rows. Config status
-exposes only the configured allowlist count.
+exposes only the configured allowlist count. Operational summary and metrics
+also surface `credit_settlement_policy_allowlist_missing` when positive delayed
+credit exists without a configured allowlist, so centrally run issuance cannot
+look rollout-ready before policy versions are pinned.
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` adds the early
 central-issuer fail-closed gate: live admin or worker settlement requests must
 carry a canonical `sha256:<64 hex>` `issuer_approval_evidence_hash` that has

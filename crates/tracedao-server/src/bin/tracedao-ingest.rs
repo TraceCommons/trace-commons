@@ -31291,6 +31291,14 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             ),
         ),
         (
+            "policy_allowlist_missing",
+            usize::from(
+                response
+                    .promotion_gates
+                    .credit_settlement_policy_allowlist_missing,
+            ),
+        ),
+        (
             "near_contract_required",
             usize::from(
                 response
@@ -52630,6 +52638,7 @@ struct TraceOperationalPromotionGateSummary {
     credit_settlement_account_cap_configured: bool,
     credit_settlement_account_cap_missing: bool,
     credit_settlement_policy_allowlist_configured: bool,
+    credit_settlement_policy_allowlist_missing: bool,
     credit_settlement_near_contract_required: bool,
     credit_settlement_near_contract_configured: bool,
     credit_settlement_near_contract_missing: bool,
@@ -52761,6 +52770,8 @@ impl TraceOperationalPromotionGateSummary {
             delayed_credit.points_positive > 0.0 && !credit_settlement_account_cap_configured;
         let credit_settlement_policy_allowlist_configured =
             !state.credit_settlement_allowed_policy_versions.is_empty();
+        let credit_settlement_policy_allowlist_missing =
+            delayed_credit.points_positive > 0.0 && !credit_settlement_policy_allowlist_configured;
         let credit_settlement_near_contract_required =
             state.credit_settlement_require_near_contract;
         let credit_settlement_near_contract_configured =
@@ -52959,6 +52970,9 @@ impl TraceOperationalPromotionGateSummary {
         if credit_settlement_account_cap_missing {
             blocking_gates.push("credit_settlement_account_cap_missing".to_string());
         }
+        if credit_settlement_policy_allowlist_missing {
+            blocking_gates.push("credit_settlement_policy_allowlist_missing".to_string());
+        }
         if credit_settlement_near_contract_missing {
             blocking_gates.push("credit_settlement_near_contract_missing".to_string());
         }
@@ -53094,6 +53108,7 @@ impl TraceOperationalPromotionGateSummary {
             credit_settlement_account_cap_configured,
             credit_settlement_account_cap_missing,
             credit_settlement_policy_allowlist_configured,
+            credit_settlement_policy_allowlist_missing,
             credit_settlement_near_contract_required,
             credit_settlement_near_contract_configured,
             credit_settlement_near_contract_missing,
@@ -78443,12 +78458,28 @@ mod tests {
             summary["promotion_gates"]["credit_settlement_issuer_approval_missing"],
             serde_json::json!(true)
         );
+        assert_eq!(
+            summary["promotion_gates"]["credit_settlement_policy_allowlist_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            summary["promotion_gates"]["credit_settlement_policy_allowlist_missing"],
+            serde_json::json!(true)
+        );
         assert!(
             summary["promotion_gates"]["blocking_gates"]
                 .as_array()
                 .expect("blocking gates are an array")
                 .contains(&serde_json::json!(
                     "credit_settlement_issuer_approval_missing"
+                ))
+        );
+        assert!(
+            summary["promotion_gates"]["blocking_gates"]
+                .as_array()
+                .expect("blocking gates are an array")
+                .contains(&serde_json::json!(
+                    "credit_settlement_policy_allowlist_missing"
                 ))
         );
         let summary_text = std::str::from_utf8(&summary_body).expect("summary body is utf8");
@@ -78483,6 +78514,12 @@ mod tests {
         )));
         assert!(metrics_text.contains(&format!(
             "tracedao_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"issuer_approval_missing\"}} 1"
+        )));
+        assert!(metrics_text.contains(&format!(
+            "tracedao_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"policy_allowlist_configured\"}} 0"
+        )));
+        assert!(metrics_text.contains(&format!(
+            "tracedao_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"policy_allowlist_missing\"}} 1"
         )));
         assert!(!metrics_text.contains("admin-token-a"));
         assert!(!metrics_text.contains("frontier lab issuer approval readiness probe"));
@@ -78528,6 +78565,10 @@ mod tests {
             summary_json["promotion_gates"]["credit_settlement_policy_allowlist_configured"],
             serde_json::json!(false)
         );
+        assert_eq!(
+            summary_json["promotion_gates"]["credit_settlement_policy_allowlist_missing"],
+            serde_json::json!(false)
+        );
         assert!(
             summary
                 .promotion_gates
@@ -78557,6 +78598,9 @@ mod tests {
         )));
         assert!(metrics.contains(&format!(
             "tracedao_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"policy_allowlist_configured\"}} 0"
+        )));
+        assert!(metrics.contains(&format!(
+            "tracedao_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"policy_allowlist_missing\"}} 0"
         )));
     }
 
