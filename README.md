@@ -327,8 +327,11 @@ aggregate gate set plus each individual promotion gate whenever promotion gates
 are blocked or warning. NEAR credit and benchmark registry outbox workers also
 emit safe completion/failure logs with tenant refs, purpose hashes, row ids, and
 counts only, avoiding adapter URLs, raw receipts, transaction hashes, account
-hashes, or raw error text. Admins can also scrape `/v1/admin/operational-metrics`
-for a Prometheus-text snapshot of the same safe promotion, per-gate,
+hashes, or raw error text. Core DB dual-write, export scheduler, evaluator
+adapter, vector payload, backfill, and generic internal-error logs likewise emit
+stable `error_hash`/`reason_hash` fields instead of raw error strings. Admins
+can also scrape `/v1/admin/operational-metrics` for a Prometheus-text snapshot
+of the same safe promotion, per-gate,
 worker-skip, rollout-smoke, submission, review SLA, export, retention, vector,
 benchmark, and delayed-credit gauges. The same summary response includes a
 `rollout_smoke` preflight block with the required canary smoke-check names,
