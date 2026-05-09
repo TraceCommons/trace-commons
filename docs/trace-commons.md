@@ -479,7 +479,7 @@ without stitching together operational-summary and evidence-list reads.
 Operators inspect and capture evidence history with admin-only `GET` and `POST`
 `/v1/admin/rollout-smoke/evidence`; `GET` can collapse history to the latest
 record per check with `latest_only=true`, and writes name one required check, a
-`passed` or `failed` status, a canonical `sha256:<64 hex>` evidence hash, and
+`passed` or `failed` status, a canonical lowercase `sha256:<64 hex>` evidence hash, and
 an optional external reference that is stored only as a hash in the tenant audit
 chain.
 `POST /v1/admin/canary-read-drill` turns an existing canary submission into
@@ -572,7 +572,7 @@ a pilot rehearsal, can require authenticated NEAR adapters through either
 `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH=true` or
 `require_near_adapter_auth: true`, requires a configured per-account issuer cap
 by default unless `require_account_cap` is explicitly disabled, and requires a
-canonical `sha256:<64 hex>` `issuer_approval_evidence_hash` when
+canonical lowercase `sha256:<64 hex>` `issuer_approval_evidence_hash` when
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` or the request
 sets `require_issuer_approval: true`. Approval evidence is source-list bound:
 operators first run the drill or settlement dry-run to obtain the exact
@@ -775,7 +775,7 @@ credit exists without a configured allowlist, so centrally run issuance cannot
 look rollout-ready before policy versions are pinned.
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` adds the early
 central-issuer fail-closed gate: live admin or worker settlement requests must
-carry a canonical `sha256:<64 hex>` `issuer_approval_evidence_hash` that has
+carry a canonical lowercase `sha256:<64 hex>` `issuer_approval_evidence_hash` that has
 already been recorded through `/v1/admin/credit-settlement-approvals` for the
 exact tenant, policy version, and canonical dry-run `source_list_hash`. That
 source-list hash can describe the whole current backlog or one bounded batch:
@@ -955,7 +955,7 @@ The service exposes:
 - `GET|POST /v1/workers/ranker/training-candidates`
 - `GET|POST /v1/workers/ranker/training-pairs`
 - `POST /v1/workers/utility-credit`
-- `POST /v1/workers/utility-attestations` with a canonical `sha256:<64 hex>` evidence hash
+- `POST /v1/workers/utility-attestations` with a canonical lowercase `sha256:<64 hex>` evidence hash
 - `GET /v1/admin/credit-attestations`
 - `GET|POST /v1/admin/credit-holds`
 - `POST /v1/admin/credit-holds/{hold_id}/release`
@@ -1184,7 +1184,7 @@ they store calibration dataset hash, target use, policy version, source-list
 manifest hash, source count, label-source count, label-actor count, lifecycle
 status, and a hashed actor principal. They do not store trace bodies, reviewer
 notes, raw lab refs, or source ids.
-Client-supplied ranking hashes are canonical `sha256:<64 hex>` digests across
+Client-supplied ranking hashes are canonical lowercase `sha256:<64 hex>` digests across
 registered model training/calibration/artifact hashes, holdout source manifests,
 feature vector/name/source-feature hashes, absolute or preference label evidence
 hashes, and calibration-run evaluation datasets. Prefix-only symbolic values

@@ -22670,9 +22670,12 @@ fn validate_trace_sha256_hash(value: &str, label: &str) -> ApiResult<String> {
 }
 
 fn is_canonical_sha256_prefixed_hash(value: &str) -> bool {
-    value
-        .strip_prefix("sha256:")
-        .is_some_and(|digest| digest.len() == 64 && digest.chars().all(|ch| ch.is_ascii_hexdigit()))
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || matches!(ch, 'a'..='f'))
+    })
 }
 
 fn validate_positive_ranking_count(value: u32, label: &str) -> ApiResult<()> {
@@ -84497,6 +84500,36 @@ mod tests {
         assert!(!body_text.contains("frontier lab central issuer approval probe"));
         assert!(!body_text.contains("lab-attestation:central-issuer-approval"));
         assert!(!body_text.contains("admin-token-a"));
+    }
+
+    #[tokio::test]
+    async fn credit_settlement_approval_rejects_uppercase_hashes_without_audit() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = credit_settlement_approval_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementIssuerApprovalRequest {
+                policy_version: "trace-credit-policy-v1".to_string(),
+                source_list_hash:
+                    "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                        .to_string(),
+                evidence_hash: sha256_prefixed("uppercase approval evidence"),
+                reason: "uppercase hashes must not become issuer approvals".to_string(),
+                evidence_ref: Some("private-lab-review:uppercase-hash".to_string()),
+            }),
+        )
+        .await
+        .expect_err("issuer approval hashes must be lowercase canonical sha256 digests");
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.0.error.contains("canonical sha256"));
+        assert!(
+            read_all_audit_events(temp.path(), "tenant-a")
+                .expect("audit reads")
+                .is_empty()
+        );
     }
 
     #[tokio::test]

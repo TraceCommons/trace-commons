@@ -147,6 +147,14 @@ fn near_credit_receipt_call_rejects_non_canonical_hashes() {
     )
     .expect_err("sha256 payload hashes must be hex");
     assert!(non_hex_hash.to_string().contains("canonical sha256"));
+
+    let uppercase_hash = NearCreditReceiptCall::freeze_account(
+        "trace-credits.testnet",
+        "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        FREEZE_REASON_HASH,
+    )
+    .expect_err("canonical sha256 payload hashes are lowercase");
+    assert!(uppercase_hash.to_string().contains("canonical sha256"));
 }
 
 #[test]
