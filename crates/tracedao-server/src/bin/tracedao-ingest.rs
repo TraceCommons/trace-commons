@@ -16136,6 +16136,41 @@ fn ensure_near_manual_status_transition(
     ))
 }
 
+fn ensure_benchmark_registry_manual_status_transition(
+    item: &TraceBenchmarkRegistryOutboxItem,
+    status: StorageTraceBenchmarkRegistryOutboxStatus,
+) -> ApiResult<()> {
+    let valid = match status {
+        StorageTraceBenchmarkRegistryOutboxStatus::Submitted => matches!(
+            item.status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Pending
+                | StorageTraceBenchmarkRegistryOutboxStatus::Failed
+                | StorageTraceBenchmarkRegistryOutboxStatus::Submitted
+        ),
+        StorageTraceBenchmarkRegistryOutboxStatus::Confirmed => {
+            matches!(
+                item.status,
+                StorageTraceBenchmarkRegistryOutboxStatus::Submitted
+                    | StorageTraceBenchmarkRegistryOutboxStatus::Confirmed
+            ) && item.external_receipt_ref.is_some()
+        }
+        StorageTraceBenchmarkRegistryOutboxStatus::Failed => matches!(
+            item.status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Pending
+                | StorageTraceBenchmarkRegistryOutboxStatus::Submitted
+                | StorageTraceBenchmarkRegistryOutboxStatus::Failed
+        ),
+        StorageTraceBenchmarkRegistryOutboxStatus::Pending => false,
+    };
+    if valid {
+        return Ok(());
+    }
+    Err(api_error(
+        StatusCode::CONFLICT,
+        "manual benchmark registry outbox status update is not valid for the current item state",
+    ))
+}
+
 async fn mark_benchmark_registry_outbox_status_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -16190,6 +16225,18 @@ async fn mark_benchmark_registry_outbox_status_handler(
         None
     };
     require_benchmark_registry_outbox_status_principal_if_configured(state.as_ref(), &tenant)?;
+    let existing = read_benchmark_registry_outbox_items_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?
+        .into_iter()
+        .find(|item| item.benchmark_outbox_id == body.benchmark_outbox_id)
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::NOT_FOUND,
+                "benchmark registry outbox item not found",
+            )
+        })?;
+    ensure_benchmark_registry_manual_status_transition(&existing, status)?;
     let updated = update_benchmark_registry_outbox_item_status_with_db_mirror(
         state.as_ref(),
         &tenant,
@@ -90493,6 +90540,95 @@ mod tests {
             sha256_prefixed("external-registry:tenant-a-submit")
         )));
         assert!(!status_reason.contains("external-registry:tenant-a-submit"));
+    }
+
+    #[tokio::test]
+    async fn benchmark_registry_outbox_mark_status_rejects_invalid_manual_transitions() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let pending_outbox_id = Uuid::new_v4();
+        let pending_item = pending_benchmark_registry_outbox_item(pending_outbox_id);
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &pending_item)
+            .expect("pending benchmark registry outbox file writes");
+
+        let confirm_pending_error = mark_benchmark_registry_outbox_status_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxStatusRequest {
+                benchmark_outbox_id: pending_outbox_id,
+                status: StorageTraceBenchmarkRegistryOutboxStatus::Confirmed,
+                external_receipt_ref: Some("external-registry:tenant-a-confirm".to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect_err("manual benchmark registry confirm requires submitted item state");
+        assert_eq!(confirm_pending_error.0, StatusCode::CONFLICT);
+        assert_eq!(
+            confirm_pending_error.1.0.error,
+            "manual benchmark registry outbox status update is not valid for the current item state"
+        );
+
+        let Json(submitted) = mark_benchmark_registry_outbox_status_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxStatusRequest {
+                benchmark_outbox_id: pending_outbox_id,
+                status: StorageTraceBenchmarkRegistryOutboxStatus::Submitted,
+                external_receipt_ref: Some("external-registry:tenant-a-submit".to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect("manual submitted status is valid from pending");
+        assert_eq!(
+            submitted.status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Submitted
+        );
+
+        let Json(confirmed) = mark_benchmark_registry_outbox_status_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxStatusRequest {
+                benchmark_outbox_id: pending_outbox_id,
+                status: StorageTraceBenchmarkRegistryOutboxStatus::Confirmed,
+                external_receipt_ref: Some("external-registry:tenant-a-confirm".to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect("manual confirmed status is valid from submitted");
+        assert_eq!(
+            confirmed.status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Confirmed
+        );
+
+        let downgrade_confirmed_error = mark_benchmark_registry_outbox_status_handler(
+            State(state),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxStatusRequest {
+                benchmark_outbox_id: pending_outbox_id,
+                status: StorageTraceBenchmarkRegistryOutboxStatus::Submitted,
+                external_receipt_ref: Some("external-registry:tenant-a-submit-again".to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect_err("manual benchmark registry status cannot downgrade confirmed item");
+        assert_eq!(downgrade_confirmed_error.0, StatusCode::CONFLICT);
+
+        let outbox = read_all_benchmark_registry_outbox_items(temp.path(), "tenant-a")
+            .expect("benchmark registry outbox reads");
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(
+            outbox[0].status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Confirmed
+        );
+        assert_eq!(
+            outbox[0].external_receipt_ref.as_deref(),
+            Some("external-registry:tenant-a-confirm")
+        );
     }
 
     #[tokio::test]

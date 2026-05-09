@@ -1062,9 +1062,12 @@ dry-run submit/confirm inspection remains available. Manual benchmark registry
 status updates append a `benchmark_registry_outbox_status` audit row with typed
 hash-only metadata for the outbox id, conversion id, operation, registry ref
 hash, artifact/source hashes, optional evaluator ref hash, status, external
-receipt-ref hash, and last-error hash. The optional in-process benchmark
-registry outbox scheduler applies the same allowlist check at startup for live
-mode before it can call the worker routes.
+receipt-ref hash, and last-error hash. The fallback enforces the same monotonic
+status shape as the workers: submitted can recover pending/failed rows,
+confirmed requires an already submitted row with receipt evidence, and confirmed
+rows cannot be downgraded through manual status edits. The optional in-process
+benchmark registry outbox scheduler applies the same allowlist check at startup
+for live mode before it can call the worker routes.
 
 Admin-only credit control-plane list reads for settlement batches, credit holds, utility attestations, NEAR credit outbox rows, and benchmark registry outbox rows append the same DB-mirrored aggregate read audit breadcrumb as issuer-approval, risk-summary, and other operator reads: only a code-owned surface plus bounded item count are recorded.
 
