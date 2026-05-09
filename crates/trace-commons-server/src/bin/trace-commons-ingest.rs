@@ -88998,6 +88998,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ranking_prediction_credit_run_cannot_override_calibration_label_actor_underdiversity()
+    {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let (candidate, prediction) = seed_credit_cycle_candidate_with_prediction(
+            state.clone(),
+            "trace-ranker-credit-actor-diversity-v1",
+        )
+        .await;
+        for (label_source, suffix) in [
+            (StorageTraceRankingLabelSource::FrontierLab, "frontier"),
+            (StorageTraceRankingLabelSource::Reviewer, "reviewer"),
+        ] {
+            let _ = ranking_label_handler(
+                State(state.clone()),
+                auth_headers("admin-token-a"),
+                Json(TraceRankingLabelRequest {
+                    submission_id: prediction.submission_id,
+                    target_use: TraceAllowedUse::RankingModelTraining,
+                    label_source,
+                    utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                    label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                    utility_delta_micros: 1_250_000,
+                    evidence_hash: sha256_prefixed(&format!("credit-actor-diversity-{suffix}")),
+                    external_ref: format!("private-credit-actor-diversity-{suffix}"),
+                }),
+            )
+            .await
+            .expect("admin can record legacy same-actor calibration labels");
+        }
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("legacy calibration can persist under single-source floor");
+        assert!(calibration.promotable);
+        assert_eq!(calibration.joined_label_source_count, 2);
+        assert_eq!(calibration.joined_label_actor_count, 1);
+        let Json(_) = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "activate legacy calibration before actor diversity floor".to_string(),
+            }),
+        )
+        .await
+        .expect("legacy source-diverse calibration can activate before actor floor rises");
+
+        Arc::make_mut(&mut state).ranking_min_label_source_count = 2;
+        let Json(run) = ranking_prediction_credit_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionCreditRunRequest {
+                dry_run: false,
+                allow_at_risk_models: true,
+                reason: "risk override must not bypass calibration actor diversity".to_string(),
+                limit: Some(10),
+                model_version: Some(candidate.model_version),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                policy_version: Some(candidate.policy_version),
+            }),
+        )
+        .await
+        .expect("actor-underdiverse calibration is skipped without failing the batch");
+        assert!(run.allow_at_risk_models);
+        assert_eq!(run.checked_count, 1);
+        assert_eq!(run.credited_count, 0);
+        assert_eq!(run.skipped_ineligible_count, 1);
+        assert_eq!(run.pending_after_count, 1);
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit reads")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn ranking_prediction_credit_worker_requires_active_positive_prediction() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
