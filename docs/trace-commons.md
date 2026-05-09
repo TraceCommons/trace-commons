@@ -1303,8 +1303,8 @@ rows. Hold placement and release audit rows mirror typed safe metadata with only
 the hold/release action, hold id, account hash, enum hold reason, and reason
 hash; raw account refs and operator reason text stay out of DB audit metadata.
 When the central issuer principal allowlist is configured, unlisted admins can
-still inspect holds but cannot create a hold or release that would enqueue one
-of those NEAR account operations.
+still inspect holds but cannot create or release credit holds, regardless of
+whether a NEAR account operation would be enqueued.
 
 Set `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL` to point at the relayer's confirmation endpoint; utility workers can then call `POST /v1/workers/near-credit-outbox/confirm` to poll submitted NEAR rows, mark confirmed transactions, or record hashed terminal failures without sending raw NEAR call args. NEAR outbox workers revalidate stored method-call payloads before submit or confirm: the contract id, method allow-list, method-specific hash-only args, and idempotency key must match the canonical payload, or the row is marked failed before it reaches the relayer. Submitted and confirmed transaction hashes must be 43-44 character base58 NEAR transaction hashes. Confirmations must bind to the exact submitted NEAR transaction hash already recorded on the outbox row; mismatched confirmation evidence stays unconfirmed and records only a safe error hash for retry/inspection. `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_BEARER_TOKEN` adds confirmation bearer auth, and `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_TIMEOUT_MS` bounds confirmation calls.
 
