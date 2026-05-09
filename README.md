@@ -139,6 +139,10 @@ a published artifact remains in
 the external-registry-adapter gap until a confirmed outbox receipt is recorded;
 a revoked artifact with a registry ref remains in the external-registry
 invalidation gap until a confirmed revoke receipt is recorded.
+The admin benchmark readiness drill exposes the same safe adapter-auth readiness
+fields and pending/submitted auth blocker counts so rollout-smoke evidence can
+prove registry publication is credential-ready without returning adapter URLs,
+bearer tokens, receipts, or raw benchmark payloads.
 Configure `TRACE_COMMONS_BENCHMARK_EVALUATOR_URL` to let benchmark evaluation
 workers call an operator-owned evaluator adapter over bounded derived benchmark
 candidate summaries, artifact hashes, source-list hashes, and evaluator refs
