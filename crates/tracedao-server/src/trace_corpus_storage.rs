@@ -1204,6 +1204,13 @@ pub enum TraceAuditSafeMetadata {
         reason_hash: String,
         external_ref_hash: Option<String>,
     },
+    CreditSettlementIssuerApproval {
+        policy_version: String,
+        source_list_hash: String,
+        evidence_hash: String,
+        reason_hash: String,
+        evidence_ref_hash: Option<String>,
+    },
     ProcessEvaluation {
         evaluator_version_hash: String,
         label_count: u32,
