@@ -53,6 +53,7 @@ use trace_commons_server::trace_corpus_storage::{
     TraceCreditEventRecord as StorageTraceCreditEventRecord,
     TraceCreditEventType as StorageTraceCreditEventType,
     TraceCreditEventWrite as StorageTraceCreditEventWrite,
+    TraceCreditHoldAuditAction as StorageTraceCreditHoldAuditAction,
     TraceCreditHoldReason as StorageTraceCreditHoldReason,
     TraceCreditHoldRecord as StorageTraceCreditHoldRecord,
     TraceCreditHoldWrite as StorageTraceCreditHoldWrite,
@@ -9713,6 +9714,125 @@ where
     .ok()
 }
 
+fn trace_credit_hold_audit_action_name(action: StorageTraceCreditHoldAuditAction) -> &'static str {
+    match action {
+        StorageTraceCreditHoldAuditAction::Placed => "placed",
+        StorageTraceCreditHoldAuditAction::Released => "released",
+    }
+}
+
+fn trace_credit_hold_audit_action_from_kind(
+    kind: &str,
+) -> Option<StorageTraceCreditHoldAuditAction> {
+    match kind {
+        "credit_hold" => Some(StorageTraceCreditHoldAuditAction::Placed),
+        "credit_hold_release" => Some(StorageTraceCreditHoldAuditAction::Released),
+        _ => None,
+    }
+}
+
+fn trace_credit_hold_audit_action_from_reason(
+    reason: Option<&str>,
+    kind: &str,
+) -> Option<StorageTraceCreditHoldAuditAction> {
+    let kind_action = trace_credit_hold_audit_action_from_kind(kind)?;
+    let Some(action) = trace_audit_reason_value(reason, "action") else {
+        return Some(kind_action);
+    };
+    let parsed = match action {
+        "placed" => Some(StorageTraceCreditHoldAuditAction::Placed),
+        "released" => Some(StorageTraceCreditHoldAuditAction::Released),
+        _ => None,
+    }?;
+    (parsed == kind_action).then_some(parsed)
+}
+
+fn trace_credit_hold_reason_name(reason: StorageTraceCreditHoldReason) -> &'static str {
+    match reason {
+        StorageTraceCreditHoldReason::DuplicateClusterUnderReview => {
+            "duplicate_cluster_under_review"
+        }
+        StorageTraceCreditHoldReason::PrivacyRiskUnderReview => "privacy_risk_under_review",
+        StorageTraceCreditHoldReason::SuspectedAbuse => "suspected_abuse",
+        StorageTraceCreditHoldReason::RevocationPropagation => "revocation_propagation",
+        StorageTraceCreditHoldReason::AttestationDispute => "attestation_dispute",
+        StorageTraceCreditHoldReason::PolicyMigration => "policy_migration",
+        StorageTraceCreditHoldReason::LegalCompliance => "legal_compliance",
+    }
+}
+
+fn trace_credit_hold_reason_from_audit_reason(
+    reason: Option<&str>,
+) -> Option<StorageTraceCreditHoldReason> {
+    let value = trace_audit_reason_value(reason, "hold_reason")?;
+    let legacy_debug_reason = match value {
+        "DuplicateClusterUnderReview" => {
+            Some(StorageTraceCreditHoldReason::DuplicateClusterUnderReview)
+        }
+        "PrivacyRiskUnderReview" => Some(StorageTraceCreditHoldReason::PrivacyRiskUnderReview),
+        "SuspectedAbuse" => Some(StorageTraceCreditHoldReason::SuspectedAbuse),
+        "RevocationPropagation" => Some(StorageTraceCreditHoldReason::RevocationPropagation),
+        "AttestationDispute" => Some(StorageTraceCreditHoldReason::AttestationDispute),
+        "PolicyMigration" => Some(StorageTraceCreditHoldReason::PolicyMigration),
+        "LegalCompliance" => Some(StorageTraceCreditHoldReason::LegalCompliance),
+        _ => None,
+    };
+    serde_json::from_value(serde_json::Value::String(value.to_string()))
+        .ok()
+        .or(legacy_debug_reason)
+}
+
+fn trace_credit_hold_audit_reason_from_parts(
+    action: StorageTraceCreditHoldAuditAction,
+    hold_id: Uuid,
+    credit_account_hash: &str,
+    hold_reason: StorageTraceCreditHoldReason,
+    reason_hash: &str,
+) -> String {
+    format!(
+        "action={};hold_id={};credit_account_hash={};hold_reason={};reason_hash={}",
+        trace_credit_hold_audit_action_name(action),
+        hold_id,
+        credit_account_hash,
+        trace_credit_hold_reason_name(hold_reason),
+        reason_hash
+    )
+}
+
+fn trace_credit_hold_audit_metadata(
+    hold: &TraceCreditHoldRecord,
+    action: StorageTraceCreditHoldAuditAction,
+    reason_hash: &str,
+) -> StorageTraceAuditSafeMetadata {
+    StorageTraceAuditSafeMetadata::CreditHold {
+        action,
+        hold_id: hold.hold_id,
+        credit_account_hash: hold.credit_account_hash.clone(),
+        hold_reason: hold.reason,
+        reason_hash: reason_hash.to_string(),
+    }
+}
+
+fn trace_credit_hold_audit_metadata_from_reason(
+    kind: &str,
+    reason: Option<&str>,
+) -> Option<StorageTraceAuditSafeMetadata> {
+    let action = trace_credit_hold_audit_action_from_reason(reason, kind)?;
+    let hold_id =
+        trace_audit_reason_value(reason, "hold_id").and_then(|id| Uuid::parse_str(id).ok())?;
+    let credit_account_hash =
+        trace_audit_reason_canonical_sha256_value(reason, "credit_account_hash")?;
+    let hold_reason = trace_credit_hold_reason_from_audit_reason(reason)?;
+    let reason_hash = trace_audit_reason_canonical_sha256_value(reason, "reason_hash")?;
+    Some(StorageTraceAuditSafeMetadata::CreditHold {
+        action,
+        hold_id,
+        credit_account_hash,
+        hold_reason,
+        reason_hash,
+    })
+}
+
 fn trace_audit_reason_is_rollout_smoke_evidence(reason: Option<&str>) -> bool {
     trace_audit_reason_value(reason, "surface") == Some("rollout_smoke_evidence")
 }
@@ -15286,12 +15406,14 @@ async fn append_credit_hold_audit_event(
     kind: &str,
     reason_hash: &str,
 ) -> anyhow::Result<()> {
+    let action = trace_credit_hold_audit_action_from_kind(kind)
+        .context("unsupported credit hold audit kind")?;
     append_audit_event_with_db_mirror(
         state,
         tenant,
         TraceCommonsAuditEvent::credit_hold(tenant, hold, kind, reason_hash),
         StorageTraceAuditAction::CreditMutate,
-        StorageTraceAuditSafeMetadata::Empty,
+        trace_credit_hold_audit_metadata(hold, action, reason_hash),
     )
     .await
 }
@@ -39987,6 +40109,25 @@ fn trace_commons_audit_event_from_storage(
             }),
             None,
         ),
+        StorageTraceAuditSafeMetadata::CreditHold {
+            action,
+            hold_id,
+            credit_account_hash,
+            hold_reason,
+            reason_hash,
+        } => (
+            None,
+            event.reason.clone().or_else(|| {
+                Some(trace_credit_hold_audit_reason_from_parts(
+                    *action,
+                    *hold_id,
+                    credit_account_hash,
+                    *hold_reason,
+                    reason_hash,
+                ))
+            }),
+            None,
+        ),
         StorageTraceAuditSafeMetadata::ProcessEvaluation {
             evaluator_version_hash: _,
             label_count: _,
@@ -40254,6 +40395,15 @@ fn storage_audit_event_kind(
         )
     {
         return "credit_settlement_issuer_approval".to_string();
+    }
+    if let StorageTraceAuditAction::CreditMutate = action
+        && let StorageTraceAuditSafeMetadata::CreditHold { action, .. } = metadata
+    {
+        return match action {
+            StorageTraceCreditHoldAuditAction::Placed => "credit_hold",
+            StorageTraceCreditHoldAuditAction::Released => "credit_hold_release",
+        }
+        .to_string();
     }
     if let StorageTraceAuditAction::Read = action
         && matches!(
@@ -46634,6 +46784,32 @@ fn normalize_audit_event_metadata(
             ),
         };
     }
+    if action == StorageTraceAuditAction::CreditMutate
+        && matches!(event.kind.as_str(), "credit_hold" | "credit_hold_release")
+    {
+        let expected =
+            trace_credit_hold_audit_metadata_from_reason(&event.kind, event.reason.as_deref())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "credit hold audit event {} requires canonical hash reason fields",
+                        event.event_id
+                    )
+                })?;
+        return match metadata {
+            StorageTraceAuditSafeMetadata::Empty => Ok(expected),
+            StorageTraceAuditSafeMetadata::CreditHold { .. } if metadata == expected => {
+                Ok(metadata)
+            }
+            StorageTraceAuditSafeMetadata::CreditHold { .. } => anyhow::bail!(
+                "credit hold audit event {} metadata does not match reason fields",
+                event.event_id
+            ),
+            _ => anyhow::bail!(
+                "credit hold audit event {} requires credit hold metadata",
+                event.event_id
+            ),
+        };
+    }
     if action == StorageTraceAuditAction::Revoke && event.kind == "revoked" {
         let expected = trace_revocation_audit_metadata_from_reason(event.reason.as_deref())
             .ok_or_else(|| {
@@ -48027,6 +48203,19 @@ fn storage_audit_canonical_reason(event: &StorageTraceAuditEventRecord) -> Optio
                 evidence_ref_hash.as_deref(),
             ),
         ),
+        StorageTraceAuditSafeMetadata::CreditHold {
+            action,
+            hold_id,
+            credit_account_hash,
+            hold_reason,
+            reason_hash,
+        } => Some(trace_credit_hold_audit_reason_from_parts(
+            *action,
+            *hold_id,
+            credit_account_hash,
+            *hold_reason,
+            reason_hash,
+        )),
         _ => None,
     }
 }
@@ -48658,9 +48847,10 @@ fn audit_backfill_storage_projection(
         "submitted" => StorageTraceAuditAction::Submit,
         "read" | "trace_content_read" => StorageTraceAuditAction::Read,
         "review_decision" | "review_lease" => StorageTraceAuditAction::Review,
-        "credit_mutate" | "credit_settlement_issuer_approval" => {
-            StorageTraceAuditAction::CreditMutate
-        }
+        "credit_mutate"
+        | "credit_settlement_issuer_approval"
+        | "credit_hold"
+        | "credit_hold_release" => StorageTraceAuditAction::CreditMutate,
         "revoked" => StorageTraceAuditAction::Revoke,
         "dataset_export" | "ranker_training_candidates_export" | "ranker_training_pairs_export" => {
             StorageTraceAuditAction::Export
@@ -48714,6 +48904,10 @@ fn audit_backfill_storage_projection(
                 event.reason.as_deref(),
             )
             .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
+        }
+        "credit_hold" | "credit_hold_release" => {
+            trace_credit_hold_audit_metadata_from_reason(&event.kind, event.reason.as_deref())
+                .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
         }
         "revoked" => trace_revocation_audit_metadata_from_reason(event.reason.as_deref())
             .unwrap_or(StorageTraceAuditSafeMetadata::Empty),
@@ -54152,6 +54346,8 @@ impl TraceCommonsAuditEvent {
         kind: &str,
         reason_hash: &str,
     ) -> Self {
+        let action = trace_credit_hold_audit_action_from_kind(kind)
+            .unwrap_or(StorageTraceCreditHoldAuditAction::Placed);
         Self {
             event_id: Uuid::new_v4(),
             tenant_id: auth.tenant_id.clone(),
@@ -54161,9 +54357,12 @@ impl TraceCommonsAuditEvent {
             status: None,
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
-            reason: Some(format!(
-                "hold_id={};credit_account_hash={};hold_reason={:?};reason_hash={}",
-                hold.hold_id, hold.credit_account_hash, hold.reason, reason_hash
+            reason: Some(trace_credit_hold_audit_reason_from_parts(
+                action,
+                hold.hold_id,
+                &hold.credit_account_hash,
+                hold.reason,
+                reason_hash,
             )),
             export_count: None,
             export_id: None,
@@ -65911,6 +66110,177 @@ mod tests {
         assert_eq!(
             projected_approval.source_list_hash,
             approval.source_list_hash
+        );
+    }
+
+    #[test]
+    fn db_audit_projection_preserves_credit_hold_kind_and_hash_only_metadata() {
+        let auth = TenantAuth {
+            tenant_id: "tenant-a".to_string(),
+            role: TokenRole::Admin,
+            principal_ref: principal_storage_ref("admin-token-a"),
+            expires_at: None,
+            auth_method: TraceAuthMethod::StaticToken,
+            signed_claim_issuer: None,
+            signed_claim_audiences: BTreeSet::new(),
+            signed_claim_subject: None,
+            allowed_consent_scopes: BTreeSet::new(),
+            allowed_uses: BTreeSet::new(),
+        };
+        let hold = TraceCreditHoldRecord {
+            hold_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&auth.tenant_id),
+            credit_account_ref: "principal:frontier-lab-contributor".to_string(),
+            credit_account_hash: sha256_prefixed("principal:frontier-lab-contributor"),
+            reason: StorageTraceCreditHoldReason::AttestationDispute,
+            reason_hash: sha256_prefixed("frontier lab attestation under dispute"),
+            actor_principal_ref: auth.principal_ref.clone(),
+            created_at: Utc::now(),
+            released_at: None,
+        };
+        let audit_event =
+            TraceCommonsAuditEvent::credit_hold(&auth, &hold, "credit_hold", &hold.reason_hash);
+
+        let (action, metadata) = audit_backfill_storage_projection(&audit_event);
+        assert_eq!(action, StorageTraceAuditAction::CreditMutate);
+        let metadata_json = serde_json::to_value(&metadata).expect("hold metadata serializes");
+        assert_eq!(
+            metadata_json.get("kind").and_then(|value| value.as_str()),
+            Some("credit_hold")
+        );
+        assert_eq!(
+            metadata_json.get("action").and_then(|value| value.as_str()),
+            Some("placed")
+        );
+        let hold_id_text = hold.hold_id.to_string();
+        assert_eq!(
+            metadata_json
+                .get("hold_id")
+                .and_then(|value| value.as_str()),
+            Some(hold_id_text.as_str())
+        );
+        assert_eq!(
+            metadata_json
+                .get("credit_account_hash")
+                .and_then(|value| value.as_str()),
+            Some(hold.credit_account_hash.as_str())
+        );
+        assert_eq!(
+            metadata_json
+                .get("hold_reason")
+                .and_then(|value| value.as_str()),
+            Some("attestation_dispute")
+        );
+        assert_eq!(
+            metadata_json
+                .get("reason_hash")
+                .and_then(|value| value.as_str()),
+            Some(hold.reason_hash.as_str())
+        );
+        assert!(
+            !metadata_json
+                .to_string()
+                .contains("principal:frontier-lab-contributor")
+        );
+        assert!(
+            !metadata_json
+                .to_string()
+                .contains("frontier lab attestation")
+        );
+
+        let storage_event = StorageTraceAuditEventRecord {
+            audit_event_id: audit_event.event_id,
+            tenant_id: audit_event.tenant_id.clone(),
+            audit_sequence: 1,
+            actor_principal_ref: audit_event.actor_principal_ref.clone().unwrap(),
+            actor_role: "admin".to_string(),
+            action,
+            reason: audit_event.reason.clone(),
+            request_id: None,
+            submission_id: None,
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: audit_event.decision_inputs_hash.clone(),
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: None,
+            metadata,
+            occurred_at: audit_event.created_at,
+        };
+        let projected_event = trace_commons_audit_event_from_storage("tenant-a", storage_event)
+            .expect("storage audit projects");
+
+        assert_eq!(projected_event.kind, "credit_hold");
+        assert_eq!(projected_event.reason, audit_event.reason);
+    }
+
+    #[test]
+    fn audit_mirror_normalization_derives_credit_hold_metadata_from_reason() {
+        let auth = TenantAuth {
+            tenant_id: "tenant-a".to_string(),
+            role: TokenRole::Admin,
+            principal_ref: principal_storage_ref("admin-token-a"),
+            expires_at: None,
+            auth_method: TraceAuthMethod::StaticToken,
+            signed_claim_issuer: None,
+            signed_claim_audiences: BTreeSet::new(),
+            signed_claim_subject: None,
+            allowed_consent_scopes: BTreeSet::new(),
+            allowed_uses: BTreeSet::new(),
+        };
+        let hold = TraceCreditHoldRecord {
+            hold_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&auth.tenant_id),
+            credit_account_ref: "principal:release-ready-contributor".to_string(),
+            credit_account_hash: sha256_prefixed("principal:release-ready-contributor"),
+            reason: StorageTraceCreditHoldReason::PolicyMigration,
+            reason_hash: sha256_prefixed("initial policy hold"),
+            actor_principal_ref: auth.principal_ref.clone(),
+            created_at: Utc::now(),
+            released_at: Some(Utc::now()),
+        };
+        let release_reason_hash = sha256_prefixed("frontier lab re-attested source list");
+        let audit_event = TraceCommonsAuditEvent::credit_hold(
+            &auth,
+            &hold,
+            "credit_hold_release",
+            &release_reason_hash,
+        );
+
+        let metadata = normalize_audit_event_metadata(
+            &audit_event,
+            StorageTraceAuditAction::CreditMutate,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .expect("credit hold metadata normalizes");
+        let metadata_json = serde_json::to_value(&metadata).expect("hold metadata serializes");
+
+        assert_eq!(
+            metadata_json.get("kind").and_then(|value| value.as_str()),
+            Some("credit_hold")
+        );
+        assert_eq!(
+            metadata_json.get("action").and_then(|value| value.as_str()),
+            Some("released")
+        );
+        assert_eq!(
+            metadata_json
+                .get("hold_reason")
+                .and_then(|value| value.as_str()),
+            Some("policy_migration")
+        );
+        assert_eq!(
+            metadata_json
+                .get("reason_hash")
+                .and_then(|value| value.as_str()),
+            Some(release_reason_hash.as_str())
+        );
+        assert!(
+            !metadata_json
+                .to_string()
+                .contains("frontier lab re-attested")
         );
     }
 
@@ -100851,6 +101221,57 @@ mod tests {
         assert_eq!(tenant_a_db_holds.len(), 1);
         assert_eq!(tenant_a_db_holds[0].hold_id, db_hold.hold_id);
         assert!(tenant_a_db_holds[0].released_at.is_some());
+
+        let tenant_a_audit_events = backend
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("tenant-a DB audit events read after hold release");
+        let hold_audit = tenant_a_audit_events
+            .iter()
+            .find(|event| {
+                event.action == StorageTraceAuditAction::CreditMutate
+                    && matches!(
+                        &event.metadata,
+                        StorageTraceAuditSafeMetadata::CreditHold {
+                            action: StorageTraceCreditHoldAuditAction::Placed,
+                            hold_id,
+                            credit_account_hash,
+                            hold_reason: StorageTraceCreditHoldReason::AttestationDispute,
+                            reason_hash,
+                        } if *hold_id == db_hold.hold_id
+                            && credit_account_hash == &db_hold.credit_account_hash
+                            && reason_hash == &db_hold.reason_hash
+                    )
+            })
+            .expect("DB hold placement audit metadata is typed");
+        let hold_audit_metadata_json =
+            serde_json::to_string(&hold_audit.metadata).expect("hold audit metadata serializes");
+        assert!(!hold_audit_metadata_json.contains("DB-backed hold placement"));
+        assert!(!hold_audit_metadata_json.contains(&event.auth_principal_ref));
+
+        let release_reason_hash = sha256_prefixed("DB-backed hold release");
+        let release_audit = tenant_a_audit_events
+            .iter()
+            .find(|event| {
+                event.action == StorageTraceAuditAction::CreditMutate
+                    && matches!(
+                        &event.metadata,
+                        StorageTraceAuditSafeMetadata::CreditHold {
+                            action: StorageTraceCreditHoldAuditAction::Released,
+                            hold_id,
+                            credit_account_hash,
+                            hold_reason: StorageTraceCreditHoldReason::AttestationDispute,
+                            reason_hash,
+                        } if *hold_id == db_hold.hold_id
+                            && credit_account_hash == &db_hold.credit_account_hash
+                            && reason_hash == &release_reason_hash
+                    )
+            })
+            .expect("DB hold release audit metadata is typed");
+        let release_audit_metadata_json = serde_json::to_string(&release_audit.metadata)
+            .expect("hold release audit metadata serializes");
+        assert!(!release_audit_metadata_json.contains("DB-backed hold release"));
+        assert!(!release_audit_metadata_json.contains(&event.auth_principal_ref));
 
         let Json(finalized) = credit_settlement_handler(
             State(state.clone()),

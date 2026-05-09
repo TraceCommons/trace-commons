@@ -182,6 +182,13 @@ pub enum TraceCreditHoldReason {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum TraceCreditHoldAuditAction {
+    Placed,
+    Released,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum TraceRankingModelStatus {
     Candidate,
     Active,
@@ -1210,6 +1217,13 @@ pub enum TraceAuditSafeMetadata {
         evidence_hash: String,
         reason_hash: String,
         evidence_ref_hash: Option<String>,
+    },
+    CreditHold {
+        action: TraceCreditHoldAuditAction,
+        hold_id: Uuid,
+        credit_account_hash: String,
+        hold_reason: TraceCreditHoldReason,
+        reason_hash: String,
     },
     ProcessEvaluation {
         evaluator_version_hash: String,
