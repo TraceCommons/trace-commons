@@ -12677,7 +12677,7 @@ async fn credit_cycle_scheduler_run_handler(
             state.as_ref(),
             &tenant,
             TraceRankingWorkerRunKind::CreditCycle,
-            body.dry_run && !body.preflight_only,
+            body.dry_run || body.preflight_only,
             Some(&candidate.model_version),
             Some(body.target_use),
             Some(&candidate.policy_version),
@@ -96778,6 +96778,113 @@ mod tests {
             read_all_ranking_worker_runs(temp.path(), "tenant-a")
                 .expect("worker runs read")
                 .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit events read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement reads")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_preflight_ignores_active_live_claims() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let (candidate, _) = seed_credit_cycle_ready_candidate(
+            state.clone(),
+            "trace-ranker-credit-cycle-preflight-active-claim-v1",
+        )
+        .await;
+        append_ranking_worker_run(
+            temp.path(),
+            "tenant-a",
+            &TraceRankingWorkerRunRecord {
+                ranking_worker_run_id: Uuid::new_v4(),
+                tenant_id: "tenant-a".to_string(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                run_kind: TraceRankingWorkerRunKind::CreditCycle,
+                status: TraceRankingWorkerRunStatus::Running,
+                dry_run: false,
+                reason_hash: sha256_prefixed("existing live credit-cycle claim"),
+                model_version: Some(candidate.model_version.clone()),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                policy_version: Some(candidate.policy_version.clone()),
+                limit: 10,
+                checked_count: 0,
+                succeeded_count: 0,
+                skipped_existing_count: 0,
+                skipped_model_risk_count: 0,
+                skipped_ineligible_count: 0,
+                pending_after_count: 0,
+                result_refs: Vec::new(),
+                reason_counts: BTreeMap::new(),
+                actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
+                created_at: Utc::now(),
+                completed_at: None,
+                last_error_hash: None,
+            },
+        )
+        .expect("active credit-cycle worker run writes");
+
+        let Json(scheduler) = credit_cycle_scheduler_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleSchedulerRunRequest {
+                dry_run: false,
+                preflight_only: true,
+                submit_near_outbox: false,
+                confirm_near_outbox: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: Some(candidate.model_version.clone()),
+                policy_version: Some(candidate.policy_version.clone()),
+                reason: "preflight should inspect active live claim".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: Some(1),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect("scheduler preflight ignores active live claims");
+
+        assert_eq!(scheduler.checked_count, 1);
+        assert_eq!(scheduler.eligible_count, 1);
+        assert_eq!(scheduler.started_count, 0);
+        assert_eq!(scheduler.skipped_active_count, 0);
+        assert_eq!(scheduler.skipped_count, 0);
+        assert!(
+            !scheduler
+                .skipped_reason_counts
+                .contains_key("active_credit_cycle_claim")
+        );
+        let scheduler_json =
+            serde_json::to_value(&scheduler).expect("scheduler response serializes");
+        assert_eq!(scheduler_json["decisions"][0]["action"], "eligible");
+        assert!(scheduler.cycles.is_empty());
+        assert_eq!(
+            read_all_ranking_worker_runs(temp.path(), "tenant-a")
+                .expect("worker runs read")
+                .len(),
+            1
         );
         assert!(
             read_all_credit_events(temp.path(), "tenant-a")
