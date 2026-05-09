@@ -1328,7 +1328,11 @@ async fn assert_raw_sql_tenant_access_grants_visible_only_with_matching_tenant_c
 }
 
 async fn cleanup_trace_tenants(backend: &PgBackend, tenant_ids: &[&str]) {
-    let mut client = backend.pool().get().await.expect("get cleanup connection");
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get cleanup connection");
     for tenant_id in tenant_ids {
         let tenant_id = *tenant_id;
         let tx = client
@@ -1356,7 +1360,11 @@ async fn assert_trace_rls_policies_installed(backend: &PgBackend) {
         .into_iter()
         .map(str::to_string)
         .collect();
-    let client = backend.pool().get().await.expect("get policy connection");
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get policy connection");
     let rows = client
         .query(
             "SELECT tablename
@@ -1574,7 +1582,11 @@ async fn pg_store_rejects_stale_audit_previous_hash_per_tenant() {
         .await
         .expect("other tenant starts an independent audit chain");
 
-    let mut client = backend.pool().get().await.expect("get cleanup connection");
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get cleanup connection");
     for tenant_id in [&tenant_id, &other_tenant_id] {
         let tx = client
             .transaction()
@@ -1609,7 +1621,11 @@ async fn store_facade_sets_transaction_local_tenant_context() {
     let submission_id = Uuid::new_v4();
 
     {
-        let client = backend.pool().get().await.expect("get pooled connection");
+        let client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("get pooled connection");
         client
             .execute(
                 "SELECT set_config('tracedao.trace_tenant_id', $1, false)",
@@ -1632,7 +1648,11 @@ async fn store_facade_sets_transaction_local_tenant_context() {
         .expect("tenant A submission exists");
     assert_eq!(fetched_a.tenant_id, tenant_a);
 
-    let mut client = backend.pool().get().await.expect("get pooled connection");
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get pooled connection");
     let tenant_context: String = client
         .query_one(
             "SELECT current_setting('tracedao.trace_tenant_id', true)",
@@ -1748,7 +1768,11 @@ async fn store_facade_keeps_same_submission_id_isolated_by_tenant() {
         .await;
     }
 
-    let mut client = backend.pool().get().await.expect("get cleanup connection");
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get cleanup connection");
     for tenant_id in [tenant_a, tenant_b] {
         let tx = client
             .transaction()
@@ -2630,7 +2654,11 @@ async fn store_facade_preserves_retention_job_scope_and_items() {
         .expect("list beta retention job items");
     assert!(beta_items.is_empty());
 
-    let mut client = backend.pool().get().await.expect("get cleanup connection");
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get cleanup connection");
     for tenant_id in [&tenant_alpha, &tenant_beta] {
         let tx = client
             .transaction()
@@ -3761,7 +3789,11 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
         .await;
     }
 
-    let mut client = backend.pool().get().await.expect("get cleanup connection");
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get cleanup connection");
     for tenant_id in [&tenant_a, &tenant_b] {
         let tx = client
             .transaction()
@@ -4185,7 +4217,11 @@ async fn store_facade_invalidates_object_refs_and_tombstones_by_tenant_scope() {
     assert_eq!(tenant_b_tombstones[0].trace_id, Some(inserted_b.trace_id));
     assert_eq!(tenant_b_tombstones[0].reason, "other tenant revocation");
 
-    let mut client = backend.pool().get().await.expect("get cleanup connection");
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get cleanup connection");
     for tenant_id in [&tenant_a, &tenant_b] {
         let tx = client
             .transaction()
@@ -4290,7 +4326,11 @@ async fn store_facade_invalidates_export_manifests_by_submission_with_tenant_sco
     assert!(beta_manifest.invalidated_at.is_none());
     assert!(beta_manifest.deleted_at.is_none());
 
-    let mut client = backend.pool().get().await.expect("get cleanup connection");
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get cleanup connection");
     for (tenant_id, export_manifest_id) in [
         ("tenant-alpha", alpha_export_id),
         ("tenant-beta", beta_export_id),
@@ -4545,7 +4585,11 @@ async fn store_facade_invalidates_export_manifest_items_by_submission_with_tenan
     assert!(tenant_b_items[0].source_invalidated_at.is_none());
     assert!(tenant_b_items[0].source_invalidation_reason.is_none());
 
-    let mut client = backend.pool().get().await.expect("get cleanup connection");
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get cleanup connection");
     for tenant_id in [&tenant_a, &tenant_b] {
         let tx = client
             .transaction()
@@ -4703,7 +4747,11 @@ async fn store_facade_rejects_export_manifest_item_cross_tenant_refs() {
         "unexpected error: {err}"
     );
 
-    let mut client = backend.pool().get().await.expect("get cleanup connection");
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get cleanup connection");
     for tenant_id in [&tenant_a, &tenant_b] {
         let tx = client
             .transaction()
@@ -4806,7 +4854,11 @@ async fn store_facade_rejects_derived_record_mismatched_tenant_object_ref() {
         "unexpected error: {err}"
     );
 
-    let mut client = backend.pool().get().await.expect("get cleanup connection");
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get cleanup connection");
     for tenant_id in [&tenant_a, &tenant_b] {
         let tx = client
             .transaction()
@@ -4934,7 +4986,11 @@ async fn store_facade_rejects_vector_entry_mismatched_submission_derived_id() {
         "unexpected error: {err}"
     );
 
-    let mut client = backend.pool().get().await.expect("get cleanup connection");
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get cleanup connection");
     let tx = client
         .transaction()
         .await

@@ -1393,10 +1393,13 @@ admin operational summary and metrics promote unsafe RLS diagnostics into a
 booleans and aggregate counts, not table names.
 Production deployments can set `TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY=true`
 to fail startup unless the configured PostgreSQL database is fully ready for RLS
-as an active tenant boundary. Production deployments still need a non-bypassing
-non-owner runtime role plus transaction-local tenant context through every
-DB-backed runtime path before RLS can become the active trust boundary. Production
-RLS tests already exercise tenant metadata rows plus the main corpus,
+as an active tenant boundary. The Rust PostgreSQL backend now keeps raw pool
+access out of the normal public application API, with crate-internal store
+access and an explicitly named test/diagnostic hook for raw RLS probes.
+Production deployments still need a non-bypassing non-owner runtime role plus
+transaction-local tenant context through every DB-backed runtime path before RLS
+can become the active trust boundary. Production RLS tests already exercise
+tenant metadata rows plus the main corpus,
 audit, credit, export, retention, revocation, ranking, and benchmark
 control-plane rows under matching and mismatched transaction-local tenant
 contexts. Deployments should still finish promoting reviewer/export/analytics

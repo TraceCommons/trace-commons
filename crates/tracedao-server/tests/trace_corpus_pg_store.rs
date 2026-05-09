@@ -100,7 +100,11 @@ async fn export_mirror_counts(
     tenant_id: &str,
     export_manifest_id: Uuid,
 ) -> ExportMirrorCounts {
-    let mut client = backend.pool().get().await.expect("get count connection");
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get count connection");
     let tx = client.transaction().await.expect("start count transaction");
     tx.execute(
         "SELECT set_config('tracedao.trace_tenant_id', $1, true)",
@@ -131,7 +135,11 @@ async fn export_mirror_counts(
 }
 
 async fn cleanup_tenant(backend: &PgBackend, tenant_id: &str) {
-    let mut client = backend.pool().get().await.expect("get cleanup connection");
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get cleanup connection");
     let tx = client
         .transaction()
         .await

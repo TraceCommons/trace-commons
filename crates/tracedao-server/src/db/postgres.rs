@@ -63,7 +63,12 @@ impl PgBackend {
         Ok(Self { pool })
     }
 
-    pub fn pool(&self) -> Pool {
+    pub(crate) fn trace_pool(&self) -> Pool {
+        self.pool.clone()
+    }
+
+    #[doc(hidden)]
+    pub fn raw_pool_for_tests_and_diagnostics(&self) -> Pool {
         self.pool.clone()
     }
 }
@@ -72,7 +77,7 @@ impl PgBackend {
 impl Database for PgBackend {
     async fn run_migrations(&self) -> Result<(), DatabaseError> {
         let client = self
-            .pool()
+            .trace_pool()
             .get()
             .await
             .map_err(|e| DatabaseError::Pool(e.to_string()))?;
@@ -495,7 +500,7 @@ impl Database for PgBackend {
         &self,
     ) -> Result<Option<TraceCorpusRlsDiagnostics>, DatabaseError> {
         let mut client = self
-            .pool()
+            .trace_pool()
             .get()
             .await
             .map_err(|e| DatabaseError::Pool(e.to_string()))?;
@@ -733,7 +738,7 @@ mod tests {
     #[test]
     fn trace_corpus_pg_client_access_enters_tenant_context_transactions() {
         let source = include_str!("trace_corpus_pg.rs");
-        let client_marker = concat!("self.", "pool().get().await?");
+        let client_marker = concat!("self.", "trace_pool().get().await?");
         let tenant_context_marker = "Self::begin_trace_tenant_transaction";
         let mut checked_client_accesses = 0;
 
@@ -760,6 +765,18 @@ mod tests {
         assert!(
             checked_client_accesses >= TRACE_COMMONS_RLS_TABLES.len(),
             "trace corpus tenant-context guard did not inspect the expected store surface"
+        );
+    }
+
+    #[test]
+    fn pg_backend_does_not_expose_raw_pool_as_application_api() {
+        let source = include_str!("postgres.rs");
+        let public_raw_pool_marker = concat!("pub fn ", "pool(&self) -> Pool");
+        assert!(
+            !source.contains(public_raw_pool_marker),
+            "PgBackend must not expose its raw pool as a normal public API; use the \
+             tenant-context helpers for application paths and an explicit test hook for \
+             raw RLS probes"
         );
     }
 }
