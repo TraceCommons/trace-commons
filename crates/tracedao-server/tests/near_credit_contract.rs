@@ -123,6 +123,38 @@ fn near_credit_receipt_call_rejects_malformed_allowed_method_args() {
 }
 
 #[test]
+fn near_credit_receipt_call_rejects_unsafe_policy_versions() {
+    let mut unsafe_receipt = sample_receipt(Uuid::from_u128(0x160));
+    unsafe_receipt.policy_version = "trace-credit-policy-v1;raw=do-not-store".to_string();
+    let unsafe_settle =
+        NearCreditReceiptCall::settle("trace-credits.testnet", unsafe_receipt.clone())
+            .expect_err("unsafe settlement policy identifiers are rejected");
+    assert!(unsafe_settle.to_string().contains("policy_version"));
+
+    unsafe_receipt.policy_version = " trace-credit-policy-v1".to_string();
+    let whitespace =
+        NearCreditReceiptCall::reverse("trace-credits.testnet", unsafe_receipt.clone())
+            .expect_err("policy identifiers must be canonical");
+    assert!(whitespace.to_string().contains("policy_version"));
+
+    let raw_error = NearCreditReceiptCall::raw(
+        "trace-credits.testnet",
+        "settle_credit_receipt",
+        json!({
+            "settlement_batch_id": Uuid::from_u128(0x161),
+            "credit_account_hash": ACCOUNT_HASH,
+            "policy_version": "trace credit policy v1",
+            "source_list_hash": SOURCE_LIST_HASH,
+            "attestation_hash": ATTESTATION_HASH,
+            "amount_micros": 1_750_000,
+            "issuer_signature_hash": ISSUER_SIGNATURE_HASH
+        }),
+    )
+    .expect_err("raw allowed-method args are also revalidated");
+    assert!(raw_error.to_string().contains("policy_version"));
+}
+
+#[test]
 fn near_credit_receipt_call_rejects_non_canonical_hashes() {
     let missing_prefix_hash = NearCreditReceiptCall::freeze_account(
         "trace-credits.testnet",
