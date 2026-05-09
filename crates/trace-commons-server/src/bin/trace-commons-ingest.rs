@@ -55264,6 +55264,7 @@ const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "postgres_rls_readiness",
     "delayed_credit_reversal",
     "object_deletion_refs",
+    "worker_queue_invalidation",
 ];
 const TRACE_OPERATIONAL_ROLLOUT_SMOKE_EVIDENCE_MAX_AGE: Duration = Duration::hours(24);
 
@@ -105371,11 +105372,11 @@ mod tests {
         );
         assert_eq!(
             operational_json["rollout_smoke"]["required_check_count"],
-            serde_json::json!(22)
+            serde_json::json!(23)
         );
         assert_eq!(
             operational_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(22)
+            serde_json::json!(23)
         );
         assert!(
             operational
@@ -105458,8 +105459,14 @@ mod tests {
         assert!(
             operational
                 .rollout_smoke
+                .required_checks
+                .contains(&"worker_queue_invalidation".to_string())
+        );
+        assert!(
+            operational
+                .rollout_smoke
                 .blocker_reasons
-                .contains(&"smoke_rehearsal_evidence_missing=22".to_string())
+                .contains(&"smoke_rehearsal_evidence_missing=23".to_string())
         );
     }
 
@@ -105539,7 +105546,7 @@ mod tests {
         );
         assert_eq!(
             operational_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(21)
+            serde_json::json!(22)
         );
         assert!(
             !operational
@@ -106234,7 +106241,7 @@ mod tests {
         );
         assert_eq!(
             preflight_json["rollout_smoke"]["required_check_count"],
-            serde_json::json!(22)
+            serde_json::json!(23)
         );
         assert_eq!(
             preflight_json["rollout_smoke"]["recorded_evidence_count"],
@@ -106246,7 +106253,7 @@ mod tests {
         );
         assert_eq!(
             preflight_json["rollout_smoke"]["missing_evidence_count"],
-            serde_json::json!(21)
+            serde_json::json!(22)
         );
         assert_eq!(
             preflight_json["latest_evidence"].as_array().map(Vec::len),
@@ -106736,7 +106743,7 @@ mod tests {
             "trace_commons_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"restore_after_delete_supported\"}} 0"
         )));
         assert!(body_text.contains(&format!(
-            "trace_commons_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 22"
+            "trace_commons_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 23"
         )));
         assert!(body_text.contains(&format!(
             "trace_commons_operational_rollout_smoke_check{{tenant_storage_ref=\"{tenant_ref}\",check_name=\"submit_status\",state=\"missing\"}} 1"

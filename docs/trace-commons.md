@@ -466,10 +466,12 @@ ranking block and promotion gates, and
 it includes a `rollout_smoke` preflight block that
 lists required canary smoke checks, including `tenant_canary_isolation`,
 `db_reconciliation_clean`, `rollback_flag_drill`, `key_rotation_drill`,
-revocation propagation, retention dry-run, vector indexing, analytics release,
-ranking-model readiness, credit settlement, object-store migration, PostgreSQL
-RLS readiness, and audit-chain verification, while reporting recorded, passed,
-failed, stale, and missing rehearsal evidence separately from promotion-gate readiness. Admin-only
+revocation propagation, delayed-credit reversal, object deletion refs,
+worker-queue invalidation, retention dry-run, vector indexing, analytics
+release, ranking-model readiness, credit settlement, object-store migration,
+PostgreSQL RLS readiness, and audit-chain verification, while reporting
+recorded, passed, failed, stale, and missing rehearsal evidence separately from
+promotion-gate readiness. Admin-only
 `GET /v1/admin/rollout-smoke/preflight`
 returns that `rollout_smoke` block together with the latest hash-only evidence
 record for each required check, so operators can review promotion readiness
@@ -639,9 +641,11 @@ dry-run blocker codes, leaves propagation rows unclaimed, and can append
 `POST /v1/admin/revocation-effects-drill` is the post-live canary proof for the
 same revoked submission: it reads DB propagation rows, reversed credit events,
 NEAR reversal outbox rows, deleted service-owned object refs, and physical-delete
-receipt rows, then can append hash-only `delayed_credit_reversal` and
-`object_deletion_refs` evidence without exposing trace bodies, credit-account
-refs, object keys, or raw operator reasons.
+receipt rows, plus hash-only worker-queue invalidation rows for the
+process-evaluation and ranking-training surfaces, then can append hash-only
+`delayed_credit_reversal`, `object_deletion_refs`, and
+`worker_queue_invalidation` evidence without exposing trace bodies,
+credit-account refs, object keys, or raw operator reasons.
 `POST /v1/admin/audit-chain-drill` runs audit-chain verification without
 maintenance side effects and can append `audit_chain_verification` evidence;
 responses expose counts, last hashes, blocker codes, and hashes of verifier
