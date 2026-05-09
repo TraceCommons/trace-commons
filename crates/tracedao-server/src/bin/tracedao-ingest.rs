@@ -40357,12 +40357,12 @@ fn require_retention_operator(auth: &TenantAuth) -> ApiResult<()> {
 }
 
 fn require_revocation_propagation_operator(auth: &TenantAuth) -> ApiResult<()> {
-    if auth.role.can_review() || auth.role == TokenRole::RevocationWorker {
+    if auth.role.can_admin() || auth.role == TokenRole::RevocationWorker {
         Ok(())
     } else {
         Err(api_error(
             StatusCode::FORBIDDEN,
-            "reviewer, admin, or revocation worker token required",
+            "admin or revocation worker token required",
         ))
     }
 }
@@ -73238,7 +73238,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("reviewer, admin, or revocation worker token required")
+                .contains("admin or revocation worker token required")
         );
 
         let missing_db = validate_trace_revocation_propagation_scheduler_config(
@@ -79159,6 +79159,26 @@ mod tests {
         .await
         .expect_err("invalid revocation worker limit is rejected before DB checks");
         assert_eq!(invalid_limit.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn revocation_propagation_worker_route_rejects_reviewer_tokens_before_db_check() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = revocation_propagation_worker_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceRevocationPropagationWorkerRequest {
+                purpose: Some("reviewer must not run revocation propagation".to_string()),
+                dry_run: true,
+                limit: TRACE_REVOCATION_PROPAGATION_DEFAULT_LIMIT,
+            }),
+        )
+        .await
+        .expect_err("reviewer token must not reach revocation propagation worker preconditions");
+
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

@@ -605,7 +605,7 @@ Access grants authorize service operations. Envelope contributor fields remain a
 In the current ingest service, `export_worker` is limited to replay/ranker export surfaces,
 `benchmark_worker` is limited to benchmark conversion, benchmark evaluation batches, and benchmark registry publication batches, `retention_worker` is limited to
 retention/cache cleanup maintenance, and the dedicated retention worker route rejects ordinary reviewer tokens even though admins may still use the route for operations. `revocation_worker` is limited to the
-revocation-propagation worker route, and `vector_worker` is limited to vector-index
+revocation-propagation worker route, whose dedicated worker surface also rejects ordinary reviewer tokens before DB mirror checks, and `vector_worker` is limited to vector-index
 maintenance. `process_eval_worker` is limited to writing bounded process-evaluation
 metadata for accepted submissions, running configured process-evaluator batches over
 derived summaries and hashes, when supplied with an external reference appending
