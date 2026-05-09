@@ -14679,10 +14679,12 @@ fn require_near_credit_outbox_principal_if_configured(
 fn require_near_credit_outbox_status_principal_if_configured(
     state: &AppState,
     tenant: &TenantAuth,
+    status: StorageTraceCreditSettlementNearStatus,
 ) -> ApiResult<()> {
-    if state
-        .credit_settlement_central_issuer_principal_refs
-        .is_empty()
+    if status == StorageTraceCreditSettlementNearStatus::Failed
+        || state
+            .credit_settlement_central_issuer_principal_refs
+            .is_empty()
         || state
             .credit_settlement_central_issuer_principal_refs
             .contains(&tenant.principal_ref)
@@ -15479,7 +15481,7 @@ async fn mark_near_credit_outbox_status_handler(
     } else {
         None
     };
-    require_near_credit_outbox_status_principal_if_configured(state.as_ref(), &tenant)?;
+    require_near_credit_outbox_status_principal_if_configured(state.as_ref(), &tenant, status)?;
     require_near_credit_manual_status_adapter_auth(state.as_ref(), status)?;
     let existing = read_near_credit_outbox_items_for_admin(state.as_ref(), &tenant)
         .await
@@ -90072,6 +90074,27 @@ mod tests {
             StorageTraceCreditSettlementNearStatus::Pending
         );
         assert!(outbox[0].near_transaction_hash.is_none());
+
+        let Json(failed) = mark_near_credit_outbox_status_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceNearCreditOutboxStatusRequest {
+                near_outbox_id: pending_outbox_id,
+                status: StorageTraceCreditSettlementNearStatus::Failed,
+                near_transaction_hash: None,
+                error_detail: Some(
+                    "relayer unavailable during central issuer recovery".to_string(),
+                ),
+            }),
+        )
+        .await
+        .expect("unlisted utility worker can mark failed without granting credit");
+        assert_eq!(
+            failed.status,
+            StorageTraceCreditSettlementNearStatus::Failed
+        );
+        assert!(failed.near_transaction_hash.is_none());
+        assert!(failed.last_error_hash.is_some());
     }
 
     #[tokio::test]
