@@ -18610,7 +18610,11 @@ async fn append_ranking_model_version_with_db_mirror(
     let mirror_result = mirror_ranking_model_version_to_db(state, record).await;
     if state.require_db_mirror_writes {
         if let Err(error) = &mirror_result {
-            tracing::warn!(%error, model_version = %record.model_version, "Trace Commons DB dual-write ranking model version mirror failed");
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                model_version_hash = %sha256_prefixed(&record.model_version),
+                "Trace Commons DB dual-write ranking model version mirror failed"
+            );
         }
         enforce_db_mirror_write_result(state, "ranking model version", mirror_result)?;
         append_ranking_model_version(&state.root, &tenant.tenant_id, record)?;
@@ -18618,7 +18622,11 @@ async fn append_ranking_model_version_with_db_mirror(
     }
     append_ranking_model_version(&state.root, &tenant.tenant_id, record)?;
     if let Err(error) = &mirror_result {
-        tracing::warn!(%error, model_version = %record.model_version, "Trace Commons DB dual-write ranking model version mirror failed");
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(error),
+            model_version_hash = %sha256_prefixed(&record.model_version),
+            "Trace Commons DB dual-write ranking model version mirror failed"
+        );
     }
     enforce_db_mirror_write_result(state, "ranking model version", mirror_result)
 }
@@ -18632,7 +18640,11 @@ async fn append_ranking_calibration_dataset_with_db_mirror(
     let mirror_result = mirror_ranking_calibration_dataset_to_db(state, record).await;
     if state.require_db_mirror_writes {
         if let Err(error) = &mirror_result {
-            tracing::warn!(%error, calibration_dataset_hash = %record.calibration_dataset_hash, "Trace Commons DB dual-write ranking calibration dataset mirror failed");
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                calibration_dataset_hash = %record.calibration_dataset_hash,
+                "Trace Commons DB dual-write ranking calibration dataset mirror failed"
+            );
         }
         enforce_db_mirror_write_result(state, "ranking calibration dataset", mirror_result)?;
         append_ranking_calibration_dataset(&state.root, &tenant.tenant_id, record)?;
@@ -18640,7 +18652,11 @@ async fn append_ranking_calibration_dataset_with_db_mirror(
     }
     append_ranking_calibration_dataset(&state.root, &tenant.tenant_id, record)?;
     if let Err(error) = &mirror_result {
-        tracing::warn!(%error, calibration_dataset_hash = %record.calibration_dataset_hash, "Trace Commons DB dual-write ranking calibration dataset mirror failed");
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(error),
+            calibration_dataset_hash = %record.calibration_dataset_hash,
+            "Trace Commons DB dual-write ranking calibration dataset mirror failed"
+        );
     }
     enforce_db_mirror_write_result(state, "ranking calibration dataset", mirror_result)
 }
@@ -18655,7 +18671,11 @@ async fn append_ranking_calibration_dataset_status_override_with_db_mirror(
         mirror_ranking_calibration_dataset_status_override_to_db(state, record).await;
     if state.require_db_mirror_writes {
         if let Err(error) = &mirror_result {
-            tracing::warn!(%error, calibration_dataset_hash = %record.calibration_dataset_hash, "Trace Commons DB ranking calibration dataset status override mirror failed");
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                calibration_dataset_hash = %record.calibration_dataset_hash,
+                "Trace Commons DB ranking calibration dataset status override mirror failed"
+            );
         }
         enforce_db_mirror_write_result(
             state,
@@ -18675,7 +18695,11 @@ async fn append_ranking_calibration_dataset_status_override_with_db_mirror(
         record,
     )?;
     if let Err(error) = &mirror_result {
-        tracing::warn!(%error, calibration_dataset_hash = %record.calibration_dataset_hash, "Trace Commons DB ranking calibration dataset status override mirror failed");
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(error),
+            calibration_dataset_hash = %record.calibration_dataset_hash,
+            "Trace Commons DB ranking calibration dataset status override mirror failed"
+        );
     }
     enforce_db_mirror_write_result(
         state,
@@ -18692,7 +18716,11 @@ async fn append_ranking_feature_with_db_mirror(
     let mirror_result = mirror_ranking_feature_to_db(state, record).await;
     if state.require_db_mirror_writes {
         if let Err(error) = &mirror_result {
-            tracing::warn!(%error, ranking_feature_id = %record.ranking_feature_id, "Trace Commons DB dual-write ranking feature mirror failed");
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                ranking_feature_id = %record.ranking_feature_id,
+                "Trace Commons DB dual-write ranking feature mirror failed"
+            );
         }
         enforce_db_mirror_write_result(state, "ranking feature", mirror_result)?;
         append_ranking_feature(&state.root, &tenant.tenant_id, record)?;
@@ -18700,7 +18728,11 @@ async fn append_ranking_feature_with_db_mirror(
     }
     append_ranking_feature(&state.root, &tenant.tenant_id, record)?;
     if let Err(error) = &mirror_result {
-        tracing::warn!(%error, ranking_feature_id = %record.ranking_feature_id, "Trace Commons DB dual-write ranking feature mirror failed");
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(error),
+            ranking_feature_id = %record.ranking_feature_id,
+            "Trace Commons DB dual-write ranking feature mirror failed"
+        );
     }
     enforce_db_mirror_write_result(state, "ranking feature", mirror_result)
 }
@@ -18713,7 +18745,11 @@ async fn append_ranking_prediction_with_db_mirror(
     let mirror_result = mirror_ranking_prediction_to_db(state, record).await;
     if state.require_db_mirror_writes {
         if let Err(error) = &mirror_result {
-            tracing::warn!(%error, ranking_prediction_id = %record.ranking_prediction_id, "Trace Commons DB dual-write ranking prediction mirror failed");
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                ranking_prediction_id = %record.ranking_prediction_id,
+                "Trace Commons DB dual-write ranking prediction mirror failed"
+            );
         }
         enforce_db_mirror_write_result(state, "ranking prediction", mirror_result)?;
         append_ranking_prediction(&state.root, &tenant.tenant_id, record)?;
@@ -18721,7 +18757,11 @@ async fn append_ranking_prediction_with_db_mirror(
     }
     append_ranking_prediction(&state.root, &tenant.tenant_id, record)?;
     if let Err(error) = &mirror_result {
-        tracing::warn!(%error, ranking_prediction_id = %record.ranking_prediction_id, "Trace Commons DB dual-write ranking prediction mirror failed");
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(error),
+            ranking_prediction_id = %record.ranking_prediction_id,
+            "Trace Commons DB dual-write ranking prediction mirror failed"
+        );
     }
     enforce_db_mirror_write_result(state, "ranking prediction", mirror_result)
 }
@@ -18734,7 +18774,11 @@ async fn append_ranking_label_with_db_mirror(
     let mirror_result = mirror_ranking_label_to_db(state, record).await;
     if state.require_db_mirror_writes {
         if let Err(error) = &mirror_result {
-            tracing::warn!(%error, ranking_label_id = %record.ranking_label_id, "Trace Commons DB dual-write ranking label mirror failed");
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                ranking_label_id = %record.ranking_label_id,
+                "Trace Commons DB dual-write ranking label mirror failed"
+            );
         }
         enforce_db_mirror_write_result(state, "ranking label", mirror_result)?;
         append_ranking_label(&state.root, &tenant.tenant_id, record)?;
@@ -18742,7 +18786,11 @@ async fn append_ranking_label_with_db_mirror(
     }
     append_ranking_label(&state.root, &tenant.tenant_id, record)?;
     if let Err(error) = &mirror_result {
-        tracing::warn!(%error, ranking_label_id = %record.ranking_label_id, "Trace Commons DB dual-write ranking label mirror failed");
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(error),
+            ranking_label_id = %record.ranking_label_id,
+            "Trace Commons DB dual-write ranking label mirror failed"
+        );
     }
     enforce_db_mirror_write_result(state, "ranking label", mirror_result)
 }
@@ -18755,7 +18803,11 @@ async fn append_ranking_preference_label_with_db_mirror(
     let mirror_result = mirror_ranking_preference_label_to_db(state, record).await;
     if state.require_db_mirror_writes {
         if let Err(error) = &mirror_result {
-            tracing::warn!(%error, preference_label_id = %record.preference_label_id, "Trace Commons DB dual-write ranking preference label mirror failed");
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                preference_label_id = %record.preference_label_id,
+                "Trace Commons DB dual-write ranking preference label mirror failed"
+            );
         }
         enforce_db_mirror_write_result(state, "ranking preference label", mirror_result)?;
         append_ranking_preference_label(&state.root, &tenant.tenant_id, record)?;
@@ -18763,7 +18815,11 @@ async fn append_ranking_preference_label_with_db_mirror(
     }
     append_ranking_preference_label(&state.root, &tenant.tenant_id, record)?;
     if let Err(error) = &mirror_result {
-        tracing::warn!(%error, preference_label_id = %record.preference_label_id, "Trace Commons DB dual-write ranking preference label mirror failed");
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(error),
+            preference_label_id = %record.preference_label_id,
+            "Trace Commons DB dual-write ranking preference label mirror failed"
+        );
     }
     enforce_db_mirror_write_result(state, "ranking preference label", mirror_result)
 }
@@ -18776,7 +18832,11 @@ async fn append_ranking_calibration_run_with_db_mirror(
     let mirror_result = mirror_ranking_calibration_run_to_db(state, record).await;
     if state.require_db_mirror_writes {
         if let Err(error) = &mirror_result {
-            tracing::warn!(%error, calibration_run_id = %record.calibration_run_id, "Trace Commons DB dual-write ranking calibration run mirror failed");
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                calibration_run_id = %record.calibration_run_id,
+                "Trace Commons DB dual-write ranking calibration run mirror failed"
+            );
         }
         enforce_db_mirror_write_result(state, "ranking calibration run", mirror_result)?;
         append_ranking_calibration_run(&state.root, &tenant.tenant_id, record)?;
@@ -18784,7 +18844,11 @@ async fn append_ranking_calibration_run_with_db_mirror(
     }
     append_ranking_calibration_run(&state.root, &tenant.tenant_id, record)?;
     if let Err(error) = &mirror_result {
-        tracing::warn!(%error, calibration_run_id = %record.calibration_run_id, "Trace Commons DB dual-write ranking calibration run mirror failed");
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(error),
+            calibration_run_id = %record.calibration_run_id,
+            "Trace Commons DB dual-write ranking calibration run mirror failed"
+        );
     }
     enforce_db_mirror_write_result(state, "ranking calibration run", mirror_result)
 }
@@ -18797,7 +18861,11 @@ async fn append_ranking_worker_run_with_db_mirror(
     let mirror_result = mirror_ranking_worker_run_to_db(state, record).await;
     if state.require_db_mirror_writes {
         if let Err(error) = &mirror_result {
-            tracing::warn!(%error, ranking_worker_run_id = %record.ranking_worker_run_id, "Trace Commons DB dual-write ranking worker run mirror failed");
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                ranking_worker_run_id = %record.ranking_worker_run_id,
+                "Trace Commons DB dual-write ranking worker run mirror failed"
+            );
         }
         enforce_db_mirror_write_result(state, "ranking worker run", mirror_result)?;
         append_ranking_worker_run(&state.root, &tenant.tenant_id, record)?;
@@ -18805,7 +18873,11 @@ async fn append_ranking_worker_run_with_db_mirror(
     }
     append_ranking_worker_run(&state.root, &tenant.tenant_id, record)?;
     if let Err(error) = &mirror_result {
-        tracing::warn!(%error, ranking_worker_run_id = %record.ranking_worker_run_id, "Trace Commons DB dual-write ranking worker run mirror failed");
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(error),
+            ranking_worker_run_id = %record.ranking_worker_run_id,
+            "Trace Commons DB dual-write ranking worker run mirror failed"
+        );
     }
     enforce_db_mirror_write_result(state, "ranking worker run", mirror_result)
 }
