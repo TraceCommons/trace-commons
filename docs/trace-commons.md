@@ -1087,7 +1087,8 @@ Replay dataset exports, benchmark conversion artifacts, and ranker training expo
 benchmark-registry submit, confirm, scheduler, and manual submitted/confirmed
 fallback paths fail closed unless the matching registry adapter bearer token is
 configured. Manual failed-status fallback remains available for bounded recovery
-evidence.
+evidence. Operational summary and metrics expose only safe readiness booleans
+and adapter-auth blocker counts for pending or submitted registry rows.
 
 When `TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS` is
 configured, positive manual and automatic credit appends in the utility-credit,

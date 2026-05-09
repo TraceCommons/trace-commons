@@ -32133,9 +32133,7 @@ async fn run_benchmark_readiness_drill(
     let summary = TraceOperationalBenchmarkSummary::from_artifacts_and_registry_outbox(
         &artifacts,
         &registry_outbox,
-        state.benchmark_registry_submitter.is_some(),
-        state.benchmark_registry_confirmer.is_some(),
-        state.benchmark_evaluator.is_some(),
+        TraceOperationalBenchmarkAdapterReadiness::from_state(state),
     );
     let mut response = TraceBenchmarkReadinessDrillResponse {
         tenant_id: tenant.tenant_id.clone(),
@@ -34994,8 +34992,20 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             usize::from(response.benchmarks.registry_submitter_configured),
         ),
         (
+            "registry_submitter_auth_configured",
+            usize::from(response.benchmarks.registry_submitter_auth_configured),
+        ),
+        (
             "registry_confirmer_configured",
             usize::from(response.benchmarks.registry_confirmer_configured),
+        ),
+        (
+            "registry_confirmer_auth_configured",
+            usize::from(response.benchmarks.registry_confirmer_auth_configured),
+        ),
+        (
+            "registry_adapter_auth_required",
+            usize::from(response.benchmarks.registry_require_adapter_auth),
         ),
         (
             "external_evaluator_configured",
@@ -35015,10 +35025,22 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
                 .registry_outbox_pending_without_submitter_count,
         ),
         (
+            "registry_outbox_pending_without_submitter_auth",
+            response
+                .benchmarks
+                .registry_outbox_pending_without_submitter_auth_count,
+        ),
+        (
             "registry_outbox_submitted_without_confirmer",
             response
                 .benchmarks
                 .registry_outbox_submitted_without_confirmer_count,
+        ),
+        (
+            "registry_outbox_submitted_without_confirmer_auth",
+            response
+                .benchmarks
+                .registry_outbox_submitted_without_confirmer_auth_count,
         ),
         (
             "registry_outbox_failed",
@@ -57242,9 +57264,7 @@ impl TraceOperationalSummaryResponse {
         let benchmarks = TraceOperationalBenchmarkSummary::from_artifacts_and_registry_outbox(
             &inputs.benchmark_artifacts,
             &inputs.benchmark_registry_outbox,
-            inputs.state.benchmark_registry_submitter.is_some(),
-            inputs.state.benchmark_registry_confirmer.is_some(),
-            inputs.state.benchmark_evaluator.is_some(),
+            TraceOperationalBenchmarkAdapterReadiness::from_state(inputs.state),
         );
         let near_credit = TraceOperationalNearCreditSummary::from_outbox(
             &inputs.near_credit_outbox,
@@ -57874,7 +57894,9 @@ struct TraceOperationalPromotionGateSummary {
     vector_missing_count: usize,
     vector_nearest_neighbor_policy_gap_count: usize,
     benchmark_registry_outbox_pending_without_submitter_count: usize,
+    benchmark_registry_outbox_pending_without_submitter_auth_count: usize,
     benchmark_registry_outbox_submitted_without_confirmer_count: usize,
+    benchmark_registry_outbox_submitted_without_confirmer_auth_count: usize,
     benchmark_registry_outbox_failed_count: usize,
     publishable_benchmark_without_external_evaluator_count: usize,
     published_benchmark_external_registry_gap_count: usize,
@@ -57978,8 +58000,12 @@ impl TraceOperationalPromotionGateSummary {
             benchmarks.external_registry_invalidation_gap_count;
         let benchmark_registry_outbox_pending_without_submitter_count =
             benchmarks.registry_outbox_pending_without_submitter_count;
+        let benchmark_registry_outbox_pending_without_submitter_auth_count =
+            benchmarks.registry_outbox_pending_without_submitter_auth_count;
         let benchmark_registry_outbox_submitted_without_confirmer_count =
             benchmarks.registry_outbox_submitted_without_confirmer_count;
+        let benchmark_registry_outbox_submitted_without_confirmer_auth_count =
+            benchmarks.registry_outbox_submitted_without_confirmer_auth_count;
         let benchmark_registry_outbox_failed_count = benchmarks.registry_outbox_failed_count;
         let publishable_benchmark_without_external_evaluator_count =
             benchmarks.publishable_without_external_evaluator_count;
@@ -58345,8 +58371,18 @@ impl TraceOperationalPromotionGateSummary {
         );
         push_gap_count(
             &mut blocking_gates,
+            "benchmark_registry_outbox_pending_without_submitter_auth",
+            benchmark_registry_outbox_pending_without_submitter_auth_count,
+        );
+        push_gap_count(
+            &mut blocking_gates,
             "benchmark_registry_outbox_submitted_without_confirmer",
             benchmark_registry_outbox_submitted_without_confirmer_count,
+        );
+        push_gap_count(
+            &mut blocking_gates,
+            "benchmark_registry_outbox_submitted_without_confirmer_auth",
+            benchmark_registry_outbox_submitted_without_confirmer_auth_count,
         );
         push_gap_count(
             &mut blocking_gates,
@@ -58409,7 +58445,9 @@ impl TraceOperationalPromotionGateSummary {
             vector_missing_count,
             vector_nearest_neighbor_policy_gap_count,
             benchmark_registry_outbox_pending_without_submitter_count,
+            benchmark_registry_outbox_pending_without_submitter_auth_count,
             benchmark_registry_outbox_submitted_without_confirmer_count,
+            benchmark_registry_outbox_submitted_without_confirmer_auth_count,
             benchmark_registry_outbox_failed_count,
             publishable_benchmark_without_external_evaluator_count,
             published_benchmark_external_registry_gap_count,
@@ -58822,11 +58860,37 @@ fn trace_vector_entries_are_policy_compatible(
         && target.source_projection == neighbor.source_projection
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct TraceOperationalBenchmarkAdapterReadiness {
+    registry_submitter_configured: bool,
+    registry_submitter_auth_configured: bool,
+    registry_confirmer_configured: bool,
+    registry_confirmer_auth_configured: bool,
+    registry_require_adapter_auth: bool,
+    external_evaluator_configured: bool,
+}
+
+impl TraceOperationalBenchmarkAdapterReadiness {
+    fn from_state(state: &AppState) -> Self {
+        Self {
+            registry_submitter_configured: state.benchmark_registry_submitter.is_some(),
+            registry_submitter_auth_configured: state.benchmark_registry_submitter_auth_configured,
+            registry_confirmer_configured: state.benchmark_registry_confirmer.is_some(),
+            registry_confirmer_auth_configured: state.benchmark_registry_confirmer_auth_configured,
+            registry_require_adapter_auth: state.benchmark_registry_require_adapter_auth,
+            external_evaluator_configured: state.benchmark_evaluator.is_some(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Serialize)]
 struct TraceOperationalBenchmarkSummary {
     total_artifact_count: usize,
     registry_submitter_configured: bool,
+    registry_submitter_auth_configured: bool,
     registry_confirmer_configured: bool,
+    registry_confirmer_auth_configured: bool,
+    registry_require_adapter_auth: bool,
     external_evaluator_configured: bool,
     by_registry_status: BTreeMap<String, usize>,
     by_evaluation_status: BTreeMap<String, usize>,
@@ -58844,7 +58908,9 @@ struct TraceOperationalBenchmarkSummary {
     registry_outbox_confirmed_count: usize,
     registry_outbox_failed_count: usize,
     registry_outbox_pending_without_submitter_count: usize,
+    registry_outbox_pending_without_submitter_auth_count: usize,
     registry_outbox_submitted_without_confirmer_count: usize,
+    registry_outbox_submitted_without_confirmer_auth_count: usize,
     external_registry_adapter_gap_count: usize,
     external_registry_invalidation_gap_count: usize,
     blocker_reasons: Vec<String>,
@@ -58854,15 +58920,16 @@ impl TraceOperationalBenchmarkSummary {
     fn from_artifacts_and_registry_outbox(
         artifacts: &[TraceBenchmarkConversionArtifact],
         registry_outbox: &[TraceBenchmarkRegistryOutboxItem],
-        registry_submitter_configured: bool,
-        registry_confirmer_configured: bool,
-        external_evaluator_configured: bool,
+        readiness: TraceOperationalBenchmarkAdapterReadiness,
     ) -> Self {
         let mut summary = Self {
             total_artifact_count: artifacts.len(),
-            registry_submitter_configured,
-            registry_confirmer_configured,
-            external_evaluator_configured,
+            registry_submitter_configured: readiness.registry_submitter_configured,
+            registry_submitter_auth_configured: readiness.registry_submitter_auth_configured,
+            registry_confirmer_configured: readiness.registry_confirmer_configured,
+            registry_confirmer_auth_configured: readiness.registry_confirmer_auth_configured,
+            registry_require_adapter_auth: readiness.registry_require_adapter_auth,
+            external_evaluator_configured: readiness.external_evaluator_configured,
             ..Self::default()
         };
         let mut confirmed_publish_conversion_ids = BTreeSet::new();
@@ -58942,15 +59009,25 @@ impl TraceOperationalBenchmarkSummary {
                 summary.publishable_count += 1;
             }
         }
-        if !external_evaluator_configured {
+        if !readiness.external_evaluator_configured {
             summary.publishable_without_external_evaluator_count = summary.publishable_count;
         }
-        if !registry_submitter_configured {
+        if !readiness.registry_submitter_configured {
             summary.registry_outbox_pending_without_submitter_count =
                 summary.registry_outbox_pending_count;
+        } else if readiness.registry_require_adapter_auth
+            && !readiness.registry_submitter_auth_configured
+        {
+            summary.registry_outbox_pending_without_submitter_auth_count =
+                summary.registry_outbox_pending_count;
         }
-        if !registry_confirmer_configured {
+        if !readiness.registry_confirmer_configured {
             summary.registry_outbox_submitted_without_confirmer_count =
+                summary.registry_outbox_submitted_count;
+        } else if readiness.registry_require_adapter_auth
+            && !readiness.registry_confirmer_auth_configured
+        {
+            summary.registry_outbox_submitted_without_confirmer_auth_count =
                 summary.registry_outbox_submitted_count;
         }
         push_gap_count(
@@ -58975,8 +59052,18 @@ impl TraceOperationalBenchmarkSummary {
         );
         push_gap_count(
             &mut summary.blocker_reasons,
+            "benchmark_registry_outbox_pending_without_submitter_auth",
+            summary.registry_outbox_pending_without_submitter_auth_count,
+        );
+        push_gap_count(
+            &mut summary.blocker_reasons,
             "benchmark_registry_outbox_submitted_without_confirmer",
             summary.registry_outbox_submitted_without_confirmer_count,
+        );
+        push_gap_count(
+            &mut summary.blocker_reasons,
+            "benchmark_registry_outbox_submitted_without_confirmer_auth",
+            summary.registry_outbox_submitted_without_confirmer_auth_count,
         );
         push_gap_count(
             &mut summary.blocker_reasons,
@@ -75963,6 +76050,128 @@ mod tests {
             "tracedao_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"benchmark_registry_outbox_failed\"}} 1"
         )));
         assert!(!body_text.contains("registry submitter outage"));
+    }
+
+    #[tokio::test]
+    async fn admin_operational_summary_and_metrics_block_benchmark_registry_auth_gaps() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).benchmark_registry_submitter =
+            Some(Arc::new(FakeBenchmarkRegistrySubmitter::default()));
+        Arc::make_mut(&mut state).benchmark_registry_confirmer =
+            Some(Arc::new(FakeBenchmarkRegistryConfirmer::default()));
+        Arc::make_mut(&mut state).benchmark_registry_require_adapter_auth = true;
+        let pending_item = pending_benchmark_registry_outbox_item(Uuid::new_v4());
+        let submitted_item = submitted_benchmark_registry_outbox_item(
+            Uuid::new_v4(),
+            StorageTraceBenchmarkRegistryOutboxOperation::Publish,
+        );
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &pending_item)
+            .expect("pending benchmark registry outbox writes");
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &submitted_item)
+            .expect("submitted benchmark registry outbox writes");
+
+        let Json(operational) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary");
+        let operational_json =
+            serde_json::to_value(&operational).expect("operational summary serializes");
+        assert_eq!(
+            operational_json["benchmarks"]["registry_submitter_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            operational_json["benchmarks"]["registry_submitter_auth_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            operational_json["benchmarks"]["registry_confirmer_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            operational_json["benchmarks"]["registry_confirmer_auth_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            operational_json["benchmarks"]["registry_require_adapter_auth"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            operational_json["benchmarks"]["registry_outbox_pending_without_submitter_count"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            operational_json["benchmarks"]["registry_outbox_pending_without_submitter_auth_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["benchmarks"]["registry_outbox_submitted_without_confirmer_count"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            operational_json["benchmarks"]["registry_outbox_submitted_without_confirmer_auth_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["promotion_gates"]["benchmark_registry_outbox_pending_without_submitter_auth_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            operational_json["promotion_gates"]["benchmark_registry_outbox_submitted_without_confirmer_auth_count"],
+            serde_json::json!(1)
+        );
+        assert!(
+            operational.promotion_gates.blocking_gates.contains(
+                &"benchmark_registry_outbox_pending_without_submitter_auth=1".to_string()
+            )
+        );
+        assert!(
+            operational.promotion_gates.blocking_gates.contains(
+                &"benchmark_registry_outbox_submitted_without_confirmer_auth=1".to_string()
+            )
+        );
+
+        let metrics_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-metrics")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("metrics response");
+        assert_eq!(metrics_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(metrics_response.into_body(), 65536)
+            .await
+            .expect("body reads");
+        let body_text = std::str::from_utf8(&body).expect("metrics body is utf8");
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_benchmarks{{tenant_storage_ref=\"{tenant_ref}\",state=\"registry_submitter_configured\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_benchmarks{{tenant_storage_ref=\"{tenant_ref}\",state=\"registry_submitter_auth_configured\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_benchmarks{{tenant_storage_ref=\"{tenant_ref}\",state=\"registry_adapter_auth_required\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_benchmarks{{tenant_storage_ref=\"{tenant_ref}\",state=\"registry_outbox_pending_without_submitter_auth\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_benchmarks{{tenant_storage_ref=\"{tenant_ref}\",state=\"registry_outbox_submitted_without_confirmer_auth\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"benchmark_registry_outbox_pending_without_submitter_auth\"}} 1"
+        )));
+        assert!(!body_text.contains("admin-token-a"));
+        assert!(!body_text.contains("external-registry:receipt"));
     }
 
     #[tokio::test]
