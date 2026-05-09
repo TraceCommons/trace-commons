@@ -78051,6 +78051,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn db_audit_reads_tenant_allowlist_keeps_fallback_tenant_file_backed() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(backend.clone()),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+            TraceTenantRolloutFeature::DbAuditReads,
+            &["tenant-a"],
+        );
+
+        let tenant_a_auth = test_reviewer_auth("tenant-a");
+        let tenant_a_db_event =
+            TraceCommonsAuditEvent::read(&tenant_a_auth, "tenant_a_db_audit_canary", 7);
+        backend
+            .append_trace_audit_event(StorageTraceAuditEventWrite {
+                audit_event_id: tenant_a_db_event.event_id,
+                tenant_id: tenant_a_db_event.tenant_id.clone(),
+                actor_principal_ref: tenant_a_db_event
+                    .actor_principal_ref
+                    .clone()
+                    .expect("tenant-a actor exists"),
+                actor_role: "reviewer".to_string(),
+                action: StorageTraceAuditAction::Read,
+                reason: tenant_a_db_event.reason.clone(),
+                request_id: None,
+                submission_id: None,
+                object_ref_id: None,
+                export_manifest_id: None,
+                decision_inputs_hash: None,
+                previous_event_hash: None,
+                event_hash: None,
+                canonical_event_json: Some(
+                    serde_json::to_string(&tenant_a_db_event).expect("tenant-a audit serializes"),
+                ),
+                metadata: StorageTraceAuditSafeMetadata::Read {
+                    surface: "tenant_a_db_audit_canary".to_string(),
+                    item_count: 7,
+                },
+            })
+            .await
+            .expect("tenant-a DB audit row writes");
+        assert!(
+            !audit_log_path(temp.path(), "tenant-a").exists(),
+            "tenant-a canary starts without file-backed audit events"
+        );
+
+        let tenant_b_auth = test_reviewer_auth("tenant-b");
+        let tenant_b_file_event = append_audit_event(
+            temp.path(),
+            "tenant-b",
+            TraceCommonsAuditEvent::read(&tenant_b_auth, "tenant_b_file_audit_fallback", 3),
+        )
+        .expect("tenant-b file audit event writes");
+        let tenant_b_db_event =
+            TraceCommonsAuditEvent::read(&tenant_b_auth, "tenant_b_db_audit_should_not_be_used", 9);
+        backend
+            .append_trace_audit_event(StorageTraceAuditEventWrite {
+                audit_event_id: tenant_b_db_event.event_id,
+                tenant_id: tenant_b_db_event.tenant_id.clone(),
+                actor_principal_ref: tenant_b_db_event
+                    .actor_principal_ref
+                    .clone()
+                    .expect("tenant-b actor exists"),
+                actor_role: "reviewer".to_string(),
+                action: StorageTraceAuditAction::Read,
+                reason: tenant_b_db_event.reason.clone(),
+                request_id: None,
+                submission_id: None,
+                object_ref_id: None,
+                export_manifest_id: None,
+                decision_inputs_hash: None,
+                previous_event_hash: None,
+                event_hash: None,
+                canonical_event_json: Some(
+                    serde_json::to_string(&tenant_b_db_event)
+                        .expect("tenant-b DB audit serializes"),
+                ),
+                metadata: StorageTraceAuditSafeMetadata::Read {
+                    surface: "tenant_b_db_audit_should_not_be_used".to_string(),
+                    item_count: 9,
+                },
+            })
+            .await
+            .expect("tenant-b DB audit row writes");
+
+        let Json(tenant_a_events) = audit_events_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(AuditEventsQuery { limit: Some(1) }),
+        )
+        .await
+        .expect("tenant-a allowlisted audit read uses DB");
+        assert_eq!(tenant_a_events.len(), 1);
+        assert_eq!(tenant_a_events[0].event_id, tenant_a_db_event.event_id);
+        assert!(
+            tenant_a_events[0]
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("tenant_a_db_audit_canary"))
+        );
+
+        let Json(tenant_b_events) = audit_events_handler(
+            State(state.clone()),
+            auth_headers("review-token-b"),
+            Query(AuditEventsQuery { limit: Some(1) }),
+        )
+        .await
+        .expect("tenant-b non-allowlisted audit read uses file fallback");
+        assert_eq!(tenant_b_events.len(), 1);
+        assert_eq!(tenant_b_events[0].event_id, tenant_b_file_event.event_id);
+        assert_ne!(tenant_b_events[0].event_id, tenant_b_db_event.event_id);
+        assert!(
+            tenant_b_events[0]
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("tenant_b_file_audit_fallback"))
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+    }
+
+    #[tokio::test]
     async fn maintenance_reconciliation_reports_ranking_control_plane_gaps() {
         let Some(backend) = postgres_backend_for_ingest_test().await else {
             return;
