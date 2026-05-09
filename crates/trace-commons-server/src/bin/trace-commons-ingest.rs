@@ -12033,6 +12033,14 @@ fn trace_credit_settlement_issuer_approval_from_audit_event(
             is_canonical_sha256_prefixed_hash(&reason_hash),
             "credit settlement issuer approval reason_hash must be a canonical sha256-prefixed hex digest"
         );
+        let evidence_ref_hash =
+            trace_audit_reason_value(reason, "evidence_ref_hash").map(ToOwned::to_owned);
+        if let Some(evidence_ref_hash) = evidence_ref_hash.as_deref() {
+            anyhow::ensure!(
+                is_canonical_sha256_prefixed_hash(evidence_ref_hash),
+                "credit settlement issuer approval evidence_ref_hash must be a canonical sha256-prefixed hex digest"
+            );
+        }
         Ok(TraceCreditSettlementIssuerApprovalResponse {
             event_id: event.event_id,
             tenant_id: event.tenant_id.clone(),
@@ -12041,8 +12049,7 @@ fn trace_credit_settlement_issuer_approval_from_audit_event(
             source_list_hash,
             evidence_hash,
             reason_hash,
-            evidence_ref_hash: trace_audit_reason_value(reason, "evidence_ref_hash")
-                .map(ToOwned::to_owned),
+            evidence_ref_hash,
             actor_principal_ref: event.actor_principal_ref.clone().unwrap_or_default(),
             recorded_at: event.created_at,
         })
@@ -51094,6 +51101,14 @@ fn trace_rollout_smoke_evidence_from_audit_event(
             is_canonical_sha256_prefixed_hash(&evidence_hash),
             "rollout smoke evidence audit event has unsupported evidence_hash"
         );
+        let evidence_ref_hash =
+            trace_audit_reason_value(reason, "evidence_ref_hash").map(ToOwned::to_owned);
+        if let Some(evidence_ref_hash) = evidence_ref_hash.as_deref() {
+            anyhow::ensure!(
+                is_canonical_sha256_prefixed_hash(evidence_ref_hash),
+                "rollout smoke evidence audit event has unsupported evidence_ref_hash"
+            );
+        }
         Ok(TraceRolloutSmokeEvidenceResponse {
             event_id: event.event_id,
             tenant_id: event.tenant_id.clone(),
@@ -51101,8 +51116,7 @@ fn trace_rollout_smoke_evidence_from_audit_event(
             check_name,
             status,
             evidence_hash,
-            evidence_ref_hash: trace_audit_reason_value(reason, "evidence_ref_hash")
-                .map(ToOwned::to_owned),
+            evidence_ref_hash,
             actor_principal_ref: event.actor_principal_ref.clone().unwrap_or_default(),
             recorded_at: event.created_at,
         })
@@ -59277,7 +59291,7 @@ mod tests {
                 check_name: "submit_status".to_string(),
                 status: TraceRolloutSmokeEvidenceStatus::Passed,
                 evidence_hash: sha256_prefixed("db smoke evidence projection"),
-                evidence_ref: None,
+                evidence_ref: Some("runbook://smoke/submit-status".to_string()),
             },
         )
         .expect("evidence request is valid");
@@ -59294,6 +59308,24 @@ mod tests {
         match parsed {
             Ok(_) => panic!("noncanonical rollout evidence hash should not parse"),
             Err(error) => assert!(error.to_string().contains("unsupported evidence_hash")),
+        }
+
+        let evidence_ref_hash = evidence
+            .evidence_ref_hash
+            .as_deref()
+            .expect("evidence includes evidence ref hash");
+        let mut audit_event = TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence);
+        audit_event.reason = audit_event.reason.map(|reason| {
+            reason.replace(
+                &format!("evidence_ref_hash={evidence_ref_hash}"),
+                "evidence_ref_hash=runbook://raw-ref",
+            )
+        });
+        let parsed = trace_rollout_smoke_evidence_from_audit_event(&audit_event)
+            .expect("audit event is rollout smoke evidence");
+        match parsed {
+            Ok(_) => panic!("noncanonical rollout evidence ref hash should not parse"),
+            Err(error) => assert!(error.to_string().contains("unsupported evidence_ref_hash")),
         }
     }
 
@@ -59380,7 +59412,7 @@ mod tests {
                 source_list_hash: sha256_prefixed("settlement source list"),
                 evidence_hash: sha256_prefixed("central issuer approval"),
                 reason: "central issuer approved exact source list".to_string(),
-                evidence_ref: None,
+                evidence_ref: Some("private-lab-review:issuer-approval".to_string()),
             },
         )
         .expect("issuer approval request is valid");
@@ -59397,6 +59429,24 @@ mod tests {
         match parsed {
             Ok(_) => panic!("noncanonical approval hash should not parse"),
             Err(error) => assert!(error.to_string().contains("canonical sha256")),
+        }
+
+        let evidence_ref_hash = approval
+            .evidence_ref_hash
+            .as_deref()
+            .expect("approval includes evidence ref hash");
+        let mut audit_event = TraceCommonsAuditEvent::credit_settlement_issuer_approval(&approval);
+        audit_event.reason = audit_event.reason.map(|reason| {
+            reason.replace(
+                &format!("evidence_ref_hash={evidence_ref_hash}"),
+                "evidence_ref_hash=private-lab-review:raw-ref",
+            )
+        });
+        let parsed = trace_credit_settlement_issuer_approval_from_audit_event(&audit_event)
+            .expect("audit event is an issuer approval");
+        match parsed {
+            Ok(_) => panic!("noncanonical approval ref hash should not parse"),
+            Err(error) => assert!(error.to_string().contains("evidence_ref_hash")),
         }
     }
 
