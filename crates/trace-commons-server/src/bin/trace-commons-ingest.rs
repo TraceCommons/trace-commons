@@ -40335,12 +40335,12 @@ fn require_benchmarker(auth: &TenantAuth) -> ApiResult<()> {
 }
 
 fn require_vector_operator(auth: &TenantAuth) -> ApiResult<()> {
-    if auth.role.can_review() || auth.role == TokenRole::VectorWorker {
+    if auth.role.can_admin() || auth.role == TokenRole::VectorWorker {
         Ok(())
     } else {
         Err(api_error(
             StatusCode::FORBIDDEN,
-            "reviewer, admin, or vector worker token required",
+            "admin or vector worker token required",
         ))
     }
 }
@@ -72910,7 +72910,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("reviewer, admin, or vector worker token required")
+                .contains("admin or vector worker token required")
         );
     }
 
@@ -84781,6 +84781,26 @@ mod tests {
         );
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn vector_index_worker_route_rejects_reviewer_tokens_before_db_check() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = vector_index_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceVectorIndexRequest {
+                purpose: Some("reviewer must not run vector indexing".to_string()),
+                dry_run: true,
+                limit: Some(TRACE_VECTOR_INDEX_WORKER_DEFAULT_LIMIT),
+            }),
+        )
+        .await
+        .expect_err("reviewer token must not reach vector index worker preconditions");
+
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
