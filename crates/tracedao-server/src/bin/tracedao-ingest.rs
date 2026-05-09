@@ -170,6 +170,8 @@ const TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN: &str =
     "TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN";
 const TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY: &str =
     "TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY";
+const TRACE_COMMONS_POSTGRES_RUNTIME_ROLE_SHA256: &str =
+    "TRACE_COMMONS_POSTGRES_RUNTIME_ROLE_SHA256";
 const TRACE_COMMONS_DB_CONTRIBUTOR_READS_TENANT_IDS: &str =
     "TRACE_COMMONS_DB_CONTRIBUTOR_READS_TENANT_IDS";
 const TRACE_COMMONS_DB_REVIEWER_READS_TENANT_IDS: &str =
@@ -742,6 +744,7 @@ struct AppState {
     db_tenant_policy_reads: bool,
     require_db_mirror_writes: bool,
     require_postgres_trace_rls_ready: bool,
+    postgres_runtime_role_sha256: Option<String>,
     require_derived_export_object_refs: bool,
     object_primary_submit_review: bool,
     object_primary_replay_export: bool,
@@ -2106,10 +2109,15 @@ impl AppState {
         let require_tenant_submission_policy =
             env_truthy("TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY");
         let db_mirror = trace_corpus_db_mirror_from_env().await?;
+        let postgres_runtime_role_sha256 = parse_postgres_runtime_role_sha256_from_env()?;
         let require_postgres_trace_rls_ready =
             env_truthy(TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY);
         if require_postgres_trace_rls_ready {
-            validate_required_postgres_trace_rls_ready(db_mirror.as_ref()).await?;
+            validate_required_postgres_trace_rls_ready(
+                db_mirror.as_ref(),
+                postgres_runtime_role_sha256.as_deref(),
+            )
+            .await?;
         }
         let tenant_rollout_gates = TraceTenantRolloutGates::from_env()?;
         let db_contributor_reads = env_truthy("TRACE_COMMONS_DB_CONTRIBUTOR_READS");
@@ -2298,6 +2306,7 @@ impl AppState {
                 db_mirror_configured: db_mirror.is_some(),
                 require_db_mirror_writes,
                 require_postgres_trace_rls_ready,
+                postgres_runtime_role_hash_configured: postgres_runtime_role_sha256.is_some(),
                 require_managed_eddsa_signed_tokens,
                 require_tenant_access_grants,
                 account_cap_configured: credit_settlement_max_micros_per_account.is_some(),
@@ -2538,6 +2547,7 @@ impl AppState {
             db_tenant_policy_reads,
             require_db_mirror_writes,
             require_postgres_trace_rls_ready,
+            postgres_runtime_role_sha256,
             require_derived_export_object_refs,
             object_primary_submit_review,
             object_primary_replay_export,
@@ -4243,6 +4253,7 @@ async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<Arc<dyn Data
 
 async fn validate_required_postgres_trace_rls_ready(
     db_mirror: Option<&Arc<dyn Database>>,
+    expected_runtime_role_hash: Option<&str>,
 ) -> anyhow::Result<()> {
     let Some(db) = db_mirror else {
         anyhow::bail!(
@@ -4258,17 +4269,20 @@ async fn validate_required_postgres_trace_rls_ready(
                 "{TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY} requires a PostgreSQL trace DB mirror"
             )
         })?;
-    validate_required_postgres_trace_rls_diagnostics(&diagnostics)
+    validate_required_postgres_trace_rls_diagnostics(&diagnostics, expected_runtime_role_hash)
 }
 
 fn validate_required_postgres_trace_rls_diagnostics(
     diagnostics: &TraceCorpusRlsDiagnostics,
+    expected_runtime_role_hash: Option<&str>,
 ) -> anyhow::Result<()> {
-    if diagnostics.production_ready() {
+    let runtime_role_hash_matched =
+        diagnostics.runtime_role_matches_expected_hash(expected_runtime_role_hash);
+    if diagnostics.production_ready() && runtime_role_hash_matched {
         return Ok(());
     }
     anyhow::bail!(
-        "{TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY} requires complete Trace Commons RLS policy coverage, enabled RLS, FORCE ROW LEVEL SECURITY on every Trace Commons table, a non-bypassing non-owner runtime role, and transaction-local tenant context; expected_tables={}, policies={}, rls_enabled={}, force_rls_enabled={}, missing_policies={}, rls_disabled={}, force_rls_disabled={}, expression_mismatches={}, bypass_role={}, table_owner_role={}, tenant_context_transaction_local={}",
+        "{TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY} requires complete Trace Commons RLS policy coverage, enabled RLS, FORCE ROW LEVEL SECURITY on every Trace Commons table, a non-bypassing non-owner runtime role, transaction-local tenant context, and a matching {TRACE_COMMONS_POSTGRES_RUNTIME_ROLE_SHA256} when configured; expected_tables={}, policies={}, rls_enabled={}, force_rls_enabled={}, missing_policies={}, rls_disabled={}, force_rls_disabled={}, expression_mismatches={}, bypass_role={}, table_owner_role={}, tenant_context_transaction_local={}, runtime_role_hash_configured={}, runtime_role_hash_matched={}",
         diagnostics.expected_table_count,
         diagnostics.policy_installed_count,
         diagnostics.rls_enabled_count,
@@ -4280,7 +4294,24 @@ fn validate_required_postgres_trace_rls_diagnostics(
         diagnostics.current_role_bypasses_rls,
         diagnostics.current_role_owns_trace_tables,
         diagnostics.tenant_context_transaction_local,
+        expected_runtime_role_hash.is_some(),
+        runtime_role_hash_matched,
     )
+}
+
+fn parse_postgres_runtime_role_sha256_from_env() -> anyhow::Result<Option<String>> {
+    let Some(value) = std::env::var(TRACE_COMMONS_POSTGRES_RUNTIME_ROLE_SHA256)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        is_canonical_sha256_prefixed_hash(&value),
+        "{TRACE_COMMONS_POSTGRES_RUNTIME_ROLE_SHA256} must be a canonical sha256-prefixed hex digest"
+    );
+    Ok(Some(value))
 }
 
 fn env_truthy(key: &str) -> bool {
@@ -6997,6 +7028,7 @@ struct CreditSettlementCentralIssuerProfileConfig {
     db_mirror_configured: bool,
     require_db_mirror_writes: bool,
     require_postgres_trace_rls_ready: bool,
+    postgres_runtime_role_hash_configured: bool,
     require_managed_eddsa_signed_tokens: bool,
     require_tenant_access_grants: bool,
     account_cap_configured: bool,
@@ -7020,6 +7052,7 @@ fn credit_settlement_central_issuer_profile_config_from_state(
         db_mirror_configured: state.db_mirror.is_some(),
         require_db_mirror_writes: state.require_db_mirror_writes,
         require_postgres_trace_rls_ready: state.require_postgres_trace_rls_ready,
+        postgres_runtime_role_hash_configured: state.postgres_runtime_role_sha256.is_some(),
         require_managed_eddsa_signed_tokens: state.require_managed_eddsa_signed_tokens,
         require_tenant_access_grants: state.require_tenant_access_grants,
         account_cap_configured: state.credit_settlement_max_micros_per_account.is_some(),
@@ -7053,6 +7086,9 @@ fn credit_settlement_central_issuer_profile_missing_config(
     }
     if !config.require_postgres_trace_rls_ready {
         missing.push(TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY);
+    }
+    if !config.postgres_runtime_role_hash_configured {
+        missing.push(TRACE_COMMONS_POSTGRES_RUNTIME_ROLE_SHA256);
     }
     if !config.require_managed_eddsa_signed_tokens {
         missing.push(TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS);
@@ -7522,6 +7558,7 @@ struct TraceCommonsRlsConfigStatus {
     rls_ready: bool,
     force_rls_ready: bool,
     production_ready: bool,
+    production_ready_with_expected_runtime_role: bool,
     expected_table_count: usize,
     rls_enabled_count: usize,
     force_rls_enabled_count: usize,
@@ -7530,17 +7567,28 @@ struct TraceCommonsRlsConfigStatus {
     rls_disabled_tables: Vec<String>,
     force_rls_disabled_tables: Vec<String>,
     policy_expression_mismatch_tables: Vec<String>,
+    current_role_hash: String,
+    expected_runtime_role_hash_configured: bool,
+    expected_runtime_role_hash_matched: Option<bool>,
     current_role_bypasses_rls: bool,
     current_role_owns_trace_tables: bool,
     tenant_context_transaction_local: bool,
 }
 
-impl From<TraceCorpusRlsDiagnostics> for TraceCommonsRlsConfigStatus {
-    fn from(diagnostics: TraceCorpusRlsDiagnostics) -> Self {
+impl TraceCommonsRlsConfigStatus {
+    fn from_diagnostics(
+        diagnostics: TraceCorpusRlsDiagnostics,
+        expected_runtime_role_hash: Option<&str>,
+    ) -> Self {
+        let expected_runtime_role_hash_matched = expected_runtime_role_hash.map(|expected_hash| {
+            diagnostics.runtime_role_matches_expected_hash(Some(expected_hash))
+        });
         Self {
             rls_ready: diagnostics.rls_ready(),
             force_rls_ready: diagnostics.force_rls_ready(),
             production_ready: diagnostics.production_ready(),
+            production_ready_with_expected_runtime_role: diagnostics
+                .production_ready_with_expected_runtime_role(expected_runtime_role_hash),
             expected_table_count: diagnostics.expected_table_count,
             rls_enabled_count: diagnostics.rls_enabled_count,
             force_rls_enabled_count: diagnostics.force_rls_enabled_count,
@@ -7549,6 +7597,9 @@ impl From<TraceCorpusRlsDiagnostics> for TraceCommonsRlsConfigStatus {
             rls_disabled_tables: diagnostics.rls_disabled_tables,
             force_rls_disabled_tables: diagnostics.force_rls_disabled_tables,
             policy_expression_mismatch_tables: diagnostics.policy_expression_mismatch_tables,
+            current_role_hash: diagnostics.current_role_hash.clone(),
+            expected_runtime_role_hash_configured: expected_runtime_role_hash.is_some(),
+            expected_runtime_role_hash_matched,
             current_role_bypasses_rls: diagnostics.current_role_bypasses_rls,
             current_role_owns_trace_tables: diagnostics.current_role_owns_trace_tables,
             tenant_context_transaction_local: diagnostics.tenant_context_transaction_local,
@@ -7592,6 +7643,7 @@ struct TraceCommonsConfigStatusResponse {
     require_tenant_submission_policy: bool,
     require_db_mirror_writes: bool,
     require_postgres_trace_rls_ready: bool,
+    postgres_runtime_role_sha256_configured: bool,
     require_derived_export_object_refs: bool,
     object_primary_submit_review: bool,
     object_primary_replay_export: bool,
@@ -7845,6 +7897,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         require_tenant_submission_policy: state.require_tenant_submission_policy,
         require_db_mirror_writes: state.require_db_mirror_writes,
         require_postgres_trace_rls_ready: state.require_postgres_trace_rls_ready,
+        postgres_runtime_role_sha256_configured: state.postgres_runtime_role_sha256.is_some(),
         require_derived_export_object_refs: state.require_derived_export_object_refs,
         object_primary_submit_review: state.object_primary_submit_review,
         object_primary_replay_export: state.object_primary_replay_export,
@@ -8243,7 +8296,12 @@ async fn config_status_handler(
             .trace_corpus_rls_diagnostics()
             .await
             .map_err(internal_error)?
-            .map(TraceCommonsRlsConfigStatus::from);
+            .map(|diagnostics| {
+                TraceCommonsRlsConfigStatus::from_diagnostics(
+                    diagnostics,
+                    state.postgres_runtime_role_sha256.as_deref(),
+                )
+            });
     }
     append_control_plane_read_audit(state.as_ref(), &tenant, "config_status", 1)
         .await
@@ -29124,6 +29182,7 @@ struct TracePostgresRlsDrillResponse {
     rls_ready: bool,
     force_rls_ready: bool,
     production_ready: bool,
+    production_ready_with_expected_runtime_role: bool,
     expected_table_count: usize,
     policy_installed_count: usize,
     rls_enabled_count: usize,
@@ -29132,6 +29191,9 @@ struct TracePostgresRlsDrillResponse {
     rls_disabled_table_count: usize,
     force_rls_disabled_table_count: usize,
     policy_expression_mismatch_table_count: usize,
+    current_role_hash: String,
+    expected_runtime_role_hash_configured: bool,
+    expected_runtime_role_hash_matched: Option<bool>,
     current_role_bypasses_rls: bool,
     current_role_owns_trace_tables: bool,
     tenant_context_transaction_local: bool,
@@ -30774,18 +30836,30 @@ async fn run_postgres_rls_drill(
         .await
         .context("failed to read Trace Commons PostgreSQL RLS diagnostics")?
         .ok_or_else(|| anyhow::Error::new(TracePostgresRlsDiagnosticsUnavailable))?;
-    let blocking_gaps = postgres_rls_readiness_blocking_gaps(&diagnostics);
-    let evidence_hash = postgres_rls_drill_evidence_hash(tenant, &diagnostics, &blocking_gaps);
+    let expected_runtime_role_hash = state.postgres_runtime_role_sha256.as_deref();
+    let expected_runtime_role_hash_matched = expected_runtime_role_hash
+        .map(|expected_hash| diagnostics.runtime_role_matches_expected_hash(Some(expected_hash)));
+    let blocking_gaps =
+        postgres_rls_readiness_blocking_gaps(&diagnostics, expected_runtime_role_hash);
+    let evidence_hash = postgres_rls_drill_evidence_hash(
+        tenant,
+        &diagnostics,
+        expected_runtime_role_hash,
+        &blocking_gaps,
+    );
+    let production_ready_with_expected_runtime_role =
+        diagnostics.production_ready_with_expected_runtime_role(expected_runtime_role_hash);
     let mut response = TracePostgresRlsDrillResponse {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
         purpose: purpose.clone(),
-        ready: diagnostics.production_ready() && blocking_gaps.is_empty(),
+        ready: production_ready_with_expected_runtime_role && blocking_gaps.is_empty(),
         evidence_hash,
         rls_ready: diagnostics.rls_ready(),
         force_rls_ready: diagnostics.force_rls_ready(),
         production_ready: diagnostics.production_ready(),
+        production_ready_with_expected_runtime_role,
         expected_table_count: diagnostics.expected_table_count,
         policy_installed_count: diagnostics.policy_installed_count,
         rls_enabled_count: diagnostics.rls_enabled_count,
@@ -30794,6 +30868,9 @@ async fn run_postgres_rls_drill(
         rls_disabled_table_count: diagnostics.rls_disabled_tables.len(),
         force_rls_disabled_table_count: diagnostics.force_rls_disabled_tables.len(),
         policy_expression_mismatch_table_count: diagnostics.policy_expression_mismatch_tables.len(),
+        current_role_hash: diagnostics.current_role_hash.clone(),
+        expected_runtime_role_hash_configured: expected_runtime_role_hash.is_some(),
+        expected_runtime_role_hash_matched,
         current_role_bypasses_rls: diagnostics.current_role_bypasses_rls,
         current_role_owns_trace_tables: diagnostics.current_role_owns_trace_tables,
         tenant_context_transaction_local: diagnostics.tenant_context_transaction_local,
@@ -32207,7 +32284,10 @@ fn db_reconciliation_drill_evidence_hash(
     sha256_prefixed(&json)
 }
 
-fn postgres_rls_readiness_blocking_gaps(diagnostics: &TraceCorpusRlsDiagnostics) -> Vec<String> {
+fn postgres_rls_readiness_blocking_gaps(
+    diagnostics: &TraceCorpusRlsDiagnostics,
+    expected_runtime_role_hash: Option<&str>,
+) -> Vec<String> {
     let mut gaps = Vec::new();
     push_rollback_gap_count(
         &mut gaps,
@@ -32244,14 +32324,22 @@ fn postgres_rls_readiness_blocking_gaps(diagnostics: &TraceCorpusRlsDiagnostics)
         "tenant_context_not_transaction_local",
         !diagnostics.tenant_context_transaction_local,
     );
+    push_key_rotation_gap(
+        &mut gaps,
+        "runtime_role_hash_mismatch",
+        !diagnostics.runtime_role_matches_expected_hash(expected_runtime_role_hash),
+    );
     gaps
 }
 
 fn postgres_rls_drill_evidence_hash(
     tenant: &TenantAuth,
     diagnostics: &TraceCorpusRlsDiagnostics,
+    expected_runtime_role_hash: Option<&str>,
     blocking_gaps: &[String],
 ) -> String {
+    let expected_runtime_role_hash_matched = expected_runtime_role_hash
+        .map(|expected_hash| diagnostics.runtime_role_matches_expected_hash(Some(expected_hash)));
     sha256_prefixed(
         &serde_json::json!({
             "schema": "trace_commons_postgres_rls_drill.v1",
@@ -32260,6 +32348,8 @@ fn postgres_rls_drill_evidence_hash(
             "rls_ready": diagnostics.rls_ready(),
             "force_rls_ready": diagnostics.force_rls_ready(),
             "production_ready": diagnostics.production_ready(),
+            "production_ready_with_expected_runtime_role": diagnostics
+                .production_ready_with_expected_runtime_role(expected_runtime_role_hash),
             "expected_table_count": diagnostics.expected_table_count,
             "policy_installed_count": diagnostics.policy_installed_count,
             "rls_enabled_count": diagnostics.rls_enabled_count,
@@ -32268,6 +32358,9 @@ fn postgres_rls_drill_evidence_hash(
             "rls_disabled_table_count": diagnostics.rls_disabled_tables.len(),
             "force_rls_disabled_table_count": diagnostics.force_rls_disabled_tables.len(),
             "policy_expression_mismatch_table_count": diagnostics.policy_expression_mismatch_tables.len(),
+            "current_role_hash": &diagnostics.current_role_hash,
+            "expected_runtime_role_hash_configured": expected_runtime_role_hash.is_some(),
+            "expected_runtime_role_hash_matched": expected_runtime_role_hash_matched,
             "current_role_bypasses_rls": diagnostics.current_role_bypasses_rls,
             "current_role_owns_trace_tables": diagnostics.current_role_owns_trace_tables,
             "tenant_context_transaction_local": diagnostics.tenant_context_transaction_local,
@@ -32853,6 +32946,24 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             usize::from(
                 postgres_rls_diagnostics_available
                     && !response.promotion_gates.current_role_owns_trace_tables,
+            ),
+        ),
+        (
+            "runtime_role_expected_hash_configured",
+            usize::from(
+                response
+                    .promotion_gates
+                    .postgres_runtime_role_hash_configured,
+            ),
+        ),
+        (
+            "runtime_role_expected_hash_matched",
+            usize::from(
+                postgres_rls_diagnostics_available
+                    && response
+                        .promotion_gates
+                        .postgres_runtime_role_hash_matched
+                        .unwrap_or(false),
             ),
         ),
         (
@@ -55118,6 +55229,8 @@ struct TraceOperationalPromotionGateSummary {
     trace_corpus_rls_expression_mismatch_table_count: usize,
     current_role_bypasses_rls: bool,
     current_role_owns_trace_tables: bool,
+    postgres_runtime_role_hash_configured: bool,
+    postgres_runtime_role_hash_matched: Option<bool>,
     tenant_context_transaction_local: bool,
     tenant_rollout_gate_count: usize,
     tenant_rollout_gate_counts: BTreeMap<String, usize>,
@@ -55322,10 +55435,10 @@ impl TraceOperationalPromotionGateSummary {
         let credit_settlement_issuer_approval_missing =
             delayed_credit.points_positive > 0.0 && !credit_settlement_issuer_approval_required;
         let credit_settlement_scheduler_enabled = state.credit_settlement_scheduler.is_some();
-        let trace_corpus_rls_ready = db_summary
-            .trace_corpus_rls
-            .as_ref()
-            .map(TraceCorpusRlsDiagnostics::production_ready);
+        let postgres_runtime_role_hash = state.postgres_runtime_role_sha256.as_deref();
+        let trace_corpus_rls_ready = db_summary.trace_corpus_rls.as_ref().map(|diagnostics| {
+            diagnostics.production_ready_with_expected_runtime_role(postgres_runtime_role_hash)
+        });
         let trace_corpus_rls_expected_table_count = db_summary
             .trace_corpus_rls
             .as_ref()
@@ -55356,6 +55469,16 @@ impl TraceOperationalPromotionGateSummary {
             .trace_corpus_rls
             .as_ref()
             .is_some_and(|diagnostics| diagnostics.current_role_owns_trace_tables);
+        let postgres_runtime_role_hash_configured = postgres_runtime_role_hash.is_some();
+        let postgres_runtime_role_hash_matched =
+            db_summary
+                .trace_corpus_rls
+                .as_ref()
+                .and_then(|diagnostics| {
+                    postgres_runtime_role_hash.map(|expected_hash| {
+                        diagnostics.runtime_role_matches_expected_hash(Some(expected_hash))
+                    })
+                });
         let tenant_context_transaction_local = db_summary
             .trace_corpus_rls
             .as_ref()
@@ -55419,6 +55542,9 @@ impl TraceOperationalPromotionGateSummary {
                     blocking_gates.push("postgres_trace_rls_diagnostics_unavailable".to_string());
                 }
             }
+        }
+        if matches!(postgres_runtime_role_hash_matched, Some(false)) {
+            blocking_gates.push("postgres_trace_runtime_role_hash_mismatch".to_string());
         }
         if state.require_derived_export_object_refs {
             push_gap_count(
@@ -55590,6 +55716,8 @@ impl TraceOperationalPromotionGateSummary {
             trace_corpus_rls_expression_mismatch_table_count,
             current_role_bypasses_rls,
             current_role_owns_trace_tables,
+            postgres_runtime_role_hash_configured,
+            postgres_runtime_role_hash_matched,
             tenant_context_transaction_local,
             tenant_rollout_gate_count,
             tenant_rollout_gate_counts,
@@ -57345,6 +57473,7 @@ mod tests {
             db_tenant_policy_reads,
             require_db_mirror_writes,
             require_postgres_trace_rls_ready: false,
+            postgres_runtime_role_sha256: None,
             require_derived_export_object_refs,
             object_primary_submit_review: false,
             object_primary_replay_export: false,
@@ -59136,6 +59265,7 @@ mod tests {
                 db_mirror_configured: false,
                 require_db_mirror_writes: false,
                 require_postgres_trace_rls_ready: false,
+                postgres_runtime_role_hash_configured: false,
                 require_managed_eddsa_signed_tokens: false,
                 require_tenant_access_grants: false,
                 account_cap_configured: false,
@@ -59160,6 +59290,7 @@ mod tests {
                 db_mirror_configured: true,
                 require_db_mirror_writes: true,
                 require_postgres_trace_rls_ready: true,
+                postgres_runtime_role_hash_configured: false,
                 require_managed_eddsa_signed_tokens: true,
                 require_tenant_access_grants: true,
                 account_cap_configured: true,
@@ -59182,6 +59313,7 @@ mod tests {
             text.contains(TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE),
             "{text}"
         );
+        assert!(text.contains(TRACE_COMMONS_POSTGRES_RUNTIME_ROLE_SHA256));
         assert!(text.contains(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN));
         assert!(text.contains(TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_BEARER_TOKEN));
 
@@ -59191,6 +59323,7 @@ mod tests {
                 db_mirror_configured: true,
                 require_db_mirror_writes: true,
                 require_postgres_trace_rls_ready: true,
+                postgres_runtime_role_hash_configured: true,
                 require_managed_eddsa_signed_tokens: true,
                 require_tenant_access_grants: true,
                 account_cap_configured: true,
@@ -60478,6 +60611,7 @@ mod tests {
             rls_disabled_tables: Vec::new(),
             force_rls_disabled_tables: Vec::new(),
             policy_expression_mismatch_tables: Vec::new(),
+            current_role_hash: sha256_prefixed("trace-commons-runtime-role"),
             current_role_bypasses_rls: false,
             current_role_owns_trace_tables: false,
             tenant_context_transaction_local: true,
@@ -60488,6 +60622,7 @@ mod tests {
     fn required_postgres_trace_rls_gate_requires_force_rls_and_non_owner_role() {
         validate_required_postgres_trace_rls_diagnostics(
             &production_ready_rls_diagnostics_for_tests(),
+            None,
         )
         .expect("production-ready diagnostics pass");
 
@@ -60496,31 +60631,50 @@ mod tests {
         missing_force_rls
             .force_rls_disabled_tables
             .push("trace_object_refs".to_string());
-        let error = validate_required_postgres_trace_rls_diagnostics(&missing_force_rls)
+        let error = validate_required_postgres_trace_rls_diagnostics(&missing_force_rls, None)
             .expect_err("missing FORCE RLS blocks production gate");
         assert!(error.to_string().contains("FORCE ROW LEVEL SECURITY"));
 
         let mut bypassing_role = production_ready_rls_diagnostics_for_tests();
         bypassing_role.current_role_bypasses_rls = true;
-        let error = validate_required_postgres_trace_rls_diagnostics(&bypassing_role)
+        let error = validate_required_postgres_trace_rls_diagnostics(&bypassing_role, None)
             .expect_err("bypassing role blocks production gate");
         assert!(error.to_string().contains("bypass_role=true"));
 
         let mut table_owner_role = production_ready_rls_diagnostics_for_tests();
         table_owner_role.current_role_owns_trace_tables = true;
-        let error = validate_required_postgres_trace_rls_diagnostics(&table_owner_role)
+        let error = validate_required_postgres_trace_rls_diagnostics(&table_owner_role, None)
             .expect_err("Trace Commons table owner role blocks production gate");
         assert!(error.to_string().contains("table_owner_role=true"));
 
         let mut sticky_tenant_context = production_ready_rls_diagnostics_for_tests();
         sticky_tenant_context.tenant_context_transaction_local = false;
-        let error = validate_required_postgres_trace_rls_diagnostics(&sticky_tenant_context)
+        let error = validate_required_postgres_trace_rls_diagnostics(&sticky_tenant_context, None)
             .expect_err("non-transaction-local tenant context blocks production gate");
         assert!(
             error
                 .to_string()
                 .contains("tenant_context_transaction_local=false")
         );
+    }
+
+    #[test]
+    fn required_postgres_trace_rls_gate_checks_expected_runtime_role_hash() {
+        let diagnostics = production_ready_rls_diagnostics_for_tests();
+        validate_required_postgres_trace_rls_diagnostics(
+            &diagnostics,
+            Some(diagnostics.current_role_hash.as_str()),
+        )
+        .expect("matching expected runtime role hash passes");
+
+        let error = validate_required_postgres_trace_rls_diagnostics(
+            &diagnostics,
+            Some(&sha256_prefixed("wrong-runtime-role")),
+        )
+        .expect_err("runtime role hash mismatch blocks production gate");
+        let text = error.to_string();
+        assert!(text.contains(TRACE_COMMONS_POSTGRES_RUNTIME_ROLE_SHA256));
+        assert!(text.contains("runtime_role_hash_matched=false"));
     }
 
     #[tokio::test]
@@ -60667,6 +60821,10 @@ mod tests {
         );
         assert_eq!(
             value["require_postgres_trace_rls_ready"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["postgres_runtime_role_sha256_configured"],
             serde_json::json!(false)
         );
         assert_eq!(
@@ -74113,6 +74271,7 @@ mod tests {
             db_tenant_policy_reads: false,
             require_db_mirror_writes: false,
             require_postgres_trace_rls_ready: false,
+            postgres_runtime_role_sha256: None,
             require_derived_export_object_refs: false,
             object_primary_submit_review: false,
             object_primary_replay_export: false,
@@ -74705,6 +74864,20 @@ mod tests {
             serde_json::json!(true)
         );
         assert!(
+            value["current_role_hash"]
+                .as_str()
+                .expect("runtime role hash is string")
+                .starts_with("sha256:")
+        );
+        assert_eq!(
+            value["expected_runtime_role_hash_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["expected_runtime_role_hash_matched"],
+            serde_json::Value::Null
+        );
+        assert!(
             value["expected_table_count"]
                 .as_u64()
                 .expect("expected table count is numeric")
@@ -74754,6 +74927,76 @@ mod tests {
                         })
                 })
         );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn postgres_rls_drill_blocks_expected_runtime_role_hash_mismatch() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        Arc::get_mut(&mut state)
+            .expect("fresh test state has one owner")
+            .postgres_runtime_role_sha256 = Some(sha256_prefixed("wrong-runtime-role"));
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/postgres-rls-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator PostgreSQL RLS drill",
+                            "record_evidence": false
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("PostgreSQL RLS drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("PostgreSQL RLS drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(false));
+        assert_eq!(
+            value["expected_runtime_role_hash_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["expected_runtime_role_hash_matched"],
+            serde_json::json!(false)
+        );
+        assert!(
+            value["blocking_gaps"]
+                .as_array()
+                .expect("blocking gaps is array")
+                .contains(&serde_json::json!("runtime_role_hash_mismatch"))
+        );
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("wrong-runtime-role"));
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
@@ -105440,6 +105683,58 @@ mod tests {
             serde_json::json!(true)
         );
         assert!(!response_json.to_string().contains("trace_object_refs"));
+    }
+
+    #[test]
+    fn operational_summary_blocks_postgres_runtime_role_hash_mismatch() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::get_mut(&mut state)
+            .expect("fresh test state has one owner")
+            .postgres_runtime_role_sha256 = Some(sha256_prefixed("wrong-runtime-role"));
+
+        let response = TraceOperationalSummaryResponse::from_parts(TraceOperationalSummaryInputs {
+            state: state.as_ref(),
+            tenant_id: "tenant-a".to_string(),
+            records: Vec::new(),
+            derived: Vec::new(),
+            credit_events: Vec::new(),
+            db_summary: TraceOperationalDbSummary {
+                db_available: true,
+                trace_corpus_rls: Some(production_ready_rls_diagnostics_for_tests()),
+                ..TraceOperationalDbSummary::default()
+            },
+            benchmark_artifacts: Vec::new(),
+            benchmark_registry_outbox: Vec::new(),
+            near_credit_outbox: Vec::new(),
+            ranking: TraceOperationalRankingSummary::default(),
+            rollout_smoke_evidence: Vec::new(),
+            revocation_propagation: TraceOperationalRevocationPropagationSummary::default(),
+            generated_at: Utc::now(),
+        });
+
+        assert!(!response.promotion_gates.ready);
+        assert_eq!(response.promotion_gates.trace_corpus_rls_ready, Some(false));
+        assert_eq!(
+            response.promotion_gates.postgres_runtime_role_hash_matched,
+            Some(false)
+        );
+        assert!(
+            response
+                .promotion_gates
+                .blocking_gates
+                .contains(&"postgres_trace_runtime_role_hash_mismatch".to_string())
+        );
+
+        let (metrics, _) = trace_operational_metrics_body(&response);
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(metrics.contains(&format!(
+            "tracedao_operational_postgres_rls_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"runtime_role_expected_hash_configured\"}} 1"
+        )));
+        assert!(metrics.contains(&format!(
+            "tracedao_operational_postgres_rls_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"runtime_role_expected_hash_matched\"}} 0"
+        )));
+        assert!(!metrics.contains("wrong-runtime-role"));
     }
 
     #[tokio::test]
