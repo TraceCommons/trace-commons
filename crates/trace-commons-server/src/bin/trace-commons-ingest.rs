@@ -36000,7 +36000,7 @@ fn collect_db_audit_hash_chain_failures(
             continue;
         };
         let mut event_failures = Vec::new();
-        if !event_hash.starts_with("sha256:") {
+        if !is_canonical_sha256_prefixed_hash(event_hash) {
             event_failures.push(format!(
                 "db row {row_number} event {}: event_hash has invalid format",
                 event.audit_event_id
@@ -36010,6 +36010,12 @@ fn collect_db_audit_hash_chain_failures(
             .previous_event_hash
             .as_deref()
             .unwrap_or(TRACE_AUDIT_EVENT_GENESIS_HASH);
+        if !is_audit_chain_previous_hash(previous_event_hash) {
+            event_failures.push(format!(
+                "db row {row_number} event {}: previous_event_hash has invalid format",
+                event.audit_event_id
+            ));
+        }
         if previous_event_hash != expected_previous_hash {
             event_failures.push(format!(
                 "db row {row_number} event {}: previous_event_hash mismatch",
@@ -41788,6 +41794,10 @@ fn audit_events_path(root: &Path, tenant_id: &str) -> PathBuf {
 const TRACE_AUDIT_EVENT_GENESIS_HASH: &str = "sha256:genesis";
 const TRACE_AUDIT_EVENT_HASH_DOMAIN: &str = "trace_commons_audit_event:v1";
 
+fn is_audit_chain_previous_hash(value: &str) -> bool {
+    value == TRACE_AUDIT_EVENT_GENESIS_HASH || is_canonical_sha256_prefixed_hash(value)
+}
+
 fn latest_audit_event_hash(path: &Path, tenant_id: &str) -> anyhow::Result<Option<String>> {
     if !path.exists() {
         return Ok(None);
@@ -42217,8 +42227,13 @@ fn verify_recent_audit_event_hashes(events: &[TraceCommonsAuditEvent]) -> anyhow
             (None, None) => continue,
             (Some(previous_event_hash), Some(event_hash)) => {
                 anyhow::ensure!(
-                    event_hash.starts_with("sha256:"),
+                    is_canonical_sha256_prefixed_hash(event_hash),
                     "audit reader row {row_number} event {}: event_hash has invalid format",
+                    event.event_id
+                );
+                anyhow::ensure!(
+                    is_audit_chain_previous_hash(previous_event_hash),
+                    "audit reader row {row_number} event {}: previous_event_hash has invalid format",
                     event.event_id
                 );
                 let recomputed = compute_audit_event_hash(previous_event_hash, event)?;
@@ -43190,6 +43205,16 @@ fn verify_file_audit_chain(root: &Path, tenant_id: &str) -> anyhow::Result<Trace
             .previous_event_hash
             .as_deref()
             .unwrap_or(TRACE_AUDIT_EVENT_GENESIS_HASH);
+        if !is_canonical_sha256_prefixed_hash(event_hash) {
+            report
+                .failures
+                .push(format!("line {line_number}: event_hash has invalid format"));
+        }
+        if !is_audit_chain_previous_hash(previous_event_hash) {
+            report.failures.push(format!(
+                "line {line_number}: previous_event_hash has invalid format"
+            ));
+        }
         if previous_event_hash != expected_previous_hash {
             report
                 .failures
@@ -43233,7 +43258,7 @@ fn verify_db_audit_chain_records(
             expected_previous_hash = TRACE_AUDIT_EVENT_GENESIS_HASH.to_string();
             continue;
         };
-        if !event_hash.starts_with("sha256:") {
+        if !is_canonical_sha256_prefixed_hash(event_hash) {
             report.failures.push(format!(
                 "db row {row_number} event {}: event_hash has invalid format",
                 event.audit_event_id
@@ -43243,6 +43268,12 @@ fn verify_db_audit_chain_records(
             .previous_event_hash
             .as_deref()
             .unwrap_or(TRACE_AUDIT_EVENT_GENESIS_HASH);
+        if !is_audit_chain_previous_hash(previous_event_hash) {
+            report.failures.push(format!(
+                "db row {row_number} event {}: previous_event_hash has invalid format",
+                event.audit_event_id
+            ));
+        }
         if previous_event_hash != expected_previous_hash {
             report.failures.push(format!(
                 "db row {row_number} event {}: previous_event_hash mismatch",
@@ -60052,8 +60083,8 @@ mod tests {
             export_count: None,
             export_id: None,
             decision_inputs_hash: None,
-            previous_event_hash: Some("sha256:not-genesis".to_string()),
-            event_hash: Some("sha256:not-the-canonical-payload-hash".to_string()),
+            previous_event_hash: Some(sha256_prefixed("not-genesis")),
+            event_hash: Some(sha256_prefixed("not-the-canonical-payload-hash")),
         };
         let event = StorageTraceAuditEventRecord {
             audit_event_id: canonical_event.event_id,
@@ -60117,6 +60148,52 @@ mod tests {
             report
                 .compute_blocking_gap_summaries()
                 .contains(&"db_audit_hash_chain_failures=1".to_string())
+        );
+    }
+
+    #[test]
+    fn db_audit_hash_chain_reports_noncanonical_event_hash() {
+        let event = StorageTraceAuditEventRecord {
+            audit_event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            audit_sequence: 1,
+            actor_principal_ref: "reviewer-a".to_string(),
+            actor_role: "reviewer".to_string(),
+            action: StorageTraceAuditAction::Read,
+            reason: Some("surface=trace_list".to_string()),
+            request_id: None,
+            submission_id: None,
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: Some(TRACE_AUDIT_EVENT_GENESIS_HASH.to_string()),
+            event_hash: Some("sha256:not-canonical".to_string()),
+            canonical_event_json: None,
+            metadata: StorageTraceAuditSafeMetadata::Empty,
+            occurred_at: Utc::now(),
+        };
+
+        let events = vec![event];
+        let chain_report =
+            verify_db_audit_chain_records(&events).expect("DB audit chain report computes");
+        assert!(!chain_report.verified);
+        assert!(
+            chain_report
+                .failures
+                .iter()
+                .any(|failure| failure.contains("event_hash has invalid format")),
+            "{:?}",
+            chain_report.failures
+        );
+
+        let failures = collect_db_audit_hash_chain_failures(&events);
+
+        assert_eq!(failures.len(), 1);
+        assert!(
+            failures[0]
+                .first_failure
+                .contains("event_hash has invalid format"),
+            "{failures:?}"
         );
     }
 
@@ -73498,7 +73575,7 @@ mod tests {
             .event_hash
             .as_deref()
             .expect("first audit event hash");
-        assert!(first_hash.starts_with("sha256:"));
+        assert!(is_canonical_sha256_prefixed_hash(first_hash));
         assert_eq!(
             raw_events[1].previous_event_hash.as_deref(),
             Some(first_hash)
@@ -73551,6 +73628,38 @@ mod tests {
         )
         .expect("tampered event hash recomputes");
         assert_ne!(stored_hash, tampered_hash);
+    }
+
+    #[test]
+    fn audit_chain_verifier_reports_noncanonical_file_event_hash() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let auth = test_reviewer_auth("tenant-a");
+        let mut event = TraceCommonsAuditEvent::read(&auth, "trace_list", 2);
+        event.previous_event_hash = Some(TRACE_AUDIT_EVENT_GENESIS_HASH.to_string());
+        event.event_hash = Some("sha256:not-canonical".to_string());
+        let path = audit_log_path(temp.path(), "tenant-a");
+        std::fs::create_dir_all(path.parent().expect("audit parent")).expect("create audit dir");
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&event).expect("event serializes")
+            ),
+        )
+        .expect("write audit event");
+
+        let report =
+            verify_file_audit_chain(temp.path(), "tenant-a").expect("audit chain verifier runs");
+
+        assert!(!report.verified);
+        assert!(
+            report
+                .failures
+                .iter()
+                .any(|failure| failure.contains("event_hash has invalid format")),
+            "{:?}",
+            report.failures
+        );
     }
 
     #[test]
