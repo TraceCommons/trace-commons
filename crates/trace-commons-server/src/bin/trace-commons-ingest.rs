@@ -258,6 +258,28 @@ const TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_NEAR_CONTRACT: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_NEAR_CONTRACT";
+const TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ENABLED: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ENABLED";
+const TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN";
+const TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_INTERVAL_SECONDS";
+const TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION";
+const TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_REASON: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_REASON";
+const TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_DRY_RUN: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_DRY_RUN";
+const TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ISSUER_APPROVAL_EVIDENCE_HASH: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ISSUER_APPROVAL_EVIDENCE_HASH";
+const TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_NEAR_CONTRACT_ID: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_NEAR_CONTRACT_ID";
+const TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_RANKING_MODEL_VERSION: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_RANKING_MODEL_VERSION";
+const TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_RANKING_TARGET_USE: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_RANKING_TARGET_USE";
+const TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_LIMIT: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_LIMIT";
 const TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL: &str = "TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL";
 const TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN: &str =
     "TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN";
@@ -506,6 +528,8 @@ const TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_LIMIT: usize = 1;
 const TRACE_CREDIT_CYCLE_SCHEDULER_MAX_LIMIT: usize = 25;
 const TRACE_CREDIT_SETTLEMENT_WORKER_RUN_DEFAULT_LIMIT: usize = 100;
 const TRACE_CREDIT_SETTLEMENT_WORKER_RUN_MAX_LIMIT: usize = 500;
+const TRACE_CREDIT_SETTLEMENT_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 300;
+const TRACE_CREDIT_SETTLEMENT_SCHEDULER_DEFAULT_REASON: &str = "scheduled trace credit settlement";
 const TRACE_CREDIT_RISK_SUMMARY_DEFAULT_ACCOUNT_LIMIT: usize = 100;
 const TRACE_CREDIT_RISK_SUMMARY_MAX_ACCOUNT_LIMIT: usize = 500;
 const TRACE_RANKING_CALIBRATION_RUN_DEFAULT_LIMIT: usize = 25;
@@ -625,6 +649,11 @@ async fn main() -> anyhow::Result<()> {
         state.credit_cycle_scheduler.as_ref(),
     )
     .await?;
+    validate_trace_credit_settlement_scheduler_config(
+        state.as_ref(),
+        state.credit_settlement_scheduler.as_ref(),
+    )
+    .await?;
     validate_trace_process_evaluation_scheduler_config(
         state.as_ref(),
         state.process_evaluation_scheduler.as_ref(),
@@ -655,6 +684,7 @@ async fn main() -> anyhow::Result<()> {
         state.benchmark_pipeline_scheduler.clone(),
     );
     spawn_trace_credit_cycle_scheduler_task(&state, state.credit_cycle_scheduler.clone());
+    spawn_trace_credit_settlement_scheduler_task(&state, state.credit_settlement_scheduler.clone());
     spawn_trace_process_evaluation_scheduler_task(
         &state,
         state.process_evaluation_scheduler.clone(),
@@ -747,6 +777,7 @@ struct AppState {
     benchmark_registry_scheduler: Option<TraceBenchmarkRegistrySchedulerConfig>,
     benchmark_pipeline_scheduler: Option<TraceBenchmarkPipelineSchedulerConfig>,
     credit_cycle_scheduler: Option<TraceCreditCycleSchedulerConfig>,
+    credit_settlement_scheduler: Option<TraceCreditSettlementSchedulerConfig>,
     process_evaluation_scheduler: Option<TraceProcessEvaluationSchedulerConfig>,
     revocation_propagation_scheduler: Option<TraceRevocationPropagationSchedulerConfig>,
     ranking_calibration_max_age: Option<Duration>,
@@ -892,6 +923,20 @@ struct TraceCreditCycleSchedulerConfig {
     submit_near_outbox: bool,
     confirm_near_outbox: bool,
     near_contract_id: Option<String>,
+    limit: usize,
+}
+
+#[derive(Clone)]
+struct TraceCreditSettlementSchedulerConfig {
+    worker_token: SecretString,
+    interval: StdDuration,
+    dry_run: bool,
+    policy_version: String,
+    reason: String,
+    issuer_approval_evidence_hash: Option<String>,
+    near_contract_id: Option<String>,
+    ranking_model_version: Option<String>,
+    ranking_target_use: Option<TraceAllowedUse>,
     limit: usize,
 }
 
@@ -2306,6 +2351,8 @@ impl AppState {
         let benchmark_pipeline_scheduler =
             parse_trace_benchmark_pipeline_scheduler_config_from_env()?;
         let credit_cycle_scheduler = parse_trace_credit_cycle_scheduler_config_from_env()?;
+        let credit_settlement_scheduler =
+            parse_trace_credit_settlement_scheduler_config_from_env()?;
         let process_evaluation_scheduler =
             parse_trace_process_evaluation_scheduler_config_from_env()?;
         let revocation_propagation_scheduler =
@@ -2516,6 +2563,7 @@ impl AppState {
             benchmark_registry_scheduler,
             benchmark_pipeline_scheduler,
             credit_cycle_scheduler,
+            credit_settlement_scheduler,
             process_evaluation_scheduler,
             revocation_propagation_scheduler,
             ranking_calibration_max_age,
@@ -3810,6 +3858,91 @@ fn parse_trace_credit_cycle_scheduler_config_from_env()
         submit_near_outbox: env_truthy(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_SUBMIT_NEAR_OUTBOX),
         confirm_near_outbox: env_truthy(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_CONFIRM_NEAR_OUTBOX),
         near_contract_id,
+        limit,
+    }))
+}
+
+fn parse_trace_credit_settlement_scheduler_config_from_env()
+-> anyhow::Result<Option<TraceCreditSettlementSchedulerConfig>> {
+    let enabled = env_truthy(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ENABLED);
+    let worker_token = optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN)?;
+    if !enabled && worker_token.is_none() {
+        return Ok(None);
+    }
+    let Some(worker_token) = worker_token else {
+        anyhow::bail!(
+            "{TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN}"
+        );
+    };
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_INTERVAL_SECONDS,
+        TRACE_CREDIT_SETTLEMENT_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
+        5,
+        86_400,
+    )?;
+    let policy_version = optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN} requires {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION}"
+            )
+        })
+        .and_then(|configured| {
+            validate_credit_settlement_policy_version(&configured)
+                .map_err(|error| anyhow::anyhow!(error.1.0.error))
+        })?;
+    let reason = optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_REASON)?
+        .unwrap_or_else(|| TRACE_CREDIT_SETTLEMENT_SCHEDULER_DEFAULT_REASON.to_string());
+    let reason = validate_credit_settlement_scheduler_reason(&reason)
+        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    let issuer_approval_evidence_hash = match optional_trimmed_env(
+        TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ISSUER_APPROVAL_EVIDENCE_HASH,
+    )? {
+        Some(configured) => {
+            validate_credit_settlement_issuer_approval_evidence_hash(Some(&configured))
+                .map_err(|error| anyhow::anyhow!(error.1.0.error))?
+        }
+        None => None,
+    };
+    let near_contract_id =
+        optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_NEAR_CONTRACT_ID)?
+            .map(|configured| validate_credit_settlement_near_contract_id(&configured))
+            .transpose()?;
+    let ranking_model_version =
+        optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_RANKING_MODEL_VERSION)?
+            .map(|configured| {
+                validate_ranking_identifier(&configured, "ranking_model_version")
+                    .map_err(|error| anyhow::anyhow!(error.1.0.error))
+            })
+            .transpose()?;
+    let ranking_target_use =
+        match optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_RANKING_TARGET_USE)? {
+            Some(configured) => Some(parse_trace_allowed_use_env(
+                TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_RANKING_TARGET_USE,
+                &configured,
+            )?),
+            None => None,
+        };
+    if ranking_target_use.is_some() && ranking_model_version.is_none() {
+        anyhow::bail!(
+            "{TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_RANKING_TARGET_USE} requires {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_RANKING_MODEL_VERSION}"
+        );
+    }
+    let limit = parse_optional_scheduler_usize_env(
+        TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_LIMIT,
+        TRACE_CREDIT_SETTLEMENT_WORKER_RUN_DEFAULT_LIMIT,
+        1,
+        TRACE_CREDIT_SETTLEMENT_WORKER_RUN_MAX_LIMIT,
+    )?;
+    Ok(Some(TraceCreditSettlementSchedulerConfig {
+        worker_token: SecretString::from(worker_token),
+        interval: StdDuration::from_secs(interval_seconds),
+        dry_run: env_truthy(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_DRY_RUN),
+        policy_version,
+        reason,
+        issuer_approval_evidence_hash,
+        near_contract_id,
+        ranking_model_version,
+        ranking_target_use,
         limit,
     }))
 }
@@ -6024,6 +6157,54 @@ fn spawn_trace_credit_cycle_scheduler_task(
     });
 }
 
+fn spawn_trace_credit_settlement_scheduler_task(
+    state: &Arc<AppState>,
+    config: Option<TraceCreditSettlementSchedulerConfig>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    let state = state.clone();
+    tracing::info!(
+        interval_seconds = config.interval.as_secs(),
+        policy_version_configured = !config.policy_version.is_empty(),
+        issuer_approval_evidence_hash_configured = config.issuer_approval_evidence_hash.is_some(),
+        near_contract_configured = config.near_contract_id.is_some(),
+        ranking_model_version_configured = config.ranking_model_version.is_some(),
+        ranking_target_use_configured = config.ranking_target_use.is_some(),
+        limit = config.limit,
+        dry_run = config.dry_run,
+        "Trace Commons credit settlement scheduler enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(config.interval).await;
+            match run_trace_credit_settlement_scheduler_tick(state.clone(), &config).await {
+                Ok(summary) => {
+                    tracing::info!(
+                        tenant_storage_ref = %summary.tenant_storage_ref,
+                        dry_run = summary.dry_run,
+                        policy_version_allowed = summary.policy_version_allowed,
+                        settled_source_event_count = summary.settled_source_event_count,
+                        eligible_source_event_count = summary.eligible_source_event_count,
+                        pending_after_count = summary.pending_after_count,
+                        settled_account_count = summary.settled_account_count,
+                        near_outbox_item_count = summary.near_outbox_item_count,
+                        "Trace Commons credit settlement scheduler tick completed"
+                    );
+                }
+                Err((status, Json(error))) => {
+                    tracing::warn!(
+                        status = %status,
+                        error_hash = %safe_display_error_hash(&error.error),
+                        "Trace Commons credit settlement scheduler tick failed"
+                    );
+                }
+            }
+        }
+    });
+}
+
 fn spawn_trace_process_evaluation_scheduler_task(
     state: &Arc<AppState>,
     config: Option<TraceProcessEvaluationSchedulerConfig>,
@@ -6351,6 +6532,75 @@ async fn validate_trace_credit_cycle_scheduler_config(
 fn trace_credit_cycle_scheduler_config_error(error: (StatusCode, Json<ApiError>)) -> anyhow::Error {
     anyhow::anyhow!(
         "invalid Trace Commons credit cycle scheduler configuration: status={}, error={}",
+        error.0,
+        error.1.0.error
+    )
+}
+
+async fn validate_trace_credit_settlement_scheduler_config(
+    state: &AppState,
+    config: Option<&TraceCreditSettlementSchedulerConfig>,
+) -> anyhow::Result<()> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
+        .map_err(trace_credit_settlement_scheduler_config_error)?;
+    let auth = authenticate_with_tenant_access_grant(state, &headers)
+        .await
+        .map_err(trace_credit_settlement_scheduler_config_error)?;
+    require_utility_operator(&auth).map_err(trace_credit_settlement_scheduler_config_error)?;
+    if config.ranking_target_use.is_some() && config.ranking_model_version.is_none() {
+        anyhow::bail!(
+            "invalid Trace Commons credit settlement scheduler configuration: {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_RANKING_TARGET_USE} requires {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_RANKING_MODEL_VERSION}"
+        );
+    }
+    if !config.dry_run {
+        if !credit_settlement_policy_version_allowed(state, &config.policy_version) {
+            anyhow::bail!(
+                "invalid Trace Commons credit settlement scheduler configuration: {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION} must be listed in {TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS}"
+            );
+        }
+        if state.credit_settlement_require_central_issuer_profile
+            && !credit_settlement_central_issuer_profile_complete(state)
+        {
+            anyhow::bail!(
+                "invalid Trace Commons credit settlement scheduler configuration: {TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE} is incomplete"
+            );
+        }
+        if state.credit_settlement_require_issuer_approval
+            && config.issuer_approval_evidence_hash.is_none()
+        {
+            anyhow::bail!(
+                "invalid Trace Commons credit settlement scheduler configuration: {TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL} requires {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ISSUER_APPROVAL_EVIDENCE_HASH}"
+            );
+        }
+        if state.credit_settlement_require_near_contract
+            && state.credit_settlement_near_contract_id.is_none()
+            && config.near_contract_id.is_none()
+        {
+            anyhow::bail!(
+                "invalid Trace Commons credit settlement scheduler configuration: {TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_NEAR_CONTRACT} requires {TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID} or {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_NEAR_CONTRACT_ID}"
+            );
+        }
+        resolve_credit_settlement_near_contract_id(
+            state,
+            false,
+            config.near_contract_id.as_deref(),
+        )
+        .map_err(trace_credit_settlement_scheduler_config_error)?;
+    } else if let Some(near_contract_id) = config.near_contract_id.as_deref() {
+        resolve_credit_settlement_near_contract_id(state, true, Some(near_contract_id))
+            .map_err(trace_credit_settlement_scheduler_config_error)?;
+    }
+    Ok(())
+}
+
+fn trace_credit_settlement_scheduler_config_error(
+    error: (StatusCode, Json<ApiError>),
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "invalid Trace Commons credit settlement scheduler configuration: status={}, error={}",
         error.0,
         error.1.0.error
     )
@@ -7290,6 +7540,15 @@ struct TraceCommonsConfigStatusResponse {
     credit_settlement_central_issuer_profile_missing_controls: Vec<&'static str>,
     credit_settlement_near_contract_configured: bool,
     credit_settlement_require_near_contract: bool,
+    credit_settlement_scheduler_configured: bool,
+    credit_settlement_scheduler_interval_seconds: Option<u64>,
+    credit_settlement_scheduler_dry_run: Option<bool>,
+    credit_settlement_scheduler_policy_version_configured: Option<bool>,
+    credit_settlement_scheduler_issuer_approval_evidence_hash_configured: Option<bool>,
+    credit_settlement_scheduler_near_contract_configured: Option<bool>,
+    credit_settlement_scheduler_ranking_model_version_configured: Option<bool>,
+    credit_settlement_scheduler_ranking_target_use: Option<TraceAllowedUse>,
+    credit_settlement_scheduler_limit: Option<usize>,
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Vec<String>,
     ranking_calibration_max_age_hours: Option<i64>,
@@ -7548,6 +7807,39 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .credit_settlement_near_contract_id
             .is_some(),
         credit_settlement_require_near_contract: state.credit_settlement_require_near_contract,
+        credit_settlement_scheduler_configured: state.credit_settlement_scheduler.is_some(),
+        credit_settlement_scheduler_interval_seconds: state
+            .credit_settlement_scheduler
+            .as_ref()
+            .map(|config| config.interval.as_secs()),
+        credit_settlement_scheduler_dry_run: state
+            .credit_settlement_scheduler
+            .as_ref()
+            .map(|config| config.dry_run),
+        credit_settlement_scheduler_policy_version_configured: state
+            .credit_settlement_scheduler
+            .as_ref()
+            .map(|config| !config.policy_version.is_empty()),
+        credit_settlement_scheduler_issuer_approval_evidence_hash_configured: state
+            .credit_settlement_scheduler
+            .as_ref()
+            .map(|config| config.issuer_approval_evidence_hash.is_some()),
+        credit_settlement_scheduler_near_contract_configured: state
+            .credit_settlement_scheduler
+            .as_ref()
+            .map(|config| config.near_contract_id.is_some()),
+        credit_settlement_scheduler_ranking_model_version_configured: state
+            .credit_settlement_scheduler
+            .as_ref()
+            .map(|config| config.ranking_model_version.is_some()),
+        credit_settlement_scheduler_ranking_target_use: state
+            .credit_settlement_scheduler
+            .as_ref()
+            .and_then(|config| config.ranking_target_use),
+        credit_settlement_scheduler_limit: state
+            .credit_settlement_scheduler
+            .as_ref()
+            .map(|config| config.limit),
         submission_quota: state.submission_quota,
         legal_hold_retention_policy_ids: state
             .legal_hold_retention_policy_ids
@@ -12252,6 +12544,23 @@ fn validate_credit_cycle_scheduler_reason(reason: &str) -> ApiResult<String> {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "credit cycle scheduler reason is too long",
+        ));
+    }
+    Ok(reason)
+}
+
+fn validate_credit_settlement_scheduler_reason(reason: &str) -> ApiResult<String> {
+    let reason = reason.trim().to_string();
+    if reason.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit settlement scheduler requires a non-empty reason",
+        ));
+    }
+    if reason.len() > 1024 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit settlement scheduler reason is too long",
         ));
     }
     Ok(reason)
@@ -27193,6 +27502,31 @@ async fn run_trace_credit_cycle_scheduler_tick(
     Ok(response)
 }
 
+async fn run_trace_credit_settlement_scheduler_tick(
+    state: Arc<AppState>,
+    config: &TraceCreditSettlementSchedulerConfig,
+) -> ApiResult<TraceCreditSettlementRunResponse> {
+    let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())?;
+    let Json(response) = credit_settlement_worker_run_handler(
+        State(state),
+        headers,
+        Json(TraceCreditSettlementWorkerRunRequest {
+            request: TraceCreditSettlementRunRequest {
+                dry_run: config.dry_run,
+                policy_version: config.policy_version.clone(),
+                reason: config.reason.clone(),
+                issuer_approval_evidence_hash: config.issuer_approval_evidence_hash.clone(),
+                near_contract_id: config.near_contract_id.clone(),
+                ranking_model_version: config.ranking_model_version.clone(),
+                ranking_target_use: config.ranking_target_use,
+            },
+            limit: Some(config.limit),
+        }),
+    )
+    .await?;
+    Ok(response)
+}
+
 async fn run_trace_process_evaluation_scheduler_tick(
     state: Arc<AppState>,
     config: &TraceProcessEvaluationSchedulerConfig,
@@ -33077,6 +33411,10 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
                     .promotion_gates
                     .credit_settlement_issuer_approval_missing,
             ),
+        ),
+        (
+            "scheduler_enabled",
+            usize::from(response.promotion_gates.credit_settlement_scheduler_enabled),
         ),
     ] {
         push_prometheus_gauge(
@@ -54322,6 +54660,7 @@ struct TraceOperationalPromotionGateSummary {
     credit_settlement_near_confirmer_auth_missing: bool,
     credit_settlement_issuer_approval_required: bool,
     credit_settlement_issuer_approval_missing: bool,
+    credit_settlement_scheduler_enabled: bool,
     object_store_versioning_required: bool,
     object_store_versioning_supported: bool,
     object_store_restore_after_delete_supported: bool,
@@ -54471,6 +54810,7 @@ impl TraceOperationalPromotionGateSummary {
             state.credit_settlement_require_issuer_approval;
         let credit_settlement_issuer_approval_missing =
             delayed_credit.points_positive > 0.0 && !credit_settlement_issuer_approval_required;
+        let credit_settlement_scheduler_enabled = state.credit_settlement_scheduler.is_some();
         let trace_corpus_rls_ready = db_summary
             .trace_corpus_rls
             .as_ref()
@@ -54792,6 +55132,7 @@ impl TraceOperationalPromotionGateSummary {
             credit_settlement_near_confirmer_auth_missing,
             credit_settlement_issuer_approval_required,
             credit_settlement_issuer_approval_missing,
+            credit_settlement_scheduler_enabled,
             object_store_versioning_required,
             object_store_versioning_supported,
             object_store_restore_after_delete_supported,
@@ -56543,6 +56884,7 @@ mod tests {
             benchmark_registry_scheduler: None,
             benchmark_pipeline_scheduler: None,
             credit_cycle_scheduler: None,
+            credit_settlement_scheduler: None,
             process_evaluation_scheduler: None,
             revocation_propagation_scheduler: None,
             ranking_calibration_max_age: None,
@@ -61480,6 +61822,102 @@ mod tests {
         assert!(!object.contains_key("credit_cycle_scheduler_token"));
         assert!(!object.contains_key("credit_cycle_scheduler_reason"));
         assert!(!object.contains_key("credit_cycle_scheduler_near_contract_id"));
+    }
+
+    #[tokio::test]
+    async fn admin_config_status_reports_credit_settlement_scheduler_without_secrets_or_refs() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_scheduler =
+            Some(TraceCreditSettlementSchedulerConfig {
+                worker_token: SecretString::from("config-status-settlement-token".to_string()),
+                interval: StdDuration::from_secs(180),
+                dry_run: true,
+                policy_version: "trace-credit-policy-config-status-v1".to_string(),
+                reason: "do not expose raw settlement scheduler note".to_string(),
+                issuer_approval_evidence_hash: Some(
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_string(),
+                ),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: Some("trace-ranker-config-status-v1".to_string()),
+                ranking_target_use: Some(TraceAllowedUse::RankingModelTraining),
+                limit: 9,
+            });
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/config-status")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("config status response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body bytes");
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(
+            value["credit_settlement_scheduler_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["credit_settlement_scheduler_interval_seconds"],
+            serde_json::json!(180)
+        );
+        assert_eq!(
+            value["credit_settlement_scheduler_dry_run"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["credit_settlement_scheduler_policy_version_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["credit_settlement_scheduler_issuer_approval_evidence_hash_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["credit_settlement_scheduler_near_contract_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["credit_settlement_scheduler_ranking_model_version_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["credit_settlement_scheduler_ranking_target_use"],
+            serde_json::json!("ranking_model_training")
+        );
+        assert_eq!(
+            value["credit_settlement_scheduler_limit"],
+            serde_json::json!(9)
+        );
+        assert!(!body_text.contains("config-status-settlement-token"));
+        assert!(!body_text.contains("do not expose raw settlement scheduler note"));
+        assert!(!body_text.contains("trace-credit-policy-config-status-v1"));
+        assert!(!body_text.contains("trace-ranker-config-status-v1"));
+        assert!(!body_text.contains("trace-credits.testnet"));
+        assert!(
+            !body_text.contains(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            )
+        );
+        let object = value.as_object().expect("config status is object");
+        assert!(!object.contains_key("credit_settlement_scheduler_token"));
+        assert!(!object.contains_key("credit_settlement_scheduler_reason"));
+        assert!(!object.contains_key("credit_settlement_scheduler_policy_version"));
+        assert!(!object.contains_key("credit_settlement_scheduler_near_contract_id"));
+        assert!(!object.contains_key("credit_settlement_scheduler_ranking_model_version"));
+        assert!(!object.contains_key("credit_settlement_scheduler_issuer_approval_evidence_hash"));
     }
 
     #[tokio::test]
@@ -67661,6 +68099,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn credit_settlement_scheduler_config_requires_utility_worker_auth_and_live_contract() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+
+        let error = validate_trace_credit_settlement_scheduler_config(
+            state.as_ref(),
+            Some(&TraceCreditSettlementSchedulerConfig {
+                worker_token: SecretString::from("token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                dry_run: true,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "scheduled credit settlement".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+                limit: 5,
+            }),
+        )
+        .await
+        .expect_err("contributor token must not start credit settlement scheduler");
+
+        assert!(
+            error
+                .to_string()
+                .contains("reviewer, admin, or utility worker token required")
+        );
+
+        Arc::make_mut(&mut state).credit_settlement_require_near_contract = true;
+        let missing_contract = validate_trace_credit_settlement_scheduler_config(
+            state.as_ref(),
+            Some(&TraceCreditSettlementSchedulerConfig {
+                worker_token: SecretString::from("utility-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "scheduled live credit settlement".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+                limit: 5,
+            }),
+        )
+        .await
+        .expect_err(
+            "live scheduler requires configured NEAR contract when settlement requires one",
+        );
+        assert!(
+            missing_contract
+                .to_string()
+                .contains(TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID)
+        );
+
+        validate_trace_credit_settlement_scheduler_config(
+            state.as_ref(),
+            Some(&TraceCreditSettlementSchedulerConfig {
+                worker_token: SecretString::from("utility-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                dry_run: true,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "scheduled dry-run credit settlement".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+                limit: 5,
+            }),
+        )
+        .await
+        .expect("dry-run scheduler can start before live NEAR contract is configured");
+
+        Arc::make_mut(&mut state).credit_settlement_near_contract_id =
+            Some("trace-credits.testnet".to_string());
+        validate_trace_credit_settlement_scheduler_config(
+            state.as_ref(),
+            Some(&TraceCreditSettlementSchedulerConfig {
+                worker_token: SecretString::from("utility-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "scheduled live credit settlement".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+                limit: 5,
+            }),
+        )
+        .await
+        .expect("live scheduler can start with utility auth and configured contract");
+    }
+
+    #[tokio::test]
     async fn vector_index_scheduler_config_requires_vector_worker_auth_at_startup() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -70386,6 +70918,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn operational_summary_reports_credit_settlement_scheduler_without_secrets_or_refs() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        {
+            let state = Arc::make_mut(&mut state);
+            state.credit_settlement_scheduler = Some(TraceCreditSettlementSchedulerConfig {
+                worker_token: SecretString::from(
+                    "operational-summary-settlement-token".to_string(),
+                ),
+                interval: StdDuration::from_secs(210),
+                dry_run: true,
+                policy_version: "trace-credit-policy-operational-v1".to_string(),
+                reason: "do not expose raw settlement ops reason".to_string(),
+                issuer_approval_evidence_hash: Some(
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_string(),
+                ),
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: Some("trace-ranker-operational-v1".to_string()),
+                ranking_target_use: Some(TraceAllowedUse::RankingModelTraining),
+                limit: 7,
+            });
+        }
+
+        let Json(response) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect credit settlement scheduler readiness");
+        let response_json = serde_json::to_value(&response).expect("response serializes");
+        assert_eq!(
+            response_json["promotion_gates"]["credit_settlement_scheduler_enabled"],
+            serde_json::json!(true)
+        );
+        let response_text = serde_json::to_string(&response).expect("response serializes");
+        assert!(!response_text.contains("operational-summary-settlement-token"));
+        assert!(!response_text.contains("do not expose raw settlement ops reason"));
+        assert!(!response_text.contains("trace-credit-policy-operational-v1"));
+        assert!(!response_text.contains("trace-ranker-operational-v1"));
+        assert!(!response_text.contains("trace-credits.testnet"));
+        assert!(
+            !response_text.contains(
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            )
+        );
+
+        let (metrics, _) = trace_operational_metrics_body(&response);
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"scheduler_enabled\"}} 1"
+        )));
+        assert!(!metrics.contains("operational-summary-settlement-token"));
+        assert!(!metrics.contains("do not expose raw settlement ops reason"));
+        assert!(!metrics.contains("trace-credit-policy-operational-v1"));
+        assert!(!metrics.contains("trace-ranker-operational-v1"));
+        assert!(!metrics.contains("trace-credits.testnet"));
+    }
+
+    #[tokio::test]
     async fn operational_summary_reports_private_vector_infrastructure_readiness() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
@@ -72771,6 +73361,7 @@ mod tests {
             benchmark_registry_scheduler: None,
             benchmark_pipeline_scheduler: None,
             credit_cycle_scheduler: None,
+            credit_settlement_scheduler: None,
             process_evaluation_scheduler: None,
             revocation_propagation_scheduler: None,
             ranking_calibration_max_age: None,
@@ -83065,6 +83656,128 @@ mod tests {
                 .expect("tenant-b outbox reads after retry")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn credit_settlement_scheduler_tick_uses_worker_surface_for_dry_run_and_live_settlement()
+    {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("training submission succeeds");
+        let Json(credit) = utility_credit_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceUtilityCreditJobRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 2.25,
+                reason: "frontier lab training value".to_string(),
+                external_ref: "frontier:scheduler-settlement".to_string(),
+                submission_ids: vec![submission_id],
+            }),
+        )
+        .await
+        .expect("utility worker can append training credit");
+        assert_eq!(credit.appended_count, 1);
+
+        let dry_run = run_trace_credit_settlement_scheduler_tick(
+            state.clone(),
+            &TraceCreditSettlementSchedulerConfig {
+                worker_token: SecretString::from("utility-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                dry_run: true,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "scheduled settlement dry run".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
+                limit: 100,
+            },
+        )
+        .await
+        .expect("settlement scheduler dry-run tick succeeds");
+        assert!(dry_run.dry_run);
+        assert_eq!(dry_run.settled_source_event_count, 1);
+        assert_eq!(dry_run.near_outbox_item_count, 0);
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement reads")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads")
+                .is_empty()
+        );
+
+        let live = run_trace_credit_settlement_scheduler_tick(
+            state.clone(),
+            &TraceCreditSettlementSchedulerConfig {
+                worker_token: SecretString::from("utility-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "scheduled settlement finalization".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
+                limit: 100,
+            },
+        )
+        .await
+        .expect("settlement scheduler live tick succeeds");
+        assert!(!live.dry_run);
+        assert_eq!(live.settled_source_event_count, 1);
+        assert_eq!(live.settled_account_count, 1);
+        assert_eq!(live.near_outbox_item_count, 1);
+        let batches =
+            read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(
+            batches[0].actor_principal_ref,
+            principal_storage_ref("utility-worker-token-a")
+        );
+        let outbox =
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(
+            outbox[0].status,
+            StorageTraceCreditSettlementNearStatus::Pending
+        );
+
+        let retry = run_trace_credit_settlement_scheduler_tick(
+            state.clone(),
+            &TraceCreditSettlementSchedulerConfig {
+                worker_token: SecretString::from("utility-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "scheduled settlement retry".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
+                limit: 100,
+            },
+        )
+        .await
+        .expect("settlement scheduler retry tick is idempotent");
+        assert_eq!(retry.settled_source_event_count, 0);
+        assert_eq!(retry.near_outbox_item_count, 0);
     }
 
     #[tokio::test]
