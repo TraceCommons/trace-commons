@@ -844,15 +844,20 @@ configures a nonzero pairwise accuracy floor, startup requires
 ordering threshold cannot be mistaken for active protection while pairwise
 evidence is disabled.
 
-`TRACE_COMMONS_RANKING_MAX_LABELER_ISSUE_RATE_MICROS` optionally turns the
-labeler-reliability report into a credit gate. When set, active model-risk,
-prediction-credit issuance, credit-readiness, and ranking-utility settlement
-recompute the current calibration label sources and hashed actor principals,
-look up their tenant-wide issue-rate micros, and block credit if any
-calibration label source or actor is above the configured ceiling. It defaults
-to unset for pilot compatibility and accepts `0` through `1000000`; failures
-emit `calibration_label_source_issue_rate_above_threshold` or
-`calibration_label_actor_issue_rate_above_threshold`.
+`TRACE_COMMONS_RANKING_MAX_LABELER_ISSUE_RATE_MICROS` and
+`TRACE_COMMONS_RANKING_MIN_LABELER_RELIABILITY_LABEL_COUNT` optionally turn the
+labeler-reliability report into a credit gate. When either is set, active
+model-risk, prediction-credit issuance, credit-readiness, and ranking-utility
+settlement recompute the current calibration label sources and hashed actor
+principals, look up their tenant-wide reliability rows, and block credit if any
+calibration label source or actor is above the configured issue-rate ceiling or
+below the configured total-label support floor. Both default to unset for pilot
+compatibility; the issue-rate ceiling accepts `0` through `1000000`, and the
+support floor accepts `1` through `1000000`. Failures emit
+`calibration_label_source_issue_rate_above_threshold`,
+`calibration_label_actor_issue_rate_above_threshold`,
+`calibration_label_source_reliability_support_below_threshold`, or
+`calibration_label_actor_reliability_support_below_threshold`.
 
 `TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT` optionally suppresses aggregate analytics cells whose count is below the configured threshold. The endpoint still returns content-free totals and reports `min_cell_count` plus `suppressed_cell_count` for compatibility, and also returns a `privacy_budget` object with the `k_anonymity_min_cell` strategy, released/suppressed cell counts, whether suppression was applied, and conservative broad-release blocker reasons such as `min_cell_count_disabled` or `small_cells_suppressed`. Reviewers/admins can request `GET /v1/analytics/summary?release_scope=broad` as a publication preflight; the route fails closed with safe blocker reason codes when the privacy budget is not broad-release ready.
 
@@ -1289,7 +1294,7 @@ audit reason stores only the code-owned ranking surface name and bounded item
 count, so operators can reconcile privileged inspection without leaking trace
 bodies, raw lab references, external refs, or reviewer notes.
 
-Model-derived ranking credit also applies the latest calibration run's confidence threshold, active-model risk report, and any configured calibration-labeler issue-rate ceiling to each active-model prediction at issuance, readiness, and settlement time. Low-confidence, unreliable-labeler, or uncleared-risk predictions remain visible in admin evidence and risk reports, but `/v1/workers/ranking/prediction-credit` rejects them and settlement excludes manually appended ranking utility events that reference them.
+Model-derived ranking credit also applies the latest calibration run's confidence threshold, active-model risk report, and any configured calibration-labeler reliability floors/ceilings to each active-model prediction at issuance, readiness, and settlement time. Low-confidence, unreliable-labeler, cold-start-labeler, or uncleared-risk predictions remain visible in admin evidence and risk reports, but `/v1/workers/ranking/prediction-credit` rejects them and settlement excludes manually appended ranking utility events that reference them.
 
 Ranking calibration runs apply both caller-supplied thresholds and
 deployment-owned floors. In production, set
@@ -1301,10 +1306,11 @@ set cannot promote a credit-bearing model, then layer
 `TRACE_COMMONS_RANKING_REQUIRE_ACTIVE_CALIBRATION_DATASET`,
 `TRACE_COMMONS_RANKING_MIN_PAIRWISE_LABEL_COUNT`,
 `TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS`,
-`TRACE_COMMONS_RANKING_MAX_LABELER_ISSUE_RATE_MICROS`, and per-source cohort
-error gates on top so the sample is high-quality, broad enough across
-reviewers/labs, comes from labelers with acceptable issue rates, and still
-agrees with pairwise preference evidence. Direct
+`TRACE_COMMONS_RANKING_MAX_LABELER_ISSUE_RATE_MICROS`,
+`TRACE_COMMONS_RANKING_MIN_LABELER_RELIABILITY_LABEL_COUNT`, and per-source
+cohort error gates on top so the sample is high-quality, broad enough across
+reviewers/labs, comes from labelers with enough prior support and acceptable
+issue rates, and still agrees with pairwise preference evidence. Direct
 registration of an `active` model uses the same calibration freshness and
 diversity gates as the explicit model-promotion route.
 
