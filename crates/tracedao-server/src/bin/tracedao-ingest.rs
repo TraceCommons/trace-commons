@@ -11342,13 +11342,7 @@ async fn run_credit_settlement(
     body: TraceCreditSettlementRunRequest,
     limit: Option<usize>,
 ) -> ApiResult<TraceCreditSettlementRunResponse> {
-    let policy_version = body.policy_version.trim().to_string();
-    if policy_version.is_empty() {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "credit settlement requires policy_version",
-        ));
-    }
+    let policy_version = validate_credit_settlement_policy_version(&body.policy_version)?;
     let reason = body.reason.trim().to_string();
     if reason.is_empty() {
         return Err(api_error(
@@ -11955,18 +11949,26 @@ impl TraceCreditSettlementIssuerApprovalResponse {
     }
 }
 
+fn validate_credit_settlement_policy_version(value: &str) -> ApiResult<String> {
+    validate_credit_policy_version(value, "credit settlement")
+}
+
 fn validate_credit_settlement_issuer_approval_policy_version(value: &str) -> ApiResult<String> {
+    validate_credit_policy_version(value, "issuer approval")
+}
+
+fn validate_credit_policy_version(value: &str, surface: &str) -> ApiResult<String> {
     let value = value.trim();
     if value.is_empty() {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
-            "issuer approval requires policy_version",
+            format!("{surface} requires policy_version"),
         ));
     }
     if value.len() > 256 {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
-            "issuer approval policy_version is too long",
+            format!("{surface} policy_version is too long"),
         ));
     }
     if !value
@@ -11975,7 +11977,7 @@ fn validate_credit_settlement_issuer_approval_policy_version(value: &str) -> Api
     {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
-            "issuer approval policy_version contains unsupported characters",
+            format!("{surface} policy_version contains unsupported characters"),
         ));
     }
     Ok(value.to_string())
@@ -75153,6 +75155,40 @@ mod tests {
         .expect_err("live settlement requires configured contract");
         assert_eq!(live_error.0, StatusCode::BAD_REQUEST);
         assert!(live_error.1.0.error.contains("near_contract_id"));
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement reads")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_settlement_rejects_unsafe_policy_version_before_side_effects() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1;raw=do-not-store".to_string(),
+                reason: "attempt unsafe policy version".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect_err("unsafe settlement policy versions are rejected at the handler");
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.0.error.contains("policy_version"));
         assert!(
             read_all_credit_settlement_batches(temp.path(), "tenant-a")
                 .expect("settlement reads")
