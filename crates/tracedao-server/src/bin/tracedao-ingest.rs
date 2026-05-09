@@ -6580,6 +6580,10 @@ async fn validate_trace_credit_cycle_scheduler_config(
     )
     .map_err(trace_credit_cycle_scheduler_config_error)?;
     if !config.dry_run && !config.preflight_only {
+        anyhow::ensure!(
+            !state.credit_settlement_require_issuer_approval,
+            "invalid Trace Commons credit cycle scheduler configuration: live scheduler requires separate credit settlement after recorded source-list issuer approval"
+        );
         if config.submit_near_outbox {
             anyhow::ensure!(
                 state.near_credit_submitter.is_some(),
@@ -70308,6 +70312,78 @@ mod tests {
         )
         .await
         .expect("preflight scheduler can start without live NEAR adapters");
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_config_rejects_live_source_list_approval_mode() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
+
+        let live_error = validate_trace_credit_cycle_scheduler_config(
+            state.as_ref(),
+            Some(&TraceCreditCycleSchedulerConfig {
+                worker_token: SecretString::from("utility-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: None,
+                policy_version: None,
+                reason: "scheduled live credit cycle with source-list approval".to_string(),
+                dry_run: false,
+                preflight_only: false,
+                submit_near_outbox: false,
+                confirm_near_outbox: false,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: 1,
+            }),
+        )
+        .await
+        .expect_err("live credit cycle scheduler cannot bind exact source-list approval");
+        assert!(
+            live_error
+                .to_string()
+                .contains("source-list issuer approval")
+        );
+
+        validate_trace_credit_cycle_scheduler_config(
+            state.as_ref(),
+            Some(&TraceCreditCycleSchedulerConfig {
+                worker_token: SecretString::from("utility-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: None,
+                policy_version: None,
+                reason: "scheduled credit cycle approval preflight".to_string(),
+                dry_run: false,
+                preflight_only: true,
+                submit_near_outbox: false,
+                confirm_near_outbox: false,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: 1,
+            }),
+        )
+        .await
+        .expect("preflight-only scheduler can discover source-list approval work");
+
+        validate_trace_credit_cycle_scheduler_config(
+            state.as_ref(),
+            Some(&TraceCreditCycleSchedulerConfig {
+                worker_token: SecretString::from("utility-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: None,
+                policy_version: None,
+                reason: "scheduled dry-run credit cycle approval preview".to_string(),
+                dry_run: true,
+                preflight_only: false,
+                submit_near_outbox: false,
+                confirm_near_outbox: false,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: 1,
+            }),
+        )
+        .await
+        .expect("dry-run scheduler can preview source-list approval work");
     }
 
     #[tokio::test]
