@@ -1188,7 +1188,7 @@ fn row_to_revocation_propagation_item(
 
 impl PgBackend {
     async fn ensure_trace_tenant(&self, tenant_id: &str) -> Result<(), DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         tx.execute(
             "INSERT INTO trace_tenants (tenant_id) VALUES ($1)
@@ -1226,7 +1226,7 @@ impl TraceCorpusStore for PgBackend {
         submission: TraceSubmissionWrite,
     ) -> Result<TraceSubmissionRecord, DatabaseError> {
         self.ensure_trace_tenant(&submission.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &submission.tenant_id).await?;
         let status = enum_to_storage(submission.status)?;
         let consent_scopes = serde_json::to_value(&submission.consent_scopes).map_err(|e| {
@@ -1317,7 +1317,7 @@ impl TraceCorpusStore for PgBackend {
         tenant_id: &str,
         submission_id: Uuid,
     ) -> Result<Option<TraceSubmissionRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let row = tx
             .query_opt(
@@ -1345,7 +1345,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -1375,7 +1375,7 @@ impl TraceCorpusStore for PgBackend {
         policy: TraceTenantPolicyWrite,
     ) -> Result<TraceTenantPolicyRecord, DatabaseError> {
         self.ensure_trace_tenant(&policy.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &policy.tenant_id).await?;
         let allowed_consent_scopes =
             serde_json::to_value(&policy.allowed_consent_scopes).map_err(|e| {
@@ -1422,7 +1422,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Option<TraceTenantPolicyRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let row = tx
             .query_opt(
@@ -1463,7 +1463,7 @@ impl TraceCorpusStore for PgBackend {
                 "trace tenant access grant metadata encode failed: {e}"
             ))
         })?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &grant.tenant_id).await?;
         let row = tx
             .query_one(
@@ -1524,7 +1524,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceTenantAccessGrantRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -1550,7 +1550,7 @@ impl TraceCorpusStore for PgBackend {
         now: DateTime<Utc>,
     ) -> Result<Vec<TraceTenantAccessGrantRecord>, DatabaseError> {
         let active = enum_to_storage(TraceTenantAccessGrantStatus::Active)?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -1578,7 +1578,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceCreditEventRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -1606,7 +1606,7 @@ impl TraceCorpusStore for PgBackend {
         actor_principal_ref: &str,
         reason: Option<&str>,
     ) -> Result<(), DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let status_value = enum_to_storage(status)?;
         let updated = tx
@@ -1694,7 +1694,7 @@ impl TraceCorpusStore for PgBackend {
         review_due_at: Option<DateTime<Utc>>,
         now: DateTime<Utc>,
     ) -> Result<Option<TraceSubmissionRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let row = tx
             .query_opt(
@@ -1743,7 +1743,7 @@ impl TraceCorpusStore for PgBackend {
         submission_id: Uuid,
         actor_principal_ref: &str,
     ) -> Result<Option<TraceSubmissionRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let row = tx
             .query_opt(
@@ -1780,7 +1780,7 @@ impl TraceCorpusStore for PgBackend {
         object_ref: TraceObjectRefWrite,
     ) -> Result<(), DatabaseError> {
         self.ensure_trace_tenant(&object_ref.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &object_ref.tenant_id).await?;
         let artifact_kind = enum_to_storage(object_ref.artifact_kind)?;
         tx.execute(
@@ -1824,7 +1824,7 @@ impl TraceCorpusStore for PgBackend {
         tenant_id: &str,
         submission_id: Uuid,
     ) -> Result<Vec<TraceObjectRefRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -1849,7 +1849,7 @@ impl TraceCorpusStore for PgBackend {
         submission_id: Uuid,
         artifact_kind: TraceObjectArtifactKind,
     ) -> Result<Option<TraceObjectRefRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let artifact_kind = enum_to_storage(artifact_kind)?;
         let row = tx
@@ -1879,7 +1879,7 @@ impl TraceCorpusStore for PgBackend {
         derived_record: TraceDerivedRecordWrite,
     ) -> Result<(), DatabaseError> {
         self.ensure_trace_tenant(&derived_record.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx =
             Self::begin_trace_tenant_transaction(&mut client, &derived_record.tenant_id).await?;
         if let Some(object_ref) = derived_record.input_object_ref.as_ref() {
@@ -2001,7 +2001,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceDerivedRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -2028,7 +2028,7 @@ impl TraceCorpusStore for PgBackend {
         vector_entry: TraceVectorEntryWrite,
     ) -> Result<TraceVectorEntryRecord, DatabaseError> {
         self.ensure_trace_tenant(&vector_entry.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &vector_entry.tenant_id).await?;
         ensure_pg_derived_record_belongs_to_submission(
             &tx,
@@ -2104,7 +2104,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceVectorEntryRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -2130,7 +2130,7 @@ impl TraceCorpusStore for PgBackend {
         model_version: TraceRankingModelVersionWrite,
     ) -> Result<TraceRankingModelVersionRecord, DatabaseError> {
         self.ensure_trace_tenant(&model_version.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx =
             Self::begin_trace_tenant_transaction(&mut client, &model_version.tenant_id).await?;
         let status = enum_to_storage(model_version.status)?;
@@ -2175,7 +2175,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceRankingModelVersionRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -2199,7 +2199,7 @@ impl TraceCorpusStore for PgBackend {
         dataset: TraceRankingCalibrationDatasetWrite,
     ) -> Result<TraceRankingCalibrationDatasetRecord, DatabaseError> {
         self.ensure_trace_tenant(&dataset.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &dataset.tenant_id).await?;
         let source_count = u32_to_pg_i32(
             dataset.source_count,
@@ -2264,7 +2264,7 @@ impl TraceCorpusStore for PgBackend {
         update: TraceRankingCalibrationDatasetStatusUpdate,
     ) -> Result<TraceRankingCalibrationDatasetRecord, DatabaseError> {
         self.ensure_trace_tenant(&update.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &update.tenant_id).await?;
         let status = enum_to_storage(update.status)?;
         let row = tx
@@ -2310,7 +2310,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceRankingCalibrationDatasetRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -2337,7 +2337,7 @@ impl TraceCorpusStore for PgBackend {
         feature: TraceRankingFeatureWrite,
     ) -> Result<TraceRankingFeatureRecord, DatabaseError> {
         self.ensure_trace_tenant(&feature.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &feature.tenant_id).await?;
         let coverage_tags = serde_json::to_value(&feature.coverage_tags).map_err(|e| {
             DatabaseError::Serialization(format!("trace ranking coverage_tags encode failed: {e}"))
@@ -2398,7 +2398,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceRankingFeatureRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -2422,7 +2422,7 @@ impl TraceCorpusStore for PgBackend {
         prediction: TraceRankingPredictionWrite,
     ) -> Result<TraceRankingPredictionRecord, DatabaseError> {
         self.ensure_trace_tenant(&prediction.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &prediction.tenant_id).await?;
         let explanation_codes =
             serde_json::to_value(&prediction.explanation_codes).map_err(|e| {
@@ -2491,7 +2491,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceRankingPredictionRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -2515,7 +2515,7 @@ impl TraceCorpusStore for PgBackend {
         label: TraceRankingLabelWrite,
     ) -> Result<TraceRankingLabelRecord, DatabaseError> {
         self.ensure_trace_tenant(&label.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &label.tenant_id).await?;
         let label_source = enum_to_storage(label.label_source)?;
         let utility_category = enum_to_storage(label.utility_category)?;
@@ -2564,7 +2564,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceRankingLabelRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -2588,7 +2588,7 @@ impl TraceCorpusStore for PgBackend {
         preference: TraceRankingPreferenceLabelWrite,
     ) -> Result<TraceRankingPreferenceLabelRecord, DatabaseError> {
         self.ensure_trace_tenant(&preference.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &preference.tenant_id).await?;
         let label_source = enum_to_storage(preference.label_source)?;
         let utility_category = enum_to_storage(preference.utility_category)?;
@@ -2641,7 +2641,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceRankingPreferenceLabelRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -2665,7 +2665,7 @@ impl TraceCorpusStore for PgBackend {
         run: TraceRankingCalibrationRunWrite,
     ) -> Result<TraceRankingCalibrationRunRecord, DatabaseError> {
         self.ensure_trace_tenant(&run.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &run.tenant_id).await?;
         let prediction_count = i32::try_from(run.prediction_count).map_err(|e| {
             DatabaseError::Serialization(format!(
@@ -2803,7 +2803,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceRankingCalibrationRunRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -2827,7 +2827,7 @@ impl TraceCorpusStore for PgBackend {
         run: TraceRankingWorkerRunWrite,
     ) -> Result<TraceRankingWorkerRunRecord, DatabaseError> {
         self.ensure_trace_tenant(&run.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &run.tenant_id).await?;
         let run_kind = enum_to_storage(run.run_kind)?;
         let status = enum_to_storage(run.status)?;
@@ -2933,7 +2933,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceRankingWorkerRunRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -2957,7 +2957,7 @@ impl TraceCorpusStore for PgBackend {
         manifest: TraceExportManifestWrite,
     ) -> Result<TraceExportManifestRecord, DatabaseError> {
         self.ensure_trace_tenant(&manifest.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &manifest.tenant_id).await?;
         let artifact_kind = enum_to_storage(manifest.artifact_kind)?;
         let item_count = i32::try_from(manifest.item_count).map_err(|e| {
@@ -3033,7 +3033,7 @@ impl TraceCorpusStore for PgBackend {
             }
         }
 
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &tenant_id).await?;
         tx.execute(
             "INSERT INTO trace_tenants (tenant_id) VALUES ($1)
@@ -3193,7 +3193,7 @@ impl TraceCorpusStore for PgBackend {
         tenant_id: &str,
         export_manifest_id: Uuid,
     ) -> Result<(), DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         tx.execute(
             "DELETE FROM trace_export_manifest_items
@@ -3224,7 +3224,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceExportManifestRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -3248,7 +3248,7 @@ impl TraceCorpusStore for PgBackend {
         item: TraceExportManifestItemWrite,
     ) -> Result<TraceExportManifestItemRecord, DatabaseError> {
         self.ensure_trace_tenant(&item.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &item.tenant_id).await?;
         if let Some(derived_id) = item.derived_id {
             ensure_pg_derived_record_belongs_to_submission(
@@ -3323,7 +3323,7 @@ impl TraceCorpusStore for PgBackend {
         tenant_id: &str,
         export_manifest_id: Uuid,
     ) -> Result<Vec<TraceExportManifestItemRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -3347,7 +3347,7 @@ impl TraceCorpusStore for PgBackend {
         tenant_id: &str,
         submission_id: Uuid,
     ) -> Result<u64, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let updated = tx
             .execute(
@@ -3372,7 +3372,7 @@ impl TraceCorpusStore for PgBackend {
         submission_id: Uuid,
         reason: TraceExportManifestItemInvalidationReason,
     ) -> Result<u64, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let reason = enum_to_storage(reason)?;
         let updated = tx
@@ -3397,7 +3397,7 @@ impl TraceCorpusStore for PgBackend {
         tenant_id: &str,
         submission_id: Uuid,
     ) -> Result<u64, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let invalidated = enum_to_storage(TraceVectorEntryStatus::Invalidated)?;
         let updated = tx
@@ -3424,7 +3424,7 @@ impl TraceCorpusStore for PgBackend {
         submission_id: Uuid,
         vector_entry_id: Uuid,
     ) -> Result<u64, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let invalidated = enum_to_storage(TraceVectorEntryStatus::Invalidated)?;
         let updated = tx
@@ -3451,7 +3451,7 @@ impl TraceCorpusStore for PgBackend {
         audit_event: TraceAuditEventWrite,
     ) -> Result<(), DatabaseError> {
         self.ensure_trace_tenant(&audit_event.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &audit_event.tenant_id).await?;
         tx.execute(
             "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
@@ -3529,7 +3529,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceAuditEventRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -3559,7 +3559,7 @@ impl TraceCorpusStore for PgBackend {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let rows = tx
@@ -3588,7 +3588,7 @@ impl TraceCorpusStore for PgBackend {
         credit_event: TraceCreditEventWrite,
     ) -> Result<(), DatabaseError> {
         self.ensure_trace_tenant(&credit_event.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &credit_event.tenant_id).await?;
         let event_type = enum_to_storage(credit_event.event_type)?;
         let settlement_state = enum_to_storage(credit_event.settlement_state)?;
@@ -3624,7 +3624,7 @@ impl TraceCorpusStore for PgBackend {
         attestation: TraceUtilityAttestationWrite,
     ) -> Result<TraceUtilityAttestationRecord, DatabaseError> {
         self.ensure_trace_tenant(&attestation.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &attestation.tenant_id).await?;
         let event_type = enum_to_storage(attestation.event_type)?;
         let row = tx
@@ -3665,7 +3665,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceUtilityAttestationRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -3689,7 +3689,7 @@ impl TraceCorpusStore for PgBackend {
         batch: TraceCreditSettlementBatchWrite,
     ) -> Result<TraceCreditSettlementBatchRecord, DatabaseError> {
         self.ensure_trace_tenant(&batch.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &batch.tenant_id).await?;
         let status = enum_to_storage(batch.status)?;
         let line_items_json = serde_json::to_value(&batch.line_items).map_err(|e| {
@@ -3786,7 +3786,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceCreditSettlementBatchRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -3810,7 +3810,7 @@ impl TraceCorpusStore for PgBackend {
         hold: TraceCreditHoldWrite,
     ) -> Result<TraceCreditHoldRecord, DatabaseError> {
         self.ensure_trace_tenant(&hold.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &hold.tenant_id).await?;
         let reason = enum_to_storage(hold.reason)?;
         let row = tx
@@ -3851,7 +3851,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceCreditHoldRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -3875,7 +3875,7 @@ impl TraceCorpusStore for PgBackend {
         item: TraceNearCreditOutboxItemWrite,
     ) -> Result<TraceNearCreditOutboxItemRecord, DatabaseError> {
         self.ensure_trace_tenant(&item.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &item.tenant_id).await?;
         let status = enum_to_storage(item.status)?;
         let account_operation = near_credit_call_method_name(&item.near_call_json)
@@ -3947,7 +3947,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceNearCreditOutboxItemRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -3978,7 +3978,7 @@ impl TraceCorpusStore for PgBackend {
         near_transaction_hash: Option<String>,
         last_error_hash: Option<String>,
     ) -> Result<Option<TraceNearCreditOutboxItemRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let status_storage = enum_to_storage(status)?;
         let row = tx
@@ -4067,7 +4067,7 @@ impl TraceCorpusStore for PgBackend {
         item: TraceBenchmarkRegistryOutboxItemWrite,
     ) -> Result<TraceBenchmarkRegistryOutboxItemRecord, DatabaseError> {
         self.ensure_trace_tenant(&item.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &item.tenant_id).await?;
         let operation = enum_to_storage(item.operation)?;
         let status = enum_to_storage(item.status)?;
@@ -4113,7 +4113,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -4143,7 +4143,7 @@ impl TraceCorpusStore for PgBackend {
         external_receipt_ref: Option<String>,
         last_error_hash: Option<String>,
     ) -> Result<Option<TraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let status_storage = enum_to_storage(status)?;
         let row = tx
@@ -4193,7 +4193,7 @@ impl TraceCorpusStore for PgBackend {
         tombstone: TraceTombstoneWrite,
     ) -> Result<(), DatabaseError> {
         self.ensure_trace_tenant(&tombstone.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &tombstone.tenant_id).await?;
         tx.execute(
             "INSERT INTO trace_tombstones (
@@ -4225,7 +4225,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceTombstoneRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -4249,7 +4249,7 @@ impl TraceCorpusStore for PgBackend {
         job: TraceRetentionJobWrite,
     ) -> Result<TraceRetentionJobRecord, DatabaseError> {
         self.ensure_trace_tenant(&job.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &job.tenant_id).await?;
         let status = enum_to_storage(job.status)?;
         let action_counts = serde_json::to_value(&job.action_counts).map_err(|e| {
@@ -4325,7 +4325,7 @@ impl TraceCorpusStore for PgBackend {
         item: TraceRetentionJobItemWrite,
     ) -> Result<TraceRetentionJobItemRecord, DatabaseError> {
         self.ensure_trace_tenant(&item.tenant_id).await?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &item.tenant_id).await?;
         let action = enum_to_storage(item.action)?;
         let status = enum_to_storage(item.status)?;
@@ -4371,7 +4371,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceRetentionJobRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -4395,7 +4395,7 @@ impl TraceCorpusStore for PgBackend {
         tenant_id: &str,
         retention_job_id: Uuid,
     ) -> Result<Vec<TraceRetentionJobItemRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -4435,7 +4435,7 @@ impl TraceCorpusStore for PgBackend {
                 "trace export access grant metadata encode failed: {e}"
             ))
         })?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &grant.tenant_id).await?;
         let row = tx
             .query_one(
@@ -4483,7 +4483,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceExportAccessGrantRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -4531,7 +4531,7 @@ impl TraceCorpusStore for PgBackend {
         let metadata_json = serde_json::to_value(&job.metadata).map_err(|e| {
             DatabaseError::Serialization(format!("trace export job metadata encode failed: {e}"))
         })?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &job.tenant_id).await?;
         let row = tx
             .query_one(
@@ -4590,7 +4590,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceExportJobRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -4629,7 +4629,7 @@ impl TraceCorpusStore for PgBackend {
         let metadata_json = serde_json::to_value(&update.metadata).map_err(|e| {
             DatabaseError::Serialization(format!("trace export job metadata encode failed: {e}"))
         })?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let row = tx
             .query_opt(
@@ -4685,7 +4685,7 @@ impl TraceCorpusStore for PgBackend {
         .map_err(|e| {
             DatabaseError::Serialization(format!("trace export job metadata encode failed: {e}"))
         })?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let row = tx
             .query_opt(
@@ -4751,7 +4751,7 @@ impl TraceCorpusStore for PgBackend {
         let metadata_json = serde_json::to_value(&update.metadata).map_err(|e| {
             DatabaseError::Serialization(format!("trace export job metadata encode failed: {e}"))
         })?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let row = tx
             .query_opt(
@@ -4814,7 +4814,7 @@ impl TraceCorpusStore for PgBackend {
         let metadata_json = serde_json::to_value(&update.metadata).map_err(|e| {
             DatabaseError::Serialization(format!("trace export job metadata encode failed: {e}"))
         })?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let row = tx
             .query_opt(
@@ -4876,7 +4876,7 @@ impl TraceCorpusStore for PgBackend {
                 "trace revocation propagation metadata encode failed: {e}"
             ))
         })?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &item.tenant_id).await?;
         let row = tx
             .query_opt(
@@ -4943,7 +4943,7 @@ impl TraceCorpusStore for PgBackend {
         tenant_id: &str,
         source_submission_id: Uuid,
     ) -> Result<Vec<TraceRevocationPropagationItemRecord>, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
@@ -4973,7 +4973,7 @@ impl TraceCorpusStore for PgBackend {
         limit: u32,
     ) -> Result<Vec<TraceRevocationPropagationItemRecord>, DatabaseError> {
         let limit = i64::from(limit);
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let pending = enum_to_storage(TraceRevocationPropagationItemStatus::Pending)?;
         let failed = enum_to_storage(TraceRevocationPropagationItemStatus::Failed)?;
@@ -5010,7 +5010,7 @@ impl TraceCorpusStore for PgBackend {
             DatabaseError::Constraint(format!("trace revocation attempt_count is too large: {e}"))
         })?;
         let status = enum_to_storage(update.status)?;
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let row = tx
             .query_opt(
@@ -5054,7 +5054,7 @@ impl TraceCorpusStore for PgBackend {
         submission_id: Uuid,
         derived_status: TraceDerivedStatus,
     ) -> Result<TraceArtifactInvalidationCounts, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let derived_status = enum_to_storage(derived_status)?;
         let object_refs_invalidated = tx
@@ -5096,7 +5096,7 @@ impl TraceCorpusStore for PgBackend {
         object_store: &str,
         object_key: &str,
     ) -> Result<u64, DatabaseError> {
-        let mut client = self.pool().get().await?;
+        let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let deleted = tx
             .execute(

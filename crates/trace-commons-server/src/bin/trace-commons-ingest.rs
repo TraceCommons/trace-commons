@@ -53723,7 +53723,11 @@ mod tests {
     }
 
     async fn cleanup_pg_trace_tenant(backend: &PgBackend, tenant_id: &str) {
-        let mut client = backend.pool().get().await.expect("get cleanup connection");
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("get cleanup connection");
         let tx = client
             .transaction()
             .await
@@ -58448,7 +58452,11 @@ mod tests {
             ("tenant-a", "sha256:tenant-a-summary", "tenant-b"),
             ("tenant-b", "sha256:tenant-b-summary", "tenant-a"),
         ] {
-            let mut client = backend.pool().get().await.expect("get raw RLS client");
+            let mut client = backend
+                .raw_pool_for_tests_and_diagnostics()
+                .get()
+                .await
+                .expect("get raw RLS client");
             let tx = client.transaction().await.expect("start raw RLS tx");
             tx.execute(
                 "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",

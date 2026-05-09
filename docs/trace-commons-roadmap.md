@@ -71,7 +71,7 @@ As of the server split, Trace Commons has moved beyond the local-only MVP into a
 - Durable tenant access grant storage now exists for issuer-authorized principals and hosted-agent multitenant permissioning, including role, consent/use allow-lists, issuer/audience/subject attribution, expiry, revocation fields, tenant-scoped admin create/list/revoke APIs and CLI helpers, and tenant-scoped PostgreSQL RLS policies. When `TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS=true`, trace submission, contributor credit/status readback, reviewer/audit reads, review mutations, dataset/export paths, non-revocation worker mutations, maintenance, and admin ledger/observability reads are denied without an active exact-role grant for the authenticated principal. Grant scopes/uses narrow the effective request policy, while revocation/self-delete, revocation propagation, config-status, tenant-policy admin, and grant-management routes remain available for deprovisioning and recovery. Required DB mirror mode now blocks review decisions before body-read/file-side publication when the mirror is absent, mirrors reviewed status/object-ref state before compatibility metadata/audit writes, and DB-mirrors shared aggregate-audit/trace-content-read rows before compatibility file audit append.
 - Revocation, retention expiration, and maintenance-discovered file tombstones already invalidate DB-mirrored submission status, object refs, derived records, vector metadata, replay export manifests, and replay export item rows. Required DB mirror mode preflights direct revocation DB tombstone/status/invalidation plus revocation-audit mirrors before writing compatibility file tombstones, status updates, invalidations, or audit rows, preventing file-only revocation state during cutover. Revocation-propagation credit-settlement items now reverse exact delayed-credit ledger rows with deterministic negative settlement events. Non-dry-run physical purge and revocation-propagation object-payload items can now mark only exact physically deleted service-owned submitted/review envelope object refs with `deleted_at`; revocation-propagation object deletes also record durable physical-delete receipt rows with evidence hashes for exact service-owned submitted/review envelope, vector worker-intermediate, benchmark artifact, and ranker export provenance payload targets, including filesystem-remote service-owned artifacts. Vector worker payloads now carry deterministic local redacted-summary feature embeddings in encrypted worker-intermediate objects, and exact vector-entry invalidation is available across PostgreSQL. Disabled cloud remote object deletion and unsupported artifact payload deletion remain future work; disabled remote object-payload rows skip with an explicit disabled-IO reason and no secret-bearing response or stored error text until cloud provider adapters exist.
 
-The main remaining gap is production rollout hardening: file-backed serving is still the compatibility path, encrypted artifacts now have local-service and filesystem-remote service-owned storage plus smoke coverage and filesystem-remote restore rehearsal but not cloud remote providers, PostgreSQL RLS is forced, policy predicates are centralized, and readiness now rejects table-owner runtime roles, but deployments still need complete transaction-local tenant context through every DB-backed path before RLS is the active trust boundary, and vector, benchmark, ranking, retention, and audit systems are not yet complete production workers.
+The main remaining gap is production rollout hardening: file-backed serving is still the compatibility path, encrypted artifacts now have local-service and filesystem-remote service-owned storage plus smoke coverage and filesystem-remote restore rehearsal but not cloud remote providers, PostgreSQL RLS is forced, policy predicates are centralized, readiness now rejects table-owner runtime roles, and the PostgreSQL backend no longer exposes its raw pool as the normal public application API, but deployments still need full production-service-role rehearsal before RLS is the active trust boundary, and vector, benchmark, ranking, retention, and audit systems are not yet complete production workers.
 
 ## Operator Finish-Line Checks
 
@@ -194,11 +194,14 @@ future work.
 The PostgreSQL store now sets `trace-commons.trace_tenant_id` transaction-locally around
 tenant-scoped Trace Commons operations while retaining explicit `tenant_id`
 predicates, and server migrations force RLS for the Trace Commons tables and
-centralize the tenant policy predicate. The RLS readiness drill and fail-closed
-startup gate also probe that tenant context is transaction-local and clears
-after commit, and now reject runtime roles that either bypass RLS or own the
-Trace Commons tables. This is still an incremental guardrail until every
-DB-backed runtime path runs under the production service role.
+centralize the tenant policy predicate. The raw pool is restricted to crate
+internals plus an explicitly named test/diagnostic hook, so new application paths
+are steered through tenant-context store helpers instead of grabbing unscoped
+clients. The RLS readiness drill and fail-closed startup gate also probe that
+tenant context is transaction-local and clears after commit, and now reject
+runtime roles that either bypass RLS or own the Trace Commons tables. This is
+still an incremental guardrail until every DB-backed runtime path runs under the
+production service role.
 
 Scope:
 
