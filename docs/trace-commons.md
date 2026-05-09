@@ -606,8 +606,10 @@ issuer profile as aggregate safe signals: required, ready,
 missing-control-count, managed-EdDSA enforcement, and tenant-grant enforcement.
 When the principal allowlist is configured, unlisted admins can still inspect
 dry-runs but cannot record source-list issuer approvals or finalize live
-settlement, and unlisted utility-worker principals cannot start live settlement
-or credit-cycle schedulers. Live settlement re-checks the profile before
+settlement, unlisted utility-worker principals cannot start live settlement or
+credit-cycle schedulers, and unlisted benchmark-worker principals cannot submit,
+confirm, manually mark, or schedule live benchmark registry outbox mutations.
+Live settlement re-checks the profile before
 writing settlement batches or NEAR outbox rows. When rollout-smoke readiness is
 required, live settlement then requires `rollout_smoke.ready: true` and rejects
 with safe status/count fields before any live repair or write path, while
@@ -1053,6 +1055,13 @@ Replay dataset exports, benchmark conversion artifacts, and ranker training expo
 
 Deployments that want the server to own benchmark candidate evaluation and local publication can configure `TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_TOKEN` with a benchmark-worker bearer token. Startup validates the token, requires explicit `TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_EVALUATOR_REF` and `TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REGISTRY_REF_PREFIX`, and defaults `TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REQUIRE_EXTERNAL_EVALUATOR` to true so startup fails unless `TRACE_COMMONS_BENCHMARK_EVALUATOR_URL` is configured. The scheduler sleeps for `TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_INTERVAL_SECONDS` (default 60), then calls the same evaluation worker route followed by the same registry-publication worker route. `TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_EVALUATION_LIMIT` and `TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_PUBLICATION_LIMIT` cap each pass from 1 to 100, `TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_MIN_SCORE` sets the evaluator threshold, `TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_DRY_RUN=true` rehearses counts without evaluator calls, lifecycle writes, or outbox rows, and `TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON` is audited without being returned by config-status.
 
+When `TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS` is
+configured, live benchmark registry outbox submit/confirm workers and the
+manual mark-status fallback require a listed central issuer principal while
+dry-run submit/confirm inspection remains available. The optional in-process
+benchmark registry outbox scheduler applies the same allowlist check at startup
+for live mode before it can call the worker routes.
+
 Admin-only credit control-plane list reads for settlement batches, credit holds, utility attestations, NEAR credit outbox rows, and benchmark registry outbox rows append the same DB-mirrored aggregate read audit breadcrumb as issuer-approval, risk-summary, and other operator reads: only a code-owned surface plus bounded item count are recorded.
 
 When central issuer approval is required,
@@ -1061,12 +1070,16 @@ require that the recorded source-list approval is still fresh before live
 settlement or credit-settlement drill readiness passes.
 
 When `TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS` is
-configured, contract-facing NEAR credit outbox mutations stay inside the same
-central issuer boundary as settlement. Listed principals can submit pending
-receipt calls, poll submitted rows for confirmation, run the live outbox
-scheduler, manually mark outbox status, or create credit-hold account
-freeze/unfreeze transitions; unlisted utility-worker/admin principals can still
-inspect dry-run counts but cannot mutate the NEAR contract mirror.
+configured, contract-facing NEAR credit outbox mutations and credit-adjacent
+benchmark registry outbox mutations stay inside the same central issuer
+boundary as settlement. Listed principals can submit pending NEAR receipt calls,
+poll submitted NEAR rows for confirmation, run the live NEAR outbox scheduler,
+manually mark NEAR outbox status, create credit-hold account freeze/unfreeze
+transitions, submit or confirm live benchmark registry outbox rows, run the live
+benchmark registry scheduler, or manually mark benchmark registry outbox status.
+Unlisted utility-worker, benchmark-worker, reviewer, or admin principals can
+still inspect dry-run counts but cannot mutate those external credit/registry
+mirrors.
 
 When `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH=true`, the manual
 `POST /v1/workers/near-credit-outbox/mark-status` fallback also requires the

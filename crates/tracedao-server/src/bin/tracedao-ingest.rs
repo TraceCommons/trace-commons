@@ -6506,6 +6506,8 @@ async fn validate_trace_benchmark_registry_scheduler_config(
         .await
         .map_err(trace_benchmark_registry_scheduler_config_error)?;
     require_benchmarker(&auth).map_err(trace_benchmark_registry_scheduler_config_error)?;
+    require_benchmark_registry_outbox_principal_if_configured(state, &auth, config.dry_run)
+        .map_err(trace_benchmark_registry_scheduler_config_error)?;
     if !config.dry_run {
         anyhow::ensure!(
             state.benchmark_registry_submitter.is_some(),
@@ -14996,6 +14998,27 @@ fn require_near_credit_outbox_principal_if_configured(
     ))
 }
 
+fn require_benchmark_registry_outbox_principal_if_configured(
+    state: &AppState,
+    tenant: &TenantAuth,
+    dry_run: bool,
+) -> ApiResult<()> {
+    if dry_run
+        || state
+            .credit_settlement_central_issuer_principal_refs
+            .is_empty()
+        || state
+            .credit_settlement_central_issuer_principal_refs
+            .contains(&tenant.principal_ref)
+    {
+        return Ok(());
+    }
+    Err(api_error(
+        StatusCode::FORBIDDEN,
+        "live benchmark registry outbox requires an authorized central issuer principal",
+    ))
+}
+
 fn require_near_credit_outbox_status_principal_if_configured(
     state: &AppState,
     tenant: &TenantAuth,
@@ -15012,6 +15035,25 @@ fn require_near_credit_outbox_status_principal_if_configured(
     Err(api_error(
         StatusCode::FORBIDDEN,
         "NEAR credit outbox status updates require an authorized central issuer principal",
+    ))
+}
+
+fn require_benchmark_registry_outbox_status_principal_if_configured(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> ApiResult<()> {
+    if state
+        .credit_settlement_central_issuer_principal_refs
+        .is_empty()
+        || state
+            .credit_settlement_central_issuer_principal_refs
+            .contains(&tenant.principal_ref)
+    {
+        return Ok(());
+    }
+    Err(api_error(
+        StatusCode::FORBIDDEN,
+        "benchmark registry outbox status updates require an authorized central issuer principal",
     ))
 }
 
@@ -15644,6 +15686,11 @@ async fn benchmark_registry_outbox_submit_worker_handler(
         TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_MAX_LIMIT,
         "benchmark registry outbox submit worker",
     )?;
+    require_benchmark_registry_outbox_principal_if_configured(
+        state.as_ref(),
+        &tenant,
+        body.dry_run,
+    )?;
     if !body.dry_run && state.benchmark_registry_submitter.is_none() {
         return Err(api_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -15667,6 +15714,11 @@ async fn benchmark_registry_outbox_confirm_worker_handler(
         body.limit,
         TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_MAX_LIMIT,
         "benchmark registry outbox confirm worker",
+    )?;
+    require_benchmark_registry_outbox_principal_if_configured(
+        state.as_ref(),
+        &tenant,
+        body.dry_run,
     )?;
     if !body.dry_run && state.benchmark_registry_confirmer.is_none() {
         return Err(api_error(
@@ -15981,6 +16033,7 @@ async fn mark_benchmark_registry_outbox_status_handler(
     } else {
         None
     };
+    require_benchmark_registry_outbox_status_principal_if_configured(state.as_ref(), &tenant)?;
     let updated = update_benchmark_registry_outbox_item_status_with_db_mirror(
         state.as_ref(),
         &tenant,
@@ -71097,7 +71150,7 @@ mod tests {
     async fn benchmark_registry_scheduler_config_requires_benchmark_worker_auth_and_live_adapters()
     {
         let temp = tempfile::tempdir().expect("temp dir");
-        let state = test_state(temp.path().to_path_buf());
+        let mut state = test_state(temp.path().to_path_buf());
 
         let error = validate_trace_benchmark_registry_scheduler_config(
             state.as_ref(),
@@ -71151,6 +71204,58 @@ mod tests {
         )
         .await
         .expect("dry-run scheduler can start without live registry adapters");
+
+        Arc::make_mut(&mut state).benchmark_registry_submitter =
+            Some(Arc::new(FakeBenchmarkRegistrySubmitter::default()));
+        Arc::make_mut(&mut state).benchmark_registry_confirmer =
+            Some(Arc::new(FakeBenchmarkRegistryConfirmer::default()));
+        Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
+            Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+
+        let central_issuer_error = validate_trace_benchmark_registry_scheduler_config(
+            state.as_ref(),
+            Some(&TraceBenchmarkRegistrySchedulerConfig {
+                worker_token: SecretString::from("benchmark-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                submit_limit: 5,
+                confirm_limit: 5,
+                dry_run: false,
+                purpose: "scheduled live benchmark registry outbox".to_string(),
+            }),
+        )
+        .await
+        .expect_err("live scheduler requires listed central issuer principal");
+        assert!(central_issuer_error.to_string().contains(
+            "live benchmark registry outbox requires an authorized central issuer principal"
+        ));
+
+        validate_trace_benchmark_registry_scheduler_config(
+            state.as_ref(),
+            Some(&TraceBenchmarkRegistrySchedulerConfig {
+                worker_token: SecretString::from("benchmark-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                submit_limit: 5,
+                confirm_limit: 5,
+                dry_run: true,
+                purpose: "scheduled dry-run benchmark registry outbox".to_string(),
+            }),
+        )
+        .await
+        .expect("dry-run scheduler can inspect from unlisted principal");
+
+        validate_trace_benchmark_registry_scheduler_config(
+            state.as_ref(),
+            Some(&TraceBenchmarkRegistrySchedulerConfig {
+                worker_token: SecretString::from("admin-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                submit_limit: 5,
+                confirm_limit: 5,
+                dry_run: false,
+                purpose: "scheduled live benchmark registry outbox from issuer".to_string(),
+            }),
+        )
+        .await
+        .expect("listed central issuer principal can start live scheduler");
     }
 
     #[tokio::test]
@@ -89809,6 +89914,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn benchmark_registry_outbox_mark_status_requires_authorized_central_issuer() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
+            Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+
+        let benchmark_outbox_id = Uuid::new_v4();
+        let item = pending_benchmark_registry_outbox_item(benchmark_outbox_id);
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &item)
+            .expect("benchmark registry outbox file writes");
+
+        let error = mark_benchmark_registry_outbox_status_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxStatusRequest {
+                benchmark_outbox_id,
+                status: StorageTraceBenchmarkRegistryOutboxStatus::Submitted,
+                external_receipt_ref: Some("external-registry:tenant-a-submit".to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect_err(
+            "manual benchmark registry outbox status requires listed central issuer principal",
+        );
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.1.0.error,
+            "benchmark registry outbox status updates require an authorized central issuer principal"
+        );
+
+        let outbox = read_all_benchmark_registry_outbox_items(temp.path(), "tenant-a")
+            .expect("benchmark registry outbox reads");
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(
+            outbox[0].status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Pending
+        );
+        assert!(outbox[0].external_receipt_ref.is_none());
+
+        let Json(submitted) = mark_benchmark_registry_outbox_status_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceBenchmarkRegistryOutboxStatusRequest {
+                benchmark_outbox_id,
+                status: StorageTraceBenchmarkRegistryOutboxStatus::Submitted,
+                external_receipt_ref: Some("external-registry:tenant-a-submit".to_string()),
+                error_detail: None,
+            }),
+        )
+        .await
+        .expect("listed central issuer principal can mark registry outbox submitted");
+        assert_eq!(
+            submitted.status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Submitted
+        );
+        assert_eq!(
+            submitted.external_receipt_ref.as_deref(),
+            Some("external-registry:tenant-a-submit")
+        );
+    }
+
+    #[tokio::test]
     async fn benchmark_registry_outbox_submit_worker_sends_pending_items_and_marks_submitted() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
@@ -90010,6 +90178,130 @@ mod tests {
         assert_eq!(dry_run.checked, 1);
         assert_eq!(dry_run.submitted, 0);
         assert_eq!(dry_run.pending, 1);
+    }
+
+    #[tokio::test]
+    async fn benchmark_registry_outbox_workers_require_authorized_central_issuer_for_live() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let fake_submitter = FakeBenchmarkRegistrySubmitter::default();
+        let submitter_calls = fake_submitter.calls.clone();
+        let fake_confirmer = FakeBenchmarkRegistryConfirmer::default();
+        let confirmer_calls = fake_confirmer.calls.clone();
+        Arc::make_mut(&mut state).benchmark_registry_submitter = Some(Arc::new(fake_submitter));
+        Arc::make_mut(&mut state).benchmark_registry_confirmer = Some(Arc::new(fake_confirmer));
+        Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
+            Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+
+        let pending_item = pending_benchmark_registry_outbox_item(Uuid::new_v4());
+        let submitted_item = submitted_benchmark_registry_outbox_item(
+            Uuid::new_v4(),
+            StorageTraceBenchmarkRegistryOutboxOperation::Publish,
+        );
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &pending_item)
+            .expect("pending benchmark registry outbox file writes");
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &submitted_item)
+            .expect("submitted benchmark registry outbox file writes");
+
+        let submit_error = benchmark_registry_outbox_submit_worker_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxSubmitWorkerRequest {
+                purpose: Some("submit_benchmark_registry_unlisted_principal".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect_err("live submit worker requires listed central issuer principal");
+        assert_eq!(submit_error.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            submit_error.1.0.error,
+            "live benchmark registry outbox requires an authorized central issuer principal"
+        );
+        assert!(
+            submitter_calls
+                .lock()
+                .expect("fake submitter calls lock")
+                .is_empty()
+        );
+
+        let confirm_error = benchmark_registry_outbox_confirm_worker_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxConfirmWorkerRequest {
+                purpose: Some("confirm_benchmark_registry_unlisted_principal".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect_err("live confirm worker requires listed central issuer principal");
+        assert_eq!(confirm_error.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            confirm_error.1.0.error,
+            "live benchmark registry outbox requires an authorized central issuer principal"
+        );
+        assert!(
+            confirmer_calls
+                .lock()
+                .expect("fake confirmer calls lock")
+                .is_empty()
+        );
+
+        let Json(submit_dry_run) = benchmark_registry_outbox_submit_worker_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxSubmitWorkerRequest {
+                purpose: Some("submit_benchmark_registry_unlisted_principal_dry_run".to_string()),
+                dry_run: true,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("dry-run submit worker can inspect from unlisted principal");
+        assert_eq!(submit_dry_run.checked, 1);
+        assert_eq!(submit_dry_run.submitted, 0);
+
+        let Json(confirm_dry_run) = benchmark_registry_outbox_confirm_worker_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxConfirmWorkerRequest {
+                purpose: Some("confirm_benchmark_registry_unlisted_principal_dry_run".to_string()),
+                dry_run: true,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("dry-run confirm worker can inspect from unlisted principal");
+        assert_eq!(confirm_dry_run.checked, 1);
+        assert_eq!(confirm_dry_run.confirmed, 0);
+
+        let Json(submit_live) = benchmark_registry_outbox_submit_worker_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceBenchmarkRegistryOutboxSubmitWorkerRequest {
+                purpose: Some("submit_benchmark_registry_listed_principal".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("listed central issuer principal can submit registry outbox");
+        assert_eq!(submit_live.submitted, 1);
+
+        let Json(confirm_live) = benchmark_registry_outbox_confirm_worker_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceBenchmarkRegistryOutboxConfirmWorkerRequest {
+                purpose: Some("confirm_benchmark_registry_listed_principal".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("listed central issuer principal can confirm registry outbox");
+        assert_eq!(confirm_live.confirmed, 2);
     }
 
     #[tokio::test]
