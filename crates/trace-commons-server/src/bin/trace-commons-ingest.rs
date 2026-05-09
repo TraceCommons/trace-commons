@@ -4875,7 +4875,7 @@ fn spawn_managed_eddsa_keyset_refresh_task(state: &Arc<AppState>) {
                 Err(error) => {
                     record_signed_token_managed_eddsa_keyset_refresh_failure(&verifier);
                     tracing::warn!(
-                        error = %error,
+                        error_hash = %safe_display_error_hash(&error),
                         "Trace Commons managed EdDSA keyset refresh failed; preserving last good keyset"
                     );
                 }
@@ -4920,7 +4920,7 @@ fn spawn_trace_export_job_scheduler_task(
                 Err((status, Json(error))) => {
                     tracing::warn!(
                         status = %status,
-                        error = %error.error,
+                        error_hash = %safe_display_error_hash(&error.error),
                         "Trace Commons export job scheduler tick failed"
                     );
                 }
@@ -4961,7 +4961,7 @@ fn spawn_trace_vector_index_scheduler_task(
                 Err((status, Json(error))) => {
                     tracing::warn!(
                         status = %status,
-                        error = %error.error,
+                        error_hash = %safe_display_error_hash(&error.error),
                         "Trace Commons vector index scheduler tick failed"
                     );
                 }
@@ -22603,7 +22603,7 @@ async fn run_process_evaluation_worker(
                         Ok(decision) => decision,
                         Err(error) => {
                             tracing::warn!(
-                                %error,
+                                error_hash = %safe_display_error_hash(&error),
                                 submission_id = %record.submission_id,
                                 "Trace Commons process evaluator response was rejected"
                             );
@@ -22618,7 +22618,7 @@ async fn run_process_evaluation_worker(
                 }
                 Err(error) => {
                     tracing::warn!(
-                        %error,
+                        error_hash = %safe_display_error_hash(&error),
                         submission_id = %record.submission_id,
                         "Trace Commons process evaluator call failed"
                     );
@@ -24182,7 +24182,7 @@ async fn run_dataset_replay_export_job(
         .await;
         if let Err(error) = &mirror_result {
             tracing::warn!(
-                %error,
+                error_hash = %safe_display_error_hash(error),
                 export_id = %manifest.export_id,
                 "Trace Commons DB dual-write export manifest mirror failed"
             );
@@ -24201,7 +24201,7 @@ async fn run_dataset_replay_export_job(
         .await;
         if let Err(error) = &mirror_result {
             tracing::warn!(
-                %error,
+                error_hash = %safe_display_error_hash(error),
                 export_id = %manifest.export_id,
                 "Trace Commons DB dual-write export manifest mirror failed"
             );
@@ -31706,7 +31706,7 @@ async fn run_benchmark_evaluation_worker(
                         Ok(decision) => decision,
                         Err(error) => {
                             tracing::warn!(
-                                %error,
+                                error_hash = %safe_display_error_hash(&error),
                                 conversion_id = %artifact.conversion_id,
                                 "Trace Commons benchmark evaluator response was rejected"
                             );
@@ -31721,7 +31721,7 @@ async fn run_benchmark_evaluation_worker(
                 }
                 Err(error) => {
                     tracing::warn!(
-                        %error,
+                        error_hash = %safe_display_error_hash(&error),
                         conversion_id = %artifact.conversion_id,
                         "Trace Commons benchmark evaluator call failed"
                     );
@@ -32244,7 +32244,7 @@ async fn run_benchmark_conversion_job(
         .await;
         if let Err(error) = &mirror_result {
             tracing::warn!(
-                %error,
+                error_hash = %safe_display_error_hash(error),
                 export_id = %conversion_id,
                 "Trace Commons DB dual-write benchmark provenance mirror failed"
             );
@@ -32296,7 +32296,7 @@ async fn run_benchmark_conversion_job(
         .await;
         if let Err(error) = &mirror_result {
             tracing::warn!(
-                %error,
+                error_hash = %safe_display_error_hash(error),
                 export_id = %conversion_id,
                 "Trace Commons DB dual-write benchmark provenance mirror failed"
             );
@@ -32438,7 +32438,7 @@ async fn persist_benchmark_lifecycle_artifact(
         .await;
         if let Err(error) = &mirror_result {
             tracing::warn!(
-                %error,
+                error_hash = %safe_display_error_hash(error),
                 export_id = %artifact.conversion_id,
                 "Trace Commons DB dual-write benchmark lifecycle mirror failed"
             );
@@ -32482,7 +32482,7 @@ async fn persist_benchmark_lifecycle_artifact(
         .await;
         if let Err(error) = &mirror_result {
             tracing::warn!(
-                %error,
+                error_hash = %safe_display_error_hash(error),
                 export_id = %artifact.conversion_id,
                 "Trace Commons DB dual-write benchmark lifecycle mirror failed"
             );
@@ -32767,7 +32767,7 @@ async fn run_ranker_training_candidates_export_job(
         .await;
         if let Err(error) = &mirror_result {
             tracing::warn!(
-                %error,
+                error_hash = %safe_display_error_hash(error),
                 export_id = %export_id,
                 "Trace Commons DB dual-write ranker candidate provenance mirror failed"
             );
@@ -32816,7 +32816,7 @@ async fn run_ranker_training_candidates_export_job(
         .await;
         if let Err(error) = &mirror_result {
             tracing::warn!(
-                %error,
+                error_hash = %safe_display_error_hash(error),
                 export_id = %export_id,
                 "Trace Commons DB dual-write ranker candidate provenance mirror failed"
             );
@@ -33114,7 +33114,7 @@ async fn run_ranker_training_pairs_export_job(
         .await;
         if let Err(error) = &mirror_result {
             tracing::warn!(
-                %error,
+                error_hash = %safe_display_error_hash(error),
                 export_id = %export_id,
                 "Trace Commons DB dual-write ranker pair provenance mirror failed"
             );
@@ -33163,7 +33163,7 @@ async fn run_ranker_training_pairs_export_job(
         .await;
         if let Err(error) = &mirror_result {
             tracing::warn!(
-                %error,
+                error_hash = %safe_display_error_hash(error),
                 export_id = %export_id,
                 "Trace Commons DB dual-write ranker pair provenance mirror failed"
             );
@@ -34260,7 +34260,11 @@ async fn enforce_export_job_mirror_result(
     result: anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     if let Err(error) = &result {
-        tracing::warn!(%error, operation, "Trace Commons DB export job mirror failed");
+        tracing::warn!(
+            error_hash = %safe_display_error_hash(error),
+            operation,
+            "Trace Commons DB export job mirror failed"
+        );
     }
     enforce_db_mirror_write_result(state, operation, result)
 }
@@ -34522,7 +34526,7 @@ fn redaction_hash_for_record(
         Ok(envelope) => Some(envelope.privacy.redaction_hash),
         Err(error) => {
             tracing::warn!(
-                %error,
+                error_hash = %safe_display_error_hash(&error),
                 submission_id = %record.submission_id,
                 "Trace Commons revocation could not read stored envelope redaction hash"
             );
@@ -38589,16 +38593,23 @@ fn revocation_propagation_retry_at(now: DateTime<Utc>, attempt_count: u32) -> Da
 }
 
 fn safe_worker_error(error: &anyhow::Error) -> String {
+    safe_log_error_text(&error.to_string())
+}
+
+fn safe_log_error_text(error: &str) -> String {
     error
-        .to_string()
         .chars()
         .map(|ch| if ch.is_control() { ' ' } else { ch })
         .take(240)
         .collect()
 }
 
+fn safe_display_error_hash(error: &(impl std::fmt::Display + ?Sized)) -> String {
+    sha256_prefixed(&safe_log_error_text(&error.to_string()))
+}
+
 fn safe_runtime_error_hash(error: &anyhow::Error) -> String {
-    sha256_prefixed(&safe_worker_error(error))
+    safe_display_error_hash(error)
 }
 
 async fn append_revocation_propagation_audit(
@@ -42424,7 +42435,7 @@ async fn append_audit_event_with_db_mirror(
     let mirror_result = mirror_audit_event_to_db(state, tenant, &event, action, metadata).await;
     if let Err(error) = &mirror_result {
         tracing::warn!(
-            %error,
+            error_hash = %safe_display_error_hash(error),
             event_id = %event.event_id,
             "Trace Commons DB dual-write audit mirror failed"
         );
@@ -42455,7 +42466,7 @@ async fn append_trace_content_read_audit(
     .await;
     if let Err(error) = &mirror_result {
         tracing::warn!(
-            %error,
+            error_hash = %safe_display_error_hash(error),
             event_id = %event.event_id,
             "Trace Commons DB dual-write audit mirror failed"
         );
@@ -44918,7 +44929,7 @@ async fn active_trace_vector_payload_neighbor_candidates(
                     tenant_id = %tenant_id,
                     submission_id = %entry.submission_id,
                     vector_entry_id = %entry.vector_entry_id,
-                    error = %error,
+                    error_hash = %safe_display_error_hash(&error),
                     "Skipping unreadable trace vector payload neighbor"
                 );
                 continue;
@@ -46566,7 +46577,7 @@ impl TraceBackfillReport {
         tracing::warn!(
             %item_kind,
             %item_ref,
-            %reason,
+            reason_hash = %safe_display_error_hash(&reason),
             "Trace Commons DB mirror backfill skipped item"
         );
         if self.failures.len() < TRACE_BACKFILL_FAILURE_DETAIL_LIMIT {
@@ -47090,7 +47101,10 @@ fn maintenance_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
 }
 
 fn internal_error(error: impl std::fmt::Display) -> (StatusCode, Json<ApiError>) {
-    tracing::error!(%error, "Trace Commons ingestion operation failed");
+    tracing::error!(
+        error_hash = %safe_display_error_hash(&error),
+        "Trace Commons ingestion operation failed"
+    );
     api_error(
         StatusCode::INTERNAL_SERVER_ERROR,
         "trace commons operation failed",
@@ -95762,11 +95776,17 @@ mod tests {
         );
 
         let error_hash = safe_runtime_error_hash(&error);
+        let display_error = "object read failed for /tmp/raw-trace\npassword=secret";
+        let display_error_hash = safe_display_error_hash(display_error);
 
         assert!(error_hash.starts_with("sha256:"));
         assert!(!error_hash.contains("secret"));
         assert!(!error_hash.contains("raw-trace"));
         assert!(!error_hash.contains('\n'));
+        assert!(display_error_hash.starts_with("sha256:"));
+        assert!(!display_error_hash.contains("secret"));
+        assert!(!display_error_hash.contains("raw-trace"));
+        assert!(!display_error_hash.contains('\n'));
     }
 
     #[test]
