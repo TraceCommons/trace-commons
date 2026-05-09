@@ -76178,6 +76178,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn db_contributor_reads_tenant_allowlist_keeps_fallback_tenant_file_backed() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(backend.clone()),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+            TraceTenantRolloutFeature::DbContributorReads,
+            &["tenant-a"],
+        );
+
+        let mut tenant_a_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_a_envelope);
+        tenant_a_envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        tenant_a_envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        tenant_a_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let tenant_a_submission_id = tenant_a_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(tenant_a_envelope),
+        )
+        .await
+        .expect("tenant-a source mirrors to DB");
+        let Json(tenant_a_event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(tenant_a_submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.5,
+                reason: Some("tenant-a DB contributor credit canary".to_string()),
+                external_ref: Some("frontier:tenant-a-db-contributor-canary".to_string()),
+            }),
+        )
+        .await
+        .expect("tenant-a credit event mirrors to DB");
+        std::fs::remove_file(submission_metadata_path(
+            temp.path(),
+            "tenant-a",
+            tenant_a_submission_id,
+        ))
+        .expect("tenant-a file metadata removed for DB contributor canary");
+        std::fs::remove_file(credit_ledger_path(temp.path(), "tenant-a"))
+            .expect("tenant-a file credit ledger removed for DB contributor canary");
+
+        let Json(tenant_a_credit) = credit_handler(State(state.clone()), auth_headers("token-a"))
+            .await
+            .expect("tenant-a allowlisted credit summary uses DB metadata and ledger");
+        assert_eq!(tenant_a_credit.accepted, 1);
+        assert_eq!(tenant_a_credit.credit_points_ledger, 1.5);
+        let Json(tenant_a_statuses) = submission_status_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(TraceSubmissionStatusRequest {
+                submission_ids: vec![tenant_a_submission_id],
+            }),
+        )
+        .await
+        .expect("tenant-a allowlisted status sync uses DB metadata and ledger");
+        assert_eq!(tenant_a_statuses.len(), 1);
+        assert_eq!(tenant_a_statuses[0].submission_id, tenant_a_submission_id);
+        assert_eq!(tenant_a_statuses[0].credit_points_ledger, 1.5);
+        assert!(
+            tenant_a_statuses[0]
+                .delayed_credit_explanations
+                .iter()
+                .any(|explanation| explanation.contains("tenant-a DB contributor credit canary"))
+        );
+
+        let mut tenant_b_file_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_b_file_envelope);
+        tenant_b_file_envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        tenant_b_file_envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        tenant_b_file_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let tenant_b_file_submission_id = tenant_b_file_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_file_envelope),
+        )
+        .await
+        .expect("tenant-b file-backed source mirrors to DB");
+        let Json(tenant_b_file_event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-b"),
+            AxumPath(tenant_b_file_submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 2.0,
+                reason: Some("tenant-b file-backed contributor credit".to_string()),
+                external_ref: Some("frontier:tenant-b-file-contributor".to_string()),
+            }),
+        )
+        .await
+        .expect("tenant-b file-backed credit event succeeds");
+
+        let mut tenant_b_db_only_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_b_db_only_envelope);
+        tenant_b_db_only_envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        tenant_b_db_only_envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        tenant_b_db_only_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let tenant_b_db_only_submission_id = tenant_b_db_only_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_db_only_envelope),
+        )
+        .await
+        .expect("tenant-b DB-mirrored source succeeds");
+        let Json(tenant_b_db_only_event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-b"),
+            AxumPath(tenant_b_db_only_submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 9.0,
+                reason: Some("tenant-b DB-only contributor credit should stay hidden".to_string()),
+                external_ref: Some("frontier:tenant-b-db-only-contributor".to_string()),
+            }),
+        )
+        .await
+        .expect("tenant-b DB-only credit event succeeds");
+        std::fs::remove_file(submission_metadata_path(
+            temp.path(),
+            "tenant-b",
+            tenant_b_db_only_submission_id,
+        ))
+        .expect("tenant-b DB-only file metadata removed");
+
+        let Json(tenant_b_credit) = credit_handler(State(state.clone()), auth_headers("token-b"))
+            .await
+            .expect("tenant-b non-allowlisted credit summary uses file metadata");
+        assert_eq!(tenant_b_credit.accepted, 1);
+        assert_eq!(tenant_b_credit.credit_points_ledger, 2.0);
+        let Json(tenant_b_events) =
+            credit_events_handler(State(state.clone()), auth_headers("token-b"))
+                .await
+                .expect("tenant-b non-allowlisted credit events use file-backed records");
+        assert_eq!(tenant_b_events.len(), 1);
+        assert_eq!(tenant_b_events[0].event_id, tenant_b_file_event.event_id);
+        assert_ne!(tenant_b_events[0].event_id, tenant_b_db_only_event.event_id);
+
+        assert_ne!(tenant_a_event.event_id, tenant_b_file_event.event_id);
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+    }
+
+    #[tokio::test]
     async fn object_primary_review_tenant_allowlist_keeps_fallback_tenant_file_backed() {
         let Some(backend) = postgres_backend_for_ingest_test().await else {
             return;
