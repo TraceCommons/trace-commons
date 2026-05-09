@@ -266,7 +266,7 @@ Exit criteria:
 
 ### Phase 5: Production Retention and Revocation Propagation
 
-Status: partial metadata invalidation, exact delayed-credit reversal for manual utility, benchmark-conversion, and prediction-bound ranking utility credits, vector/export row invalidation, hash-only worker-queue invalidation propagation with an optional cache invalidator adapter, configured remote-object deletion for disabled cloud refs, and service-owned local/filesystem artifact deletion now exist; deployed invalidator/deleter operations, unsupported artifact payload deletion, and production hardening remain future work.
+Status: partial metadata invalidation, exact delayed-credit reversal for manual utility, benchmark-conversion, and prediction-bound ranking utility credits, vector/export row invalidation, hash-only worker-queue invalidation propagation with an optional cache invalidator adapter, configured remote-object deletion for disabled cloud refs, safe operational readiness gates for disabled-remote deleter configuration, and service-owned local/filesystem artifact deletion now exist; deployed invalidator/deleter operations, unsupported artifact payload deletion, and production hardening remain future work.
 
 Scope:
 
