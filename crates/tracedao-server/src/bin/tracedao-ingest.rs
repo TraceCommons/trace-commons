@@ -76090,6 +76090,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn db_tenant_policy_reads_tenant_allowlist_keeps_fallback_tenant_policy_backed() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let static_model_training_policy = TenantSubmissionPolicy {
+            allowed_consent_scopes: BTreeSet::from([ConsentScope::ModelTraining]),
+            allowed_uses: BTreeSet::from([TraceAllowedUse::ModelTraining]),
+        };
+        let mut tenant_policies = BTreeMap::new();
+        tenant_policies.insert("tenant-a".to_string(), static_model_training_policy.clone());
+        tenant_policies.insert("tenant-b".to_string(), static_model_training_policy);
+        let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            Some(backend.clone()),
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            tenant_policies,
+            true,
+            false,
+        );
+        Arc::make_mut(&mut state).tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+            TraceTenantRolloutFeature::DbTenantPolicyReads,
+            &["tenant-a"],
+        );
+
+        let db_policy_scopes = vec![
+            serde_storage_string(&ConsentScope::DebuggingEvaluation)
+                .expect("DB tenant policy scope serializes"),
+        ];
+        let db_policy_uses = vec![
+            serde_storage_string(&TraceAllowedUse::Evaluation)
+                .expect("DB tenant policy use serializes"),
+        ];
+        for (tenant_id, actor) in [("tenant-a", "admin-token-a"), ("tenant-b", "admin-token-b")] {
+            backend
+                .upsert_trace_tenant_policy(StorageTraceTenantPolicyWrite {
+                    tenant_id: tenant_id.to_string(),
+                    policy_version: format!("{tenant_id}-db-policy-v1"),
+                    allowed_consent_scopes: db_policy_scopes.clone(),
+                    allowed_uses: db_policy_uses.clone(),
+                    updated_by_principal_ref: principal_storage_ref(actor),
+                })
+                .await
+                .expect("DB tenant policy writes");
+        }
+
+        let mut tenant_a_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_a_envelope);
+        tenant_a_envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        tenant_a_envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        tenant_a_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let tenant_a_error = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(tenant_a_envelope),
+        )
+        .await
+        .expect_err("tenant-a allowlisted submit obeys DB tenant policy");
+        assert_eq!(tenant_a_error.0, StatusCode::FORBIDDEN);
+
+        let mut tenant_b_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_b_envelope);
+        tenant_b_envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        tenant_b_envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        tenant_b_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let Json(tenant_b_receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_envelope),
+        )
+        .await
+        .expect("tenant-b non-allowlisted submit keeps static tenant policy fallback");
+        assert_eq!(tenant_b_receipt.status, "accepted");
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+    }
+
+    #[tokio::test]
     async fn object_primary_review_tenant_allowlist_keeps_fallback_tenant_file_backed() {
         let Some(backend) = postgres_backend_for_ingest_test().await else {
             return;
