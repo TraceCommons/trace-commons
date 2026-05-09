@@ -32402,6 +32402,18 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         &[("tenant_storage_ref", &response.tenant_storage_ref)],
         response.retention.job_count,
     );
+    body.push_str("# HELP trace_commons_operational_retention_infrastructure Safe retention-worker infrastructure readiness flags.\n");
+    body.push_str("# TYPE trace_commons_operational_retention_infrastructure gauge\n");
+    push_prometheus_gauge(
+        &mut body,
+        &mut metric_count,
+        "trace_commons_operational_retention_infrastructure",
+        &[
+            ("tenant_storage_ref", &response.tenant_storage_ref),
+            ("state", "scheduler_enabled"),
+        ],
+        usize::from(response.retention.scheduler_enabled),
+    );
     body.push_str("# HELP trace_commons_operational_analytics_release_readiness Safe analytics broad-release readiness flags.\n");
     body.push_str("# TYPE trace_commons_operational_analytics_release_readiness gauge\n");
     for (state, value) in [
@@ -53689,7 +53701,8 @@ impl TraceOperationalSummaryResponse {
             inputs.generated_at,
             inputs.state,
         );
-        let retention = TraceOperationalRetentionSummary::from_db_summary(&inputs.db_summary);
+        let retention =
+            TraceOperationalRetentionSummary::from_db_summary(&inputs.db_summary, inputs.state);
         let analytics = TraceOperationalAnalyticsSummary::from_state(inputs.state);
         let object_store = TraceOperationalObjectStoreSummary::from_state(inputs.state);
         let vectors = TraceOperationalVectorSummary::from_records_and_db_summary(
@@ -54942,16 +54955,18 @@ struct TraceOperationalRetentionSummary {
     db_available: bool,
     job_count: usize,
     dry_run_count: usize,
+    scheduler_enabled: bool,
     jobs_by_status: BTreeMap<String, usize>,
     selected_revoked_total: u64,
     selected_expired_total: u64,
 }
 
 impl TraceOperationalRetentionSummary {
-    fn from_db_summary(db_summary: &TraceOperationalDbSummary) -> Self {
+    fn from_db_summary(db_summary: &TraceOperationalDbSummary, state: &AppState) -> Self {
         let mut summary = Self {
             db_available: db_summary.db_available,
             job_count: db_summary.retention_jobs.len(),
+            scheduler_enabled: state.retention_maintenance_scheduler.is_some(),
             ..Self::default()
         };
         for job in &db_summary.retention_jobs {
@@ -70326,6 +70341,48 @@ mod tests {
         )));
         assert!(!metrics.contains("operational-summary-export-token"));
         assert!(!metrics.contains("do not expose raw export scheduler note"));
+    }
+
+    #[tokio::test]
+    async fn operational_summary_reports_retention_scheduler_without_token_or_purpose() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        {
+            let state = Arc::make_mut(&mut state);
+            state.retention_maintenance_scheduler =
+                Some(TraceRetentionMaintenanceSchedulerConfig {
+                    worker_token: SecretString::from(
+                        "operational-summary-retention-token".to_string(),
+                    ),
+                    interval: StdDuration::from_secs(210),
+                    dry_run: true,
+                    purpose: "do not expose raw retention ops purpose".to_string(),
+                    prune_export_cache: true,
+                    max_export_age_hours: Some(24),
+                    purge_expired_before: Some(Utc::now()),
+                });
+        }
+
+        let Json(response) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect retention infrastructure readiness");
+        let response_json = serde_json::to_value(&response).expect("response serializes");
+        assert_eq!(
+            response_json["retention"]["scheduler_enabled"],
+            serde_json::json!(true)
+        );
+        let response_text = serde_json::to_string(&response).expect("response serializes");
+        assert!(!response_text.contains("operational-summary-retention-token"));
+        assert!(!response_text.contains("do not expose raw retention ops purpose"));
+
+        let (metrics, _) = trace_operational_metrics_body(&response);
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_retention_infrastructure{{tenant_storage_ref=\"{tenant_ref}\",state=\"scheduler_enabled\"}} 1"
+        )));
+        assert!(!metrics.contains("operational-summary-retention-token"));
+        assert!(!metrics.contains("do not expose raw retention ops purpose"));
     }
 
     #[tokio::test]
