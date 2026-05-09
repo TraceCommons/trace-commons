@@ -321,6 +321,22 @@ const TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_MAX_DELAY_SECONDS: &str =
     "TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_MAX_DELAY_SECONDS";
 const TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_REASON: &str =
     "TRACE_COMMONS_EXPORT_JOB_SCHEDULER_RETRY_REASON";
+const TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_ENABLED: &str =
+    "TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_ENABLED";
+const TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_TOKEN: &str =
+    "TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_TOKEN";
+const TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_INTERVAL_SECONDS";
+const TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_DRY_RUN: &str =
+    "TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_DRY_RUN";
+const TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_PURPOSE: &str =
+    "TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_PURPOSE";
+const TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_PRUNE_EXPORT_CACHE: &str =
+    "TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_PRUNE_EXPORT_CACHE";
+const TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_MAX_EXPORT_AGE_HOURS: &str =
+    "TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_MAX_EXPORT_AGE_HOURS";
+const TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_PURGE_EXPIRED_BEFORE: &str =
+    "TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_PURGE_EXPIRED_BEFORE";
 const TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_ENABLED: &str =
     "TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_ENABLED";
 const TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_TOKEN: &str =
@@ -523,6 +539,9 @@ const TRACE_EXPORT_JOB_RETRY_DEFAULT_BASE_DELAY_SECONDS: i64 = 60;
 const TRACE_EXPORT_JOB_RETRY_DEFAULT_MAX_DELAY_SECONDS: i64 = 3600;
 const TRACE_EXPORT_JOB_RETRY_MAX_DELAY_SECONDS_LIMIT: i64 = 86_400;
 const TRACE_EXPORT_JOB_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 60;
+const TRACE_RETENTION_MAINTENANCE_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 300;
+const TRACE_RETENTION_MAINTENANCE_SCHEDULER_DEFAULT_PURPOSE: &str =
+    "scheduled trace retention maintenance";
 const TRACE_NEAR_CREDIT_OUTBOX_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 60;
 const TRACE_NEAR_CREDIT_OUTBOX_SCHEDULER_DEFAULT_PURPOSE: &str =
     "scheduled trace NEAR credit outbox";
@@ -581,6 +600,11 @@ async fn main() -> anyhow::Result<()> {
         state.near_credit_outbox_scheduler.as_ref(),
     )
     .await?;
+    validate_trace_retention_maintenance_scheduler_config(
+        state.as_ref(),
+        state.retention_maintenance_scheduler.as_ref(),
+    )
+    .await?;
     validate_trace_vector_index_scheduler_config(
         state.as_ref(),
         state.vector_index_scheduler.as_ref(),
@@ -616,6 +640,10 @@ async fn main() -> anyhow::Result<()> {
     spawn_trace_near_credit_outbox_scheduler_task(
         &state,
         state.near_credit_outbox_scheduler.clone(),
+    );
+    spawn_trace_retention_maintenance_scheduler_task(
+        &state,
+        state.retention_maintenance_scheduler.clone(),
     );
     spawn_trace_vector_index_scheduler_task(&state, state.vector_index_scheduler.clone());
     spawn_trace_benchmark_registry_scheduler_task(
@@ -714,6 +742,7 @@ struct AppState {
     vector_searcher_timeout_ms: Option<u64>,
     require_external_vector_searcher: bool,
     export_job_scheduler: Option<TraceExportJobSchedulerConfig>,
+    retention_maintenance_scheduler: Option<TraceRetentionMaintenanceSchedulerConfig>,
     vector_index_scheduler: Option<TraceVectorIndexSchedulerConfig>,
     benchmark_registry_scheduler: Option<TraceBenchmarkRegistrySchedulerConfig>,
     benchmark_pipeline_scheduler: Option<TraceBenchmarkPipelineSchedulerConfig>,
@@ -749,6 +778,11 @@ struct TraceExportJobSchedulerConfig {
 struct TraceExportJobSchedulerTickSummary {
     retry_failed: TraceExportJobsRetryFailedResponse,
     run_queued: TraceExportJobsRunQueuedResponse,
+}
+
+#[derive(Debug)]
+struct TraceRetentionMaintenanceSchedulerTickSummary {
+    run: TraceMaintenanceResponse,
 }
 
 #[derive(Debug)]
@@ -799,6 +833,17 @@ struct TraceNearCreditOutboxSchedulerConfig {
     confirm_limit: u32,
     dry_run: bool,
     purpose: String,
+}
+
+#[derive(Clone)]
+struct TraceRetentionMaintenanceSchedulerConfig {
+    worker_token: SecretString,
+    interval: StdDuration,
+    dry_run: bool,
+    purpose: String,
+    prune_export_cache: bool,
+    max_export_age_hours: Option<i64>,
+    purge_expired_before: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone)]
@@ -2253,6 +2298,8 @@ impl AppState {
         let near_credit_outbox_scheduler =
             parse_trace_near_credit_outbox_scheduler_config_from_env()?;
         let export_job_scheduler = parse_trace_export_job_scheduler_config_from_env()?;
+        let retention_maintenance_scheduler =
+            parse_trace_retention_maintenance_scheduler_config_from_env()?;
         let vector_index_scheduler = parse_trace_vector_index_scheduler_config_from_env()?;
         let benchmark_registry_scheduler =
             parse_trace_benchmark_registry_scheduler_config_from_env()?;
@@ -2464,6 +2511,7 @@ impl AppState {
             vector_searcher_timeout_ms,
             require_external_vector_searcher,
             export_job_scheduler,
+            retention_maintenance_scheduler,
             vector_index_scheduler,
             benchmark_registry_scheduler,
             benchmark_pipeline_scheduler,
@@ -3487,6 +3535,60 @@ fn parse_trace_export_job_scheduler_config_from_env()
     }))
 }
 
+fn parse_trace_retention_maintenance_scheduler_config_from_env()
+-> anyhow::Result<Option<TraceRetentionMaintenanceSchedulerConfig>> {
+    let enabled = env_truthy(TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_ENABLED);
+    let worker_token = optional_trimmed_env(TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_TOKEN)?;
+    if !enabled && worker_token.is_none() {
+        return Ok(None);
+    }
+    let Some(worker_token) = worker_token else {
+        anyhow::bail!(
+            "{TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_TOKEN}"
+        );
+    };
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_INTERVAL_SECONDS,
+        TRACE_RETENTION_MAINTENANCE_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
+        5,
+        86_400,
+    )?;
+    let purpose = optional_trimmed_env(TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_PURPOSE)?
+        .unwrap_or_else(|| TRACE_RETENTION_MAINTENANCE_SCHEDULER_DEFAULT_PURPOSE.to_string());
+    let purpose = validate_retention_maintenance_scheduler_purpose(&purpose)
+        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    let prune_export_cache = parse_optional_scheduler_bool_env(
+        TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_PRUNE_EXPORT_CACHE,
+        true,
+    )?;
+    let max_export_age_hours = parse_optional_scheduler_optional_i64_env(
+        TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_MAX_EXPORT_AGE_HOURS,
+        0,
+        87_600,
+    )?;
+    let purge_expired_before =
+        optional_trimmed_env(TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_PURGE_EXPIRED_BEFORE)?
+            .map(|configured| {
+                DateTime::parse_from_rfc3339(&configured)
+                    .map(|parsed| parsed.with_timezone(&Utc))
+                    .with_context(|| {
+                        format!(
+                            "{TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_PURGE_EXPIRED_BEFORE} must be an RFC3339 timestamp"
+                        )
+                    })
+            })
+            .transpose()?;
+    Ok(Some(TraceRetentionMaintenanceSchedulerConfig {
+        worker_token: SecretString::from(worker_token),
+        interval: StdDuration::from_secs(interval_seconds),
+        dry_run: env_truthy(TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_DRY_RUN),
+        purpose,
+        prune_export_cache,
+        max_export_age_hours,
+        purge_expired_before,
+    }))
+}
+
 fn parse_trace_vector_index_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceVectorIndexSchedulerConfig>> {
     let enabled = env_truthy(TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_ENABLED);
@@ -3918,6 +4020,24 @@ fn parse_optional_scheduler_bool_env(name: &'static str, default: bool) -> anyho
         "0" | "false" | "no" | "off" => Ok(false),
         _ => anyhow::bail!("{name} must be true or false"),
     }
+}
+
+fn parse_optional_scheduler_optional_i64_env(
+    name: &'static str,
+    min: i64,
+    max: i64,
+) -> anyhow::Result<Option<i64>> {
+    let Some(configured) = optional_trimmed_env(name)? else {
+        return Ok(None);
+    };
+    let value = configured
+        .parse::<i64>()
+        .with_context(|| format!("{name} must be a non-negative integer"))?;
+    anyhow::ensure!(
+        (min..=max).contains(&value),
+        "{name} must be between {min} and {max}"
+    );
+    Ok(Some(value))
 }
 
 fn parse_optional_scheduler_i64_env(
@@ -5672,6 +5792,51 @@ fn spawn_trace_near_credit_outbox_scheduler_task(
     });
 }
 
+fn spawn_trace_retention_maintenance_scheduler_task(
+    state: &Arc<AppState>,
+    config: Option<TraceRetentionMaintenanceSchedulerConfig>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    let state = state.clone();
+    tracing::info!(
+        interval_seconds = config.interval.as_secs(),
+        dry_run = config.dry_run,
+        prune_export_cache = config.prune_export_cache,
+        max_export_age_hours_configured = config.max_export_age_hours.is_some(),
+        purge_expired_before_configured = config.purge_expired_before.is_some(),
+        "Trace Commons retention maintenance scheduler enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(config.interval).await;
+            match run_trace_retention_maintenance_scheduler_tick(state.clone(), &config).await {
+                Ok(summary) => {
+                    tracing::info!(
+                        tenant_storage_ref = %summary.run.tenant_storage_ref,
+                        records_marked_revoked = summary.run.records_marked_revoked,
+                        records_marked_expired = summary.run.records_marked_expired,
+                        records_marked_purged = summary.run.records_marked_purged,
+                        export_cache_files_pruned = summary.run.export_cache_files_pruned,
+                        trace_object_files_deleted = summary.run.trace_object_files_deleted,
+                        encrypted_artifacts_deleted = summary.run.encrypted_artifacts_deleted,
+                        dry_run = summary.run.dry_run,
+                        "Trace Commons retention maintenance scheduler tick completed"
+                    );
+                }
+                Err((status, Json(error))) => {
+                    tracing::warn!(
+                        status = %status,
+                        error_hash = %safe_display_error_hash(&error.error),
+                        "Trace Commons retention maintenance scheduler tick failed"
+                    );
+                }
+            }
+        }
+    });
+}
+
 fn spawn_trace_vector_index_scheduler_task(
     state: &Arc<AppState>,
     config: Option<TraceVectorIndexSchedulerConfig>,
@@ -6013,6 +6178,33 @@ fn trace_near_credit_outbox_scheduler_config_error(
 ) -> anyhow::Error {
     anyhow::anyhow!(
         "invalid Trace Commons NEAR credit outbox scheduler configuration: status={}, error={}",
+        error.0,
+        error.1.0.error
+    )
+}
+
+async fn validate_trace_retention_maintenance_scheduler_config(
+    state: &AppState,
+    config: Option<&TraceRetentionMaintenanceSchedulerConfig>,
+) -> anyhow::Result<()> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
+        .map_err(trace_retention_maintenance_scheduler_config_error)?;
+    let auth = authenticate_with_tenant_access_grant(state, &headers)
+        .await
+        .map_err(trace_retention_maintenance_scheduler_config_error)?;
+    require_retention_operator(&auth)
+        .map_err(trace_retention_maintenance_scheduler_config_error)?;
+    Ok(())
+}
+
+fn trace_retention_maintenance_scheduler_config_error(
+    error: (StatusCode, Json<ApiError>),
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "invalid Trace Commons retention maintenance scheduler configuration: status={}, error={}",
         error.0,
         error.1.0.error
     )
@@ -7164,6 +7356,12 @@ struct TraceCommonsConfigStatusResponse {
     export_job_scheduler_retry_failed_max_retry_count: Option<u32>,
     export_job_scheduler_retry_base_delay_seconds: Option<i64>,
     export_job_scheduler_retry_max_delay_seconds: Option<i64>,
+    retention_maintenance_scheduler_configured: bool,
+    retention_maintenance_scheduler_interval_seconds: Option<u64>,
+    retention_maintenance_scheduler_dry_run: Option<bool>,
+    retention_maintenance_scheduler_prune_export_cache: Option<bool>,
+    retention_maintenance_scheduler_max_export_age_hours: Option<i64>,
+    retention_maintenance_scheduler_purge_expired_before_configured: Option<bool>,
     vector_index_worker_default_limit: usize,
     vector_index_worker_max_limit: usize,
     vector_index_scheduler_configured: bool,
@@ -7486,6 +7684,27 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .export_job_scheduler
             .as_ref()
             .map(|config| config.retry_failed_max_delay_seconds),
+        retention_maintenance_scheduler_configured: state.retention_maintenance_scheduler.is_some(),
+        retention_maintenance_scheduler_interval_seconds: state
+            .retention_maintenance_scheduler
+            .as_ref()
+            .map(|config| config.interval.as_secs()),
+        retention_maintenance_scheduler_dry_run: state
+            .retention_maintenance_scheduler
+            .as_ref()
+            .map(|config| config.dry_run),
+        retention_maintenance_scheduler_prune_export_cache: state
+            .retention_maintenance_scheduler
+            .as_ref()
+            .map(|config| config.prune_export_cache),
+        retention_maintenance_scheduler_max_export_age_hours: state
+            .retention_maintenance_scheduler
+            .as_ref()
+            .and_then(|config| config.max_export_age_hours),
+        retention_maintenance_scheduler_purge_expired_before_configured: state
+            .retention_maintenance_scheduler
+            .as_ref()
+            .map(|config| config.purge_expired_before.is_some()),
         vector_index_worker_default_limit: TRACE_VECTOR_INDEX_WORKER_DEFAULT_LIMIT,
         vector_index_worker_max_limit: TRACE_VECTOR_INDEX_WORKER_MAX_LIMIT,
         vector_index_scheduler_configured: state.vector_index_scheduler.is_some(),
@@ -20365,6 +20584,23 @@ fn validate_vector_index_scheduler_purpose(purpose: &str) -> ApiResult<String> {
     Ok(purpose)
 }
 
+fn validate_retention_maintenance_scheduler_purpose(purpose: &str) -> ApiResult<String> {
+    let purpose = purpose.trim().to_string();
+    if purpose.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "retention maintenance scheduler requires a non-empty purpose",
+        ));
+    }
+    if purpose.len() > 1024 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "retention maintenance scheduler purpose is too long",
+        ));
+    }
+    Ok(purpose)
+}
+
 fn validate_benchmark_registry_scheduler_purpose(purpose: &str) -> ApiResult<String> {
     let purpose = purpose.trim().to_string();
     if purpose.is_empty() {
@@ -26818,6 +27054,26 @@ async fn run_trace_near_credit_outbox_scheduler_tick(
     )
     .await?;
     Ok(TraceNearCreditOutboxSchedulerTickSummary { submit, confirm })
+}
+
+async fn run_trace_retention_maintenance_scheduler_tick(
+    state: Arc<AppState>,
+    config: &TraceRetentionMaintenanceSchedulerConfig,
+) -> ApiResult<TraceRetentionMaintenanceSchedulerTickSummary> {
+    let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())?;
+    let Json(run) = retention_maintenance_handler(
+        State(state),
+        headers,
+        Json(TraceRetentionMaintenanceRequest {
+            purpose: Some(config.purpose.clone()),
+            dry_run: config.dry_run,
+            prune_export_cache: config.prune_export_cache,
+            max_export_age_hours: config.max_export_age_hours,
+            purge_expired_before: config.purge_expired_before,
+        }),
+    )
+    .await?;
+    Ok(TraceRetentionMaintenanceSchedulerTickSummary { run })
 }
 
 async fn run_trace_vector_index_scheduler_tick(
@@ -56267,6 +56523,7 @@ mod tests {
             vector_searcher_timeout_ms: None,
             require_external_vector_searcher: false,
             export_job_scheduler: None,
+            retention_maintenance_scheduler: None,
             vector_index_scheduler: None,
             benchmark_registry_scheduler: None,
             benchmark_pipeline_scheduler: None,
@@ -60754,6 +61011,74 @@ mod tests {
         let object = value.as_object().expect("config status is object");
         assert!(!object.contains_key("export_job_scheduler_token"));
         assert!(!object.contains_key("export_job_scheduler_retry_reason"));
+    }
+
+    #[tokio::test]
+    async fn admin_config_status_reports_retention_maintenance_scheduler_without_token_or_purpose()
+    {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).retention_maintenance_scheduler =
+            Some(TraceRetentionMaintenanceSchedulerConfig {
+                worker_token: SecretString::from("config-status-retention-token".to_string()),
+                interval: StdDuration::from_secs(210),
+                dry_run: true,
+                purpose: "do not expose raw retention scheduler note".to_string(),
+                prune_export_cache: false,
+                max_export_age_hours: Some(12),
+                purge_expired_before: Some(Utc::now()),
+            });
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/config-status")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("config status response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body bytes");
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(
+            value["retention_maintenance_scheduler_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["retention_maintenance_scheduler_interval_seconds"],
+            serde_json::json!(210)
+        );
+        assert_eq!(
+            value["retention_maintenance_scheduler_dry_run"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["retention_maintenance_scheduler_prune_export_cache"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["retention_maintenance_scheduler_max_export_age_hours"],
+            serde_json::json!(12)
+        );
+        assert_eq!(
+            value["retention_maintenance_scheduler_purge_expired_before_configured"],
+            serde_json::json!(true)
+        );
+        assert!(!body_text.contains("config-status-retention-token"));
+        assert!(!body_text.contains("do not expose raw retention scheduler note"));
+        let object = value.as_object().expect("config status is object");
+        assert!(!object.contains_key("retention_maintenance_scheduler_token"));
+        assert!(!object.contains_key("retention_maintenance_scheduler_purpose"));
+        assert!(!object.contains_key("retention_maintenance_scheduler_purge_expired_before"));
     }
 
     #[tokio::test]
@@ -67346,6 +67671,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retention_maintenance_scheduler_config_requires_retention_worker_auth_at_startup() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = validate_trace_retention_maintenance_scheduler_config(
+            state.as_ref(),
+            Some(&TraceRetentionMaintenanceSchedulerConfig {
+                worker_token: SecretString::from("token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                dry_run: true,
+                purpose: "scheduled retention maintenance".to_string(),
+                prune_export_cache: true,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect_err("contributor token must not start retention maintenance scheduler");
+
+        assert!(
+            error
+                .to_string()
+                .contains("reviewer, admin, or retention worker token required")
+        );
+
+        validate_trace_retention_maintenance_scheduler_config(
+            state.as_ref(),
+            Some(&TraceRetentionMaintenanceSchedulerConfig {
+                worker_token: SecretString::from("retention-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                dry_run: true,
+                purpose: "scheduled retention maintenance".to_string(),
+                prune_export_cache: true,
+                max_export_age_hours: None,
+                purge_expired_before: None,
+            }),
+        )
+        .await
+        .expect("retention-worker auth can start retention maintenance scheduler");
+    }
+
+    #[tokio::test]
     async fn benchmark_registry_scheduler_config_requires_benchmark_worker_auth_and_live_adapters()
     {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -71582,6 +71949,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retention_maintenance_scheduler_tick_purges_tenant_expired_objects_only() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let artifact_store = test_artifact_store(artifact_temp.path());
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            None,
+            Some(artifact_store.clone()),
+            false,
+            false,
+            false,
+            false,
+        );
+        let expired_at = Utc::now() - Duration::days(2);
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("tenant-a submission succeeds");
+        let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("tenant-a record reads")
+            .expect("tenant-a record exists");
+        let object_path = temp.path().join(&record.object_key);
+        let receipt = record
+            .artifact_receipt
+            .clone()
+            .expect("tenant-a encrypted receipt exists");
+        record.status = TraceCorpusStatus::Expired;
+        record.expires_at = Some(expired_at);
+        write_submission_record(temp.path(), &record).expect("tenant-a expired record writes");
+
+        let mut tenant_b_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_b_envelope);
+        let tenant_b_submission_id = tenant_b_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_envelope),
+        )
+        .await
+        .expect("tenant-b submission succeeds");
+        let mut tenant_b_record =
+            read_submission_record(temp.path(), "tenant-b", tenant_b_submission_id)
+                .expect("tenant-b record reads")
+                .expect("tenant-b record exists");
+        let tenant_b_object_path = temp.path().join(&tenant_b_record.object_key);
+        let tenant_b_receipt = tenant_b_record
+            .artifact_receipt
+            .clone()
+            .expect("tenant-b encrypted receipt exists");
+        tenant_b_record.status = TraceCorpusStatus::Expired;
+        tenant_b_record.expires_at = Some(expired_at);
+        write_submission_record(temp.path(), &tenant_b_record)
+            .expect("tenant-b expired record writes");
+
+        let cutoff = Utc::now();
+        let dry_run = run_trace_retention_maintenance_scheduler_tick(
+            state.clone(),
+            &TraceRetentionMaintenanceSchedulerConfig {
+                worker_token: SecretString::from("retention-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                dry_run: true,
+                purpose: "scheduled retention maintenance dry run".to_string(),
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: Some(cutoff),
+            },
+        )
+        .await
+        .expect("retention maintenance scheduler dry-run tick succeeds");
+        assert!(dry_run.run.dry_run);
+        assert_eq!(dry_run.run.tenant_id, "tenant-a");
+        assert_eq!(dry_run.run.records_marked_purged, 1);
+        assert_eq!(dry_run.run.trace_object_files_deleted, 0);
+        assert_eq!(dry_run.run.encrypted_artifacts_deleted, 0);
+        assert!(object_path.exists());
+        artifact_store
+            .read_artifact(&tenant_storage_ref("tenant-a"), &receipt)
+            .expect("dry-run keeps tenant-a encrypted artifact");
+        assert!(tenant_b_object_path.exists());
+        artifact_store
+            .read_artifact(&tenant_storage_ref("tenant-b"), &tenant_b_receipt)
+            .expect("dry-run keeps tenant-b encrypted artifact");
+
+        let live = run_trace_retention_maintenance_scheduler_tick(
+            state,
+            &TraceRetentionMaintenanceSchedulerConfig {
+                worker_token: SecretString::from("retention-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                dry_run: false,
+                purpose: "scheduled retention maintenance".to_string(),
+                prune_export_cache: false,
+                max_export_age_hours: None,
+                purge_expired_before: Some(cutoff),
+            },
+        )
+        .await
+        .expect("retention maintenance scheduler live tick succeeds");
+        assert!(!live.run.dry_run);
+        assert_eq!(live.run.tenant_id, "tenant-a");
+        assert_eq!(live.run.records_marked_purged, 1);
+        assert_eq!(live.run.trace_object_files_deleted, 1);
+        assert_eq!(live.run.encrypted_artifacts_deleted, 1);
+        assert!(!object_path.exists());
+        artifact_store
+            .read_artifact(&tenant_storage_ref("tenant-a"), &receipt)
+            .expect_err("live tick deletes tenant-a encrypted artifact");
+        let purged_record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("tenant-a record reads after live tick")
+            .expect("tenant-a record remains as tombstone");
+        assert_eq!(purged_record.status, TraceCorpusStatus::Purged);
+        assert!(purged_record.purged_at.is_some());
+        assert!(tenant_b_object_path.exists());
+        artifact_store
+            .read_artifact(&tenant_storage_ref("tenant-b"), &tenant_b_receipt)
+            .expect("tenant-a scheduler tick keeps tenant-b encrypted artifact");
+        let tenant_b_record_after =
+            read_submission_record(temp.path(), "tenant-b", tenant_b_submission_id)
+                .expect("tenant-b record reads after live tick")
+                .expect("tenant-b record remains");
+        assert_eq!(tenant_b_record_after.status, TraceCorpusStatus::Expired);
+        assert!(tenant_b_record_after.purged_at.is_none());
+    }
+
+    #[tokio::test]
     async fn maintenance_purges_filesystem_remote_object_primary_artifact() {
         let temp = tempfile::tempdir().expect("temp dir");
         let remote_temp = tempfile::tempdir().expect("remote artifact temp dir");
@@ -72211,6 +72709,7 @@ mod tests {
             vector_searcher_timeout_ms: None,
             require_external_vector_searcher: false,
             export_job_scheduler: None,
+            retention_maintenance_scheduler: None,
             vector_index_scheduler: None,
             benchmark_registry_scheduler: None,
             benchmark_pipeline_scheduler: None,
