@@ -1339,7 +1339,7 @@ When the central issuer principal allowlist is configured, unlisted admins can
 still inspect holds but cannot create or release credit holds, regardless of
 whether a NEAR account operation would be enqueued.
 
-Set `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL` to point at the relayer's confirmation endpoint; utility workers can then call `POST /v1/workers/near-credit-outbox/confirm` to poll submitted NEAR rows, mark confirmed transactions, or record hashed terminal failures without sending raw NEAR call args. NEAR outbox workers revalidate stored method-call payloads before submit or confirm: the contract id, method allow-list, method-specific hash-only args, and idempotency key must match the canonical payload, or the row is marked failed before it reaches the relayer. Submitted and confirmed transaction hashes must be 43-44 character base58 NEAR transaction hashes. Confirmations must bind to the exact submitted NEAR transaction hash already recorded on the outbox row; mismatched confirmation evidence stays unconfirmed and records only a safe error hash for retry/inspection. `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_BEARER_TOKEN` adds confirmation bearer auth, and `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_TIMEOUT_MS` bounds confirmation calls.
+Set `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL` to point at the relayer's confirmation endpoint; utility workers can then call `POST /v1/workers/near-credit-outbox/confirm` to poll submitted NEAR rows, mark confirmed transactions, or record hashed terminal failures without sending raw NEAR call args. NEAR outbox workers revalidate stored method-call payloads before submit or confirm: the contract id, method allow-list, method-specific hash-only args, bounded policy-version identifiers, and idempotency key must match the canonical payload, or the row is marked failed before it reaches the relayer. Submitted and confirmed transaction hashes must be 43-44 character base58 NEAR transaction hashes. Confirmations must bind to the exact submitted NEAR transaction hash already recorded on the outbox row; mismatched confirmation evidence stays unconfirmed and records only a safe error hash for retry/inspection. `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_BEARER_TOKEN` adds confirmation bearer auth, and `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_TIMEOUT_MS` bounds confirmation calls.
 
 Deployments that want the server to own non-transferable credit receipt delivery can configure `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_TOKEN` with a utility-worker bearer token. Startup validates the token, requires submitter and confirmation adapters for live mode, honors `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH`, checks the central issuer principal allowlist for live mode when configured, and the in-process scheduler sleeps for `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS` (default 60) before running the same submit and confirm worker routes. `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_SUBMIT_LIMIT` and `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_CONFIRM_LIMIT` cap each pass from 1 to 500, `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_DRY_RUN=true` audits due counts without changing outbox rows, and `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_PURPOSE` is audited without being returned by config-status.
 
@@ -2008,8 +2008,9 @@ codes. Finalized batches record the calibration run id plus the calibration
 report hash and joined-evidence hash used for the gate.
 When a settlement request includes `near_contract_id`, the NEAR payload builder
 validates it as a lowercase NEAR account id before any settlement batch or
-outbox row is persisted; if a central contract is configured, mismatched request
-contracts fail closed before side effects.
+outbox row is persisted; settlement and reversal receipt payloads also require
+bounded canonical `policy_version` identifiers. If a central contract is
+configured, mismatched request contracts fail closed before side effects.
 
 Production settlement schedulers should use
 `POST /v1/workers/credit-settlements/run` rather than the admin settlement

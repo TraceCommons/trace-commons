@@ -167,8 +167,9 @@ The NEAR path is intentionally an outbox of deterministic method-call payloads
 for a non-transferable receipt contract. The payload builder only emits
 `settle_credit_receipt`, `reverse_credit_receipt`, `freeze_credit_account`, and
 `unfreeze_credit_account` calls, rejects malformed NEAR account ids, validates
-the method-specific hash-only argument shape, recomputes the idempotency key,
-and rejects any other NEAR credit method. Configured credit holds enqueue
+the method-specific hash-only argument shape including bounded policy-version
+identifiers, recomputes the idempotency key, and rejects any other NEAR credit
+method. Configured credit holds enqueue
 account-freeze rows when an account transitions from zero to one active holds
 and account-unfreeze rows when the last active hold is released. Stored outbox
 calls are revalidated before submit or confirm workers hand them to a relayer,

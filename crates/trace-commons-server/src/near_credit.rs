@@ -184,10 +184,7 @@ fn validate_receipt(receipt: &NearCreditReceipt) -> anyhow::Result<()> {
     ensure_hash_like("source_list_hash", &receipt.source_list_hash)?;
     ensure_hash_like("attestation_hash", &receipt.attestation_hash)?;
     ensure_hash_like("issuer_signature_hash", &receipt.issuer_signature_hash)?;
-    anyhow::ensure!(
-        !receipt.policy_version.trim().is_empty(),
-        "policy_version is required"
-    );
+    ensure_policy_version_like("policy_version", &receipt.policy_version)?;
     anyhow::ensure!(
         receipt.amount_micros > 0,
         "settled NEAR credit amount must be positive"
@@ -271,6 +268,22 @@ fn ensure_hash_like(label: &str, value: &str) -> anyhow::Result<()> {
                 .chars()
                 .all(|ch| ch.is_ascii_digit() || matches!(ch, 'a'..='f')),
         "{label} must be a canonical sha256-prefixed hex digest"
+    );
+    Ok(())
+}
+
+fn ensure_policy_version_like(label: &str, value: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!value.trim().is_empty(), "{label} is required");
+    anyhow::ensure!(
+        value.trim() == value,
+        "{label} must not contain leading or trailing whitespace"
+    );
+    anyhow::ensure!(value.len() <= 256, "{label} is too long");
+    anyhow::ensure!(
+        value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':')),
+        "{label} contains unsupported characters"
     );
     Ok(())
 }
