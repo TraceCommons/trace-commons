@@ -106667,8 +106667,127 @@ mod tests {
         .expect_err("utility worker cannot self-declare reviewer ranking label authority");
         assert_eq!(label_error.0, StatusCode::FORBIDDEN);
 
+        let reviewer_frontier_error = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: preferred_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_000_000,
+                evidence_hash: sha256_prefixed("frontier-spoofed-label-source"),
+                external_ref: "frontier-private-spoofed-label-source".to_string(),
+            }),
+        )
+        .await
+        .expect_err("reviewer cannot self-declare frontier-lab ranking label authority");
+        assert_eq!(reviewer_frontier_error.0, StatusCode::FORBIDDEN);
+
+        let benchmark_system_error = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: preferred_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::System,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_000_000,
+                evidence_hash: sha256_prefixed("system-spoofed-label-source"),
+                external_ref: "system-private-spoofed-label-source".to_string(),
+            }),
+        )
+        .await
+        .expect_err("benchmark worker cannot self-declare system ranking label authority");
+        assert_eq!(benchmark_system_error.0, StatusCode::FORBIDDEN);
+
+        let process_eval_benchmark_error = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("process-eval-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: preferred_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Benchmark,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_000_000,
+                evidence_hash: sha256_prefixed("benchmark-spoofed-label-source"),
+                external_ref: "benchmark-private-spoofed-label-source".to_string(),
+            }),
+        )
+        .await
+        .expect_err(
+            "process evaluation worker cannot self-declare benchmark ranking label authority",
+        );
+        assert_eq!(process_eval_benchmark_error.0, StatusCode::FORBIDDEN);
+
+        let Json(reviewer_label) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: preferred_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_000_000,
+                evidence_hash: sha256_prefixed("reviewer-authorized-label-source"),
+                external_ref: "reviewer-private-authorized-label-source".to_string(),
+            }),
+        )
+        .await
+        .expect("reviewer can write reviewer ranking label authority");
+        assert_eq!(
+            reviewer_label.label_source,
+            StorageTraceRankingLabelSource::Reviewer
+        );
+
+        let Json(benchmark_label) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: preferred_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Benchmark,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_000_000,
+                evidence_hash: sha256_prefixed("benchmark-authorized-label-source"),
+                external_ref: "benchmark-private-authorized-label-source".to_string(),
+            }),
+        )
+        .await
+        .expect("benchmark worker can write benchmark ranking label authority");
+        assert_eq!(
+            benchmark_label.label_source,
+            StorageTraceRankingLabelSource::Benchmark
+        );
+
+        let Json(system_label) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("process-eval-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: preferred_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::System,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_000_000,
+                evidence_hash: sha256_prefixed("system-authorized-label-source"),
+                external_ref: "system-private-authorized-label-source".to_string(),
+            }),
+        )
+        .await
+        .expect("process evaluation worker can write system ranking label authority");
+        assert_eq!(
+            system_label.label_source,
+            StorageTraceRankingLabelSource::System
+        );
+
         let preference_error = ranking_preference_label_handler(
-            State(state),
+            State(state.clone()),
             auth_headers("utility-worker-token-a"),
             Json(TraceRankingPreferenceLabelRequest {
                 preferred_submission_id,
@@ -106684,6 +106803,84 @@ mod tests {
         .await
         .expect_err("utility worker cannot self-declare reviewer preference authority");
         assert_eq!(preference_error.0, StatusCode::FORBIDDEN);
+
+        let reviewer_frontier_preference_error = ranking_preference_label_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id,
+                rejected_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 850_000,
+                evidence_hash: sha256_prefixed("frontier-spoofed-preference-source"),
+                external_ref: "frontier-private-spoofed-preference-source".to_string(),
+            }),
+        )
+        .await
+        .expect_err("reviewer cannot self-declare frontier-lab preference authority");
+        assert_eq!(reviewer_frontier_preference_error.0, StatusCode::FORBIDDEN);
+
+        let benchmark_system_preference_error = ranking_preference_label_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id,
+                rejected_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::System,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 850_000,
+                evidence_hash: sha256_prefixed("system-spoofed-preference-source"),
+                external_ref: "system-private-spoofed-preference-source".to_string(),
+            }),
+        )
+        .await
+        .expect_err("benchmark worker cannot self-declare system preference authority");
+        assert_eq!(benchmark_system_preference_error.0, StatusCode::FORBIDDEN);
+
+        let Json(benchmark_preference) = ranking_preference_label_handler(
+            State(state.clone()),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id,
+                rejected_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Benchmark,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 850_000,
+                evidence_hash: sha256_prefixed("benchmark-authorized-preference-source"),
+                external_ref: "benchmark-private-authorized-preference-source".to_string(),
+            }),
+        )
+        .await
+        .expect("benchmark worker can write benchmark preference authority");
+        assert_eq!(
+            benchmark_preference.label_source,
+            StorageTraceRankingLabelSource::Benchmark
+        );
+
+        let Json(system_preference) = ranking_preference_label_handler(
+            State(state),
+            auth_headers("process-eval-worker-token-a"),
+            Json(TraceRankingPreferenceLabelRequest {
+                preferred_submission_id,
+                rejected_submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::System,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                preference_strength_micros: 850_000,
+                evidence_hash: sha256_prefixed("system-authorized-preference-source"),
+                external_ref: "system-private-authorized-preference-source".to_string(),
+            }),
+        )
+        .await
+        .expect("process evaluation worker can write system preference authority");
+        assert_eq!(
+            system_preference.label_source,
+            StorageTraceRankingLabelSource::System
+        );
     }
 
     #[tokio::test]
