@@ -1844,7 +1844,10 @@ Requests with `preflight_only: true` stop after eligibility checks and return
 `eligible`/`skipped` decisions without invoking the direct coordinator or
 creating worker rows, credit events, settlement batches, or NEAR outbox rows.
 This gives external schedulers a safe retry surface without granting generic
-admin settlement access.
+admin settlement access. When the central issuer principal allowlist is
+configured, the route rejects non-dry-run, non-preflight scheduler requests from
+unlisted principals before candidate discovery; dry-run and preflight-only
+requests remain available for inspection.
 Deployments that want the server to own this scan loop can configure
 `TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TOKEN` with a utility-worker bearer token;
 startup validates that token, requires it to be listed in the central issuer
