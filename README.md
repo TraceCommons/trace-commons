@@ -79,9 +79,10 @@ for both directions. The profile also requires
 live settlement require a fresh green rollout-smoke preflight while keeping
 dry-runs and drills available. When that principal allowlist is configured,
 unlisted admins can still inspect dry-runs but cannot record issuer approvals,
-finalize live settlement, or manually mark NEAR credit outbox rows, and
-unlisted utility-worker principals cannot start live settlement, credit-cycle,
-or NEAR credit outbox schedulers or run live NEAR submit/confirm workers. Admin
+finalize live settlement, manually mark NEAR credit outbox rows, or create NEAR
+account freeze/unfreeze transitions from credit holds, and unlisted
+utility-worker principals cannot start live settlement, credit-cycle, or NEAR
+credit outbox schedulers or run live NEAR submit/confirm workers. Admin
 config status returns safe missing-control names for that central issuer profile
 so operators can see which gate still needs configuration without exposing
 adapter URLs, bearer tokens, approval evidence, or account refs. The
@@ -109,7 +110,8 @@ holds project current state so later settlement resumes without exposing raw
 hold/release reason text. Hold placement and release also
 append hash-only credit-mutation audit rows. When a central NEAR contract is
 configured, those hold transitions enqueue account freeze/unfreeze outbox rows
-for the non-transferable contract. With the DB mirror configured, utility
+for the non-transferable contract; if the central issuer principal allowlist is
+configured, only listed admins can create those NEAR account transitions. With the DB mirror configured, utility
 attestations, settlement batches, credit holds, and NEAR receipt/account outbox
 rows are dual-written to PostgreSQL;
 `TRACE_COMMONS_DB_REVIEWER_READS=true` serves the admin credit control-plane

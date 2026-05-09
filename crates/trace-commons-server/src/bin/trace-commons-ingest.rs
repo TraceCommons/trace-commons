@@ -14636,6 +14636,25 @@ fn require_near_credit_outbox_status_principal_if_configured(
     ))
 }
 
+fn require_near_credit_hold_account_transition_principal_if_configured(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> ApiResult<()> {
+    if state
+        .credit_settlement_central_issuer_principal_refs
+        .is_empty()
+        || state
+            .credit_settlement_central_issuer_principal_refs
+            .contains(&tenant.principal_ref)
+    {
+        return Ok(());
+    }
+    Err(api_error(
+        StatusCode::FORBIDDEN,
+        "NEAR credit hold account transitions require an authorized central issuer principal",
+    ))
+}
+
 async fn require_credit_settlement_rollout_smoke_ready_if_configured(
     state: &AppState,
     tenant: &TenantAuth,
@@ -14982,6 +15001,12 @@ async fn credit_hold_handler(
     } else {
         false
     };
+    if should_enqueue_near_freeze {
+        require_near_credit_hold_account_transition_principal_if_configured(
+            state.as_ref(),
+            &tenant,
+        )?;
+    }
     append_credit_hold_with_db_mirror(state.as_ref(), &tenant, &hold)
         .await
         .map_err(internal_error)?;
@@ -15057,6 +15082,12 @@ async fn credit_hold_release_handler(
             &hold.credit_account_hash,
             Some(hold.hold_id),
         );
+    if should_enqueue_near_unfreeze {
+        require_near_credit_hold_account_transition_principal_if_configured(
+            state.as_ref(),
+            &tenant,
+        )?;
+    }
     append_credit_hold_with_db_mirror(state.as_ref(), &tenant, &hold)
         .await
         .map_err(internal_error)?;
@@ -97631,6 +97662,127 @@ mod tests {
             unfreeze.near_call.args["reason_hash"],
             serde_json::json!(sha256_prefixed(release_reason))
         );
+    }
+
+    #[tokio::test]
+    async fn credit_hold_near_account_transitions_require_authorized_central_issuer() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut tokens = BTreeMap::new();
+        insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
+        insert_token(
+            &mut tokens,
+            "tenant-a",
+            "review-token-a",
+            TokenRole::Reviewer,
+        );
+        insert_token(&mut tokens, "tenant-a", "admin-token-a", TokenRole::Admin);
+        insert_token(
+            &mut tokens,
+            "tenant-a",
+            "admin-token-shadow-a",
+            TokenRole::Admin,
+        );
+        let mut state = test_state_with_tokens(temp.path().to_path_buf(), tokens);
+        Arc::make_mut(&mut state).credit_settlement_near_contract_id =
+            Some("trace-credits.testnet".to_string());
+        Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
+            Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.25,
+                reason: Some("credit hold central issuer transition".to_string()),
+                external_ref: Some("frontier:central-issuer-hold-transition".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+
+        let hold_error = credit_hold_handler(
+            State(state.clone()),
+            auth_headers("admin-token-shadow-a"),
+            Json(TraceCreditHoldRequest {
+                credit_account_ref: event.auth_principal_ref.clone(),
+                reason: StorageTraceCreditHoldReason::AttestationDispute,
+                reason_detail: "unlisted admin cannot freeze NEAR account".to_string(),
+            }),
+        )
+        .await
+        .expect_err("unlisted admin cannot enqueue a NEAR freeze transition");
+        assert_eq!(hold_error.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            hold_error.1.0.error,
+            "NEAR credit hold account transitions require an authorized central issuer principal"
+        );
+        assert!(
+            read_all_credit_holds(temp.path(), "tenant-a")
+                .expect("holds read after blocked freeze")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads after blocked freeze")
+                .is_empty()
+        );
+
+        let Json(hold) = credit_hold_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditHoldRequest {
+                credit_account_ref: event.auth_principal_ref,
+                reason: StorageTraceCreditHoldReason::AttestationDispute,
+                reason_detail: "authorized admin can freeze NEAR account".to_string(),
+            }),
+        )
+        .await
+        .expect("authorized central issuer can place hold");
+        assert_eq!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads after authorized freeze")
+                .len(),
+            1
+        );
+
+        let release_error = credit_hold_release_handler(
+            State(state.clone()),
+            auth_headers("admin-token-shadow-a"),
+            AxumPath(hold.hold_id),
+            Json(TraceCreditHoldReleaseRequest {
+                reason_detail: "unlisted admin cannot unfreeze NEAR account".to_string(),
+            }),
+        )
+        .await
+        .expect_err("unlisted admin cannot enqueue a NEAR unfreeze transition");
+        assert_eq!(release_error.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            release_error.1.0.error,
+            "NEAR credit hold account transitions require an authorized central issuer principal"
+        );
+        let holds = read_all_credit_holds(temp.path(), "tenant-a")
+            .expect("holds read after blocked unfreeze");
+        assert_eq!(holds.len(), 1);
+        assert!(holds[0].released_at.is_none());
+        let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+            .expect("outbox reads after blocked unfreeze");
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox[0].near_call.method_name, "freeze_credit_account");
     }
 
     #[tokio::test]
