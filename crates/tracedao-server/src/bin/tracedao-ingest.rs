@@ -6211,15 +6211,9 @@ async fn config_status_handler(
             .map_err(internal_error)?
             .map(TraceCommonsRlsConfigStatus::from);
     }
-    append_audit_event_with_db_mirror(
-        state.as_ref(),
-        &tenant,
-        TraceCommonsAuditEvent::read(&tenant, "config_status", 1),
-        StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Empty,
-    )
-    .await
-    .map_err(internal_error)?;
+    append_control_plane_read_audit(state.as_ref(), &tenant, "config_status", 1)
+        .await
+        .map_err(internal_error)?;
     Ok(Json(response))
 }
 
@@ -6241,15 +6235,9 @@ async fn get_tenant_policy_handler(
             )
         })?;
     let response = trace_tenant_policy_response(policy);
-    append_audit_event_with_db_mirror(
-        state.as_ref(),
-        &tenant,
-        TraceCommonsAuditEvent::read(&tenant, "tenant_policy", 1),
-        StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Empty,
-    )
-    .await
-    .map_err(internal_error)?;
+    append_control_plane_read_audit(state.as_ref(), &tenant, "tenant_policy", 1)
+        .await
+        .map_err(internal_error)?;
     Ok(Json(response))
 }
 
@@ -6346,12 +6334,11 @@ async fn tenant_access_grants_handler(
         .take(limit)
         .map(trace_tenant_access_grant_response)
         .collect::<Vec<_>>();
-    append_audit_event_with_db_mirror(
+    append_control_plane_read_audit(
         state.as_ref(),
         &tenant,
-        TraceCommonsAuditEvent::read(&tenant, "tenant_access_grants", summaries.len()),
-        StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Empty,
+        "tenant_access_grants",
+        summaries.len(),
     )
     .await
     .map_err(internal_error)?;
@@ -7056,12 +7043,11 @@ async fn credit_handler(
         .await
         .map_err(internal_error)?;
     let item_count = credit_view.records.len();
-    append_audit_event_with_db_mirror(
+    append_control_plane_read_audit(
         state.as_ref(),
         tenant.auth(),
-        tenant.read_audit_event("contributor_credit", item_count),
-        StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Empty,
+        "contributor_credit",
+        item_count,
     )
     .await
     .map_err(internal_error)?;
@@ -7089,12 +7075,11 @@ async fn credit_events_handler(
     let credit_view = read_contributor_credit_view(state.as_ref(), tenant.auth())
         .await
         .map_err(internal_error)?;
-    append_audit_event_with_db_mirror(
+    append_control_plane_read_audit(
         state.as_ref(),
         tenant.auth(),
-        tenant.read_audit_event("contributor_credit_events", credit_view.credit_events.len()),
-        StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Empty,
+        "contributor_credit_events",
+        credit_view.credit_events.len(),
     )
     .await
     .map_err(internal_error)?;
@@ -7133,12 +7118,11 @@ async fn submission_status_handler(
         }
     }
 
-    append_audit_event_with_db_mirror(
+    append_control_plane_read_audit(
         state.as_ref(),
         tenant.auth(),
-        tenant.read_audit_event("submission_status", statuses.len()),
-        StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Empty,
+        "submission_status",
+        statuses.len(),
     )
     .await
     .map_err(internal_error)?;
@@ -7219,7 +7203,7 @@ async fn analytics_handler(
         tenant.auth(),
         audit_event,
         StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Empty,
+        trace_read_audit_metadata("analytics_summary", response.submissions_total),
     )
     .await
     .map_err(internal_error)?;
@@ -7366,15 +7350,9 @@ async fn list_traces_handler(
         .take(limit)
         .map(|record| TraceCommonsTraceListItem::from_record(record, &derived_by_submission))
         .collect();
-    append_audit_event_with_db_mirror(
-        state.as_ref(),
-        tenant.auth(),
-        tenant.read_audit_event("trace_list", items.len()),
-        StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Empty,
-    )
-    .await
-    .map_err(internal_error)?;
+    append_control_plane_read_audit(state.as_ref(), tenant.auth(), "trace_list", items.len())
+        .await
+        .map_err(internal_error)?;
     Ok(Json(items))
 }
 
@@ -7454,12 +7432,11 @@ async fn review_quarantine_handler(
             .then_with(|| right.review_age_hours.cmp(&left.review_age_hours))
             .then_with(|| left.received_at.cmp(&right.received_at))
     });
-    append_audit_event_with_db_mirror(
+    append_control_plane_read_audit(
         state.as_ref(),
         tenant.auth(),
-        tenant.read_audit_event("review_quarantine", queue.len()),
-        StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Empty,
+        "review_quarantine",
+        queue.len(),
     )
     .await
     .map_err(internal_error)?;
@@ -7478,15 +7455,11 @@ async fn review_routing_summary_handler(
             .map_err(internal_error)?;
     let now = Utc::now();
     let summary = TraceReviewRoutingSummary::from_records(tenant.auth(), &records, now);
-    append_audit_event_with_db_mirror(
+    append_control_plane_read_audit(
         state.as_ref(),
         tenant.auth(),
-        tenant.read_audit_event("review_routing_summary", summary.queue_count),
-        StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Read {
-            surface: "review_routing_summary".to_string(),
-            item_count: summary.queue_count.min(u32::MAX as usize) as u32,
-        },
+        "review_routing_summary",
+        summary.queue_count,
     )
     .await
     .map_err(internal_error)?;
@@ -24575,12 +24548,11 @@ async fn replay_export_manifests_handler(
     let manifests = read_replay_export_manifest_summaries(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
-    append_audit_event_with_db_mirror(
+    append_control_plane_read_audit(
         state.as_ref(),
         &tenant,
-        TraceCommonsAuditEvent::read(&tenant, "replay_export_manifests", manifests.len()),
-        StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Empty,
+        "replay_export_manifests",
+        manifests.len(),
     )
     .await
     .map_err(internal_error)?;
@@ -24631,15 +24603,9 @@ async fn vector_entries_handler(
         .take(limit)
         .map(TraceVectorEntrySummary::from_storage_record)
         .collect::<Vec<_>>();
-    append_audit_event_with_db_mirror(
-        state.as_ref(),
-        &tenant,
-        TraceCommonsAuditEvent::read(&tenant, "vector_entries", summaries.len()),
-        StorageTraceAuditAction::Read,
-        trace_read_audit_metadata("vector_entries", summaries.len()),
-    )
-    .await
-    .map_err(internal_error)?;
+    append_control_plane_read_audit(state.as_ref(), &tenant, "vector_entries", summaries.len())
+        .await
+        .map_err(internal_error)?;
     Ok(Json(summaries))
 }
 
@@ -24663,15 +24629,9 @@ async fn retention_jobs_handler(
         .take(limit)
         .map(TraceRetentionJobSummary::from_storage_record)
         .collect::<Vec<_>>();
-    append_audit_event_with_db_mirror(
-        state.as_ref(),
-        &tenant,
-        TraceCommonsAuditEvent::read(&tenant, "retention_jobs", summaries.len()),
-        StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Empty,
-    )
-    .await
-    .map_err(internal_error)?;
+    append_control_plane_read_audit(state.as_ref(), &tenant, "retention_jobs", summaries.len())
+        .await
+        .map_err(internal_error)?;
     Ok(Json(summaries))
 }
 
@@ -24704,12 +24664,11 @@ async fn retention_job_items_handler(
         .take(limit)
         .map(TraceRetentionJobItemSummary::from_storage_record)
         .collect::<Vec<_>>();
-    append_audit_event_with_db_mirror(
+    append_control_plane_read_audit(
         state.as_ref(),
         &tenant,
-        TraceCommonsAuditEvent::read(&tenant, "retention_job_items", summaries.len()),
-        StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Empty,
+        "retention_job_items",
+        summaries.len(),
     )
     .await
     .map_err(internal_error)?;
@@ -24752,12 +24711,11 @@ async fn export_access_grants_handler(
         .take(limit)
         .map(TraceExportAccessGrantSummary::from_storage_record)
         .collect::<Vec<_>>();
-    append_audit_event_with_db_mirror(
+    append_control_plane_read_audit(
         state.as_ref(),
         &tenant,
-        TraceCommonsAuditEvent::read(&tenant, "export_access_grants", summaries.len()),
-        StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Empty,
+        "export_access_grants",
+        summaries.len(),
     )
     .await
     .map_err(internal_error)?;
@@ -24894,15 +24852,9 @@ async fn export_jobs_handler(
         .take(limit)
         .map(TraceExportJobSummary::from_storage_record)
         .collect::<Vec<_>>();
-    append_audit_event_with_db_mirror(
-        state.as_ref(),
-        &tenant,
-        TraceCommonsAuditEvent::read(&tenant, "export_jobs", summaries.len()),
-        StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Empty,
-    )
-    .await
-    .map_err(internal_error)?;
+    append_control_plane_read_audit(state.as_ref(), &tenant, "export_jobs", summaries.len())
+        .await
+        .map_err(internal_error)?;
     Ok(Json(summaries))
 }
 
@@ -33650,12 +33602,11 @@ async fn active_learning_review_queue_handler(
             .then_with(|| left.received_at.cmp(&right.received_at))
     });
     items.truncate(limit);
-    append_audit_event_with_db_mirror(
+    append_control_plane_read_audit(
         state.as_ref(),
         &tenant,
-        TraceCommonsAuditEvent::read(&tenant, "active_learning_review_queue", items.len()),
-        StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Empty,
+        "active_learning_review_queue",
+        items.len(),
     )
     .await
     .map_err(internal_error)?;
@@ -33995,15 +33946,9 @@ async fn audit_events_handler(
     let events = read_recent_audit_events(state.as_ref(), &tenant, limit)
         .await
         .map_err(internal_error)?;
-    append_audit_event_with_db_mirror(
-        state.as_ref(),
-        &tenant,
-        TraceCommonsAuditEvent::read(&tenant, "audit_events", events.len()),
-        StorageTraceAuditAction::Read,
-        StorageTraceAuditSafeMetadata::Empty,
-    )
-    .await
-    .map_err(internal_error)?;
+    append_control_plane_read_audit(state.as_ref(), &tenant, "audit_events", events.len())
+        .await
+        .map_err(internal_error)?;
     Ok(Json(events))
 }
 
@@ -58109,6 +58054,323 @@ mod tests {
             }
             other => panic!("config status read audit metadata was not typed: {other:?}"),
         }
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn aggregate_read_handlers_append_code_owned_read_reasons() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let Json(_) = config_status_handler(State(state.clone()), auth_headers("admin-token-a"))
+            .await
+            .expect("config status read succeeds");
+        let Json(_) = credit_handler(State(state.clone()), auth_headers("token-a"))
+            .await
+            .expect("contributor credit read succeeds");
+        let Json(_) = credit_events_handler(State(state.clone()), auth_headers("token-a"))
+            .await
+            .expect("contributor credit events read succeeds");
+        let Json(_) = submission_status_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(TraceSubmissionStatusRequest {
+                submission_ids: Vec::new(),
+            }),
+        )
+        .await
+        .expect("submission status read succeeds");
+        let Json(_) = analytics_handler(
+            State(state.clone()),
+            Query(TraceAnalyticsQuery::default()),
+            auth_headers("review-token-a"),
+        )
+        .await
+        .expect("analytics summary read succeeds");
+        let Json(_) = list_traces_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(TraceListQuery {
+                status: None,
+                limit: Some(10),
+                purpose: None,
+                coverage_tag: None,
+                tool: None,
+                privacy_risk: None,
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("trace list read succeeds");
+        let Json(_) = review_quarantine_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(ReviewQueueQuery::default()),
+        )
+        .await
+        .expect("review quarantine read succeeds");
+        let Json(_) =
+            review_routing_summary_handler(State(state.clone()), auth_headers("review-token-a"))
+                .await
+                .expect("review routing summary read succeeds");
+        let Json(_) = active_learning_review_queue_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(ActiveLearningQueueQuery {
+                limit: Some(10),
+                privacy_risk: None,
+                lease_filter: TraceReviewLeaseFilter::All,
+            }),
+        )
+        .await
+        .expect("active learning queue read succeeds");
+        let Json(_) = audit_events_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(AuditEventsQuery { limit: Some(100) }),
+        )
+        .await
+        .expect("audit events read succeeds");
+
+        let events = read_recent_audit_events_from_file(&state.root, "tenant-a", 100)
+            .expect("file audit events read");
+        let read_surfaces = events
+            .iter()
+            .filter(|event| event.kind == "read")
+            .filter_map(|event| {
+                let surface = trace_audit_reason_value(event.reason.as_deref(), "surface")?;
+                let item_count = trace_audit_reason_u32(event.reason.as_deref(), "item_count")?;
+                Some((surface.to_string(), item_count))
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(read_surfaces.get("config_status"), Some(&1));
+        for surface in [
+            "contributor_credit",
+            "contributor_credit_events",
+            "submission_status",
+            "analytics_summary",
+            "trace_list",
+            "review_quarantine",
+            "review_routing_summary",
+            "active_learning_review_queue",
+        ] {
+            assert_eq!(
+                read_surfaces.get(surface),
+                Some(&0),
+                "{surface} read audit should use a code-owned zero-count reason"
+            );
+        }
+        assert!(
+            read_surfaces
+                .get("audit_events")
+                .is_some_and(|item_count| *item_count > 0),
+            "audit_events read audit should record the bounded returned event count"
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregate_read_handlers_use_shared_typed_audit_metadata() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+
+        let Json(_) =
+            get_tenant_policy_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("tenant policy read succeeds");
+        let Json(_) = tenant_access_grants_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Query(TraceTenantAccessGrantsQuery {
+                limit: Some(10),
+                status: None,
+                role: None,
+                principal_ref: None,
+            }),
+        )
+        .await
+        .expect("tenant access grants read succeeds");
+        let Json(_) = credit_handler(State(state.clone()), auth_headers("token-a"))
+            .await
+            .expect("contributor credit read succeeds");
+        let Json(_) = credit_events_handler(State(state.clone()), auth_headers("token-a"))
+            .await
+            .expect("contributor credit events read succeeds");
+        let Json(_) = submission_status_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(TraceSubmissionStatusRequest {
+                submission_ids: Vec::new(),
+            }),
+        )
+        .await
+        .expect("submission status read succeeds");
+        let Json(_) = list_traces_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(TraceListQuery {
+                status: None,
+                limit: Some(10),
+                purpose: None,
+                coverage_tag: None,
+                tool: None,
+                privacy_risk: None,
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("trace list read succeeds");
+        let Json(_) = review_quarantine_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(ReviewQueueQuery::default()),
+        )
+        .await
+        .expect("review quarantine read succeeds");
+        let Json(_) =
+            review_routing_summary_handler(State(state.clone()), auth_headers("review-token-a"))
+                .await
+                .expect("review routing summary read succeeds");
+        let Json(_) = replay_export_manifests_handler(
+            State(state.clone()),
+            auth_headers("export-worker-token-a"),
+        )
+        .await
+        .expect("replay export manifests read succeeds");
+        let Json(_) = vector_entries_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Query(VectorEntriesQuery {
+                limit: Some(10),
+                status: None,
+                source_projection: None,
+                submission_id: None,
+            }),
+        )
+        .await
+        .expect("vector entries read succeeds");
+        let Json(_) = retention_jobs_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Query(RetentionJobsQuery {
+                limit: Some(10),
+                status: None,
+            }),
+        )
+        .await
+        .expect("retention jobs read succeeds");
+        let Json(_) = retention_job_items_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            AxumPath(Uuid::new_v4()),
+            Query(RetentionJobItemsQuery {
+                limit: Some(10),
+                action: None,
+                status: None,
+            }),
+        )
+        .await
+        .expect("retention job items read succeeds");
+        let Json(_) = export_access_grants_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Query(ExportAccessGrantsQuery {
+                limit: Some(10),
+                status: None,
+                dataset_kind: None,
+            }),
+        )
+        .await
+        .expect("export access grants read succeeds");
+        let Json(_) = export_jobs_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Query(ExportJobsQuery {
+                limit: Some(10),
+                status: None,
+                dataset_kind: None,
+            }),
+        )
+        .await
+        .expect("export jobs read succeeds");
+        let Json(_) = active_learning_review_queue_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(ActiveLearningQueueQuery {
+                limit: Some(10),
+                privacy_risk: None,
+                lease_filter: TraceReviewLeaseFilter::All,
+            }),
+        )
+        .await
+        .expect("active learning queue read succeeds");
+        let Json(_) = audit_events_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(AuditEventsQuery { limit: Some(100) }),
+        )
+        .await
+        .expect("audit events read succeeds");
+
+        let events = backend
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("DB audit events read");
+        let read_surfaces = events
+            .iter()
+            .filter_map(|event| match &event.metadata {
+                StorageTraceAuditSafeMetadata::Read {
+                    surface,
+                    item_count,
+                } => Some((surface.as_str(), *item_count)),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        for surface in [
+            "tenant_access_grants",
+            "contributor_credit",
+            "contributor_credit_events",
+            "submission_status",
+            "trace_list",
+            "review_quarantine",
+            "review_routing_summary",
+            "replay_export_manifests",
+            "vector_entries",
+            "retention_jobs",
+            "retention_job_items",
+            "export_access_grants",
+            "export_jobs",
+            "active_learning_review_queue",
+        ] {
+            assert_eq!(
+                read_surfaces.get(surface),
+                Some(&0),
+                "{surface} read audit should use typed empty aggregate metadata"
+            );
+        }
+        assert_eq!(read_surfaces.get("tenant_policy"), Some(&1));
+        assert!(
+            read_surfaces
+                .get("audit_events")
+                .is_some_and(|item_count| *item_count > 0),
+            "audit_events read audit should use typed aggregate metadata"
+        );
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
