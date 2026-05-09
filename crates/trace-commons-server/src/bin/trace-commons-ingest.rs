@@ -246,6 +246,8 @@ const TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT";
+const TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS: &str =
@@ -526,6 +528,7 @@ struct AppState {
     analytics_broad_release_noise: Option<TraceAnalyticsNoiseConfig>,
     analytics_broad_release_privacy_accounting: Option<TraceAnalyticsPrivacyAccountingConfig>,
     credit_settlement_max_micros_per_account: Option<i64>,
+    credit_settlement_allowed_policy_versions: Arc<BTreeSet<String>>,
     credit_settlement_require_issuer_approval: bool,
     credit_settlement_issuer_approval_max_age: Option<Duration>,
     credit_settlement_require_central_issuer_profile: bool,
@@ -1870,6 +1873,8 @@ impl AppState {
             parse_analytics_privacy_accounting_from_env()?;
         let credit_settlement_max_micros_per_account =
             parse_credit_settlement_max_points_per_account_from_env()?;
+        let credit_settlement_allowed_policy_versions =
+            parse_credit_settlement_allowed_policy_versions_from_env()?;
         let credit_settlement_require_issuer_approval =
             env_truthy(TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL);
         let credit_settlement_issuer_approval_max_age =
@@ -1941,6 +1946,8 @@ impl AppState {
                 require_managed_eddsa_signed_tokens,
                 require_tenant_access_grants,
                 account_cap_configured: credit_settlement_max_micros_per_account.is_some(),
+                policy_version_allowlist_configured: !credit_settlement_allowed_policy_versions
+                    .is_empty(),
                 require_issuer_approval: credit_settlement_require_issuer_approval,
                 issuer_approval_freshness_configured: credit_settlement_issuer_approval_max_age
                     .is_some(),
@@ -2170,6 +2177,9 @@ impl AppState {
             analytics_broad_release_noise,
             analytics_broad_release_privacy_accounting,
             credit_settlement_max_micros_per_account,
+            credit_settlement_allowed_policy_versions: Arc::new(
+                credit_settlement_allowed_policy_versions,
+            ),
             credit_settlement_require_issuer_approval,
             credit_settlement_issuer_approval_max_age,
             credit_settlement_require_central_issuer_profile,
@@ -5422,6 +5432,32 @@ fn parse_credit_settlement_max_points_per_account(configured: &str) -> anyhow::R
     }
 }
 
+fn parse_credit_settlement_allowed_policy_versions_from_env() -> anyhow::Result<BTreeSet<String>> {
+    match std::env::var(TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS) {
+        Ok(configured) => parse_credit_settlement_allowed_policy_versions(&configured),
+        Err(std::env::VarError::NotPresent) => Ok(BTreeSet::new()),
+        Err(error) => Err(error).with_context(|| {
+            format!("failed to read {TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS}")
+        }),
+    }
+}
+
+fn parse_credit_settlement_allowed_policy_versions(
+    configured: &str,
+) -> anyhow::Result<BTreeSet<String>> {
+    let mut policy_versions = BTreeSet::new();
+    for policy_version in configured.split(',').map(str::trim) {
+        if policy_version.is_empty() {
+            continue;
+        }
+        policy_versions.insert(
+            validate_credit_policy_version(policy_version, "credit settlement allowed policy")
+                .map_err(|error| anyhow::anyhow!(error.1.0.error))?,
+        );
+    }
+    Ok(policy_versions)
+}
+
 fn parse_credit_settlement_issuer_approval_max_age_from_env() -> anyhow::Result<Option<Duration>> {
     let Some(value) =
         optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS)?
@@ -5469,6 +5505,7 @@ struct CreditSettlementCentralIssuerProfileConfig {
     require_managed_eddsa_signed_tokens: bool,
     require_tenant_access_grants: bool,
     account_cap_configured: bool,
+    policy_version_allowlist_configured: bool,
     require_issuer_approval: bool,
     issuer_approval_freshness_configured: bool,
     near_contract_configured: bool,
@@ -5490,6 +5527,9 @@ fn credit_settlement_central_issuer_profile_config_from_state(
         require_managed_eddsa_signed_tokens: state.require_managed_eddsa_signed_tokens,
         require_tenant_access_grants: state.require_tenant_access_grants,
         account_cap_configured: state.credit_settlement_max_micros_per_account.is_some(),
+        policy_version_allowlist_configured: !state
+            .credit_settlement_allowed_policy_versions
+            .is_empty(),
         require_issuer_approval: state.credit_settlement_require_issuer_approval,
         issuer_approval_freshness_configured: state
             .credit_settlement_issuer_approval_max_age
@@ -5525,6 +5565,9 @@ fn credit_settlement_central_issuer_profile_missing_config(
     }
     if !config.account_cap_configured {
         missing.push(TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT);
+    }
+    if !config.policy_version_allowlist_configured {
+        missing.push(TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS);
     }
     if !config.require_issuer_approval {
         missing.push(TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL);
@@ -6024,6 +6067,7 @@ struct TraceCommonsConfigStatusResponse {
     analytics_broad_release_epsilon_micros_per_release: Option<u64>,
     analytics_broad_release_max_epsilon_micros: Option<u64>,
     credit_settlement_max_micros_per_account: Option<i64>,
+    credit_settlement_allowed_policy_version_count: usize,
     credit_settlement_require_issuer_approval: bool,
     credit_settlement_issuer_approval_max_age_hours: Option<i64>,
     credit_settlement_require_central_issuer_profile: bool,
@@ -6229,6 +6273,9 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .analytics_broad_release_privacy_accounting
             .map(|config| config.max_epsilon_micros),
         credit_settlement_max_micros_per_account: state.credit_settlement_max_micros_per_account,
+        credit_settlement_allowed_policy_version_count: state
+            .credit_settlement_allowed_policy_versions
+            .len(),
         credit_settlement_require_issuer_approval: state.credit_settlement_require_issuer_approval,
         credit_settlement_issuer_approval_max_age_hours: state
             .credit_settlement_issuer_approval_max_age
@@ -8990,6 +9037,7 @@ struct TraceCreditSettlementRunResponse {
     settlement_batch_id: Uuid,
     dry_run: bool,
     policy_version: String,
+    policy_version_allowed: bool,
     source_list_hash: String,
     issuer_approval_evidence_hash: Option<String>,
     limit: Option<usize>,
@@ -11531,6 +11579,9 @@ fn credit_settlement_drill_blocking_gaps(
     if readiness.central_issuer_profile_required && !readiness.central_issuer_profile_ready {
         blocking_gaps.push("credit_settlement_central_issuer_profile_incomplete".to_string());
     }
+    if !settlement.policy_version_allowed {
+        blocking_gaps.push("credit_settlement_policy_version_not_allowed".to_string());
+    }
     if readiness.require_pending && risk_summary.pending_credit_micros <= 0 {
         blocking_gaps.push("pending_credit_events_missing".to_string());
     }
@@ -11638,6 +11689,10 @@ fn credit_settlement_drill_evidence_hash(
     });
     if let serde_json::Value::Object(fields) = &mut evidence {
         fields.insert(
+            "policy_version_allowed".to_string(),
+            serde_json::Value::Bool(settlement.policy_version_allowed),
+        );
+        fields.insert(
             "credit_settlement_central_issuer_profile_missing_controls".to_string(),
             serde_json::Value::Array(
                 central_issuer_profile_missing_controls
@@ -11657,6 +11712,12 @@ async fn run_credit_settlement(
     limit: Option<usize>,
 ) -> ApiResult<TraceCreditSettlementRunResponse> {
     let policy_version = validate_credit_settlement_policy_version(&body.policy_version)?;
+    let policy_version_allowed = credit_settlement_policy_version_allowed(state, &policy_version);
+    require_credit_settlement_policy_version_allowed_for_live(
+        state,
+        body.dry_run,
+        &policy_version,
+    )?;
     let reason = body.reason.trim().to_string();
     if reason.is_empty() {
         return Err(api_error(
@@ -12001,6 +12062,7 @@ async fn run_credit_settlement(
         settlement_batch_id,
         dry_run: body.dry_run,
         policy_version,
+        policy_version_allowed,
         source_list_hash,
         issuer_approval_evidence_hash,
         limit,
@@ -12266,6 +12328,29 @@ impl TraceCreditSettlementIssuerApprovalResponse {
 
 fn validate_credit_settlement_policy_version(value: &str) -> ApiResult<String> {
     validate_credit_policy_version(value, "credit settlement")
+}
+
+fn credit_settlement_policy_version_allowed(state: &AppState, policy_version: &str) -> bool {
+    state.credit_settlement_allowed_policy_versions.is_empty()
+        || state
+            .credit_settlement_allowed_policy_versions
+            .contains(policy_version)
+}
+
+fn require_credit_settlement_policy_version_allowed_for_live(
+    state: &AppState,
+    dry_run: bool,
+    policy_version: &str,
+) -> ApiResult<()> {
+    if dry_run || credit_settlement_policy_version_allowed(state, policy_version) {
+        return Ok(());
+    }
+    Err(api_error(
+        StatusCode::CONFLICT,
+        format!(
+            "live credit settlement policy_version is not listed in {TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS}"
+        ),
+    ))
 }
 
 fn validate_credit_settlement_issuer_approval_policy_version(value: &str) -> ApiResult<String> {
@@ -31195,6 +31280,14 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
                 response
                     .promotion_gates
                     .credit_settlement_account_cap_missing,
+            ),
+        ),
+        (
+            "policy_allowlist_configured",
+            usize::from(
+                response
+                    .promotion_gates
+                    .credit_settlement_policy_allowlist_configured,
             ),
         ),
         (
@@ -52536,6 +52629,7 @@ struct TraceOperationalPromotionGateSummary {
     credit_settlement_tenant_access_grants_required: bool,
     credit_settlement_account_cap_configured: bool,
     credit_settlement_account_cap_missing: bool,
+    credit_settlement_policy_allowlist_configured: bool,
     credit_settlement_near_contract_required: bool,
     credit_settlement_near_contract_configured: bool,
     credit_settlement_near_contract_missing: bool,
@@ -52665,6 +52759,8 @@ impl TraceOperationalPromotionGateSummary {
             state.credit_settlement_max_micros_per_account.is_some();
         let credit_settlement_account_cap_missing =
             delayed_credit.points_positive > 0.0 && !credit_settlement_account_cap_configured;
+        let credit_settlement_policy_allowlist_configured =
+            !state.credit_settlement_allowed_policy_versions.is_empty();
         let credit_settlement_near_contract_required =
             state.credit_settlement_require_near_contract;
         let credit_settlement_near_contract_configured =
@@ -52997,6 +53093,7 @@ impl TraceOperationalPromotionGateSummary {
             credit_settlement_tenant_access_grants_required,
             credit_settlement_account_cap_configured,
             credit_settlement_account_cap_missing,
+            credit_settlement_policy_allowlist_configured,
             credit_settlement_near_contract_required,
             credit_settlement_near_contract_configured,
             credit_settlement_near_contract_missing,
@@ -54722,6 +54819,7 @@ mod tests {
             analytics_broad_release_noise: None,
             analytics_broad_release_privacy_accounting: None,
             credit_settlement_max_micros_per_account: None,
+            credit_settlement_allowed_policy_versions: Arc::new(BTreeSet::new()),
             credit_settlement_require_issuer_approval: false,
             credit_settlement_issuer_approval_max_age: None,
             credit_settlement_require_central_issuer_profile: false,
@@ -56464,6 +56562,25 @@ mod tests {
     }
 
     #[test]
+    fn parses_credit_settlement_allowed_policy_versions() {
+        let versions = parse_credit_settlement_allowed_policy_versions(
+            " trace-credit-policy-v1,trace-credit-policy-v2 ,, trace-credit-policy-v1 ",
+        )
+        .expect("allowed settlement policies parse");
+        assert_eq!(
+            versions,
+            BTreeSet::from([
+                "trace-credit-policy-v1".to_string(),
+                "trace-credit-policy-v2".to_string()
+            ])
+        );
+
+        let error = parse_credit_settlement_allowed_policy_versions("trace-credit-policy-v1;raw")
+            .expect_err("unsafe settlement policy versions are rejected");
+        assert!(error.to_string().contains("policy_version"));
+    }
+
+    #[test]
     fn central_issuer_profile_requires_fail_closed_credit_controls() {
         validate_credit_settlement_central_issuer_profile_config(
             false,
@@ -56474,6 +56591,7 @@ mod tests {
                 require_managed_eddsa_signed_tokens: false,
                 require_tenant_access_grants: false,
                 account_cap_configured: false,
+                policy_version_allowlist_configured: false,
                 require_issuer_approval: false,
                 issuer_approval_freshness_configured: false,
                 near_contract_configured: false,
@@ -56496,6 +56614,7 @@ mod tests {
                 require_managed_eddsa_signed_tokens: true,
                 require_tenant_access_grants: true,
                 account_cap_configured: true,
+                policy_version_allowlist_configured: true,
                 require_issuer_approval: true,
                 issuer_approval_freshness_configured: true,
                 near_contract_configured: true,
@@ -56525,6 +56644,7 @@ mod tests {
                 require_managed_eddsa_signed_tokens: true,
                 require_tenant_access_grants: true,
                 account_cap_configured: true,
+                policy_version_allowlist_configured: true,
                 require_issuer_approval: true,
                 issuer_approval_freshness_configured: true,
                 near_contract_configured: true,
@@ -57932,6 +58052,10 @@ mod tests {
             serde_json::Value::Null
         );
         assert_eq!(
+            value["credit_settlement_allowed_policy_version_count"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
             value["credit_settlement_require_central_issuer_profile"],
             serde_json::json!(false)
         );
@@ -57949,6 +58073,9 @@ mod tests {
         );
         assert!(central_issuer_missing_controls.contains(&serde_json::json!(
             TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL
+        )));
+        assert!(central_issuer_missing_controls.contains(&serde_json::json!(
+            TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS
         )));
         assert!(central_issuer_missing_controls.contains(&serde_json::json!(
             TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS
@@ -69876,6 +70003,7 @@ mod tests {
             analytics_broad_release_noise: None,
             analytics_broad_release_privacy_accounting: None,
             credit_settlement_max_micros_per_account: None,
+            credit_settlement_allowed_policy_versions: Arc::new(BTreeSet::new()),
             credit_settlement_require_issuer_approval: false,
             credit_settlement_issuer_approval_max_age: None,
             credit_settlement_require_central_issuer_profile: false,
@@ -77064,6 +77192,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn credit_settlement_policy_allowlist_blocks_live_unapproved_policy() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_allowed_policy_versions =
+            Arc::new(BTreeSet::from(["trace-credit-policy-v2".to_string()]));
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.0,
+                reason: Some("central issuer policy allowlist probe".to_string()),
+                external_ref: Some("lab-attestation:policy-allowlist".to_string()),
+            }),
+        )
+        .await
+        .expect("reviewer can append delayed utility credit");
+
+        let Json(dry_run) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: true,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "inspect disallowed policy before approval".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("dry-run can inspect unapproved policy version");
+        assert!(!dry_run.policy_version_allowed);
+        assert_eq!(dry_run.settled_source_event_count, 1);
+
+        let Json(drill) = credit_settlement_drill_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementDrillRequest {
+                policy_version: "trace-credit-policy-v1".to_string(),
+                purpose: Some("drill disallowed settlement policy".to_string()),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+                account_limit: None,
+                require_pending: None,
+                require_near_contract: Some(false),
+                require_near_submitter: Some(false),
+                require_near_confirmer: Some(false),
+                require_near_adapter_auth: Some(false),
+                require_account_cap: Some(false),
+                require_issuer_approval: Some(false),
+                record_evidence: false,
+            }),
+        )
+        .await
+        .expect("drill reports disallowed policy without side effects");
+        assert!(!drill.settlement.policy_version_allowed);
+        assert_eq!(
+            drill.blocking_gaps,
+            vec!["credit_settlement_policy_version_not_allowed".to_string()]
+        );
+
+        let live_error = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "live settlement with unapproved policy".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect_err("live settlement rejects unapproved policy version");
+        assert_eq!(live_error.0, StatusCode::CONFLICT);
+        assert!(
+            live_error
+                .1
+                .0
+                .error
+                .contains(TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS)
+        );
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement reads")
+                .is_empty()
+        );
+
+        let Json(finalized) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v2".to_string(),
+                reason: "live settlement with approved policy".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("live settlement accepts allowlisted policy version");
+        assert!(finalized.policy_version_allowed);
+        assert_eq!(finalized.settled_source_event_count, 1);
+
+        let batches =
+            read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].policy_version, "trace-credit-policy-v2");
+        assert_eq!(batches[0].source_credit_event_ids, vec![event.event_id]);
+    }
+
+    #[tokio::test]
     async fn admin_credit_settlement_persists_central_issuer_approval_hash() {
         use axum::body::Body;
         use tower::ServiceExt;
@@ -78251,7 +78514,7 @@ mod tests {
         );
         assert_eq!(
             summary_json["promotion_gates"]["credit_settlement_central_issuer_profile_missing_control_count"],
-            serde_json::json!(15)
+            serde_json::json!(16)
         );
         assert_eq!(
             summary_json["promotion_gates"]["credit_settlement_managed_eddsa_signed_tokens_required"],
@@ -78259,6 +78522,10 @@ mod tests {
         );
         assert_eq!(
             summary_json["promotion_gates"]["credit_settlement_tenant_access_grants_required"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            summary_json["promotion_gates"]["credit_settlement_policy_allowlist_configured"],
             serde_json::json!(false)
         );
         assert!(
@@ -78280,13 +78547,16 @@ mod tests {
             "trace_commons_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"central_issuer_profile_ready\"}} 0"
         )));
         assert!(metrics.contains(&format!(
-            "trace_commons_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"central_issuer_profile_missing_control_count\"}} 15"
+            "trace_commons_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"central_issuer_profile_missing_control_count\"}} 16"
         )));
         assert!(metrics.contains(&format!(
             "trace_commons_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"managed_eddsa_signed_tokens_required\"}} 0"
         )));
         assert!(metrics.contains(&format!(
             "trace_commons_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"tenant_access_grants_required\"}} 0"
+        )));
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"policy_allowlist_configured\"}} 0"
         )));
     }
 
