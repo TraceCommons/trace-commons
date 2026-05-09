@@ -124,6 +124,14 @@ fn near_credit_receipt_call_rejects_malformed_allowed_method_args() {
 
 #[test]
 fn near_credit_receipt_call_rejects_non_canonical_hashes() {
+    let missing_prefix_hash = NearCreditReceiptCall::freeze_account(
+        "trace-credits.testnet",
+        "account",
+        FREEZE_REASON_HASH,
+    )
+    .expect_err("credit hashes must use the canonical sha256-prefixed digest form");
+    assert!(missing_prefix_hash.to_string().contains("canonical sha256"));
+
     let short_hash = NearCreditReceiptCall::freeze_account(
         "trace-credits.testnet",
         "sha256:account",
