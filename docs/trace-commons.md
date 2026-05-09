@@ -1033,9 +1033,9 @@ When `TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS` is
 configured, contract-facing NEAR credit outbox mutations stay inside the same
 central issuer boundary as settlement. Listed principals can submit pending
 receipt calls, poll submitted rows for confirmation, run the live outbox
-scheduler, or manually mark outbox status; unlisted utility-worker/admin
-principals can still inspect dry-run counts but cannot mutate the NEAR contract
-mirror.
+scheduler, manually mark outbox status, or create credit-hold account
+freeze/unfreeze transitions; unlisted utility-worker/admin principals can still
+inspect dry-run counts but cannot mutate the NEAR contract mirror.
 
 When `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH=true`, the manual
 `POST /v1/workers/near-credit-outbox/mark-status` fallback also requires the
@@ -1241,7 +1241,9 @@ account enqueues `freeze_credit_account`, and release of the last active hold
 enqueues `unfreeze_credit_account`. PostgreSQL stores those hold-driven account
 operations in a separate RLS-protected outbox table tied to the hold id, while
 the file-backed outbox and worker lifecycle stay shared with settlement receipt
-rows.
+rows. When the central issuer principal allowlist is configured, unlisted admins
+can still inspect holds but cannot create a hold or release that would enqueue
+one of those NEAR account operations.
 
 Set `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL` to point at the relayer's confirmation endpoint; utility workers can then call `POST /v1/workers/near-credit-outbox/confirm` to poll submitted NEAR rows, mark confirmed transactions, or record hashed terminal failures without sending raw NEAR call args. NEAR outbox workers revalidate stored method-call payloads before submit or confirm: the contract id, method allow-list, method-specific hash-only args, and idempotency key must match the canonical payload, or the row is marked failed before it reaches the relayer. Submitted and confirmed transaction hashes must be 43-44 character base58 NEAR transaction hashes. Confirmations must bind to the exact submitted NEAR transaction hash already recorded on the outbox row; mismatched confirmation evidence stays unconfirmed and records only a safe error hash for retry/inspection. `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_BEARER_TOKEN` adds confirmation bearer auth, and `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_TIMEOUT_MS` bounds confirmation calls.
 
