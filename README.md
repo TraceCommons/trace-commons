@@ -78,7 +78,9 @@ so operators can see which gate still needs configuration without exposing
 adapter URLs, bearer tokens, approval evidence, or account refs. The
 credit-settlement drill returns the same safe missing-control names, and
 operational summary/metrics expose the missing-control count plus managed EdDSA
-and tenant-grant enforcement booleans for dashboards.
+and tenant-grant enforcement booleans for dashboards. Live settlement also
+re-checks the complete profile before writing settlement batches or NEAR outbox
+rows; dry-runs remain available for diagnosis.
 The worker `POST /v1/workers/credit-cycle/run` route can run the production
 credit path in bounded steps for a single model/version:
 calibration, model promotion, prediction credit, settlement, then a NEAR outbox
