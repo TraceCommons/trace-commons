@@ -643,6 +643,12 @@ submitter/confirmer configured flags. Pending rows without a submitter,
 submitted rows without a confirmer, and failed NEAR outbox rows are promotion
 blockers, while the metrics never expose transaction hashes, account hashes,
 contract ids, adapter URLs, or raw failure text.
+The NEAR credit outbox submit/confirm workers emit the same safe shape in
+runtime logs: completion summaries include only tenant refs, purpose hashes, and
+counts, and per-row failures include only the outbox id plus a hash of the
+sanitized error. Benchmark registry outbox submit/confirm workers use the same
+pattern and also terminalize malformed submitted receipts per item before
+calling the external confirmer.
 
 Stored envelope body reads now also validate any decoded contributor tenant scope that uses the server `tenant_sha256:<hash>` shape against the authenticated tenant for both file-backed and object-ref-backed reads, so a tampered server tenant ref cannot ride behind otherwise valid metadata while legacy client attribution strings remain non-authoritative.
 
