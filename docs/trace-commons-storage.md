@@ -602,7 +602,10 @@ The names below are intentionally close to the MVP concepts, but are not propose
 | `created_by`, `revoked_by`, `reason` | Audit-friendly provenance. |
 
 Access grants authorize service operations. Envelope contributor fields remain attribution only.
-In the current ingest service, `export_worker` is limited to replay/ranker export surfaces,
+In the current ingest service, `export_worker` is limited to dedicated replay/ranker
+export and export-job automation surfaces; those worker routes reject ordinary reviewer
+tokens while reviewer-compatible export surfaces remain available where manual reviewer
+operations are intended.
 `benchmark_worker` is limited to benchmark automation surfaces. Dedicated benchmark
 worker routes for conversion, evaluation batches, registry publication batches, and
 registry outbox submit/confirm/status automation reject ordinary reviewer tokens, while

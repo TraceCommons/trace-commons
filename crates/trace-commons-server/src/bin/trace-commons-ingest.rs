@@ -6581,7 +6581,7 @@ async fn validate_trace_export_job_scheduler_config(
     let auth = authenticate_with_tenant_access_grant(state, &headers)
         .await
         .map_err(trace_export_scheduler_config_error)?;
-    require_exporter(&auth).map_err(trace_export_scheduler_config_error)
+    require_export_worker_operator(&auth).map_err(trace_export_scheduler_config_error)
 }
 
 fn trace_export_scheduler_config_error(error: (StatusCode, Json<ApiError>)) -> anyhow::Error {
@@ -28055,7 +28055,7 @@ async fn run_worker_replay_export(
     query: DatasetExportQuery,
 ) -> ApiResult<Json<TraceReplayDatasetExport>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_exporter(&tenant)?;
+    require_export_worker_operator(&tenant)?;
     let now = Utc::now();
     let purpose = normalized_export_purpose(
         query.purpose.as_deref(),
@@ -28669,7 +28669,7 @@ async fn worker_export_job_claim_next_handler(
     Json(body): Json<TraceExportJobClaimNextRequest>,
 ) -> ApiResult<Json<TraceExportJobClaimNextResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_exporter(&tenant)?;
+    require_export_worker_operator(&tenant)?;
     let db = trace_export_control_db(state.as_ref())?;
     let dataset_kind = body
         .dataset_kind
@@ -28707,7 +28707,7 @@ async fn worker_export_job_claim_and_run_handler(
     Json(body): Json<TraceExportJobClaimAndRunRequest>,
 ) -> ApiResult<Json<TraceExportJobClaimAndRunResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_exporter(&tenant)?;
+    require_export_worker_operator(&tenant)?;
     let requested_dataset_kind = body
         .dataset_kind
         .as_deref()
@@ -28776,7 +28776,7 @@ async fn worker_export_jobs_run_queued_handler(
     Json(body): Json<TraceExportJobsRunQueuedRequest>,
 ) -> ApiResult<Json<TraceExportJobsRunQueuedResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_exporter(&tenant)?;
+    require_export_worker_operator(&tenant)?;
     let requested_dataset_kind = body
         .dataset_kind
         .as_deref()
@@ -28864,7 +28864,7 @@ async fn worker_export_jobs_retry_failed_handler(
     Json(body): Json<TraceExportJobsRetryFailedRequest>,
 ) -> ApiResult<Json<TraceExportJobsRetryFailedResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_exporter(&tenant)?;
+    require_export_worker_operator(&tenant)?;
     let requested_dataset_kind = body
         .dataset_kind
         .as_deref()
@@ -37299,7 +37299,7 @@ async fn run_worker_ranker_training_candidates_export(
     query: RankerTrainingExportQuery,
 ) -> ApiResult<Json<TraceRankerTrainingCandidateExport>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_exporter(&tenant)?;
+    require_export_worker_operator(&tenant)?;
     let now = Utc::now();
     let purpose = normalized_export_purpose(
         query.purpose.as_deref(),
@@ -37668,7 +37668,7 @@ async fn run_worker_ranker_training_pairs_export(
     query: RankerTrainingExportQuery,
 ) -> ApiResult<Json<TraceRankerTrainingPairExport>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_exporter(&tenant)?;
+    require_export_worker_operator(&tenant)?;
     let now = Utc::now();
     let purpose = normalized_export_purpose(
         query.purpose.as_deref(),
@@ -40321,6 +40321,17 @@ fn require_exporter(auth: &TenantAuth) -> ApiResult<()> {
         Err(api_error(
             StatusCode::FORBIDDEN,
             "reviewer, admin, or export worker token required",
+        ))
+    }
+}
+
+fn require_export_worker_operator(auth: &TenantAuth) -> ApiResult<()> {
+    if auth.role.can_admin() || auth.role == TokenRole::ExportWorker {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::FORBIDDEN,
+            "admin or export worker token required",
         ))
     }
 }
@@ -72076,6 +72087,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn export_worker_routes_reject_reviewer_tokens_before_preconditions() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let replay_error = worker_replay_export_body_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(DatasetExportQuery {
+                limit: Some(1),
+                purpose: Some("reviewer_worker_replay_export_boundary".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: Some("debugging_evaluation".to_string()),
+            }),
+        )
+        .await
+        .expect_err("reviewer token must not reach replay worker export checks");
+        assert_eq!(replay_error.0, StatusCode::FORBIDDEN);
+
+        let claim_next_error = worker_export_job_claim_next_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceExportJobClaimNextRequest {
+                dataset_kind: Some("replay-dataset".to_string()),
+            }),
+        )
+        .await
+        .expect_err("reviewer token must not reach export job claim checks");
+        assert_eq!(claim_next_error.0, StatusCode::FORBIDDEN);
+
+        let claim_and_run_error = worker_export_job_claim_and_run_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceExportJobClaimAndRunRequest {
+                dataset_kind: Some("replay-dataset".to_string()),
+            }),
+        )
+        .await
+        .expect_err("reviewer token must not reach export job execution checks");
+        assert_eq!(claim_and_run_error.0, StatusCode::FORBIDDEN);
+
+        let run_queued_error = worker_export_jobs_run_queued_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceExportJobsRunQueuedRequest {
+                dataset_kind: None,
+                max_jobs: Some(1),
+            }),
+        )
+        .await
+        .expect_err("reviewer token must not reach export run-queued checks");
+        assert_eq!(run_queued_error.0, StatusCode::FORBIDDEN);
+
+        let retry_failed_error = worker_export_jobs_retry_failed_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceExportJobsRetryFailedRequest {
+                dataset_kind: None,
+                max_jobs: Some(1),
+                max_retry_count: Some(1),
+                base_delay_seconds: Some(30),
+                max_delay_seconds: Some(120),
+                reason: Some("reviewer_worker_retry_boundary".to_string()),
+            }),
+        )
+        .await
+        .expect_err("reviewer token must not reach export retry checks");
+        assert_eq!(retry_failed_error.0, StatusCode::FORBIDDEN);
+
+        let ranker_candidates_error = worker_ranker_training_candidates_body_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(RankerTrainingExportQuery {
+                limit: Some(1),
+                purpose: Some("reviewer_worker_ranker_candidates_boundary".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking_training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect_err("reviewer token must not reach ranker candidates worker export checks");
+        assert_eq!(ranker_candidates_error.0, StatusCode::FORBIDDEN);
+
+        let ranker_pairs_error = worker_ranker_training_pairs_body_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(RankerTrainingExportQuery {
+                limit: Some(1),
+                purpose: Some("reviewer_worker_ranker_pairs_boundary".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking_training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect_err("reviewer token must not reach ranker pairs worker export checks");
+        assert_eq!(ranker_pairs_error.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn export_job_workers_reject_invalid_limits_before_db_check() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -72630,7 +72742,30 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("reviewer, admin, or export worker token required")
+                .contains("admin or export worker token required")
+        );
+
+        let reviewer_error = validate_trace_export_job_scheduler_config(
+            state.as_ref(),
+            Some(&TraceExportJobSchedulerConfig {
+                worker_token: SecretString::from("review-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                dataset_kind: None,
+                run_queued_max_jobs: 5,
+                retry_failed_max_jobs: 5,
+                retry_failed_max_retry_count: 3,
+                retry_failed_base_delay_seconds: 30,
+                retry_failed_max_delay_seconds: 120,
+                retry_failed_reason: "scheduled export retry".to_string(),
+            }),
+        )
+        .await
+        .expect_err("reviewer token must not start export scheduler");
+
+        assert!(
+            reviewer_error
+                .to_string()
+                .contains("admin or export worker token required")
         );
     }
 
