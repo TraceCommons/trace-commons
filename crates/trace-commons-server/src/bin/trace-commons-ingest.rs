@@ -9706,6 +9706,85 @@ fn trace_audit_reason_bool(reason: Option<&str>, key: &str) -> Option<bool> {
     trace_audit_reason_value(reason, key)?.parse::<bool>().ok()
 }
 
+fn trace_maintenance_audit_purpose_hash(reason: Option<&str>) -> Option<String> {
+    trace_audit_reason_value(reason, "purpose_hash")
+        .map(ToOwned::to_owned)
+        .or_else(|| trace_audit_reason_value(reason, "purpose").map(sha256_prefixed))
+}
+
+fn trace_maintenance_audit_action_counts_from_reason(
+    reason: Option<&str>,
+) -> BTreeMap<String, u32> {
+    let mut action_counts = BTreeMap::new();
+    let Some(reason) = reason else {
+        return action_counts;
+    };
+    for part in reason.split(';') {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        if matches!(key, "purpose" | "purpose_hash" | "dry_run") {
+            continue;
+        }
+        if key == "action_counts" {
+            if let Ok(counts) = serde_json::from_str::<BTreeMap<String, u32>>(value) {
+                action_counts.extend(counts);
+            }
+            continue;
+        }
+        if let Ok(count) = value.parse::<u32>() {
+            action_counts.insert(key.to_string(), count);
+        }
+    }
+    action_counts
+}
+
+fn trace_maintenance_audit_metadata_from_reason(
+    surface: &str,
+    reason: Option<&str>,
+) -> Option<StorageTraceAuditSafeMetadata> {
+    let dry_run = trace_audit_reason_bool(reason, "dry_run")?;
+    let action_counts = trace_maintenance_audit_action_counts_from_reason(reason);
+    if action_counts.is_empty() {
+        return None;
+    }
+    Some(StorageTraceAuditSafeMetadata::Maintenance {
+        surface: Some(surface.to_string()),
+        purpose_hash: trace_maintenance_audit_purpose_hash(reason),
+        dry_run,
+        action_counts,
+    })
+}
+
+fn trace_maintenance_audit_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "maintenance"
+            | "near_credit_outbox_submit"
+            | "near_credit_outbox_confirm"
+            | "benchmark_registry_outbox_submit"
+            | "benchmark_registry_outbox_confirm"
+            | "revocation_propagation"
+            | "vector_index"
+    )
+}
+
+fn trace_maintenance_audit_reason(
+    purpose_hash: Option<&str>,
+    dry_run: bool,
+    action_counts: &BTreeMap<String, u32>,
+) -> String {
+    let mut parts = Vec::with_capacity(action_counts.len() + 2);
+    if let Some(purpose_hash) = purpose_hash {
+        parts.push(format!("purpose_hash={purpose_hash}"));
+    }
+    parts.push(format!("dry_run={dry_run}"));
+    for (name, count) in action_counts {
+        parts.push(format!("{name}={count}"));
+    }
+    parts.join(";")
+}
+
 fn trace_audit_reason_enum<T>(reason: Option<&str>, key: &str) -> Option<T>
 where
     T: DeserializeOwned,
@@ -17418,6 +17497,7 @@ async fn append_near_credit_outbox_submit_audit(
         "pending".to_string(),
         response.pending.min(u32::MAX as usize) as u32,
     );
+    let purpose_hash = sha256_prefixed(&response.purpose);
     append_audit_event_with_db_mirror(
         state,
         tenant,
@@ -17430,15 +17510,10 @@ async fn append_near_credit_outbox_submit_audit(
             status: None,
             actor_role: Some(tenant.role),
             actor_principal_ref: Some(tenant.principal_ref.clone()),
-            reason: Some(format!(
-                "purpose_hash={};dry_run={};checked={};submitted={};failed={};skipped={};pending={}",
-                sha256_prefixed(&response.purpose),
+            reason: Some(trace_maintenance_audit_reason(
+                Some(&purpose_hash),
                 response.dry_run,
-                response.checked,
-                response.submitted,
-                response.failed,
-                response.skipped,
-                response.pending
+                &action_counts,
             )),
             export_count: Some(response.checked),
             export_id: None,
@@ -17448,6 +17523,8 @@ async fn append_near_credit_outbox_submit_audit(
         },
         StorageTraceAuditAction::Retain,
         StorageTraceAuditSafeMetadata::Maintenance {
+            surface: Some("near_credit_outbox_submit".to_string()),
+            purpose_hash: Some(purpose_hash),
             dry_run: response.dry_run,
             action_counts,
         },
@@ -17481,6 +17558,7 @@ async fn append_near_credit_outbox_confirm_audit(
         "pending".to_string(),
         response.pending.min(u32::MAX as usize) as u32,
     );
+    let purpose_hash = sha256_prefixed(&response.purpose);
     append_audit_event_with_db_mirror(
         state,
         tenant,
@@ -17493,15 +17571,10 @@ async fn append_near_credit_outbox_confirm_audit(
             status: None,
             actor_role: Some(tenant.role),
             actor_principal_ref: Some(tenant.principal_ref.clone()),
-            reason: Some(format!(
-                "purpose_hash={};dry_run={};checked={};confirmed={};failed={};skipped={};pending={}",
-                sha256_prefixed(&response.purpose),
+            reason: Some(trace_maintenance_audit_reason(
+                Some(&purpose_hash),
                 response.dry_run,
-                response.checked,
-                response.confirmed,
-                response.failed,
-                response.skipped,
-                response.pending
+                &action_counts,
             )),
             export_count: Some(response.checked),
             export_id: None,
@@ -17511,6 +17584,8 @@ async fn append_near_credit_outbox_confirm_audit(
         },
         StorageTraceAuditAction::Retain,
         StorageTraceAuditSafeMetadata::Maintenance {
+            surface: Some("near_credit_outbox_confirm".to_string()),
+            purpose_hash: Some(purpose_hash),
             dry_run: response.dry_run,
             action_counts,
         },
@@ -17544,6 +17619,7 @@ async fn append_benchmark_registry_outbox_submit_audit(
         "pending".to_string(),
         response.pending.min(u32::MAX as usize) as u32,
     );
+    let purpose_hash = sha256_prefixed(&response.purpose);
     append_audit_event_with_db_mirror(
         state,
         tenant,
@@ -17556,15 +17632,10 @@ async fn append_benchmark_registry_outbox_submit_audit(
             status: None,
             actor_role: Some(tenant.role),
             actor_principal_ref: Some(tenant.principal_ref.clone()),
-            reason: Some(format!(
-                "purpose_hash={};dry_run={};checked={};submitted={};failed={};skipped={};pending={}",
-                sha256_prefixed(&response.purpose),
+            reason: Some(trace_maintenance_audit_reason(
+                Some(&purpose_hash),
                 response.dry_run,
-                response.checked,
-                response.submitted,
-                response.failed,
-                response.skipped,
-                response.pending
+                &action_counts,
             )),
             export_count: Some(response.checked),
             export_id: None,
@@ -17574,6 +17645,8 @@ async fn append_benchmark_registry_outbox_submit_audit(
         },
         StorageTraceAuditAction::Retain,
         StorageTraceAuditSafeMetadata::Maintenance {
+            surface: Some("benchmark_registry_outbox_submit".to_string()),
+            purpose_hash: Some(purpose_hash),
             dry_run: response.dry_run,
             action_counts,
         },
@@ -17607,6 +17680,7 @@ async fn append_benchmark_registry_outbox_confirm_audit(
         "pending".to_string(),
         response.pending.min(u32::MAX as usize) as u32,
     );
+    let purpose_hash = sha256_prefixed(&response.purpose);
     append_audit_event_with_db_mirror(
         state,
         tenant,
@@ -17619,15 +17693,10 @@ async fn append_benchmark_registry_outbox_confirm_audit(
             status: None,
             actor_role: Some(tenant.role),
             actor_principal_ref: Some(tenant.principal_ref.clone()),
-            reason: Some(format!(
-                "purpose_hash={};dry_run={};checked={};confirmed={};failed={};skipped={};pending={}",
-                sha256_prefixed(&response.purpose),
+            reason: Some(trace_maintenance_audit_reason(
+                Some(&purpose_hash),
                 response.dry_run,
-                response.checked,
-                response.confirmed,
-                response.failed,
-                response.skipped,
-                response.pending
+                &action_counts,
             )),
             export_count: Some(response.checked),
             export_id: None,
@@ -17637,6 +17706,8 @@ async fn append_benchmark_registry_outbox_confirm_audit(
         },
         StorageTraceAuditAction::Retain,
         StorageTraceAuditSafeMetadata::Maintenance {
+            surface: Some("benchmark_registry_outbox_confirm".to_string()),
+            purpose_hash: Some(purpose_hash),
             dry_run: response.dry_run,
             action_counts,
         },
@@ -40481,15 +40552,15 @@ fn trace_commons_audit_event_from_storage(
             Some(*item_count as usize),
         ),
         StorageTraceAuditSafeMetadata::Maintenance {
+            surface: _,
+            purpose_hash: _,
             dry_run,
             action_counts,
         } => (
             None,
-            Some(format!(
-                "dry_run={dry_run};action_counts={}",
-                serde_json::to_string(action_counts)
-                    .context("failed to serialize trace audit action_counts")?
-            )),
+            storage_maintenance_audit_reason(&event).or_else(|| {
+                Some(trace_maintenance_audit_reason(None, *dry_run, action_counts))
+            }),
             Some(
                 action_counts
                     .values()
@@ -40888,6 +40959,13 @@ fn storage_audit_event_kind(
         )
     {
         return "benchmark_registry_outbox_status".to_string();
+    }
+    if let StorageTraceAuditSafeMetadata::Maintenance {
+        surface: Some(surface),
+        ..
+    } = metadata
+    {
+        return surface.clone();
     }
     if let StorageTraceAuditAction::Read = action
         && matches!(
@@ -41969,6 +42047,8 @@ async fn mirror_revocation_to_db(
             event_hash: None,
             canonical_event_json: None,
             metadata: StorageTraceAuditSafeMetadata::Maintenance {
+                surface: None,
+                purpose_hash: None,
                 dry_run: false,
                 action_counts,
             },
@@ -43163,6 +43243,7 @@ async fn append_revocation_propagation_audit(
         "next_attempt_scheduled".to_string(),
         response.next_attempt_scheduled.min(u32::MAX as usize) as u32,
     );
+    let purpose_hash = sha256_prefixed(&response.purpose);
     append_audit_event_with_db_mirror(
         state,
         tenant,
@@ -43175,15 +43256,10 @@ async fn append_revocation_propagation_audit(
             status: None,
             actor_role: Some(tenant.role),
             actor_principal_ref: Some(tenant.principal_ref.clone()),
-            reason: Some(format!(
-                "purpose_hash={};dry_run={};checked={};completed={};failed={};skipped={};pending={}",
-                sha256_prefixed(&response.purpose),
+            reason: Some(trace_maintenance_audit_reason(
+                Some(&purpose_hash),
                 response.dry_run,
-                response.checked,
-                response.completed,
-                response.failed,
-                response.skipped,
-                response.pending
+                &action_counts,
             )),
             export_count: Some(response.checked),
             export_id: None,
@@ -43193,6 +43269,8 @@ async fn append_revocation_propagation_audit(
         },
         StorageTraceAuditAction::Revoke,
         StorageTraceAuditSafeMetadata::Maintenance {
+            surface: Some("revocation_propagation".to_string()),
+            purpose_hash: Some(purpose_hash),
             dry_run: response.dry_run,
             action_counts,
         },
@@ -43465,6 +43543,8 @@ async fn append_lifecycle_invalidation_audit_to_db(
         event_hash: None,
         canonical_event_json: None,
         metadata: StorageTraceAuditSafeMetadata::Maintenance {
+            surface: None,
+            purpose_hash: None,
             dry_run: false,
             action_counts,
         },
@@ -47427,6 +47507,25 @@ fn normalize_audit_event_metadata(
             ),
         };
     }
+    if trace_maintenance_audit_kind(&event.kind)
+        && let Some(expected) =
+            trace_maintenance_audit_metadata_from_reason(&event.kind, event.reason.as_deref())
+    {
+        return match metadata {
+            StorageTraceAuditSafeMetadata::Empty => Ok(expected),
+            StorageTraceAuditSafeMetadata::Maintenance { .. } if metadata == expected => {
+                Ok(metadata)
+            }
+            StorageTraceAuditSafeMetadata::Maintenance { .. } => anyhow::bail!(
+                "maintenance audit event {} metadata does not match reason fields",
+                event.event_id
+            ),
+            _ => anyhow::bail!(
+                "maintenance audit event {} requires maintenance metadata",
+                event.event_id
+            ),
+        };
+    }
     Ok(metadata)
 }
 
@@ -48290,27 +48389,34 @@ async fn run_maintenance(
         audit_event,
         StorageTraceAuditAction::Retain,
         StorageTraceAuditSafeMetadata::Maintenance {
+            surface: Some("maintenance".to_string()),
+            purpose_hash: Some(sha256_prefixed(&purpose)),
             dry_run: request.dry_run,
             action_counts: maintenance_counts.action_counts(),
         },
     )
     .await?;
     if request.index_vectors {
+        let mut vector_action_counts = BTreeMap::new();
+        vector_action_counts.insert(
+            "vector_entries_indexed".to_string(),
+            vector_entries_indexed.min(u32::MAX as usize) as u32,
+        );
         append_audit_event_with_db_mirror(
             state,
             tenant,
-            TraceCommonsAuditEvent::vector_index(tenant, vector_entries_indexed, request.dry_run),
+            TraceCommonsAuditEvent::vector_index(
+                tenant,
+                request.dry_run,
+                Some(&purpose),
+                vector_action_counts.clone(),
+            ),
             StorageTraceAuditAction::VectorIndex,
             StorageTraceAuditSafeMetadata::Maintenance {
+                surface: Some("vector_index".to_string()),
+                purpose_hash: Some(sha256_prefixed(&purpose)),
                 dry_run: request.dry_run,
-                action_counts: {
-                    let mut counts = BTreeMap::new();
-                    counts.insert(
-                        "vector_entries_indexed".to_string(),
-                        vector_entries_indexed.min(u32::MAX as usize) as u32,
-                    );
-                    counts
-                },
+                action_counts: vector_action_counts,
             },
         )
         .await?;
@@ -48734,7 +48840,7 @@ fn storage_audit_canonical_kind(event: &StorageTraceAuditEventRecord) -> String 
     if event.action == StorageTraceAuditAction::Retain
         && matches!(
             &event.metadata,
-            StorageTraceAuditSafeMetadata::Maintenance { .. }
+            StorageTraceAuditSafeMetadata::Maintenance { surface: None, .. }
         )
         && event.reason.as_deref().is_some_and(|reason| {
             reason.starts_with("purpose=") || reason.starts_with("purpose_hash=")
@@ -48766,6 +48872,51 @@ fn storage_audit_canonical_export_count(event: &StorageTraceAuditEventRecord) ->
         StorageTraceAuditSafeMetadata::Export { item_count, .. } => Some(*item_count as usize),
         _ => None,
     }
+}
+
+fn storage_maintenance_audit_reason(event: &StorageTraceAuditEventRecord) -> Option<String> {
+    let StorageTraceAuditSafeMetadata::Maintenance {
+        surface,
+        purpose_hash,
+        dry_run,
+        action_counts,
+    } = &event.metadata
+    else {
+        return None;
+    };
+    if let Some(reason) = event.reason.as_deref() {
+        let parsed = trace_maintenance_audit_metadata_from_reason(
+            surface.as_deref().unwrap_or("maintenance"),
+            Some(reason),
+        );
+        if let Some(StorageTraceAuditSafeMetadata::Maintenance {
+            surface: parsed_surface,
+            purpose_hash: parsed_purpose_hash,
+            dry_run: parsed_dry_run,
+            action_counts: parsed_action_counts,
+        }) = parsed
+        {
+            let surface_matches = surface
+                .as_deref()
+                .zip(parsed_surface.as_deref())
+                .is_none_or(|(expected, parsed)| expected == parsed);
+            let purpose_hash_matches = purpose_hash
+                .as_deref()
+                .is_none_or(|expected| parsed_purpose_hash.as_deref() == Some(expected));
+            if surface_matches
+                && purpose_hash_matches
+                && parsed_dry_run == *dry_run
+                && parsed_action_counts == *action_counts
+            {
+                return Some(reason.to_string());
+            }
+        }
+    }
+    Some(trace_maintenance_audit_reason(
+        purpose_hash.as_deref(),
+        *dry_run,
+        action_counts,
+    ))
 }
 
 fn storage_audit_canonical_reason(event: &StorageTraceAuditEventRecord) -> Option<String> {
@@ -48851,6 +49002,9 @@ fn storage_audit_canonical_reason(event: &StorageTraceAuditEventRecord) -> Optio
                 },
             ),
         ),
+        StorageTraceAuditSafeMetadata::Maintenance { .. } => {
+            storage_maintenance_audit_reason(event)
+        }
         _ => None,
     }
 }
@@ -49488,11 +49642,15 @@ fn audit_backfill_storage_projection(
         | "credit_hold_release"
         | "near_credit_outbox_status" => StorageTraceAuditAction::CreditMutate,
         "benchmark_registry_outbox_status" => StorageTraceAuditAction::BenchmarkConvert,
-        "revoked" => StorageTraceAuditAction::Revoke,
+        "revoked" | "revocation_propagation" => StorageTraceAuditAction::Revoke,
         "dataset_export" | "ranker_training_candidates_export" | "ranker_training_pairs_export" => {
             StorageTraceAuditAction::Export
         }
-        "maintenance" => StorageTraceAuditAction::Retain,
+        "maintenance"
+        | "near_credit_outbox_submit"
+        | "near_credit_outbox_confirm"
+        | "benchmark_registry_outbox_submit"
+        | "benchmark_registry_outbox_confirm" => StorageTraceAuditAction::Retain,
         "purge" => StorageTraceAuditAction::Purge,
         "vector_index" => StorageTraceAuditAction::VectorIndex,
         "benchmark_conversion" | "benchmark_lifecycle_update" => {
@@ -49597,6 +49755,16 @@ fn audit_backfill_storage_projection(
                 event.reason.as_deref(),
             )
             .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
+        }
+        "maintenance"
+        | "near_credit_outbox_submit"
+        | "near_credit_outbox_confirm"
+        | "benchmark_registry_outbox_submit"
+        | "benchmark_registry_outbox_confirm"
+        | "revocation_propagation"
+        | "vector_index" => {
+            trace_maintenance_audit_metadata_from_reason(&event.kind, event.reason.as_deref())
+                .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
         }
         _ => StorageTraceAuditSafeMetadata::Empty,
     };
@@ -49816,10 +49984,28 @@ async fn run_vector_index_worker(
         Some(limit),
     )
     .await?;
+    let mut action_counts = BTreeMap::new();
+    action_counts.insert(
+        "vector_entries_checked".to_string(),
+        report.checked_count.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "vector_entries_indexed".to_string(),
+        report.vector_entries_indexed.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "vector_entries_skipped_existing".to_string(),
+        report.skipped_existing_count.min(u32::MAX as usize) as u32,
+    );
+    action_counts.insert(
+        "vector_entries_pending_after".to_string(),
+        report.pending_after_count.min(u32::MAX as usize) as u32,
+    );
     let audit_event = TraceCommonsAuditEvent::vector_index(
         tenant,
-        report.vector_entries_indexed,
         request.dry_run,
+        Some(&purpose),
+        action_counts.clone(),
     );
     let audit_event_id = audit_event.event_id;
     append_audit_event_with_db_mirror(
@@ -49828,27 +50014,10 @@ async fn run_vector_index_worker(
         audit_event,
         StorageTraceAuditAction::VectorIndex,
         StorageTraceAuditSafeMetadata::Maintenance {
+            surface: Some("vector_index".to_string()),
+            purpose_hash: Some(sha256_prefixed(&purpose)),
             dry_run: request.dry_run,
-            action_counts: {
-                let mut counts = BTreeMap::new();
-                counts.insert(
-                    "vector_entries_checked".to_string(),
-                    report.checked_count.min(u32::MAX as usize) as u32,
-                );
-                counts.insert(
-                    "vector_entries_indexed".to_string(),
-                    report.vector_entries_indexed.min(u32::MAX as usize) as u32,
-                );
-                counts.insert(
-                    "vector_entries_skipped_existing".to_string(),
-                    report.skipped_existing_count.min(u32::MAX as usize) as u32,
-                );
-                counts.insert(
-                    "vector_entries_pending_after".to_string(),
-                    report.pending_after_count.min(u32::MAX as usize) as u32,
-                );
-                counts
-            },
+            action_counts,
         },
     )
     .await?;
@@ -55277,7 +55446,17 @@ impl TraceCommonsAuditEvent {
         }
     }
 
-    fn vector_index(auth: &TenantAuth, vector_entries_indexed: usize, dry_run: bool) -> Self {
+    fn vector_index(
+        auth: &TenantAuth,
+        dry_run: bool,
+        purpose: Option<&str>,
+        action_counts: BTreeMap<String, u32>,
+    ) -> Self {
+        let vector_entries_indexed = action_counts
+            .get("vector_entries_indexed")
+            .copied()
+            .unwrap_or_default() as usize;
+        let purpose_hash = purpose.map(sha256_prefixed);
         Self {
             event_id: Uuid::new_v4(),
             tenant_id: auth.tenant_id.clone(),
@@ -55287,8 +55466,10 @@ impl TraceCommonsAuditEvent {
             status: None,
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
-            reason: Some(format!(
-                "dry_run={dry_run};vector_entries_indexed={vector_entries_indexed}"
+            reason: Some(trace_maintenance_audit_reason(
+                purpose_hash.as_deref(),
+                dry_run,
+                &action_counts,
             )),
             export_count: Some(vector_entries_indexed),
             export_id: None,
@@ -55360,6 +55541,7 @@ impl TraceCommonsAuditEvent {
         counts: TraceMaintenanceAuditCounts,
     ) -> Self {
         let purpose_hash = sha256_prefixed(purpose);
+        let action_counts = counts.action_counts();
         Self {
             event_id: Uuid::new_v4(),
             tenant_id: auth.tenant_id.clone(),
@@ -55369,21 +55551,10 @@ impl TraceCommonsAuditEvent {
             status: None,
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
-            reason: Some(format!(
-                "purpose_hash={purpose_hash};dry_run={dry_run};records_marked_revoked={};records_marked_expired={};records_marked_purged={};derived_marked_revoked={};derived_marked_expired={};export_cache_files_pruned={};export_provenance_invalidated={};benchmark_artifacts_invalidated={};trace_object_files_deleted={};encrypted_artifacts_deleted={};db_mirror_backfilled={};db_mirror_backfill_failed={};vector_entries_indexed={}",
-                counts.records_marked_revoked,
-                counts.records_marked_expired,
-                counts.records_marked_purged,
-                counts.derived_marked_revoked,
-                counts.derived_marked_expired,
-                counts.export_cache_files_pruned,
-                counts.export_provenance_invalidated,
-                counts.benchmark_artifacts_invalidated,
-                counts.trace_object_files_deleted,
-                counts.encrypted_artifacts_deleted,
-                counts.db_mirror_backfilled,
-                counts.db_mirror_backfill_failed,
-                counts.vector_entries_indexed
+            reason: Some(trace_maintenance_audit_reason(
+                Some(&purpose_hash),
+                dry_run,
+                &action_counts,
             )),
             export_count: Some(counts.export_cache_files_pruned),
             export_id: None,
@@ -66543,6 +66714,82 @@ mod tests {
             projected_event.decision_inputs_hash,
             audit_event.decision_inputs_hash
         );
+    }
+
+    #[test]
+    fn audit_backfill_derives_hash_only_maintenance_metadata_from_reason() {
+        let maintenance_purpose = "ranker provenance invalidation frontier lab batch 77";
+        let purpose_hash = sha256_prefixed(maintenance_purpose);
+        let audit_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: Uuid::nil(),
+            kind: "maintenance".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Admin),
+            actor_principal_ref: Some(principal_storage_ref("admin-token-a")),
+            reason: Some(format!(
+                "purpose_hash={purpose_hash};dry_run=false;export_provenance_invalidated=2;records_marked_revoked=1"
+            )),
+            export_count: Some(2),
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+
+        let (action, metadata) = audit_backfill_storage_projection(&audit_event);
+
+        assert_eq!(action, StorageTraceAuditAction::Retain);
+        let StorageTraceAuditSafeMetadata::Maintenance {
+            surface,
+            purpose_hash: metadata_purpose_hash,
+            dry_run,
+            action_counts,
+        } = metadata
+        else {
+            panic!("maintenance audit must project maintenance metadata");
+        };
+        assert_eq!(surface.as_deref(), Some("maintenance"));
+        assert_eq!(
+            metadata_purpose_hash.as_deref(),
+            Some(purpose_hash.as_str())
+        );
+        assert!(!dry_run);
+        assert_eq!(action_counts.get("export_provenance_invalidated"), Some(&2));
+        assert_eq!(action_counts.get("records_marked_revoked"), Some(&1));
+
+        let storage_event = StorageTraceAuditEventRecord {
+            audit_event_id: audit_event.event_id,
+            tenant_id: audit_event.tenant_id.clone(),
+            audit_sequence: 1,
+            actor_principal_ref: audit_event.actor_principal_ref.clone().unwrap(),
+            actor_role: "admin".to_string(),
+            action,
+            reason: audit_event.reason.clone(),
+            request_id: None,
+            submission_id: None,
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: Some(
+                serde_json::to_string(&audit_event).expect("canonical audit serializes"),
+            ),
+            metadata: StorageTraceAuditSafeMetadata::Maintenance {
+                surface,
+                purpose_hash: metadata_purpose_hash,
+                dry_run,
+                action_counts,
+            },
+            occurred_at: audit_event.created_at,
+        };
+        let projected_event = trace_commons_audit_event_from_storage("tenant-a", storage_event)
+            .expect("maintenance DB audit projects without canonical drift");
+        assert_eq!(projected_event.kind, "maintenance");
+        assert_eq!(projected_event.reason, audit_event.reason);
     }
 
     #[test]

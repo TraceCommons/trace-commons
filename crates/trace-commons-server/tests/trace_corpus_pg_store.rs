@@ -609,6 +609,8 @@ async fn pg_store_governance_and_retention_rows_are_tenant_scoped_with_overlappi
                 event_hash: Some(format!("sha256:{label}-audit-event")),
                 canonical_event_json: Some(format!("{{\"tenant\":\"{label}\"}}")),
                 metadata: TraceAuditSafeMetadata::Maintenance {
+                    surface: Some("maintenance".to_string()),
+                    purpose_hash: None,
                     dry_run: true,
                     action_counts: audit_action_counts,
                 },

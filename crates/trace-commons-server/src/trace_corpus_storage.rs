@@ -1202,6 +1202,10 @@ pub enum TraceAuditSafeMetadata {
         item_count: u32,
     },
     Maintenance {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        purpose_hash: Option<String>,
         dry_run: bool,
         action_counts: BTreeMap<String, u32>,
     },

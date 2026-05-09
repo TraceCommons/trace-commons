@@ -52,7 +52,7 @@ These are the next independent production slices that can be staffed in parallel
 - Live benchmark registry outbox submit/confirm workers, manual mark-status fallback, and registry scheduler startup now use the same central issuer principal allowlist when configured, keeping credit-adjacent frontier-lab registry publication under centralized issuance controls while preserving dry-run inspection.
 - Manual benchmark registry outbox status updates now append typed hash-only audit metadata for ids, operation, registry/artifact/source/evaluator evidence, status, external receipt refs, and error hashes, matching the NEAR manual-status audit posture without storing raw operator evidence.
 - Manual benchmark registry outbox status updates now enforce monotonic transition rules, so operators cannot skip pending rows straight to confirmed or downgrade confirmed rows through the fallback route.
-- Retention/maintenance audit rows now hash operator purpose text while preserving bounded action counters, keeping maintenance reconciliation and invalidation runs out of raw-purpose audit storage.
+- Retention/maintenance, vector-index, NEAR outbox, benchmark registry outbox, and revocation-propagation audit rows now mirror typed safe metadata with a code-owned surface, purpose hashes where supplied, and bounded action counters, keeping maintenance and worker runs out of raw-purpose audit storage while letting DB canonical projection catch metadata drift.
 - Settlement drills now accept the same bounded `source_event_limit` as admin/worker/scheduler settlement, so centrally operated issuers can approve an exact partial source list without approving the full backlog.
 
 ## Current Gecko-Pass Status
