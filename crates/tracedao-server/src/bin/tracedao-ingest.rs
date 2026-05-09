@@ -99467,6 +99467,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ranking_model_promotion_rejects_pairwise_labels_from_single_source_even_across_actors()
+    {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let (candidate, calibrated_prediction) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-pairwise-source-v1")
+                .await;
+        let _ = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: calibrated_prediction.submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_250_000,
+                evidence_hash: sha256_prefixed("pairwise-source-reviewer-absolute-label"),
+                external_ref: "reviewer-private-pairwise-source-absolute".to_string(),
+            }),
+        )
+        .await
+        .expect("reviewer can add absolute label diversity for calibration");
+        Arc::make_mut(&mut state).ranking_min_label_source_count = 2;
+        Arc::make_mut(&mut state).ranking_min_pairwise_label_count = 2;
+        Arc::make_mut(&mut state).ranking_min_pairwise_accuracy_micros = 600_000;
+
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist source-diverse calibration");
+        assert!(calibration.promotable);
+        assert_eq!(calibration.joined_label_source_count, 2);
+        assert_eq!(calibration.joined_label_actor_count, 2);
+
+        let lower_scored = seed_pairwise_ranking_prediction_source(
+            state.clone(),
+            &candidate,
+            "pairwise-source",
+            500_000,
+        )
+        .await;
+        for (actor_token, suffix) in [
+            ("review-token-a", "reviewer"),
+            ("admin-token-a", "admin-override"),
+        ] {
+            let _ = ranking_preference_label_handler(
+                State(state.clone()),
+                auth_headers(actor_token),
+                Json(TraceRankingPreferenceLabelRequest {
+                    preferred_submission_id: calibrated_prediction.submission_id,
+                    rejected_submission_id: lower_scored.submission_id,
+                    target_use: TraceAllowedUse::RankingModelTraining,
+                    label_source: StorageTraceRankingLabelSource::Reviewer,
+                    utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                    preference_strength_micros: 800_000,
+                    evidence_hash: sha256_prefixed(&format!("pairwise-source-{suffix}-evidence")),
+                    external_ref: format!("private-pairwise-source-{suffix}"),
+                }),
+            )
+            .await
+            .expect("reviewer/admin can record same-source pairwise labels");
+        }
+
+        let Json(backtest) = ranking_model_backtest_report_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+        )
+        .await
+        .expect("admin can inspect pairwise source-diversity backtest");
+        assert_eq!(backtest.failing_model_target_count, 1);
+        assert_eq!(
+            backtest
+                .reason_code_counts
+                .get("pairwise_label_source_underdiverse"),
+            Some(&1)
+        );
+        let model_value = serde_json::to_value(&backtest.models[0]).expect("model serializes");
+        assert_eq!(
+            model_value["pairwise_joined_label_source_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            model_value["pairwise_joined_label_actor_count"],
+            serde_json::json!(2)
+        );
+
+        let promotion_error = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version,
+                reason: "single source pairwise labels should not support promotion".to_string(),
+            }),
+        )
+        .await
+        .expect_err("single source pairwise labels block model promotion");
+        assert_eq!(promotion_error.0, StatusCode::CONFLICT);
+        assert!(
+            promotion_error
+                .1
+                .0
+                .error
+                .contains("pairwise_label_source_underdiverse")
+        );
+    }
+
+    #[tokio::test]
     async fn active_ranking_model_risk_report_flags_pairwise_evidence_floor() {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(temp.path().to_path_buf());
