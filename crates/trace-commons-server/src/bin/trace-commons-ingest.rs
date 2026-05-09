@@ -75949,6 +75949,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn object_primary_review_tenant_allowlist_keeps_fallback_tenant_file_backed() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let artifact_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            test_artifact_store(artifact_temp.path()),
+        );
+        let mut state =
+            test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
+                temp.path().to_path_buf(),
+                Some(backend.clone()),
+                Some(artifact_store),
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                BTreeMap::new(),
+                false,
+                false,
+                true,
+                false,
+            );
+        {
+            let state_mut = Arc::make_mut(&mut state);
+            state_mut.tenant_rollout_gates = TraceTenantRolloutGates::default()
+                .with_feature(TraceTenantRolloutFeature::DbReviewerReads, &["tenant-a"])
+                .with_feature(
+                    TraceTenantRolloutFeature::DbReviewerRequireObjectRefs,
+                    &["tenant-a"],
+                )
+                .with_feature(
+                    TraceTenantRolloutFeature::ObjectPrimarySubmitReview,
+                    &["tenant-a"],
+                );
+        }
+
+        let tenant_a_envelope = sample_envelope().await;
+        let tenant_a_submission_id = tenant_a_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(tenant_a_envelope),
+        )
+        .await
+        .expect("tenant-a object-primary quarantined submission succeeds");
+        let tenant_a_record =
+            read_submission_record(temp.path(), "tenant-a", tenant_a_submission_id)
+                .expect("tenant-a record reads")
+                .expect("tenant-a record exists");
+        assert_eq!(tenant_a_record.status, TraceCorpusStatus::Quarantined);
+        assert!(
+            !temp.path().join(&tenant_a_record.object_key).exists(),
+            "tenant-a object-primary submit must not write the quarantined plaintext body"
+        );
+
+        let Json(tenant_a_receipt) = review_decision_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(tenant_a_submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some("tenant-a object-primary review canary".to_string()),
+                credit_points_pending: Some(1.25),
+            }),
+        )
+        .await
+        .expect("tenant-a object-primary review succeeds");
+        assert_eq!(tenant_a_receipt.status, "accepted");
+        let tenant_a_accepted =
+            read_submission_record(temp.path(), "tenant-a", tenant_a_submission_id)
+                .expect("tenant-a accepted record reads")
+                .expect("tenant-a accepted record exists");
+        assert_eq!(tenant_a_accepted.status, TraceCorpusStatus::Accepted);
+        assert!(
+            !temp.path().join(&tenant_a_accepted.object_key).exists(),
+            "tenant-a object-primary review must not write the accepted plaintext body"
+        );
+        let tenant_a_review_ref = backend
+            .get_latest_active_trace_object_ref(
+                "tenant-a",
+                tenant_a_submission_id,
+                StorageTraceObjectArtifactKind::ReviewSnapshot,
+            )
+            .await
+            .expect("tenant-a review snapshot object ref reads")
+            .expect("tenant-a review snapshot object ref exists");
+        assert_eq!(
+            tenant_a_review_ref.object_store,
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+        );
+        assert!(tenant_a_review_ref.invalidated_at.is_none());
+        assert!(tenant_a_review_ref.deleted_at.is_none());
+
+        let tenant_b_envelope = sample_envelope().await;
+        let tenant_b_submission_id = tenant_b_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_envelope),
+        )
+        .await
+        .expect("tenant-b fallback quarantined submission succeeds");
+        let tenant_b_record =
+            read_submission_record(temp.path(), "tenant-b", tenant_b_submission_id)
+                .expect("tenant-b record reads")
+                .expect("tenant-b record exists");
+        assert_eq!(tenant_b_record.status, TraceCorpusStatus::Quarantined);
+        assert!(
+            temp.path().join(&tenant_b_record.object_key).exists(),
+            "tenant-b fallback submit must keep the quarantined plaintext body"
+        );
+
+        let Json(tenant_b_receipt) = review_decision_handler(
+            State(state.clone()),
+            auth_headers("review-token-b"),
+            AxumPath(tenant_b_submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some("tenant-b review fallback".to_string()),
+                credit_points_pending: Some(1.25),
+            }),
+        )
+        .await
+        .expect("tenant-b fallback review succeeds");
+        assert_eq!(tenant_b_receipt.status, "accepted");
+        let tenant_b_accepted =
+            read_submission_record(temp.path(), "tenant-b", tenant_b_submission_id)
+                .expect("tenant-b accepted record reads")
+                .expect("tenant-b accepted record exists");
+        assert_eq!(tenant_b_accepted.status, TraceCorpusStatus::Accepted);
+        assert!(
+            temp.path().join(&tenant_b_accepted.object_key).exists(),
+            "tenant-b fallback review must keep the accepted plaintext body"
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+    }
+
+    #[tokio::test]
     async fn object_primary_derived_exports_tenant_allowlist_keeps_fallback_tenant_file_backed() {
         let Some(backend) = postgres_backend_for_ingest_test().await else {
             return;
