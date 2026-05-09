@@ -14385,7 +14385,11 @@ async fn append_utility_attestation_with_db_mirror(
     let mirror_result = mirror_utility_attestation_to_db(state, attestation).await;
     if state.require_db_mirror_writes {
         if let Err(error) = &mirror_result {
-            tracing::warn!(%error, attestation_id = %attestation.attestation_id, "Trace Commons DB dual-write utility attestation mirror failed");
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                attestation_id = %attestation.attestation_id,
+                "Trace Commons DB dual-write utility attestation mirror failed"
+            );
         }
         enforce_db_mirror_write_result(state, "utility attestation", mirror_result)?;
         append_utility_attestation(&state.root, &tenant.tenant_id, attestation)?;
@@ -14393,7 +14397,11 @@ async fn append_utility_attestation_with_db_mirror(
     }
     append_utility_attestation(&state.root, &tenant.tenant_id, attestation)?;
     if let Err(error) = &mirror_result {
-        tracing::warn!(%error, attestation_id = %attestation.attestation_id, "Trace Commons DB dual-write utility attestation mirror failed");
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(error),
+            attestation_id = %attestation.attestation_id,
+            "Trace Commons DB dual-write utility attestation mirror failed"
+        );
     }
     enforce_db_mirror_write_result(state, "utility attestation", mirror_result)
 }
@@ -14407,7 +14415,11 @@ async fn append_credit_settlement_batch_with_db_mirror(
     let mirror_result = mirror_credit_settlement_batch_to_db(state, batch).await;
     if state.require_db_mirror_writes {
         if let Err(error) = &mirror_result {
-            tracing::warn!(%error, settlement_batch_id = %batch.settlement_batch_id, "Trace Commons DB dual-write credit settlement mirror failed");
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                settlement_batch_id = %batch.settlement_batch_id,
+                "Trace Commons DB dual-write credit settlement mirror failed"
+            );
         }
         enforce_db_mirror_write_result(state, "credit settlement batch", mirror_result)?;
         append_credit_settlement_batch(&state.root, &tenant.tenant_id, batch)?;
@@ -14415,7 +14427,11 @@ async fn append_credit_settlement_batch_with_db_mirror(
     }
     append_credit_settlement_batch(&state.root, &tenant.tenant_id, batch)?;
     if let Err(error) = &mirror_result {
-        tracing::warn!(%error, settlement_batch_id = %batch.settlement_batch_id, "Trace Commons DB dual-write credit settlement mirror failed");
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(error),
+            settlement_batch_id = %batch.settlement_batch_id,
+            "Trace Commons DB dual-write credit settlement mirror failed"
+        );
     }
     enforce_db_mirror_write_result(state, "credit settlement batch", mirror_result)
 }
@@ -14471,7 +14487,11 @@ async fn append_credit_hold_with_db_mirror(
     let mirror_result = mirror_credit_hold_to_db(state, hold).await;
     if state.require_db_mirror_writes {
         if let Err(error) = &mirror_result {
-            tracing::warn!(%error, hold_id = %hold.hold_id, "Trace Commons DB dual-write credit hold mirror failed");
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                hold_id = %hold.hold_id,
+                "Trace Commons DB dual-write credit hold mirror failed"
+            );
         }
         enforce_db_mirror_write_result(state, "credit hold", mirror_result)?;
         append_credit_hold(&state.root, &tenant.tenant_id, hold)?;
@@ -14479,7 +14499,11 @@ async fn append_credit_hold_with_db_mirror(
     }
     append_credit_hold(&state.root, &tenant.tenant_id, hold)?;
     if let Err(error) = &mirror_result {
-        tracing::warn!(%error, hold_id = %hold.hold_id, "Trace Commons DB dual-write credit hold mirror failed");
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(error),
+            hold_id = %hold.hold_id,
+            "Trace Commons DB dual-write credit hold mirror failed"
+        );
     }
     enforce_db_mirror_write_result(state, "credit hold", mirror_result)
 }
@@ -14492,7 +14516,11 @@ async fn append_near_credit_outbox_item_with_db_mirror(
     let mirror_result = mirror_near_credit_outbox_item_to_db(state, item).await;
     if state.require_db_mirror_writes {
         if let Err(error) = &mirror_result {
-            tracing::warn!(%error, near_outbox_id = %item.near_outbox_id, "Trace Commons DB dual-write NEAR credit outbox mirror failed");
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                near_outbox_id = %item.near_outbox_id,
+                "Trace Commons DB dual-write NEAR credit outbox mirror failed"
+            );
         }
         enforce_db_mirror_write_result(state, "NEAR credit outbox item", mirror_result)?;
         append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item)?;
@@ -14500,7 +14528,11 @@ async fn append_near_credit_outbox_item_with_db_mirror(
     }
     append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item)?;
     if let Err(error) = &mirror_result {
-        tracing::warn!(%error, near_outbox_id = %item.near_outbox_id, "Trace Commons DB dual-write NEAR credit outbox mirror failed");
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(error),
+            near_outbox_id = %item.near_outbox_id,
+            "Trace Commons DB dual-write NEAR credit outbox mirror failed"
+        );
     }
     enforce_db_mirror_write_result(state, "NEAR credit outbox item", mirror_result)
 }
@@ -14531,7 +14563,11 @@ async fn ensure_benchmark_registry_outbox_item_with_db_mirror(
     let mirror_result = mirror_benchmark_registry_outbox_item_to_db(state, item).await;
     if state.require_db_mirror_writes {
         if let Err(error) = &mirror_result {
-            tracing::warn!(%error, benchmark_outbox_id = %item.benchmark_outbox_id, "Trace Commons DB dual-write benchmark registry outbox mirror failed");
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                benchmark_outbox_id = %item.benchmark_outbox_id,
+                "Trace Commons DB dual-write benchmark registry outbox mirror failed"
+            );
         }
         enforce_db_mirror_write_result(state, "benchmark registry outbox item", mirror_result)?;
         upsert_benchmark_registry_outbox_item(&state.root, &tenant.tenant_id, item)?;
@@ -14539,7 +14575,11 @@ async fn ensure_benchmark_registry_outbox_item_with_db_mirror(
     }
     upsert_benchmark_registry_outbox_item(&state.root, &tenant.tenant_id, item)?;
     if let Err(error) = &mirror_result {
-        tracing::warn!(%error, benchmark_outbox_id = %item.benchmark_outbox_id, "Trace Commons DB dual-write benchmark registry outbox mirror failed");
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(error),
+            benchmark_outbox_id = %item.benchmark_outbox_id,
+            "Trace Commons DB dual-write benchmark registry outbox mirror failed"
+        );
     }
     enforce_db_mirror_write_result(state, "benchmark registry outbox item", mirror_result)
 }
@@ -14600,7 +14640,11 @@ async fn update_near_credit_outbox_item_status_with_db_mirror(
     )
     .await;
     if let Err(error) = &mirror_result {
-        tracing::warn!(%error, %near_outbox_id, "Trace Commons DB dual-write NEAR credit outbox status mirror failed");
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(error),
+            %near_outbox_id,
+            "Trace Commons DB dual-write NEAR credit outbox status mirror failed"
+        );
     }
     let db_updated = mirror_result.unwrap_or(None);
     Ok(file_updated.or(db_updated))
@@ -14664,7 +14708,11 @@ async fn update_benchmark_registry_outbox_item_status_with_db_mirror(
     )
     .await;
     if let Err(error) = &mirror_result {
-        tracing::warn!(%error, %benchmark_outbox_id, "Trace Commons DB dual-write benchmark registry outbox status mirror failed");
+        tracing::warn!(
+            error_hash = %safe_runtime_error_hash(error),
+            %benchmark_outbox_id,
+            "Trace Commons DB dual-write benchmark registry outbox status mirror failed"
+        );
     }
     let db_updated = mirror_result.unwrap_or(None);
     Ok(file_updated.or(db_updated))
@@ -38447,6 +38495,10 @@ fn safe_worker_error(error: &anyhow::Error) -> String {
         .map(|ch| if ch.is_control() { ' ' } else { ch })
         .take(240)
         .collect()
+}
+
+fn safe_runtime_error_hash(error: &anyhow::Error) -> String {
+    sha256_prefixed(&safe_worker_error(error))
 }
 
 async fn append_revocation_propagation_audit(
@@ -95601,6 +95653,20 @@ mod tests {
         assert_eq!(fields.failed, 1);
         assert_eq!(fields.skipped, 2);
         assert_eq!(fields.pending, 1);
+    }
+
+    #[test]
+    fn safe_runtime_error_hash_does_not_expose_raw_error_text() {
+        let error = anyhow::anyhow!(
+            "database mirror rejected write for secret tenant path /tmp/raw-trace\npassword=secret"
+        );
+
+        let error_hash = safe_runtime_error_hash(&error);
+
+        assert!(error_hash.starts_with("sha256:"));
+        assert!(!error_hash.contains("secret"));
+        assert!(!error_hash.contains("raw-trace"));
+        assert!(!error_hash.contains('\n'));
     }
 
     #[test]
