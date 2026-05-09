@@ -10662,13 +10662,7 @@ async fn credit_cycle_worker_run_handler(
     require_utility_operator(&tenant)?;
     let model_version = validate_ranking_identifier(&body.model_version, "model_version")?;
     let policy_version = validate_ranking_identifier(&body.policy_version, "policy_version")?;
-    let reason = body.reason.trim().to_string();
-    if reason.is_empty() {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "credit cycle worker run requires a non-empty reason",
-        ));
-    }
+    let reason = validate_credit_cycle_worker_reason(&body.reason)?;
     let issuer_approval_evidence_hash = validate_credit_settlement_issuer_approval_evidence_hash(
         body.issuer_approval_evidence_hash.as_deref(),
     )?;
@@ -10872,6 +10866,23 @@ async fn credit_cycle_worker_run_handler(
         .map_err(internal_error)?;
 
     Ok(Json(response))
+}
+
+fn validate_credit_cycle_worker_reason(reason: &str) -> ApiResult<String> {
+    let reason = reason.trim().to_string();
+    if reason.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit cycle worker run requires a non-empty reason",
+        ));
+    }
+    if reason.len() > 1024 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit cycle worker run reason is too long",
+        ));
+    }
+    Ok(reason)
 }
 
 fn credit_cycle_worker_run_total_limit(body: &TraceCreditCycleWorkerRunRequest) -> usize {
@@ -85994,6 +86005,61 @@ mod tests {
         assert_eq!(
             error.1.0.error,
             "reviewer, admin, or utility worker token required"
+        );
+        assert!(
+            read_all_ranking_worker_runs(temp.path(), "tenant-a")
+                .expect("worker run ledger reads")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit ledger reads")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("NEAR outbox reads")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_worker_rejects_oversized_reason_without_side_effects() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = credit_cycle_worker_run_handler(
+            State(state),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleWorkerRunRequest {
+                dry_run: false,
+                submit_near_outbox: true,
+                confirm_near_outbox: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: "trace-ranker-credit-cycle-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "x".repeat(1025),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect_err("oversized credit cycle reason is rejected before claiming work");
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.1.0.error,
+            "credit cycle worker run reason is too long"
         );
         assert!(
             read_all_ranking_worker_runs(temp.path(), "tenant-a")
