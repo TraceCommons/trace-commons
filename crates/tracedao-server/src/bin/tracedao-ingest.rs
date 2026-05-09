@@ -75949,6 +75949,246 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn object_primary_derived_exports_tenant_allowlist_keeps_fallback_tenant_file_backed() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let artifact_store = ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            test_artifact_store(artifact_temp.path()),
+        );
+        let mut state =
+            test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
+                temp.path().to_path_buf(),
+                Some(backend.clone()),
+                Some(artifact_store),
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                BTreeMap::new(),
+                false,
+                false,
+                true,
+                false,
+            );
+        {
+            let state_mut = Arc::make_mut(&mut state);
+            state_mut.tenant_rollout_gates = TraceTenantRolloutGates::default()
+                .with_feature(TraceTenantRolloutFeature::DbReviewerReads, &["tenant-a"])
+                .with_feature(
+                    TraceTenantRolloutFeature::DbReviewerRequireObjectRefs,
+                    &["tenant-a"],
+                )
+                .with_feature(
+                    TraceTenantRolloutFeature::ObjectPrimarySubmitReview,
+                    &["tenant-a"],
+                )
+                .with_feature(
+                    TraceTenantRolloutFeature::DerivedExportRequireObjectRefs,
+                    &["tenant-a"],
+                )
+                .with_feature(
+                    TraceTenantRolloutFeature::ObjectPrimaryDerivedExports,
+                    &["tenant-a"],
+                );
+        }
+
+        let mut tenant_a_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_a_envelope);
+        tenant_a_envelope.consent.scopes =
+            vec![ConsentScope::BenchmarkOnly, ConsentScope::RankingTraining];
+        tenant_a_envelope.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        tenant_a_envelope.trace_card.allowed_uses = vec![
+            TraceAllowedUse::BenchmarkGeneration,
+            TraceAllowedUse::RankingModelTraining,
+        ];
+        set_metadata_only_user_message(
+            &mut tenant_a_envelope,
+            "tenant-a object-primary derived export canary",
+        );
+        let tenant_a_submission_id = tenant_a_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(tenant_a_envelope),
+        )
+        .await
+        .expect("tenant-a object-primary submission succeeds");
+        let tenant_a_record =
+            read_submission_record(temp.path(), "tenant-a", tenant_a_submission_id)
+                .expect("tenant-a record reads")
+                .expect("tenant-a record exists");
+        assert!(
+            !temp.path().join(&tenant_a_record.object_key).exists(),
+            "tenant-a object-primary submit must not write a plaintext envelope body"
+        );
+
+        let Json(tenant_a_benchmark) = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("tenant_a_object_primary_benchmark_canary".to_string()),
+                consent_scope: Some("benchmark_only".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("tenant-a object-primary benchmark conversion succeeds");
+        assert_eq!(tenant_a_benchmark.item_count, 1);
+        assert_eq!(
+            tenant_a_benchmark.source_submission_ids,
+            vec![tenant_a_submission_id]
+        );
+        assert!(
+            !benchmark_artifact_path(temp.path(), "tenant-a", tenant_a_benchmark.conversion_id)
+                .exists(),
+            "tenant-a object-primary benchmark export must skip plaintext artifact files"
+        );
+        assert!(
+            !benchmark_provenance_path(temp.path(), "tenant-a", tenant_a_benchmark.conversion_id)
+                .exists(),
+            "tenant-a object-primary benchmark export must skip plaintext provenance files"
+        );
+
+        let Json(tenant_a_ranker) = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("tenant_a_object_primary_ranker_canary".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking_training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect("tenant-a object-primary ranker export succeeds");
+        assert_eq!(tenant_a_ranker.item_count, 1);
+        assert_eq!(
+            tenant_a_ranker.candidates[0].submission_id,
+            tenant_a_submission_id
+        );
+        assert!(
+            !ranker_provenance_path(temp.path(), "tenant-a", tenant_a_ranker.export_id).exists(),
+            "tenant-a object-primary ranker export must skip plaintext provenance files"
+        );
+
+        let tenant_a_refs = backend
+            .list_trace_object_refs("tenant-a", tenant_a_submission_id)
+            .await
+            .expect("tenant-a object refs read");
+        assert!(tenant_a_refs.iter().any(|object_ref| {
+            object_ref.artifact_kind == StorageTraceObjectArtifactKind::BenchmarkArtifact
+                && object_ref.object_store == TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+                && object_ref.invalidated_at.is_none()
+                && object_ref.deleted_at.is_none()
+        }));
+        assert!(tenant_a_refs.iter().any(|object_ref| {
+            object_ref.artifact_kind == StorageTraceObjectArtifactKind::ExportArtifact
+                && object_ref.object_store == TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE
+                && object_ref.invalidated_at.is_none()
+                && object_ref.deleted_at.is_none()
+        }));
+
+        let mut tenant_b_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_b_envelope);
+        tenant_b_envelope.consent.scopes =
+            vec![ConsentScope::BenchmarkOnly, ConsentScope::RankingTraining];
+        tenant_b_envelope.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        tenant_b_envelope.trace_card.allowed_uses = vec![
+            TraceAllowedUse::BenchmarkGeneration,
+            TraceAllowedUse::RankingModelTraining,
+        ];
+        set_metadata_only_user_message(
+            &mut tenant_b_envelope,
+            "tenant-b file-backed derived export fallback",
+        );
+        let tenant_b_submission_id = tenant_b_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_envelope),
+        )
+        .await
+        .expect("tenant-b fallback submission succeeds");
+        let tenant_b_record =
+            read_submission_record(temp.path(), "tenant-b", tenant_b_submission_id)
+                .expect("tenant-b record reads")
+                .expect("tenant-b record exists");
+        assert!(
+            temp.path().join(&tenant_b_record.object_key).exists(),
+            "tenant-b must keep the file-backed envelope body during tenant-a canary rollout"
+        );
+
+        let Json(tenant_b_benchmark) = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-b"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("tenant_b_benchmark_fallback".to_string()),
+                consent_scope: Some("benchmark_only".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("tenant-b benchmark conversion keeps file fallback");
+        assert_eq!(tenant_b_benchmark.item_count, 1);
+        assert_eq!(
+            tenant_b_benchmark.source_submission_ids,
+            vec![tenant_b_submission_id]
+        );
+        assert!(
+            benchmark_artifact_path(temp.path(), "tenant-b", tenant_b_benchmark.conversion_id)
+                .exists(),
+            "tenant-b benchmark fallback must keep plaintext artifact compatibility"
+        );
+        assert!(
+            benchmark_provenance_path(temp.path(), "tenant-b", tenant_b_benchmark.conversion_id)
+                .exists(),
+            "tenant-b benchmark fallback must keep plaintext provenance compatibility"
+        );
+
+        let Json(tenant_b_ranker) = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-b"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("tenant_b_ranker_fallback".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                consent_scope: Some("ranking_training".to_string()),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+            }),
+        )
+        .await
+        .expect("tenant-b ranker export keeps file fallback");
+        assert_eq!(tenant_b_ranker.item_count, 1);
+        assert_eq!(
+            tenant_b_ranker.candidates[0].submission_id,
+            tenant_b_submission_id
+        );
+        assert!(
+            ranker_provenance_path(temp.path(), "tenant-b", tenant_b_ranker.export_id).exists(),
+            "tenant-b ranker fallback must keep plaintext provenance compatibility"
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+    }
+
+    #[tokio::test]
     async fn object_store_migration_drill_records_hash_only_probe_evidence() {
         use axum::body::Body;
         use tower::ServiceExt;
