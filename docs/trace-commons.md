@@ -92,7 +92,8 @@ retention worker route or retention-scoped maintenance; reviewer tokens are not 
 dedicated retention worker surface. Revocation workers can
 run only the dedicated revocation-propagation route, which also rejects ordinary reviewer
 tokens, and vector workers can run
-the dedicated vector-index worker route or vector-index maintenance. Utility
+the dedicated vector-index worker route or vector-index maintenance; that route rejects
+ordinary reviewer tokens before DB/vector adapter preconditions. Utility
 credit workers can append idempotent delayed utility credit through their
 dedicated route for accepted traces only and can run the bounded credit-cycle
 coordinator for one model/policy/target, or the scheduler route that selects the
@@ -1443,9 +1444,10 @@ duplicate/novelty scoring and emits `embedding:` cluster ids; otherwise it falls
 back to deterministic redacted-summary similarity.
 
 Vector workers should use `POST /v1/workers/vector-index` for scheduled
-indexing. The worker route requires the DB mirror before it starts, accepts
-`purpose`, `dry_run`, and an optional `limit` from 1 to 500, rejects invalid
-explicit limits with a client error, and returns `checked_count`,
+indexing. The worker route accepts admin or vector-worker credentials, rejects
+ordinary reviewer tokens before DB/vector adapter checks, requires the DB mirror
+before it starts, accepts `purpose`, `dry_run`, and an optional `limit` from 1
+to 500, rejects invalid explicit limits with a client error, and returns `checked_count`,
 `vector_entries_indexed`, `skipped_existing_count`, and `pending_after_count`.
 Unlike broad admin maintenance, this route does not mark
 expired/revoked records, prune export caches, write retention ledgers, or run
