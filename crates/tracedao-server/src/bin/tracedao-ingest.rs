@@ -120,6 +120,7 @@ use tracedao_server::trace_corpus_storage::{
     TraceRevocationPropagationItemStatusUpdate as StorageTraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite as StorageTraceRevocationPropagationItemWrite,
     TraceRevocationPropagationTarget as StorageTraceRevocationPropagationTarget,
+    TraceRevocationPropagationTargetKind as StorageTraceRevocationPropagationTargetKind,
     TraceSubmissionRecord as StorageTraceSubmissionRecord,
     TraceSubmissionWrite as StorageTraceSubmissionWrite,
     TraceTenantAccessGrantRecord as StorageTraceTenantAccessGrantRecord,
@@ -456,6 +457,12 @@ const TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN: &str =
     "TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN";
 const TRACE_COMMONS_PROCESS_EVALUATOR_TIMEOUT_MS: &str =
     "TRACE_COMMONS_PROCESS_EVALUATOR_TIMEOUT_MS";
+const TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_URL: &str =
+    "TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_URL";
+const TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_BEARER_TOKEN: &str =
+    "TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_BEARER_TOKEN";
+const TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_TIMEOUT_MS: &str =
+    "TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_TIMEOUT_MS";
 const TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_ENABLED: &str =
     "TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_ENABLED";
 const TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_TOKEN: &str =
@@ -520,6 +527,7 @@ const DEFAULT_BENCHMARK_REGISTRY_SUBMITTER_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_BENCHMARK_EVALUATOR_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_PROCESS_EVALUATOR_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_WORKER_CACHE_INVALIDATOR_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_VECTOR_EMBEDDER_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_VECTOR_SEARCH_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_EDDSA_KEYSET_REFRESH_INTERVAL_SECONDS: u64 = 300;
@@ -788,6 +796,8 @@ struct AppState {
     benchmark_evaluator_timeout_ms: Option<u64>,
     process_evaluator: Option<Arc<dyn TraceProcessEvaluator>>,
     process_evaluator_timeout_ms: Option<u64>,
+    worker_cache_invalidator: Option<Arc<dyn TraceWorkerCacheInvalidator>>,
+    worker_cache_invalidator_timeout_ms: Option<u64>,
     vector_embedder: Option<Arc<dyn TraceVectorEmbedder>>,
     vector_embedder_timeout_ms: Option<u64>,
     require_external_vector_embedder: bool,
@@ -2356,6 +2366,12 @@ impl AppState {
             .as_ref()
             .map(|config| config.timeout_ms);
         let process_evaluator = process_evaluator_config.map(|config| config.evaluator);
+        let worker_cache_invalidator_config = trace_worker_cache_invalidator_from_env()?;
+        let worker_cache_invalidator_timeout_ms = worker_cache_invalidator_config
+            .as_ref()
+            .map(|config| config.timeout_ms);
+        let worker_cache_invalidator =
+            worker_cache_invalidator_config.map(|config| config.invalidator);
         let vector_embedder_config = trace_vector_embedder_from_env()?;
         let vector_embedder_timeout_ms = vector_embedder_config
             .as_ref()
@@ -2600,6 +2616,8 @@ impl AppState {
             benchmark_evaluator_timeout_ms,
             process_evaluator,
             process_evaluator_timeout_ms,
+            worker_cache_invalidator,
+            worker_cache_invalidator_timeout_ms,
             vector_embedder,
             vector_embedder_timeout_ms,
             require_external_vector_embedder,
@@ -2936,6 +2954,11 @@ struct ConfiguredTraceProcessEvaluator {
     timeout_ms: u64,
 }
 
+struct ConfiguredTraceWorkerCacheInvalidator {
+    invalidator: Arc<dyn TraceWorkerCacheInvalidator>,
+    timeout_ms: u64,
+}
+
 struct ConfiguredTraceVectorEmbedder {
     embedder: Arc<dyn TraceVectorEmbedder>,
     timeout_ms: u64,
@@ -3118,6 +3141,36 @@ fn trace_process_evaluator_from_env() -> anyhow::Result<Option<ConfiguredTracePr
             url,
             bearer_token: optional_trimmed_env(TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN)?
                 .map(SecretString::from),
+        }),
+        timeout_ms,
+    }))
+}
+
+fn trace_worker_cache_invalidator_from_env()
+-> anyhow::Result<Option<ConfiguredTraceWorkerCacheInvalidator>> {
+    let Some(url) = optional_trimmed_env(TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_URL)? else {
+        return Ok(None);
+    };
+    let parsed = reqwest::Url::parse(&url)
+        .with_context(|| format!("invalid {TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_URL}"))?;
+    validate_trace_worker_cache_invalidator_url(&parsed)?;
+    let timeout = parse_trace_worker_cache_invalidator_timeout_from_env()?;
+    let timeout_ms = timeout.as_millis() as u64;
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout.min(StdDuration::from_secs(3)))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("tracedao-worker-cache-invalidator/0.1")
+        .build()
+        .context("failed to build worker cache invalidator HTTP client")?;
+    Ok(Some(ConfiguredTraceWorkerCacheInvalidator {
+        invalidator: Arc::new(HttpTraceWorkerCacheInvalidator {
+            client,
+            url,
+            bearer_token: optional_trimmed_env(
+                TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_BEARER_TOKEN,
+            )?
+            .map(SecretString::from),
         }),
         timeout_ms,
     }))
@@ -3328,6 +3381,31 @@ fn validate_trace_process_evaluator_url(url: &reqwest::Url) -> anyhow::Result<()
     Ok(())
 }
 
+fn validate_trace_worker_cache_invalidator_url(url: &reqwest::Url) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        matches!(url.scheme(), "https" | "http"),
+        "{TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_URL} must use http or https"
+    );
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "{TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_URL} must not include embedded credentials"
+    );
+    anyhow::ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "{TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_URL} must not include query strings or fragments"
+    );
+    let host = url.host_str().map(str::to_ascii_lowercase).ok_or_else(|| {
+        anyhow::anyhow!("{TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_URL} requires a host")
+    })?;
+    if url.scheme() == "http" {
+        anyhow::ensure!(
+            is_loopback_or_localhost_host(&host),
+            "{TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_URL} may use http only for localhost loopback invalidators"
+        );
+    }
+    Ok(())
+}
+
 fn validate_trace_vector_embedder_url(url: &reqwest::Url) -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(url.scheme(), "https" | "http"),
@@ -3481,6 +3559,21 @@ fn parse_trace_process_evaluator_timeout_from_env() -> anyhow::Result<StdDuratio
     anyhow::ensure!(
         (1..=120_000).contains(&timeout_ms),
         "{TRACE_COMMONS_PROCESS_EVALUATOR_TIMEOUT_MS} must be between 1 and 120000"
+    );
+    Ok(StdDuration::from_millis(timeout_ms))
+}
+
+fn parse_trace_worker_cache_invalidator_timeout_from_env() -> anyhow::Result<StdDuration> {
+    let timeout_ms = match optional_trimmed_env(TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_TIMEOUT_MS)?
+    {
+        Some(configured) => configured.parse::<u64>().with_context(|| {
+            format!("{TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_TIMEOUT_MS} must be milliseconds")
+        })?,
+        None => DEFAULT_WORKER_CACHE_INVALIDATOR_TIMEOUT_MS,
+    };
+    anyhow::ensure!(
+        (1..=30_000).contains(&timeout_ms),
+        "{TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_TIMEOUT_MS} must be between 1 and 30000"
     );
     Ok(StdDuration::from_millis(timeout_ms))
 }
@@ -7789,6 +7882,8 @@ struct TraceCommonsConfigStatusResponse {
     benchmark_evaluator_timeout_ms: Option<u64>,
     process_evaluator_configured: bool,
     process_evaluator_timeout_ms: Option<u64>,
+    worker_cache_invalidator_configured: bool,
+    worker_cache_invalidator_timeout_ms: Option<u64>,
     process_evaluation_worker_run_default_limit: usize,
     process_evaluation_worker_run_max_limit: usize,
     process_evaluation_scheduler_configured: bool,
@@ -8113,6 +8208,8 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         benchmark_evaluator_timeout_ms: state.benchmark_evaluator_timeout_ms,
         process_evaluator_configured: state.process_evaluator.is_some(),
         process_evaluator_timeout_ms: state.process_evaluator_timeout_ms,
+        worker_cache_invalidator_configured: state.worker_cache_invalidator.is_some(),
+        worker_cache_invalidator_timeout_ms: state.worker_cache_invalidator_timeout_ms,
         process_evaluation_worker_run_default_limit:
             TRACE_PROCESS_EVALUATION_WORKER_RUN_DEFAULT_LIMIT,
         process_evaluation_worker_run_max_limit: TRACE_PROCESS_EVALUATION_WORKER_RUN_MAX_LIMIT,
@@ -35579,6 +35676,64 @@ impl TraceProcessEvaluator for HttpTraceProcessEvaluator {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceWorkerCacheInvalidationRequest {
+    tenant_storage_ref: String,
+    propagation_item_id: Uuid,
+    source_submission_ref_hash: String,
+    queue_surface: String,
+    queue_key_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceWorkerCacheInvalidationResponse {
+    evidence_hash: String,
+}
+
+#[async_trait::async_trait]
+trait TraceWorkerCacheInvalidator: Send + Sync {
+    async fn invalidate(
+        &self,
+        request: TraceWorkerCacheInvalidationRequest,
+    ) -> anyhow::Result<TraceWorkerCacheInvalidationResponse>;
+}
+
+#[derive(Clone)]
+struct HttpTraceWorkerCacheInvalidator {
+    client: reqwest::Client,
+    url: String,
+    bearer_token: Option<SecretString>,
+}
+
+#[async_trait::async_trait]
+impl TraceWorkerCacheInvalidator for HttpTraceWorkerCacheInvalidator {
+    async fn invalidate(
+        &self,
+        request: TraceWorkerCacheInvalidationRequest,
+    ) -> anyhow::Result<TraceWorkerCacheInvalidationResponse> {
+        let mut builder = self
+            .client
+            .post(&self.url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&request);
+        if let Some(bearer_token) = &self.bearer_token {
+            builder = builder.bearer_auth(bearer_token.expose_secret());
+        }
+        let response = builder
+            .send()
+            .await
+            .context("failed to invalidate trace worker cache")?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!("worker cache invalidator returned HTTP {}", status.as_u16());
+        }
+        response
+            .json()
+            .await
+            .context("failed to decode worker cache invalidator response")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TraceVectorEmbeddingRequest {
     tenant_storage_ref: String,
     vector_entry_id: Uuid,
@@ -42619,7 +42774,7 @@ async fn apply_revocation_propagation_item(
             ))
         }
         StorageTraceRevocationPropagationAction::InvalidateWorkerQueue => {
-            invalidate_worker_queue_for_revocation_propagation(tenant, item).await
+            invalidate_worker_queue_for_revocation_propagation(state, tenant, item).await
         }
         StorageTraceRevocationPropagationAction::ReverseCreditSettlement => {
             reverse_credit_settlement_for_revocation_propagation(state, db, tenant, item).await
@@ -42648,6 +42803,7 @@ async fn apply_revocation_propagation_item(
 }
 
 async fn invalidate_worker_queue_for_revocation_propagation(
+    state: &AppState,
     tenant: &TenantAuth,
     item: &StorageTraceRevocationPropagationItemRecord,
 ) -> anyhow::Result<TraceRevocationPropagationItemOutcome> {
@@ -42677,6 +42833,25 @@ async fn invalidate_worker_queue_for_revocation_propagation(
             item,
             "worker queue invalidation target hash does not match tenant submission",
         ));
+    }
+    if let Some(invalidator) = &state.worker_cache_invalidator {
+        let response = invalidator
+            .invalidate(TraceWorkerCacheInvalidationRequest {
+                tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+                propagation_item_id: item.propagation_item_id,
+                source_submission_ref_hash: sha256_prefixed(&format!(
+                    "trace_revocation_worker_cache:v1:{}:{}:{queue_surface}",
+                    tenant.tenant_id, item.source_submission_id
+                )),
+                queue_surface: queue_surface.clone(),
+                queue_key_hash: queue_key_hash.clone(),
+            })
+            .await
+            .context("failed to invalidate configured trace worker cache")?;
+        let evidence_hash =
+            validate_trace_sha256_hash(&response.evidence_hash, "worker cache evidence_hash")
+                .map_err(|(_, Json(error))| anyhow::anyhow!(error.error))?;
+        return Ok(TraceRevocationPropagationItemOutcome::Done { evidence_hash });
     }
 
     Ok(done_revocation_propagation_item(
@@ -59218,6 +59393,8 @@ mod tests {
             benchmark_evaluator_timeout_ms: None,
             process_evaluator: None,
             process_evaluator_timeout_ms: None,
+            worker_cache_invalidator: None,
+            worker_cache_invalidator_timeout_ms: None,
             vector_embedder: None,
             vector_embedder_timeout_ms: None,
             require_external_vector_embedder: false,
@@ -63764,6 +63941,9 @@ mod tests {
         Arc::make_mut(&mut state).process_evaluator =
             Some(Arc::new(FakeProcessEvaluator::default()));
         Arc::make_mut(&mut state).process_evaluator_timeout_ms = Some(6_789);
+        Arc::make_mut(&mut state).worker_cache_invalidator =
+            Some(Arc::new(FakeWorkerCacheInvalidator::default()));
+        Arc::make_mut(&mut state).worker_cache_invalidator_timeout_ms = Some(7_890);
         Arc::make_mut(&mut state).vector_embedder = Some(Arc::new(FakeVectorEmbedder::default()));
         Arc::make_mut(&mut state).vector_embedder_timeout_ms = Some(8_901);
         Arc::make_mut(&mut state).require_external_vector_embedder = true;
@@ -63809,6 +63989,14 @@ mod tests {
             serde_json::json!(6_789)
         );
         assert_eq!(
+            value["worker_cache_invalidator_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["worker_cache_invalidator_timeout_ms"],
+            serde_json::json!(7_890)
+        );
+        assert_eq!(
             value["process_evaluation_worker_run_default_limit"],
             serde_json::json!(TRACE_PROCESS_EVALUATION_WORKER_RUN_DEFAULT_LIMIT)
         );
@@ -63834,6 +64022,8 @@ mod tests {
         assert!(!object.contains_key("benchmark_evaluator_bearer_token"));
         assert!(!object.contains_key("process_evaluator_url"));
         assert!(!object.contains_key("process_evaluator_bearer_token"));
+        assert!(!object.contains_key("worker_cache_invalidator_url"));
+        assert!(!object.contains_key("worker_cache_invalidator_bearer_token"));
         assert!(!object.contains_key("vector_embedder_url"));
         assert!(!object.contains_key("vector_embedder_bearer_token"));
         assert!(!object.contains_key("vector_search_url"));
@@ -63843,6 +64033,8 @@ mod tests {
         assert!(!body_text.contains(TRACE_COMMONS_BENCHMARK_EVALUATOR_BEARER_TOKEN));
         assert!(!body_text.contains(TRACE_COMMONS_PROCESS_EVALUATOR_URL));
         assert!(!body_text.contains(TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN));
+        assert!(!body_text.contains(TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_URL));
+        assert!(!body_text.contains(TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_BEARER_TOKEN));
         assert!(!body_text.contains(TRACE_COMMONS_VECTOR_EMBEDDER_URL));
         assert!(!body_text.contains(TRACE_COMMONS_VECTOR_EMBEDDER_BEARER_TOKEN));
         assert!(!body_text.contains(TRACE_COMMONS_VECTOR_SEARCH_URL));
@@ -77336,6 +77528,8 @@ mod tests {
             benchmark_evaluator_timeout_ms: None,
             process_evaluator: None,
             process_evaluator_timeout_ms: None,
+            worker_cache_invalidator: None,
+            worker_cache_invalidator_timeout_ms: None,
             vector_embedder: None,
             vector_embedder_timeout_ms: None,
             require_external_vector_embedder: false,
@@ -78847,6 +79041,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_queue_invalidation_calls_configured_cache_invalidator_hash_only() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let fake_invalidator = Arc::new(FakeWorkerCacheInvalidator::default());
+        Arc::make_mut(&mut state).worker_cache_invalidator = Some(fake_invalidator.clone());
+
+        let submission_id =
+            Uuid::parse_str("2f997bf0-07a2-4d13-82c0-53b9114573a1").expect("static uuid parses");
+        let propagation_item_id =
+            Uuid::parse_str("f7af077b-e985-49fe-9a70-e7c5a22d21d5").expect("static uuid parses");
+        let queue_surface = "process_evaluation_queue";
+        let queue_key_hash =
+            trace_revocation_worker_queue_key_hash("tenant-a", submission_id, queue_surface);
+        let now = Utc::now();
+        let item = StorageTraceRevocationPropagationItemRecord {
+            tenant_id: "tenant-a".to_string(),
+            propagation_item_id,
+            source_submission_id: submission_id,
+            trace_id: Uuid::new_v4(),
+            target_kind: StorageTraceRevocationPropagationTargetKind::WorkerQueue,
+            target: StorageTraceRevocationPropagationTarget::WorkerQueue {
+                queue_surface: queue_surface.to_string(),
+                queue_key_hash: queue_key_hash.clone(),
+            },
+            action: StorageTraceRevocationPropagationAction::InvalidateWorkerQueue,
+            status: StorageTraceRevocationPropagationItemStatus::Pending,
+            idempotency_key: sha256_prefixed("worker-cache-invalidation-test-item"),
+            reason: "revoked trace worker queue invalidation;surface=process_evaluation_queue"
+                .to_string(),
+            attempt_count: 0,
+            last_error: None,
+            next_attempt_at: None,
+            completed_at: None,
+            evidence_hash: None,
+            metadata: BTreeMap::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        let tenant = TenantAuth {
+            tenant_id: "tenant-a".to_string(),
+            role: TokenRole::RevocationWorker,
+            principal_ref: principal_storage_ref("revocation-worker-token-a"),
+            expires_at: None,
+            auth_method: TraceAuthMethod::StaticToken,
+            signed_claim_issuer: None,
+            signed_claim_audiences: BTreeSet::new(),
+            signed_claim_subject: None,
+            allowed_consent_scopes: BTreeSet::new(),
+            allowed_uses: BTreeSet::new(),
+        };
+
+        let outcome =
+            invalidate_worker_queue_for_revocation_propagation(state.as_ref(), &tenant, &item)
+                .await
+                .expect("configured invalidator is called");
+        let TraceRevocationPropagationItemOutcome::Done { evidence_hash } = outcome else {
+            panic!("worker cache invalidation should complete");
+        };
+        assert_eq!(evidence_hash, fake_invalidator.evidence_hash.as_str());
+
+        let calls = fake_invalidator
+            .calls
+            .lock()
+            .expect("fake invalidator calls lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tenant_storage_ref, tenant_storage_ref("tenant-a"));
+        assert_eq!(calls[0].propagation_item_id, propagation_item_id);
+        assert_eq!(calls[0].queue_surface, queue_surface);
+        assert_eq!(calls[0].queue_key_hash, queue_key_hash);
+        assert!(calls[0].source_submission_ref_hash.starts_with("sha256:"));
+        let request_text =
+            serde_json::to_string(&calls[0]).expect("invalidator request serializes");
+        assert!(!request_text.contains("tenant-a"));
+        assert!(!request_text.contains(&submission_id.to_string()));
+    }
+
+    #[tokio::test]
     async fn revocation_enqueues_worker_queue_invalidation_and_drill_verifies_completion() {
         use axum::body::Body;
         use tower::ServiceExt;
@@ -78868,6 +79139,8 @@ mod tests {
             false,
         );
         Arc::make_mut(&mut state).require_db_mirror_writes = true;
+        let fake_invalidator = Arc::new(FakeWorkerCacheInvalidator::default());
+        Arc::make_mut(&mut state).worker_cache_invalidator = Some(fake_invalidator.clone());
 
         let mut envelope = sample_envelope().await;
         make_metadata_only_low_risk(&mut envelope);
@@ -78948,6 +79221,24 @@ mod tests {
         assert_eq!(worker.failed, 0);
         assert_eq!(worker.skipped, 0);
         assert_eq!(worker.completed, 2);
+        let invalidator_calls = fake_invalidator
+            .calls
+            .lock()
+            .expect("fake invalidator calls lock")
+            .clone();
+        assert_eq!(invalidator_calls.len(), 2);
+        let invalidated_surfaces = invalidator_calls
+            .iter()
+            .map(|call| call.queue_surface.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            invalidated_surfaces,
+            BTreeSet::from(["process_evaluation_queue", "ranking_training_queue"])
+        );
+        let invalidator_request_text =
+            serde_json::to_string(&invalidator_calls).expect("invalidator calls serialize");
+        assert!(!invalidator_request_text.contains("token-a"));
+        assert!(!invalidator_request_text.contains(&submission_id.to_string()));
 
         let propagation_items = backend
             .list_trace_revocation_propagation_items("tenant-a", submission_id)
@@ -90573,6 +90864,42 @@ mod tests {
                 .expect("fake process evaluator calls lock")
                 .push(request);
             Ok(self.response.clone())
+        }
+    }
+
+    #[derive(Clone)]
+    struct FakeWorkerCacheInvalidator {
+        calls: Arc<std::sync::Mutex<Vec<TraceWorkerCacheInvalidationRequest>>>,
+        evidence_hash: String,
+        failure: Option<String>,
+    }
+
+    impl Default for FakeWorkerCacheInvalidator {
+        fn default() -> Self {
+            Self {
+                calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+                evidence_hash: sha256_prefixed("trace worker cache invalidated"),
+                failure: None,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TraceWorkerCacheInvalidator for FakeWorkerCacheInvalidator {
+        async fn invalidate(
+            &self,
+            request: TraceWorkerCacheInvalidationRequest,
+        ) -> anyhow::Result<TraceWorkerCacheInvalidationResponse> {
+            if let Some(failure) = &self.failure {
+                anyhow::bail!("{failure}");
+            }
+            self.calls
+                .lock()
+                .expect("fake worker cache invalidator calls lock")
+                .push(request);
+            Ok(TraceWorkerCacheInvalidationResponse {
+                evidence_hash: self.evidence_hash.clone(),
+            })
         }
     }
 
