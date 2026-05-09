@@ -19174,12 +19174,12 @@ fn validate_ranking_identifier(value: &str, label: &str) -> ApiResult<String> {
 
 fn validate_sha256_hash(value: &str, label: &str) -> ApiResult<String> {
     let value = value.trim();
-    if value.starts_with("sha256:") {
+    if is_canonical_sha256_prefixed_hash(value) {
         Ok(value.to_string())
     } else {
         Err(api_error(
             StatusCode::BAD_REQUEST,
-            format!("ranking {label} must be a sha256-prefixed hash"),
+            format!("ranking {label} must be a canonical sha256-prefixed hex digest"),
         ))
     }
 }
@@ -52786,9 +52786,9 @@ mod tests {
                 feature_schema_version: "wrong-tenant-features-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:wrong-tenant-training".to_string(),
-                calibration_dataset_hash: "sha256:wrong-tenant-calibration".to_string(),
-                model_artifact_hash: "sha256:wrong-tenant-model".to_string(),
+                training_dataset_hash: sha256_prefixed("wrong-tenant-training"),
+                calibration_dataset_hash: sha256_prefixed("wrong-tenant-calibration"),
+                model_artifact_hash: sha256_prefixed("wrong-tenant-model"),
                 actor_principal_ref: "principal:utility-worker".to_string(),
                 created_at: now,
             },
@@ -52850,9 +52850,9 @@ mod tests {
                 feature_schema_version: "ranking-features-backfill-v1".to_string(),
                 policy_version: "trace-credit-policy-backfill-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:ranking-training-backfill".to_string(),
-                calibration_dataset_hash: "sha256:ranking-calibration-backfill".to_string(),
-                model_artifact_hash: "sha256:ranking-model-artifact-backfill".to_string(),
+                training_dataset_hash: sha256_prefixed("ranking-training-backfill"),
+                calibration_dataset_hash: sha256_prefixed("ranking-calibration-backfill"),
+                model_artifact_hash: sha256_prefixed("ranking-model-artifact-backfill"),
                 actor_principal_ref: principal_storage_ref("admin-token-a"),
                 created_at: now,
             },
@@ -52869,9 +52869,9 @@ mod tests {
                 trace_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: "ranking-features-backfill-v1".to_string(),
-                feature_vector_hash: "sha256:ranking-feature-backfill".to_string(),
-                feature_names_hash: "sha256:ranking-feature-names-backfill".to_string(),
-                source_feature_hash: "sha256:ranking-source-feature-backfill".to_string(),
+                feature_vector_hash: sha256_prefixed("ranking-feature-backfill"),
+                feature_names_hash: sha256_prefixed("ranking-feature-names-backfill"),
+                source_feature_hash: sha256_prefixed("ranking-source-feature-backfill"),
                 duplicate_score: Some(0.02),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.01),
@@ -52895,7 +52895,7 @@ mod tests {
                 model_version: "trace-ranker-backfill-v1".to_string(),
                 feature_schema_version: "ranking-features-backfill-v1".to_string(),
                 prediction_policy_version: "trace-credit-policy-backfill-v1".to_string(),
-                feature_vector_hash: "sha256:ranking-feature-backfill".to_string(),
+                feature_vector_hash: sha256_prefixed("ranking-feature-backfill"),
                 predicted_utility_micros: 1_200_000,
                 uncertainty_micros: 100_000,
                 confidence: 0.86,
@@ -52922,7 +52922,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_250_000,
-                evidence_hash: "sha256:ranking-label-evidence-backfill".to_string(),
+                evidence_hash: sha256_prefixed("ranking-label-evidence-backfill"),
                 external_ref_hash: "sha256:ranking-label-external-ref-backfill".to_string(),
                 actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
                 created_at: now,
@@ -52944,7 +52944,7 @@ mod tests {
                 label_source: StorageTraceRankingLabelSource::FrontierLab,
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 preference_strength_micros: 850_000,
-                evidence_hash: "sha256:ranking-preference-evidence-backfill".to_string(),
+                evidence_hash: sha256_prefixed("ranking-preference-evidence-backfill"),
                 external_ref_hash: "sha256:ranking-preference-external-ref-backfill".to_string(),
                 actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
                 created_at: now,
@@ -52961,13 +52961,13 @@ mod tests {
                 model_version: "trace-ranker-backfill-v1".to_string(),
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: "trace-credit-policy-backfill-v1".to_string(),
-                evaluation_dataset_hash: "sha256:ranking-calibration-backfill".to_string(),
+                evaluation_dataset_hash: sha256_prefixed("ranking-calibration-backfill"),
                 prediction_count: 1,
                 label_count: 1,
                 joined_label_prediction_count: 1,
                 joined_label_source_count: 1,
                 joined_label_actor_count: 1,
-                joined_evidence_hash: "sha256:ranking-joined-evidence-backfill".to_string(),
+                joined_evidence_hash: sha256_prefixed("ranking-joined-evidence-backfill"),
                 average_predicted_utility_micros: Some(1_200_000),
                 average_label_utility_delta_micros: Some(1_250_000),
                 average_absolute_error_micros: Some(50_000),
@@ -53571,10 +53571,10 @@ mod tests {
         let initial = TraceRankingCalibrationDatasetRecord {
             tenant_id: tenant_id.to_string(),
             tenant_storage_ref: tenant_storage_ref(tenant_id),
-            calibration_dataset_hash: format!("sha256:{fixture_key}-holdout-v1"),
+            calibration_dataset_hash: sha256_prefixed(&format!("{fixture_key}-holdout-v1")),
             target_use: TraceAllowedUse::RankingModelTraining,
             policy_version: "trace-credit-policy-v1".to_string(),
-            source_manifest_hash: format!("sha256:{fixture_key}-manifest-v1"),
+            source_manifest_hash: sha256_prefixed(&format!("{fixture_key}-manifest-v1")),
             source_count: 128,
             label_source_count: 3,
             label_actor_count: 3,
@@ -53585,7 +53585,7 @@ mod tests {
         let conflict_key =
             ranking_calibration_dataset_file_key(&initial).expect("calibration dataset key");
         let mut rewrite = initial.clone();
-        rewrite.source_manifest_hash = format!("sha256:{fixture_key}-manifest-v2");
+        rewrite.source_manifest_hash = sha256_prefixed(&format!("{fixture_key}-manifest-v2"));
         rewrite.status = StorageTraceRankingCalibrationDatasetStatus::Active;
         rewrite.created_at = Utc::now();
 
@@ -71442,9 +71442,9 @@ mod tests {
                 feature_schema_version: "ranking-features-reconcile-v1".to_string(),
                 policy_version: "trace-credit-policy-reconcile-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:ranking-training-reconcile".to_string(),
-                calibration_dataset_hash: "sha256:ranking-calibration-reconcile".to_string(),
-                model_artifact_hash: "sha256:ranking-model-artifact-reconcile".to_string(),
+                training_dataset_hash: sha256_prefixed("ranking-training-reconcile"),
+                calibration_dataset_hash: sha256_prefixed("ranking-calibration-reconcile"),
+                model_artifact_hash: sha256_prefixed("ranking-model-artifact-reconcile"),
                 actor_principal_ref: principal_storage_ref("admin-token-a"),
                 created_at: now,
             },
@@ -71454,10 +71454,10 @@ mod tests {
         let calibration_dataset = TraceRankingCalibrationDatasetRecord {
             tenant_id: "tenant-a".to_string(),
             tenant_storage_ref: tenant_storage_ref("tenant-a"),
-            calibration_dataset_hash: "sha256:ranking-calibration-reconcile".to_string(),
+            calibration_dataset_hash: sha256_prefixed("ranking-calibration-reconcile"),
             target_use: TraceAllowedUse::RankingModelTraining,
             policy_version: "trace-credit-policy-reconcile-v1".to_string(),
-            source_manifest_hash: "sha256:ranking-calibration-manifest-reconcile-v1".to_string(),
+            source_manifest_hash: sha256_prefixed("ranking-calibration-manifest-reconcile-v1"),
             source_count: 32,
             label_source_count: 2,
             label_actor_count: 2,
@@ -71492,9 +71492,9 @@ mod tests {
                 trace_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: "ranking-features-reconcile-v1".to_string(),
-                feature_vector_hash: "sha256:ranking-feature-reconcile".to_string(),
-                feature_names_hash: "sha256:ranking-feature-names-reconcile".to_string(),
-                source_feature_hash: "sha256:ranking-source-feature-reconcile".to_string(),
+                feature_vector_hash: sha256_prefixed("ranking-feature-reconcile"),
+                feature_names_hash: sha256_prefixed("ranking-feature-names-reconcile"),
+                source_feature_hash: sha256_prefixed("ranking-source-feature-reconcile"),
                 duplicate_score: Some(0.02),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.01),
@@ -71518,7 +71518,7 @@ mod tests {
                 model_version: "trace-ranker-reconcile-v1".to_string(),
                 feature_schema_version: "ranking-features-reconcile-v1".to_string(),
                 prediction_policy_version: "trace-credit-policy-reconcile-v1".to_string(),
-                feature_vector_hash: "sha256:ranking-feature-reconcile".to_string(),
+                feature_vector_hash: sha256_prefixed("ranking-feature-reconcile"),
                 predicted_utility_micros: 1_200_000,
                 uncertainty_micros: 100_000,
                 confidence: 0.86,
@@ -71545,7 +71545,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_250_000,
-                evidence_hash: "sha256:ranking-label-evidence-reconcile".to_string(),
+                evidence_hash: sha256_prefixed("ranking-label-evidence-reconcile"),
                 external_ref_hash: "sha256:ranking-label-external-ref-reconcile".to_string(),
                 actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
                 created_at: now,
@@ -71567,7 +71567,7 @@ mod tests {
                 label_source: StorageTraceRankingLabelSource::FrontierLab,
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 preference_strength_micros: 850_000,
-                evidence_hash: "sha256:ranking-preference-evidence-reconcile".to_string(),
+                evidence_hash: sha256_prefixed("ranking-preference-evidence-reconcile"),
                 external_ref_hash: "sha256:ranking-preference-external-ref-reconcile".to_string(),
                 actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
                 created_at: now,
@@ -71584,13 +71584,13 @@ mod tests {
                 model_version: "trace-ranker-reconcile-v1".to_string(),
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: "trace-credit-policy-reconcile-v1".to_string(),
-                evaluation_dataset_hash: "sha256:ranking-calibration-reconcile".to_string(),
+                evaluation_dataset_hash: sha256_prefixed("ranking-calibration-reconcile"),
                 prediction_count: 1,
                 label_count: 1,
                 joined_label_prediction_count: 1,
                 joined_label_source_count: 1,
                 joined_label_actor_count: 1,
-                joined_evidence_hash: "sha256:ranking-joined-evidence-reconcile".to_string(),
+                joined_evidence_hash: sha256_prefixed("ranking-joined-evidence-reconcile"),
                 average_predicted_utility_micros: Some(1_200_000),
                 average_label_utility_delta_micros: Some(1_250_000),
                 average_absolute_error_micros: Some(50_000),
@@ -72769,7 +72769,7 @@ mod tests {
                 event_type: TraceCreditLedgerEventType::TrainingUtility,
                 use_category: "frontier_lab_training".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
-                evidence_hash: "sha256:utility-attestation-evidence".to_string(),
+                evidence_hash: sha256_prefixed("utility-attestation-evidence"),
                 external_ref_hash: "sha256:utility-attestation-ref".to_string(),
                 source_submission_ids: vec![Uuid::new_v4()],
                 actor_principal_ref: principal_storage_ref("utility-worker-token-a"),
@@ -73662,10 +73662,10 @@ mod tests {
         let record = TraceRankingCalibrationDatasetRecord {
             tenant_id: "tenant-a".to_string(),
             tenant_storage_ref: tenant_storage_ref("tenant-a"),
-            calibration_dataset_hash: "sha256:quarantine-holdout".to_string(),
+            calibration_dataset_hash: sha256_prefixed("quarantine-holdout"),
             target_use: TraceAllowedUse::RankingModelTraining,
             policy_version: "trace-credit-policy-v1".to_string(),
-            source_manifest_hash: "sha256:quarantine-manifest".to_string(),
+            source_manifest_hash: sha256_prefixed("quarantine-manifest"),
             source_count: 128,
             label_source_count: 3,
             label_actor_count: 3,
@@ -79658,9 +79658,9 @@ mod tests {
                 feature_schema_version: "ranking-features-settlement-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:ranking-training-settlement".to_string(),
-                calibration_dataset_hash: "sha256:ranking-calibration-settlement".to_string(),
-                model_artifact_hash: "sha256:ranking-model-artifact-settlement".to_string(),
+                training_dataset_hash: sha256_prefixed("ranking-training-settlement"),
+                calibration_dataset_hash: sha256_prefixed("ranking-calibration-settlement"),
+                model_artifact_hash: sha256_prefixed("ranking-model-artifact-settlement"),
             }),
         )
         .await
@@ -79672,9 +79672,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: model.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:ranking-feature-settlement".to_string(),
-                feature_names_hash: "sha256:ranking-feature-names-settlement".to_string(),
-                source_feature_hash: "sha256:ranking-source-feature-settlement".to_string(),
+                feature_vector_hash: sha256_prefixed("ranking-feature-settlement"),
+                feature_names_hash: sha256_prefixed("ranking-feature-names-settlement"),
+                source_feature_hash: sha256_prefixed("ranking-source-feature-settlement"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -79714,7 +79714,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_300_000,
-                evidence_hash: "sha256:ranking-frontier-evidence-settlement".to_string(),
+                evidence_hash: sha256_prefixed("ranking-frontier-evidence-settlement"),
                 external_ref: "private-ranking-calibration-ref".to_string(),
             }),
         )
@@ -79873,10 +79873,9 @@ mod tests {
                 feature_schema_version: "ranking-features-active-settlement-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:ranking-training-active-settlement".to_string(),
-                calibration_dataset_hash: "sha256:ranking-calibration-active-settlement"
-                    .to_string(),
-                model_artifact_hash: "sha256:ranking-model-artifact-active-settlement".to_string(),
+                training_dataset_hash: sha256_prefixed("ranking-training-active-settlement"),
+                calibration_dataset_hash: sha256_prefixed("ranking-calibration-active-settlement"),
+                model_artifact_hash: sha256_prefixed("ranking-model-artifact-active-settlement"),
             }),
         )
         .await
@@ -79888,9 +79887,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:ranking-feature-active-settlement".to_string(),
-                feature_names_hash: "sha256:ranking-feature-names-active-settlement".to_string(),
-                source_feature_hash: "sha256:ranking-source-feature-active-settlement".to_string(),
+                feature_vector_hash: sha256_prefixed("ranking-feature-active-settlement"),
+                feature_names_hash: sha256_prefixed("ranking-feature-names-active-settlement"),
+                source_feature_hash: sha256_prefixed("ranking-source-feature-active-settlement"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -79930,7 +79929,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_300_000,
-                evidence_hash: "sha256:ranking-frontier-evidence-active-settlement".to_string(),
+                evidence_hash: sha256_prefixed("ranking-frontier-evidence-active-settlement"),
                 external_ref: "private-ranking-active-settlement".to_string(),
             }),
         )
@@ -80012,9 +80011,9 @@ mod tests {
                 feature_schema_version: "ranking-features-prediction-bound-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:ranking-training-prediction-bound".to_string(),
-                calibration_dataset_hash: "sha256:ranking-calibration-prediction-bound".to_string(),
-                model_artifact_hash: "sha256:ranking-model-artifact-prediction-bound".to_string(),
+                training_dataset_hash: sha256_prefixed("ranking-training-prediction-bound"),
+                calibration_dataset_hash: sha256_prefixed("ranking-calibration-prediction-bound"),
+                model_artifact_hash: sha256_prefixed("ranking-model-artifact-prediction-bound"),
             }),
         )
         .await
@@ -80026,9 +80025,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:ranking-feature-prediction-bound".to_string(),
-                feature_names_hash: "sha256:ranking-feature-names-prediction-bound".to_string(),
-                source_feature_hash: "sha256:ranking-source-feature-prediction-bound".to_string(),
+                feature_vector_hash: sha256_prefixed("ranking-feature-prediction-bound"),
+                feature_names_hash: sha256_prefixed("ranking-feature-names-prediction-bound"),
+                source_feature_hash: sha256_prefixed("ranking-source-feature-prediction-bound"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -80068,7 +80067,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_300_000,
-                evidence_hash: "sha256:ranking-frontier-evidence-prediction-bound".to_string(),
+                evidence_hash: sha256_prefixed("ranking-frontier-evidence-prediction-bound"),
                 external_ref: "private-ranking-prediction-bound".to_string(),
             }),
         )
@@ -80201,9 +80200,9 @@ mod tests {
                 feature_schema_version: "ranking-features-credit-worker-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:ranking-training-credit-worker".to_string(),
-                calibration_dataset_hash: "sha256:ranking-calibration-credit-worker".to_string(),
-                model_artifact_hash: "sha256:ranking-model-artifact-credit-worker".to_string(),
+                training_dataset_hash: sha256_prefixed("ranking-training-credit-worker"),
+                calibration_dataset_hash: sha256_prefixed("ranking-calibration-credit-worker"),
+                model_artifact_hash: sha256_prefixed("ranking-model-artifact-credit-worker"),
             }),
         )
         .await
@@ -80215,9 +80214,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:ranking-feature-credit-worker".to_string(),
-                feature_names_hash: "sha256:ranking-feature-names-credit-worker".to_string(),
-                source_feature_hash: "sha256:ranking-source-feature-credit-worker".to_string(),
+                feature_vector_hash: sha256_prefixed("ranking-feature-credit-worker"),
+                feature_names_hash: sha256_prefixed("ranking-feature-names-credit-worker"),
+                source_feature_hash: sha256_prefixed("ranking-source-feature-credit-worker"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -80257,7 +80256,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_300_000,
-                evidence_hash: "sha256:ranking-frontier-evidence-credit-worker".to_string(),
+                evidence_hash: sha256_prefixed("ranking-frontier-evidence-credit-worker"),
                 external_ref: "private-ranking-credit-worker".to_string(),
             }),
         )
@@ -80671,7 +80670,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Rejected,
                 utility_delta_micros: -1_250_000,
-                evidence_hash: "sha256:readiness-adjudication-conflict-review".to_string(),
+                evidence_hash: sha256_prefixed("readiness-adjudication-conflict-review"),
                 external_ref: "private-readiness-adjudication-conflict".to_string(),
             }),
         )
@@ -80756,9 +80755,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: "ranking-features-server-v1".to_string(),
-                feature_vector_hash: "sha256:manual-reserved-feature".to_string(),
-                feature_names_hash: "sha256:manual-reserved-feature-names".to_string(),
-                source_feature_hash: "sha256:manual-reserved-source-feature".to_string(),
+                feature_vector_hash: sha256_prefixed("manual-reserved-feature"),
+                feature_names_hash: sha256_prefixed("manual-reserved-feature-names"),
+                source_feature_hash: sha256_prefixed("manual-reserved-source-feature"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -81043,9 +81042,9 @@ mod tests {
                 feature_schema_version: "ranking-features-credit-run-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:ranking-training-credit-run".to_string(),
-                calibration_dataset_hash: "sha256:ranking-calibration-credit-run".to_string(),
-                model_artifact_hash: "sha256:ranking-model-artifact-credit-run".to_string(),
+                training_dataset_hash: sha256_prefixed("ranking-training-credit-run"),
+                calibration_dataset_hash: sha256_prefixed("ranking-calibration-credit-run"),
+                model_artifact_hash: sha256_prefixed("ranking-model-artifact-credit-run"),
             }),
         )
         .await
@@ -81065,7 +81064,8 @@ mod tests {
             )
             .await
             .expect("ranking submission succeeds");
-            let feature_vector_hash = format!("sha256:ranking-feature-credit-run-{index}");
+            let feature_vector_hash =
+                sha256_prefixed(&format!("ranking-feature-credit-run-{index}"));
             let Json(feature) = ranking_feature_handler(
                 State(state.clone()),
                 auth_headers("utility-worker-token-a"),
@@ -81074,10 +81074,12 @@ mod tests {
                     target_use: TraceAllowedUse::RankingModelTraining,
                     feature_schema_version: candidate.feature_schema_version.clone(),
                     feature_vector_hash,
-                    feature_names_hash: format!("sha256:ranking-feature-names-credit-run-{index}"),
-                    source_feature_hash: format!(
-                        "sha256:ranking-source-feature-credit-run-{index}"
-                    ),
+                    feature_names_hash: sha256_prefixed(&format!(
+                        "ranking-feature-names-credit-run-{index}"
+                    )),
+                    source_feature_hash: sha256_prefixed(&format!(
+                        "ranking-source-feature-credit-run-{index}"
+                    )),
                     duplicate_score: Some(0.05),
                     novelty_score: Some(0.91),
                     privacy_risk_score: Some(0.02),
@@ -81117,7 +81119,9 @@ mod tests {
                     utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                     label_outcome: StorageTraceRankingLabelOutcome::Useful,
                     utility_delta_micros: 1_300_000 + i64::from(index) * 250_000,
-                    evidence_hash: format!("sha256:ranking-frontier-evidence-credit-run-{index}"),
+                    evidence_hash: sha256_prefixed(&format!(
+                        "ranking-frontier-evidence-credit-run-{index}"
+                    )),
                     external_ref: format!("private-ranking-credit-run-{index}"),
                 }),
             )
@@ -81551,10 +81555,9 @@ mod tests {
                 feature_schema_version: "ranking-features-credit-failed-run-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:ranking-training-credit-failed-run".to_string(),
-                calibration_dataset_hash: "sha256:ranking-calibration-credit-failed-run"
-                    .to_string(),
-                model_artifact_hash: "sha256:ranking-model-artifact-credit-failed-run".to_string(),
+                training_dataset_hash: sha256_prefixed("ranking-training-credit-failed-run"),
+                calibration_dataset_hash: sha256_prefixed("ranking-calibration-credit-failed-run"),
+                model_artifact_hash: sha256_prefixed("ranking-model-artifact-credit-failed-run"),
             }),
         )
         .await
@@ -81580,9 +81583,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:ranking-feature-credit-failed-run".to_string(),
-                feature_names_hash: "sha256:ranking-feature-names-credit-failed-run".to_string(),
-                source_feature_hash: "sha256:ranking-source-feature-credit-failed-run".to_string(),
+                feature_vector_hash: sha256_prefixed("ranking-feature-credit-failed-run"),
+                feature_names_hash: sha256_prefixed("ranking-feature-names-credit-failed-run"),
+                source_feature_hash: sha256_prefixed("ranking-source-feature-credit-failed-run"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -81695,9 +81698,9 @@ mod tests {
                 feature_schema_version: "ranking-features-credit-risk-run-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:ranking-training-credit-risk-run".to_string(),
-                calibration_dataset_hash: "sha256:ranking-calibration-credit-risk-run".to_string(),
-                model_artifact_hash: "sha256:ranking-model-artifact-credit-risk-run".to_string(),
+                training_dataset_hash: sha256_prefixed("ranking-training-credit-risk-run"),
+                calibration_dataset_hash: sha256_prefixed("ranking-calibration-credit-risk-run"),
+                model_artifact_hash: sha256_prefixed("ranking-model-artifact-credit-risk-run"),
             }),
         )
         .await
@@ -81723,11 +81726,13 @@ mod tests {
                 submission_id: calibration_submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:ranking-feature-credit-risk-calibration".to_string(),
-                feature_names_hash: "sha256:ranking-feature-names-credit-risk-calibration"
-                    .to_string(),
-                source_feature_hash: "sha256:ranking-source-feature-credit-risk-calibration"
-                    .to_string(),
+                feature_vector_hash: sha256_prefixed("ranking-feature-credit-risk-calibration"),
+                feature_names_hash: sha256_prefixed(
+                    "ranking-feature-names-credit-risk-calibration",
+                ),
+                source_feature_hash: sha256_prefixed(
+                    "ranking-source-feature-credit-risk-calibration",
+                ),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -81767,8 +81772,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_250_000,
-                evidence_hash: "sha256:ranking-frontier-evidence-credit-risk-calibration"
-                    .to_string(),
+                evidence_hash: sha256_prefixed("ranking-frontier-evidence-credit-risk-calibration"),
                 external_ref: "private-ranking-credit-risk-calibration".to_string(),
             }),
         )
@@ -81835,9 +81839,9 @@ mod tests {
                 submission_id: drift_submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:ranking-feature-credit-risk-drift".to_string(),
-                feature_names_hash: "sha256:ranking-feature-names-credit-risk-drift".to_string(),
-                source_feature_hash: "sha256:ranking-source-feature-credit-risk-drift".to_string(),
+                feature_vector_hash: sha256_prefixed("ranking-feature-credit-risk-drift"),
+                feature_names_hash: sha256_prefixed("ranking-feature-names-credit-risk-drift"),
+                source_feature_hash: sha256_prefixed("ranking-source-feature-credit-risk-drift"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.94),
                 privacy_risk_score: Some(0.02),
@@ -81877,7 +81881,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_500_000,
-                evidence_hash: "sha256:ranking-frontier-evidence-credit-risk-drift".to_string(),
+                evidence_hash: sha256_prefixed("ranking-frontier-evidence-credit-risk-drift"),
                 external_ref: "private-ranking-credit-risk-drift".to_string(),
             }),
         )
@@ -81991,9 +81995,9 @@ mod tests {
                 feature_schema_version: "ranking-features-credit-guard-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:ranking-training-credit-guard".to_string(),
-                calibration_dataset_hash: "sha256:ranking-calibration-credit-guard".to_string(),
-                model_artifact_hash: "sha256:ranking-model-artifact-credit-guard".to_string(),
+                training_dataset_hash: sha256_prefixed("ranking-training-credit-guard"),
+                calibration_dataset_hash: sha256_prefixed("ranking-calibration-credit-guard"),
+                model_artifact_hash: sha256_prefixed("ranking-model-artifact-credit-guard"),
             }),
         )
         .await
@@ -82005,9 +82009,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:ranking-feature-credit-guard".to_string(),
-                feature_names_hash: "sha256:ranking-feature-names-credit-guard".to_string(),
-                source_feature_hash: "sha256:ranking-source-feature-credit-guard".to_string(),
+                feature_vector_hash: sha256_prefixed("ranking-feature-credit-guard"),
+                feature_names_hash: sha256_prefixed("ranking-feature-names-credit-guard"),
+                source_feature_hash: sha256_prefixed("ranking-source-feature-credit-guard"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -82059,7 +82063,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_250_000,
-                evidence_hash: "sha256:ranking-frontier-evidence-credit-guard".to_string(),
+                evidence_hash: sha256_prefixed("ranking-frontier-evidence-credit-guard"),
                 external_ref: "private-ranking-credit-guard".to_string(),
             }),
         )
@@ -82158,9 +82162,9 @@ mod tests {
                 feature_schema_version: "ranking-features-freshness-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:ranking-training-freshness".to_string(),
-                calibration_dataset_hash: "sha256:ranking-calibration-freshness".to_string(),
-                model_artifact_hash: "sha256:ranking-model-artifact-freshness".to_string(),
+                training_dataset_hash: sha256_prefixed("ranking-training-freshness"),
+                calibration_dataset_hash: sha256_prefixed("ranking-calibration-freshness"),
+                model_artifact_hash: sha256_prefixed("ranking-model-artifact-freshness"),
             }),
         )
         .await
@@ -82172,9 +82176,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:ranking-feature-freshness".to_string(),
-                feature_names_hash: "sha256:ranking-feature-names-freshness".to_string(),
-                source_feature_hash: "sha256:ranking-source-feature-freshness".to_string(),
+                feature_vector_hash: sha256_prefixed("ranking-feature-freshness"),
+                feature_names_hash: sha256_prefixed("ranking-feature-names-freshness"),
+                source_feature_hash: sha256_prefixed("ranking-source-feature-freshness"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -82214,7 +82218,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_300_000,
-                evidence_hash: "sha256:ranking-frontier-evidence-freshness".to_string(),
+                evidence_hash: sha256_prefixed("ranking-frontier-evidence-freshness"),
                 external_ref: "private-ranking-freshness".to_string(),
             }),
         )
@@ -82475,9 +82479,9 @@ mod tests {
                 feature_schema_version: "ranking-features-promote-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:ranking-training-promote".to_string(),
-                calibration_dataset_hash: "sha256:ranking-calibration-promote".to_string(),
-                model_artifact_hash: "sha256:ranking-model-artifact-promote".to_string(),
+                training_dataset_hash: sha256_prefixed("ranking-training-promote"),
+                calibration_dataset_hash: sha256_prefixed("ranking-calibration-promote"),
+                model_artifact_hash: sha256_prefixed("ranking-model-artifact-promote"),
             }),
         )
         .await
@@ -82489,9 +82493,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:ranking-feature-promote".to_string(),
-                feature_names_hash: "sha256:ranking-feature-names-promote".to_string(),
-                source_feature_hash: "sha256:ranking-source-feature-promote".to_string(),
+                feature_vector_hash: sha256_prefixed("ranking-feature-promote"),
+                feature_names_hash: sha256_prefixed("ranking-feature-names-promote"),
+                source_feature_hash: sha256_prefixed("ranking-source-feature-promote"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -82531,7 +82535,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_300_000,
-                evidence_hash: "sha256:ranking-frontier-evidence-promote".to_string(),
+                evidence_hash: sha256_prefixed("ranking-frontier-evidence-promote"),
                 external_ref: "private-ranking-promote".to_string(),
             }),
         )
@@ -82626,7 +82630,7 @@ mod tests {
                 label_source: StorageTraceRankingLabelSource::Reviewer,
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 preference_strength_micros: 800_000,
-                evidence_hash: "sha256:promotion-backtest-pairwise-reversal".to_string(),
+                evidence_hash: sha256_prefixed("promotion-backtest-pairwise-reversal"),
                 external_ref: "reviewer-private-promotion-backtest-pairwise-reversal".to_string(),
             }),
         )
@@ -82708,7 +82712,7 @@ mod tests {
                 label_source: StorageTraceRankingLabelSource::Reviewer,
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 preference_strength_micros: 800_000,
-                evidence_hash: "sha256:worker-backtest-pairwise-reversal".to_string(),
+                evidence_hash: sha256_prefixed("worker-backtest-pairwise-reversal"),
                 external_ref: "reviewer-private-worker-backtest-pairwise-reversal".to_string(),
             }),
         )
@@ -82804,7 +82808,7 @@ mod tests {
                 label_source: StorageTraceRankingLabelSource::Reviewer,
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 preference_strength_micros: 800_000,
-                evidence_hash: "sha256:operational-backtest-pairwise-reversal".to_string(),
+                evidence_hash: sha256_prefixed("operational-backtest-pairwise-reversal"),
                 external_ref: "reviewer-private-operational-backtest-pairwise-reversal".to_string(),
             }),
         )
@@ -82868,7 +82872,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_000_000,
-                evidence_hash: "sha256:operational-adjudication-frontier".to_string(),
+                evidence_hash: sha256_prefixed("operational-adjudication-frontier"),
                 external_ref: "private-operational-adjudication-frontier".to_string(),
             }),
         )
@@ -82884,7 +82888,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Rejected,
                 utility_delta_micros: -250_000,
-                evidence_hash: "sha256:operational-adjudication-reviewer".to_string(),
+                evidence_hash: sha256_prefixed("operational-adjudication-reviewer"),
                 external_ref: "private-operational-adjudication-reviewer".to_string(),
             }),
         )
@@ -82932,9 +82936,15 @@ mod tests {
                 feature_schema_version: format!("ranking-features-{model_version}"),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: format!("sha256:ranking-training-{model_version}"),
-                calibration_dataset_hash: format!("sha256:ranking-calibration-{model_version}"),
-                model_artifact_hash: format!("sha256:ranking-model-artifact-{model_version}"),
+                training_dataset_hash: sha256_prefixed(&format!(
+                    "ranking-training-{model_version}"
+                )),
+                calibration_dataset_hash: sha256_prefixed(&format!(
+                    "ranking-calibration-{model_version}"
+                )),
+                model_artifact_hash: sha256_prefixed(&format!(
+                    "ranking-model-artifact-{model_version}"
+                )),
             }),
         )
         .await
@@ -82961,9 +82971,13 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
-                feature_vector_hash: format!("sha256:ranking-feature-{model_version}"),
-                feature_names_hash: format!("sha256:ranking-feature-names-{model_version}"),
-                source_feature_hash: format!("sha256:ranking-source-feature-{model_version}"),
+                feature_vector_hash: sha256_prefixed(&format!("ranking-feature-{model_version}")),
+                feature_names_hash: sha256_prefixed(&format!(
+                    "ranking-feature-names-{model_version}"
+                )),
+                source_feature_hash: sha256_prefixed(&format!(
+                    "ranking-source-feature-{model_version}"
+                )),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -83012,7 +83026,9 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_250_000,
-                evidence_hash: format!("sha256:ranking-frontier-evidence-{model_version}"),
+                evidence_hash: sha256_prefixed(&format!(
+                    "ranking-frontier-evidence-{model_version}"
+                )),
                 external_ref: format!("private-ranking-{model_version}"),
             }),
         )
@@ -83216,7 +83232,7 @@ mod tests {
                 calibration_dataset_hash: candidate.calibration_dataset_hash.clone(),
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: candidate.policy_version.clone(),
-                source_manifest_hash: "sha256:required-holdout-manifest".to_string(),
+                source_manifest_hash: sha256_prefixed("required-holdout-manifest"),
                 source_count: 10,
                 label_source_count: 1,
                 label_actor_count: 1,
@@ -83275,7 +83291,7 @@ mod tests {
                 calibration_dataset_hash: candidate.calibration_dataset_hash.clone(),
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: candidate.policy_version.clone(),
-                source_manifest_hash: "sha256:active-holdout-manifest".to_string(),
+                source_manifest_hash: sha256_prefixed("active-holdout-manifest"),
                 source_count: 10,
                 label_source_count: 1,
                 label_actor_count: 1,
@@ -83353,7 +83369,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_250_000,
-                evidence_hash: "sha256:ranking-review-evidence-holdout-floor".to_string(),
+                evidence_hash: sha256_prefixed("ranking-review-evidence-holdout-floor"),
                 external_ref: "private-ranking-review-holdout-floor".to_string(),
             }),
         )
@@ -83386,7 +83402,7 @@ mod tests {
                 calibration_dataset_hash: candidate.calibration_dataset_hash.clone(),
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: candidate.policy_version.clone(),
-                source_manifest_hash: "sha256:holdout-floor-manifest".to_string(),
+                source_manifest_hash: sha256_prefixed("holdout-floor-manifest"),
                 source_count: 1,
                 label_source_count: 2,
                 label_actor_count: 2,
@@ -83563,7 +83579,7 @@ mod tests {
                 calibration_dataset_hash: candidate.calibration_dataset_hash,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: candidate.policy_version,
-                source_manifest_hash: "sha256:readiness-holdout-manifest".to_string(),
+                source_manifest_hash: sha256_prefixed("readiness-holdout-manifest"),
                 source_count: 10,
                 label_source_count: 1,
                 label_actor_count: 1,
@@ -83638,13 +83654,13 @@ mod tests {
         assert_eq!(conflict.conflict_key, conflict_key);
         assert_eq!(
             conflict.calibration_dataset_hash,
-            "sha256:calibration-conflict-report-holdout-v1"
+            sha256_prefixed("calibration-conflict-report-holdout-v1")
         );
         assert_eq!(conflict.target_use, TraceAllowedUse::RankingModelTraining);
         assert_eq!(conflict.policy_version, "trace-credit-policy-v1");
         assert_eq!(
             conflict.latest_source_manifest_hash,
-            "sha256:calibration-conflict-report-manifest-v2"
+            sha256_prefixed("calibration-conflict-report-manifest-v2")
         );
         assert_eq!(
             conflict.latest_status,
@@ -83672,8 +83688,9 @@ mod tests {
             State(state.clone()),
             auth_headers("admin-token-a"),
             Json(TraceRankingCalibrationDatasetConflictQuarantineRequest {
-                calibration_dataset_hash: "sha256:calibration-conflict-quarantine-holdout-v1"
-                    .to_string(),
+                calibration_dataset_hash: sha256_prefixed(
+                    "calibration-conflict-quarantine-holdout-v1",
+                ),
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "legacy manifest rewrite was imported before immutability enforcement"
@@ -83691,7 +83708,7 @@ mod tests {
         );
         assert_eq!(
             response.archived_record.source_manifest_hash,
-            "sha256:calibration-conflict-quarantine-manifest-v2"
+            sha256_prefixed("calibration-conflict-quarantine-manifest-v2")
         );
         assert_eq!(response.remaining_conflict_count, 0);
         let audit_events =
@@ -83768,11 +83785,11 @@ mod tests {
         backend
             .upsert_trace_ranking_calibration_dataset(StorageTraceRankingCalibrationDatasetWrite {
                 tenant_id: "tenant-a".to_string(),
-                calibration_dataset_hash: format!("sha256:{fixture_key}-holdout-v1"),
+                calibration_dataset_hash: sha256_prefixed(&format!("{fixture_key}-holdout-v1")),
                 target_use: serde_storage_string(&TraceAllowedUse::RankingModelTraining)
                     .expect("target use serializes"),
                 policy_version: "trace-credit-policy-v1".to_string(),
-                source_manifest_hash: format!("sha256:{fixture_key}-manifest-v1"),
+                source_manifest_hash: sha256_prefixed(&format!("{fixture_key}-manifest-v1")),
                 source_count: 128,
                 label_source_count: 3,
                 label_actor_count: 3,
@@ -83805,7 +83822,7 @@ mod tests {
             State(state),
             auth_headers("admin-token-a"),
             Json(TraceRankingCalibrationDatasetConflictQuarantineRequest {
-                calibration_dataset_hash: format!("sha256:{fixture_key}-holdout-v1"),
+                calibration_dataset_hash: sha256_prefixed(&format!("{fixture_key}-holdout-v1")),
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: "trace-credit-policy-v1".to_string(),
                 reason: "legacy manifest rewrite imported before DB immutability".to_string(),
@@ -83845,10 +83862,10 @@ mod tests {
             State(state.clone()),
             auth_headers("admin-token-a"),
             Json(TraceRankingCalibrationDatasetRequest {
-                calibration_dataset_hash: "sha256:ranking-calibration-registry-v1".to_string(),
+                calibration_dataset_hash: sha256_prefixed("ranking-calibration-registry-v1"),
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: "trace-credit-policy-v1".to_string(),
-                source_manifest_hash: "sha256:ranking-calibration-source-manifest-v1".to_string(),
+                source_manifest_hash: sha256_prefixed("ranking-calibration-source-manifest-v1"),
                 source_count: 128,
                 label_source_count: 3,
                 label_actor_count: 3,
@@ -83859,13 +83876,13 @@ mod tests {
         .expect("admin can register calibration dataset metadata");
         assert_eq!(
             record.calibration_dataset_hash,
-            "sha256:ranking-calibration-registry-v1"
+            sha256_prefixed("ranking-calibration-registry-v1")
         );
         assert_eq!(record.target_use, TraceAllowedUse::RankingModelTraining);
         assert_eq!(record.policy_version, "trace-credit-policy-v1");
         assert_eq!(
             record.source_manifest_hash,
-            "sha256:ranking-calibration-source-manifest-v1"
+            sha256_prefixed("ranking-calibration-source-manifest-v1")
         );
         assert_eq!(record.source_count, 128);
         assert_eq!(record.label_source_count, 3);
@@ -83907,11 +83924,10 @@ mod tests {
             State(state.clone()),
             auth_headers("admin-token-a"),
             Json(TraceRankingCalibrationDatasetRequest {
-                calibration_dataset_hash: "sha256:ranking-calibration-immutable-v1".to_string(),
+                calibration_dataset_hash: sha256_prefixed("ranking-calibration-immutable-v1"),
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: "trace-credit-policy-v1".to_string(),
-                source_manifest_hash: "sha256:ranking-calibration-immutable-manifest-v1"
-                    .to_string(),
+                source_manifest_hash: sha256_prefixed("ranking-calibration-immutable-manifest-v1"),
                 source_count: 128,
                 label_source_count: 3,
                 label_actor_count: 3,
@@ -83949,8 +83965,7 @@ mod tests {
                 calibration_dataset_hash: record.calibration_dataset_hash.clone(),
                 target_use: record.target_use,
                 policy_version: record.policy_version.clone(),
-                source_manifest_hash: "sha256:ranking-calibration-immutable-manifest-v2"
-                    .to_string(),
+                source_manifest_hash: sha256_prefixed("ranking-calibration-immutable-manifest-v2"),
                 source_count: record.source_count,
                 label_source_count: record.label_source_count,
                 label_actor_count: record.label_actor_count,
@@ -83980,10 +83995,10 @@ mod tests {
         let initial = TraceRankingCalibrationDatasetRecord {
             tenant_id: tenant_id.to_string(),
             tenant_storage_ref: tenant_storage_ref(tenant_id),
-            calibration_dataset_hash: "sha256:ranking-calibration-storage-v1".to_string(),
+            calibration_dataset_hash: sha256_prefixed("ranking-calibration-storage-v1"),
             target_use: TraceAllowedUse::RankingModelTraining,
             policy_version: "trace-credit-policy-v1".to_string(),
-            source_manifest_hash: "sha256:ranking-calibration-storage-manifest-v1".to_string(),
+            source_manifest_hash: sha256_prefixed("ranking-calibration-storage-manifest-v1"),
             source_count: 128,
             label_source_count: 3,
             label_actor_count: 3,
@@ -84002,7 +84017,7 @@ mod tests {
             .expect("status-only calibration dataset append succeeds");
 
         let mut rewrite = status_update.clone();
-        rewrite.source_manifest_hash = "sha256:ranking-calibration-storage-manifest-v2".to_string();
+        rewrite.source_manifest_hash = sha256_prefixed("ranking-calibration-storage-manifest-v2");
         let error = append_ranking_calibration_dataset(temp.path(), tenant_id, &rewrite)
             .expect_err("storage append rejects calibration dataset manifest rewrite");
         assert!(error.to_string().contains("immutable"));
@@ -84028,10 +84043,10 @@ mod tests {
         let initial = TraceRankingCalibrationDatasetRecord {
             tenant_id: tenant_id.to_string(),
             tenant_storage_ref: tenant_storage_ref(tenant_id),
-            calibration_dataset_hash: "sha256:ranking-calibration-legacy-v1".to_string(),
+            calibration_dataset_hash: sha256_prefixed("ranking-calibration-legacy-v1"),
             target_use: TraceAllowedUse::RankingModelTraining,
             policy_version: "trace-credit-policy-v1".to_string(),
-            source_manifest_hash: "sha256:ranking-calibration-legacy-manifest-v1".to_string(),
+            source_manifest_hash: sha256_prefixed("ranking-calibration-legacy-manifest-v1"),
             source_count: 128,
             label_source_count: 3,
             label_actor_count: 3,
@@ -84040,7 +84055,7 @@ mod tests {
             created_at: Utc::now(),
         };
         let mut rewrite = initial.clone();
-        rewrite.source_manifest_hash = "sha256:ranking-calibration-legacy-manifest-v2".to_string();
+        rewrite.source_manifest_hash = sha256_prefixed("ranking-calibration-legacy-manifest-v2");
         rewrite.status = StorageTraceRankingCalibrationDatasetStatus::Active;
         rewrite.created_at = Utc::now();
 
@@ -84062,11 +84077,12 @@ mod tests {
         let initial = TraceRankingCalibrationDatasetRecord {
             tenant_id: tenant_id.to_string(),
             tenant_storage_ref: tenant_storage_ref(tenant_id),
-            calibration_dataset_hash: "sha256:ranking-calibration-reconcile-legacy-v1".to_string(),
+            calibration_dataset_hash: sha256_prefixed("ranking-calibration-reconcile-legacy-v1"),
             target_use: TraceAllowedUse::RankingModelTraining,
             policy_version: "trace-credit-policy-v1".to_string(),
-            source_manifest_hash: "sha256:ranking-calibration-reconcile-legacy-manifest-v1"
-                .to_string(),
+            source_manifest_hash: sha256_prefixed(
+                "ranking-calibration-reconcile-legacy-manifest-v1",
+            ),
             source_count: 128,
             label_source_count: 3,
             label_actor_count: 3,
@@ -84076,7 +84092,7 @@ mod tests {
         };
         let mut rewrite = initial.clone();
         rewrite.source_manifest_hash =
-            "sha256:ranking-calibration-reconcile-legacy-manifest-v2".to_string();
+            sha256_prefixed("ranking-calibration-reconcile-legacy-manifest-v2");
         rewrite.status = StorageTraceRankingCalibrationDatasetStatus::Active;
         rewrite.created_at = Utc::now();
 
@@ -84094,10 +84110,10 @@ mod tests {
         );
         assert_eq!(
             read.manifest_conflict_keys,
-            vec![
-                "sha256:ranking-calibration-reconcile-legacy-v1:ranking_model_training:trace-credit-policy-v1"
-                    .to_string()
-            ]
+            vec![format!(
+                "{}:ranking_model_training:trace-credit-policy-v1",
+                initial.calibration_dataset_hash
+            )]
         );
     }
 
@@ -84127,9 +84143,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
-                feature_vector_hash: format!("sha256:{fixture_key}-feature-vector"),
-                feature_names_hash: format!("sha256:{fixture_key}-feature-names"),
-                source_feature_hash: format!("sha256:{fixture_key}-source-feature"),
+                feature_vector_hash: sha256_prefixed(&format!("{fixture_key}-feature-vector")),
+                feature_names_hash: sha256_prefixed(&format!("{fixture_key}-feature-names")),
+                source_feature_hash: sha256_prefixed(&format!("{fixture_key}-source-feature")),
                 duplicate_score: Some(0.02),
                 novelty_score: Some(0.9),
                 privacy_risk_score: Some(0.01),
@@ -84705,11 +84721,11 @@ mod tests {
                 feature_schema_version: "ranking-features-credit-cycle-claimed-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:ranking-training-credit-cycle-claimed".to_string(),
-                calibration_dataset_hash: "sha256:ranking-calibration-credit-cycle-claimed"
-                    .to_string(),
-                model_artifact_hash: "sha256:ranking-model-artifact-credit-cycle-claimed"
-                    .to_string(),
+                training_dataset_hash: sha256_prefixed("ranking-training-credit-cycle-claimed"),
+                calibration_dataset_hash: sha256_prefixed(
+                    "ranking-calibration-credit-cycle-claimed",
+                ),
+                model_artifact_hash: sha256_prefixed("ranking-model-artifact-credit-cycle-claimed"),
             }),
         )
         .await
@@ -84907,11 +84923,11 @@ mod tests {
                 feature_schema_version: "ranking-features-credit-cycle-unready-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:ranking-training-credit-cycle-unready".to_string(),
-                calibration_dataset_hash: "sha256:ranking-calibration-credit-cycle-unready"
-                    .to_string(),
-                model_artifact_hash: "sha256:ranking-model-artifact-credit-cycle-unready"
-                    .to_string(),
+                training_dataset_hash: sha256_prefixed("ranking-training-credit-cycle-unready"),
+                calibration_dataset_hash: sha256_prefixed(
+                    "ranking-calibration-credit-cycle-unready",
+                ),
+                model_artifact_hash: sha256_prefixed("ranking-model-artifact-credit-cycle-unready"),
             }),
         )
         .await
@@ -85016,7 +85032,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_250_000,
-                evidence_hash: "sha256:ranking-frontier-evidence-unjoined-cycle".to_string(),
+                evidence_hash: sha256_prefixed("ranking-frontier-evidence-unjoined-cycle"),
                 external_ref: "private-ranking-unjoined-cycle".to_string(),
             }),
         )
@@ -85363,9 +85379,9 @@ mod tests {
                 feature_schema_version: "ranking-features-worker-promote-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:ranking-training-worker-promote".to_string(),
-                calibration_dataset_hash: "sha256:ranking-calibration-worker-promote".to_string(),
-                model_artifact_hash: "sha256:ranking-model-artifact-worker-promote".to_string(),
+                training_dataset_hash: sha256_prefixed("ranking-training-worker-promote"),
+                calibration_dataset_hash: sha256_prefixed("ranking-calibration-worker-promote"),
+                model_artifact_hash: sha256_prefixed("ranking-model-artifact-worker-promote"),
             }),
         )
         .await
@@ -85378,11 +85394,13 @@ mod tests {
                 feature_schema_version: "ranking-features-worker-promote-blocked-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:ranking-training-worker-promote-blocked".to_string(),
-                calibration_dataset_hash: "sha256:ranking-calibration-worker-promote-blocked"
-                    .to_string(),
-                model_artifact_hash: "sha256:ranking-model-artifact-worker-promote-blocked"
-                    .to_string(),
+                training_dataset_hash: sha256_prefixed("ranking-training-worker-promote-blocked"),
+                calibration_dataset_hash: sha256_prefixed(
+                    "ranking-calibration-worker-promote-blocked",
+                ),
+                model_artifact_hash: sha256_prefixed(
+                    "ranking-model-artifact-worker-promote-blocked",
+                ),
             }),
         )
         .await
@@ -85408,9 +85426,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:ranking-feature-worker-promote".to_string(),
-                feature_names_hash: "sha256:ranking-feature-names-worker-promote".to_string(),
-                source_feature_hash: "sha256:ranking-source-feature-worker-promote".to_string(),
+                feature_vector_hash: sha256_prefixed("ranking-feature-worker-promote"),
+                feature_names_hash: sha256_prefixed("ranking-feature-names-worker-promote"),
+                source_feature_hash: sha256_prefixed("ranking-source-feature-worker-promote"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -85450,7 +85468,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_250_000,
-                evidence_hash: "sha256:ranking-frontier-evidence-worker-promote".to_string(),
+                evidence_hash: sha256_prefixed("ranking-frontier-evidence-worker-promote"),
                 external_ref: "private-ranking-worker-promote".to_string(),
             }),
         )
@@ -85624,9 +85642,9 @@ mod tests {
                 feature_schema_version: "ranking-features-calibration-worker-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:ranking-training-calibration-worker".to_string(),
-                calibration_dataset_hash: "sha256:ranking-calibration-worker".to_string(),
-                model_artifact_hash: "sha256:ranking-model-artifact-calibration-worker".to_string(),
+                training_dataset_hash: sha256_prefixed("ranking-training-calibration-worker"),
+                calibration_dataset_hash: sha256_prefixed("ranking-calibration-worker"),
+                model_artifact_hash: sha256_prefixed("ranking-model-artifact-calibration-worker"),
             }),
         )
         .await
@@ -85639,9 +85657,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: model.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:ranking-feature-calibration-worker".to_string(),
-                feature_names_hash: "sha256:ranking-feature-names-calibration-worker".to_string(),
-                source_feature_hash: "sha256:ranking-source-feature-calibration-worker".to_string(),
+                feature_vector_hash: sha256_prefixed("ranking-feature-calibration-worker"),
+                feature_names_hash: sha256_prefixed("ranking-feature-names-calibration-worker"),
+                source_feature_hash: sha256_prefixed("ranking-source-feature-calibration-worker"),
                 duplicate_score: Some(0.03),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -85681,7 +85699,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_450_000,
-                evidence_hash: "sha256:frontier-evidence-calibration-worker".to_string(),
+                evidence_hash: sha256_prefixed("frontier-evidence-calibration-worker"),
                 external_ref: "private-calibration-worker-batch".to_string(),
             }),
         )
@@ -85807,7 +85825,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Rejected,
                 utility_delta_micros: 1_250_000,
-                evidence_hash: "sha256:cal-worker-reason-reviewer-conflict".to_string(),
+                evidence_hash: sha256_prefixed("cal-worker-reason-reviewer-conflict"),
                 external_ref: "private-cal-worker-reason-reviewer-conflict".to_string(),
             }),
         )
@@ -85885,10 +85903,9 @@ mod tests {
                 feature_schema_version: "ranking-features-dataset-rewrite-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:ranking-training-dataset-rewrite".to_string(),
-                calibration_dataset_hash: "sha256:ranking-calibration-dataset-rewrite-a"
-                    .to_string(),
-                model_artifact_hash: "sha256:ranking-model-artifact-dataset-rewrite".to_string(),
+                training_dataset_hash: sha256_prefixed("ranking-training-dataset-rewrite"),
+                calibration_dataset_hash: sha256_prefixed("ranking-calibration-dataset-rewrite-a"),
+                model_artifact_hash: sha256_prefixed("ranking-model-artifact-dataset-rewrite"),
             }),
         )
         .await
@@ -85900,9 +85917,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:ranking-feature-dataset-rewrite".to_string(),
-                feature_names_hash: "sha256:ranking-feature-names-dataset-rewrite".to_string(),
-                source_feature_hash: "sha256:ranking-source-feature-dataset-rewrite".to_string(),
+                feature_vector_hash: sha256_prefixed("ranking-feature-dataset-rewrite"),
+                feature_names_hash: sha256_prefixed("ranking-feature-names-dataset-rewrite"),
+                source_feature_hash: sha256_prefixed("ranking-source-feature-dataset-rewrite"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -85942,7 +85959,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_300_000,
-                evidence_hash: "sha256:ranking-frontier-evidence-dataset-rewrite".to_string(),
+                evidence_hash: sha256_prefixed("ranking-frontier-evidence-dataset-rewrite"),
                 external_ref: "private-ranking-dataset-rewrite".to_string(),
             }),
         )
@@ -86015,9 +86032,9 @@ mod tests {
                 feature_schema_version: "ranking-features-promotion-drift-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:ranking-training-promotion-drift".to_string(),
-                calibration_dataset_hash: "sha256:ranking-calibration-promotion-drift".to_string(),
-                model_artifact_hash: "sha256:ranking-model-artifact-promotion-drift".to_string(),
+                training_dataset_hash: sha256_prefixed("ranking-training-promotion-drift"),
+                calibration_dataset_hash: sha256_prefixed("ranking-calibration-promotion-drift"),
+                model_artifact_hash: sha256_prefixed("ranking-model-artifact-promotion-drift"),
             }),
         )
         .await
@@ -86029,9 +86046,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:ranking-feature-promotion-drift".to_string(),
-                feature_names_hash: "sha256:ranking-feature-names-promotion-drift".to_string(),
-                source_feature_hash: "sha256:ranking-source-feature-promotion-drift".to_string(),
+                feature_vector_hash: sha256_prefixed("ranking-feature-promotion-drift"),
+                feature_names_hash: sha256_prefixed("ranking-feature-names-promotion-drift"),
+                source_feature_hash: sha256_prefixed("ranking-source-feature-promotion-drift"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -86071,7 +86088,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_250_000,
-                evidence_hash: "sha256:ranking-frontier-evidence-promotion-drift-a".to_string(),
+                evidence_hash: sha256_prefixed("ranking-frontier-evidence-promotion-drift-a"),
                 external_ref: "private-ranking-promotion-drift-a".to_string(),
             }),
         )
@@ -86104,7 +86121,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_250_000,
-                evidence_hash: "sha256:ranking-frontier-evidence-promotion-drift-b".to_string(),
+                evidence_hash: sha256_prefixed("ranking-frontier-evidence-promotion-drift-b"),
                 external_ref: "private-ranking-promotion-drift-b".to_string(),
             }),
         )
@@ -86139,9 +86156,9 @@ mod tests {
                 feature_schema_version: "ranking-features-promote-blocked-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:ranking-training-promote-blocked".to_string(),
-                calibration_dataset_hash: "sha256:ranking-calibration-promote-blocked".to_string(),
-                model_artifact_hash: "sha256:ranking-model-artifact-promote-blocked".to_string(),
+                training_dataset_hash: sha256_prefixed("ranking-training-promote-blocked"),
+                calibration_dataset_hash: sha256_prefixed("ranking-calibration-promote-blocked"),
+                model_artifact_hash: sha256_prefixed("ranking-model-artifact-promote-blocked"),
             }),
         )
         .await
@@ -87798,7 +87815,7 @@ mod tests {
                 credit_points_delta: 2.0,
                 use_category: "frontier_lab_training".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
-                evidence_hash: "sha256:not-canonical".to_string(),
+                evidence_hash: sha256_prefixed("not-canonical"),
                 reason: "malformed utility attestation must not record".to_string(),
                 external_ref: "frontier-lab:malformed-utility-attestation".to_string(),
                 source_submission_ids: vec![submission_id],
@@ -87938,6 +87955,30 @@ mod tests {
         .await
         .expect("submission succeeds");
 
+        let invalid_model_hash_error = ranking_model_version_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelVersionRequest {
+                model_version: "trace-ranker-invalid-hash-v1".to_string(),
+                feature_schema_version: "ranking-features-invalid-hash-v1".to_string(),
+                policy_version: "trace-credit-policy-v1".to_string(),
+                status: StorageTraceRankingModelStatus::Candidate,
+                training_dataset_hash: "sha256:training-set".to_string(),
+                calibration_dataset_hash: sha256_prefixed("calibration-set-invalid-hash"),
+                model_artifact_hash: sha256_prefixed("model-artifact-invalid-hash"),
+            }),
+        )
+        .await
+        .expect_err("ranking model hash inputs must be canonical sha256 digests");
+        assert_eq!(invalid_model_hash_error.0, StatusCode::BAD_REQUEST);
+        assert!(
+            invalid_model_hash_error
+                .1
+                .0
+                .error
+                .contains("canonical sha256-prefixed hex digest")
+        );
+
         let Json(model) = ranking_model_version_handler(
             State(state.clone()),
             auth_headers("admin-token-a"),
@@ -87946,9 +87987,9 @@ mod tests {
                 feature_schema_version: "ranking-features-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set".to_string(),
-                calibration_dataset_hash: "sha256:calibration-set".to_string(),
-                model_artifact_hash: "sha256:model-artifact".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set"),
+                calibration_dataset_hash: sha256_prefixed("calibration-set"),
+                model_artifact_hash: sha256_prefixed("model-artifact"),
             }),
         )
         .await
@@ -87986,7 +88027,7 @@ mod tests {
                 .is_empty()
         );
 
-        let Json(feature) = ranking_feature_handler(
+        let invalid_feature_hash_error = ranking_feature_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
             Json(TraceRankingFeatureRequest {
@@ -87994,8 +88035,37 @@ mod tests {
                 target_use: TraceAllowedUse::ModelTraining,
                 feature_schema_version: model.feature_schema_version.clone(),
                 feature_vector_hash: "sha256:feature-vector".to_string(),
-                feature_names_hash: "sha256:feature-names".to_string(),
-                source_feature_hash: "sha256:redacted-summary-features".to_string(),
+                feature_names_hash: sha256_prefixed("feature-names-invalid-hash"),
+                source_feature_hash: sha256_prefixed("redacted-summary-features-invalid-hash"),
+                duplicate_score: Some(0.05),
+                novelty_score: Some(0.91),
+                privacy_risk_score: Some(0.02),
+                quality_score: Some(0.88),
+                coverage_tags: vec!["tool:terminal".to_string()],
+            }),
+        )
+        .await
+        .expect_err("ranking feature hash inputs must be canonical sha256 digests");
+        assert_eq!(invalid_feature_hash_error.0, StatusCode::BAD_REQUEST);
+        assert!(
+            invalid_feature_hash_error
+                .1
+                .0
+                .error
+                .contains("canonical sha256-prefixed hex digest")
+        );
+
+        let feature_vector_hash = sha256_prefixed("feature-vector");
+        let Json(feature) = ranking_feature_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingFeatureRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                feature_schema_version: model.feature_schema_version.clone(),
+                feature_vector_hash: feature_vector_hash.clone(),
+                feature_names_hash: sha256_prefixed("feature-names"),
+                source_feature_hash: sha256_prefixed("redacted-summary-features"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -88006,7 +88076,7 @@ mod tests {
         .await
         .expect("utility worker can write ranking feature record");
         assert_eq!(feature.submission_id, submission_id);
-        assert_eq!(feature.feature_vector_hash, "sha256:feature-vector");
+        assert_eq!(feature.feature_vector_hash, feature_vector_hash);
 
         let tenant_b_prediction_error = ranking_prediction_handler(
             State(state.clone()),
@@ -88082,7 +88152,7 @@ mod tests {
                 .is_empty()
         );
 
-        let Json(label) = ranking_label_handler(
+        let invalid_label_hash_error = ranking_label_handler(
             State(state.clone()),
             auth_headers("utility-worker-token-a"),
             Json(TraceRankingLabelRequest {
@@ -88093,6 +88163,31 @@ mod tests {
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 2_500_000,
                 evidence_hash: "sha256:frontier-lab-evidence".to_string(),
+                external_ref: "private-frontier-lab-invalid-hash".to_string(),
+            }),
+        )
+        .await
+        .expect_err("ranking label evidence hash must be a canonical sha256 digest");
+        assert_eq!(invalid_label_hash_error.0, StatusCode::BAD_REQUEST);
+        assert!(
+            invalid_label_hash_error
+                .1
+                .0
+                .error
+                .contains("canonical sha256-prefixed hex digest")
+        );
+
+        let Json(label) = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 2_500_000,
+                evidence_hash: sha256_prefixed("frontier-lab-evidence"),
                 external_ref: "private-frontier-lab-batch-123".to_string(),
             }),
         )
@@ -88189,7 +88284,7 @@ mod tests {
                 label_source: StorageTraceRankingLabelSource::FrontierLab,
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 preference_strength_micros: 850_000,
-                evidence_hash: "sha256:pairwise-frontier-evidence".to_string(),
+                evidence_hash: sha256_prefixed("pairwise-frontier-evidence"),
                 external_ref: "frontier-lab-private-pair-456".to_string(),
             }),
         )
@@ -88256,7 +88351,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_000_000,
-                evidence_hash: "sha256:reviewer-spoofed-label-source".to_string(),
+                evidence_hash: sha256_prefixed("reviewer-spoofed-label-source"),
                 external_ref: "reviewer-private-spoofed-label-source".to_string(),
             }),
         )
@@ -88274,7 +88369,7 @@ mod tests {
                 label_source: StorageTraceRankingLabelSource::Reviewer,
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 preference_strength_micros: 850_000,
-                evidence_hash: "sha256:reviewer-spoofed-preference-source".to_string(),
+                evidence_hash: sha256_prefixed("reviewer-spoofed-preference-source"),
                 external_ref: "reviewer-private-spoofed-preference-source".to_string(),
             }),
         )
@@ -88336,7 +88431,7 @@ mod tests {
                 label_source: StorageTraceRankingLabelSource::FrontierLab,
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 preference_strength_micros: 900_000,
-                evidence_hash: "sha256:frontier-explicit-training-pair".to_string(),
+                evidence_hash: sha256_prefixed("frontier-explicit-training-pair"),
                 external_ref: "frontier-lab-private-training-pair-789".to_string(),
             }),
         )
@@ -88413,9 +88508,9 @@ mod tests {
                 feature_schema_version: "ranking-features-pairwise-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:pairwise-training-set".to_string(),
-                calibration_dataset_hash: "sha256:pairwise-calibration-set".to_string(),
-                model_artifact_hash: "sha256:pairwise-model-artifact".to_string(),
+                training_dataset_hash: sha256_prefixed("pairwise-training-set"),
+                calibration_dataset_hash: sha256_prefixed("pairwise-calibration-set"),
+                model_artifact_hash: sha256_prefixed("pairwise-model-artifact"),
             }),
         )
         .await
@@ -88433,9 +88528,13 @@ mod tests {
                     submission_id,
                     target_use: TraceAllowedUse::RankingModelTraining,
                     feature_schema_version: model.feature_schema_version.clone(),
-                    feature_vector_hash: format!("sha256:pairwise-feature-vector-{feature_suffix}"),
-                    feature_names_hash: "sha256:pairwise-feature-names".to_string(),
-                    source_feature_hash: format!("sha256:pairwise-source-feature-{feature_suffix}"),
+                    feature_vector_hash: sha256_prefixed(&format!(
+                        "pairwise-feature-vector-{feature_suffix}"
+                    )),
+                    feature_names_hash: sha256_prefixed("pairwise-feature-names"),
+                    source_feature_hash: sha256_prefixed(&format!(
+                        "pairwise-source-feature-{feature_suffix}"
+                    )),
                     duplicate_score: Some(0.05),
                     novelty_score: Some(0.9),
                     privacy_risk_score: Some(0.01),
@@ -88477,7 +88576,7 @@ mod tests {
                 label_source: StorageTraceRankingLabelSource::FrontierLab,
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 preference_strength_micros: 700_000,
-                evidence_hash: "sha256:pairwise-correct-evidence".to_string(),
+                evidence_hash: sha256_prefixed("pairwise-correct-evidence"),
                 external_ref: "frontier-private-pairwise-correct".to_string(),
             }),
         )
@@ -88493,7 +88592,7 @@ mod tests {
                 label_source: StorageTraceRankingLabelSource::Reviewer,
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 preference_strength_micros: 650_000,
-                evidence_hash: "sha256:pairwise-reversed-evidence".to_string(),
+                evidence_hash: sha256_prefixed("pairwise-reversed-evidence"),
                 external_ref: "reviewer-private-pairwise-reversed".to_string(),
             }),
         )
@@ -88566,7 +88665,7 @@ mod tests {
                 label_source: StorageTraceRankingLabelSource::Reviewer,
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 preference_strength_micros: 800_000,
-                evidence_hash: "sha256:backtest-pairwise-reversal-evidence".to_string(),
+                evidence_hash: sha256_prefixed("backtest-pairwise-reversal-evidence"),
                 external_ref: "reviewer-private-backtest-pairwise-reversal".to_string(),
             }),
         )
@@ -88664,7 +88763,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Rejected,
                 utility_delta_micros: 1_250_000,
-                evidence_hash: "sha256:backtest-adjudication-reviewer-conflict".to_string(),
+                evidence_hash: sha256_prefixed("backtest-adjudication-reviewer-conflict"),
                 external_ref: "reviewer-private-backtest-adjudication-conflict".to_string(),
             }),
         )
@@ -88723,7 +88822,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Rejected,
                 utility_delta_micros: 1_250_000,
-                evidence_hash: "sha256:promotion-adjudication-reviewer-conflict".to_string(),
+                evidence_hash: sha256_prefixed("promotion-adjudication-reviewer-conflict"),
                 external_ref: "reviewer-private-promotion-adjudication-conflict".to_string(),
             }),
         )
@@ -88826,7 +88925,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_000_000,
-                evidence_hash: "sha256:adjudication-disputed-useful".to_string(),
+                evidence_hash: sha256_prefixed("adjudication-disputed-useful"),
                 external_ref: "private-adjudication-disputed-useful".to_string(),
             }),
         )
@@ -88842,7 +88941,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Disputed,
                 utility_delta_micros: 1_000_000,
-                evidence_hash: "sha256:adjudication-disputed-latest".to_string(),
+                evidence_hash: sha256_prefixed("adjudication-disputed-latest"),
                 external_ref: "private-adjudication-disputed-latest".to_string(),
             }),
         )
@@ -88858,7 +88957,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 900_000,
-                evidence_hash: "sha256:adjudication-conflict-frontier".to_string(),
+                evidence_hash: sha256_prefixed("adjudication-conflict-frontier"),
                 external_ref: "private-adjudication-conflict-frontier".to_string(),
             }),
         )
@@ -88874,7 +88973,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Rejected,
                 utility_delta_micros: -250_000,
-                evidence_hash: "sha256:adjudication-conflict-reviewer".to_string(),
+                evidence_hash: sha256_prefixed("adjudication-conflict-reviewer"),
                 external_ref: "private-adjudication-conflict-reviewer".to_string(),
             }),
         )
@@ -88890,7 +88989,7 @@ mod tests {
                 label_source: StorageTraceRankingLabelSource::Reviewer,
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 preference_strength_micros: 700_000,
-                evidence_hash: "sha256:adjudication-pair-reviewer".to_string(),
+                evidence_hash: sha256_prefixed("adjudication-pair-reviewer"),
                 external_ref: "private-adjudication-pair-reviewer".to_string(),
             }),
         )
@@ -88906,7 +89005,7 @@ mod tests {
                 label_source: StorageTraceRankingLabelSource::FrontierLab,
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 preference_strength_micros: 700_000,
-                evidence_hash: "sha256:adjudication-pair-frontier".to_string(),
+                evidence_hash: sha256_prefixed("adjudication-pair-frontier"),
                 external_ref: "private-adjudication-pair-frontier".to_string(),
             }),
         )
@@ -88998,7 +89097,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 900_000,
-                evidence_hash: "sha256:reliability-frontier-label".to_string(),
+                evidence_hash: sha256_prefixed("reliability-frontier-label"),
                 external_ref: "private-reliability-frontier-label".to_string(),
             }),
         )
@@ -89014,7 +89113,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Rejected,
                 utility_delta_micros: -250_000,
-                evidence_hash: "sha256:reliability-reviewer-label".to_string(),
+                evidence_hash: sha256_prefixed("reliability-reviewer-label"),
                 external_ref: "private-reliability-reviewer-label".to_string(),
             }),
         )
@@ -89030,7 +89129,7 @@ mod tests {
                 label_source: StorageTraceRankingLabelSource::Reviewer,
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 preference_strength_micros: 700_000,
-                evidence_hash: "sha256:reliability-reviewer-pair".to_string(),
+                evidence_hash: sha256_prefixed("reliability-reviewer-pair"),
                 external_ref: "private-reliability-reviewer-pair".to_string(),
             }),
         )
@@ -89046,7 +89145,7 @@ mod tests {
                 label_source: StorageTraceRankingLabelSource::FrontierLab,
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 preference_strength_micros: 700_000,
-                evidence_hash: "sha256:reliability-frontier-pair".to_string(),
+                evidence_hash: sha256_prefixed("reliability-frontier-pair"),
                 external_ref: "private-reliability-frontier-pair".to_string(),
             }),
         )
@@ -89126,9 +89225,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::ModelTraining,
                 feature_schema_version: "ranking-features-bound-v1".to_string(),
-                feature_vector_hash: "sha256:feature-vector-bound".to_string(),
-                feature_names_hash: "sha256:feature-names-bound".to_string(),
-                source_feature_hash: "sha256:redacted-summary-features-bound".to_string(),
+                feature_vector_hash: sha256_prefixed("feature-vector-bound"),
+                feature_names_hash: sha256_prefixed("feature-names-bound"),
+                source_feature_hash: sha256_prefixed("redacted-summary-features-bound"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -89169,9 +89268,9 @@ mod tests {
                 feature_schema_version: feature.feature_schema_version.clone(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set-bound".to_string(),
-                calibration_dataset_hash: "sha256:calibration-set-bound".to_string(),
-                model_artifact_hash: "sha256:model-artifact-bound".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-bound"),
+                calibration_dataset_hash: sha256_prefixed("calibration-set-bound"),
+                model_artifact_hash: sha256_prefixed("model-artifact-bound"),
             }),
         )
         .await
@@ -89208,7 +89307,7 @@ mod tests {
                 model_version: model.model_version.clone(),
                 feature_schema_version: model.feature_schema_version.clone(),
                 prediction_policy_version: model.policy_version.clone(),
-                feature_vector_hash: "sha256:missing-feature-vector-bound".to_string(),
+                feature_vector_hash: sha256_prefixed("missing-feature-vector-bound"),
                 predicted_utility_micros: 2_100_000,
                 uncertainty_micros: 300_000,
                 confidence: 0.82,
@@ -89257,9 +89356,9 @@ mod tests {
                 feature_schema_version: "ranking-features-immutable-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set-immutable".to_string(),
-                calibration_dataset_hash: "sha256:calibration-set-immutable".to_string(),
-                model_artifact_hash: "sha256:model-artifact-immutable".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-immutable"),
+                calibration_dataset_hash: sha256_prefixed("calibration-set-immutable"),
+                model_artifact_hash: sha256_prefixed("model-artifact-immutable"),
             }),
         )
         .await
@@ -89274,7 +89373,7 @@ mod tests {
                 policy_version: model.policy_version.clone(),
                 status: StorageTraceRankingModelStatus::Candidate,
                 training_dataset_hash: model.training_dataset_hash.clone(),
-                calibration_dataset_hash: "sha256:calibration-set-immutable-rewrite".to_string(),
+                calibration_dataset_hash: sha256_prefixed("calibration-set-immutable-rewrite"),
                 model_artifact_hash: model.model_artifact_hash.clone(),
             }),
         )
@@ -89306,9 +89405,9 @@ mod tests {
                 feature_schema_version: "ranking-features-overlap-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:same-ranking-dataset".to_string(),
-                calibration_dataset_hash: "sha256:same-ranking-dataset".to_string(),
-                model_artifact_hash: "sha256:model-artifact-overlap".to_string(),
+                training_dataset_hash: sha256_prefixed("same-ranking-dataset"),
+                calibration_dataset_hash: sha256_prefixed("same-ranking-dataset"),
+                model_artifact_hash: sha256_prefixed("model-artifact-overlap"),
             }),
         )
         .await
@@ -89401,9 +89500,9 @@ mod tests {
                 feature_schema_version: "ranking-features-calibrated-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set-calibrated".to_string(),
-                calibration_dataset_hash: "sha256:calibration-set-calibrated".to_string(),
-                model_artifact_hash: "sha256:model-artifact-calibrated".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-calibrated"),
+                calibration_dataset_hash: sha256_prefixed("calibration-set-calibrated"),
+                model_artifact_hash: sha256_prefixed("model-artifact-calibrated"),
             }),
         )
         .await
@@ -89415,9 +89514,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::ModelTraining,
                 feature_schema_version: model.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:feature-vector-calibrated".to_string(),
-                feature_names_hash: "sha256:feature-names-calibrated".to_string(),
-                source_feature_hash: "sha256:redacted-summary-features-calibrated".to_string(),
+                feature_vector_hash: sha256_prefixed("feature-vector-calibrated"),
+                feature_names_hash: sha256_prefixed("feature-names-calibrated"),
+                source_feature_hash: sha256_prefixed("redacted-summary-features-calibrated"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -89465,7 +89564,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 2_500_000,
-                evidence_hash: "sha256:frontier-lab-evidence-calibrated".to_string(),
+                evidence_hash: sha256_prefixed("frontier-lab-evidence-calibrated"),
                 external_ref: "private-frontier-lab-calibration-batch".to_string(),
             }),
         )
@@ -89523,7 +89622,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Rejected,
                 utility_delta_micros: 1_250_000,
-                evidence_hash: "sha256:calibration-adjudication-reviewer-conflict".to_string(),
+                evidence_hash: sha256_prefixed("calibration-adjudication-reviewer-conflict"),
                 external_ref: "private-calibration-adjudication-conflict".to_string(),
             }),
         )
@@ -89585,9 +89684,9 @@ mod tests {
                 feature_schema_version: "ranking-features-min-label-floor-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set-min-label-floor".to_string(),
-                calibration_dataset_hash: "sha256:calibration-set-min-label-floor".to_string(),
-                model_artifact_hash: "sha256:model-artifact-min-label-floor".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-min-label-floor"),
+                calibration_dataset_hash: sha256_prefixed("calibration-set-min-label-floor"),
+                model_artifact_hash: sha256_prefixed("model-artifact-min-label-floor"),
             }),
         )
         .await
@@ -89599,9 +89698,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::ModelTraining,
                 feature_schema_version: model.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:feature-vector-min-label-floor".to_string(),
-                feature_names_hash: "sha256:feature-names-min-label-floor".to_string(),
-                source_feature_hash: "sha256:redacted-summary-features-min-label-floor".to_string(),
+                feature_vector_hash: sha256_prefixed("feature-vector-min-label-floor"),
+                feature_names_hash: sha256_prefixed("feature-names-min-label-floor"),
+                source_feature_hash: sha256_prefixed("redacted-summary-features-min-label-floor"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -89641,7 +89740,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 2_500_000,
-                evidence_hash: "sha256:frontier-lab-evidence-min-label-floor".to_string(),
+                evidence_hash: sha256_prefixed("frontier-lab-evidence-min-label-floor"),
                 external_ref: "private-frontier-lab-min-label-floor".to_string(),
             }),
         )
@@ -89696,9 +89795,9 @@ mod tests {
                 feature_schema_version: "ranking-features-dedup-labels-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set-dedup-labels".to_string(),
-                calibration_dataset_hash: "sha256:calibration-set-dedup-labels".to_string(),
-                model_artifact_hash: "sha256:model-artifact-dedup-labels".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-dedup-labels"),
+                calibration_dataset_hash: sha256_prefixed("calibration-set-dedup-labels"),
+                model_artifact_hash: sha256_prefixed("model-artifact-dedup-labels"),
             }),
         )
         .await
@@ -89710,9 +89809,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::ModelTraining,
                 feature_schema_version: model.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:feature-vector-dedup-labels".to_string(),
-                feature_names_hash: "sha256:feature-names-dedup-labels".to_string(),
-                source_feature_hash: "sha256:redacted-summary-features-dedup-labels".to_string(),
+                feature_vector_hash: sha256_prefixed("feature-vector-dedup-labels"),
+                feature_names_hash: sha256_prefixed("feature-names-dedup-labels"),
+                source_feature_hash: sha256_prefixed("redacted-summary-features-dedup-labels"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -89752,7 +89851,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Neutral,
                 utility_delta_micros: 500_000,
-                evidence_hash: "sha256:frontier-lab-evidence-dedup-labels-a".to_string(),
+                evidence_hash: sha256_prefixed("frontier-lab-evidence-dedup-labels-a"),
                 external_ref: "private-frontier-lab-dedup-labels-a".to_string(),
             }),
         )
@@ -89768,7 +89867,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_000_000,
-                evidence_hash: "sha256:frontier-lab-evidence-dedup-labels-b".to_string(),
+                evidence_hash: sha256_prefixed("frontier-lab-evidence-dedup-labels-b"),
                 external_ref: "private-frontier-lab-dedup-labels-b".to_string(),
             }),
         )
@@ -89824,9 +89923,9 @@ mod tests {
                 feature_schema_version: "ranking-features-disputed-labels-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set-disputed-labels".to_string(),
-                calibration_dataset_hash: "sha256:calibration-set-disputed-labels".to_string(),
-                model_artifact_hash: "sha256:model-artifact-disputed-labels".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-disputed-labels"),
+                calibration_dataset_hash: sha256_prefixed("calibration-set-disputed-labels"),
+                model_artifact_hash: sha256_prefixed("model-artifact-disputed-labels"),
             }),
         )
         .await
@@ -89838,9 +89937,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::ModelTraining,
                 feature_schema_version: model.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:feature-vector-disputed-labels".to_string(),
-                feature_names_hash: "sha256:feature-names-disputed-labels".to_string(),
-                source_feature_hash: "sha256:redacted-summary-features-disputed-labels".to_string(),
+                feature_vector_hash: sha256_prefixed("feature-vector-disputed-labels"),
+                feature_names_hash: sha256_prefixed("feature-names-disputed-labels"),
+                source_feature_hash: sha256_prefixed("redacted-summary-features-disputed-labels"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -89880,7 +89979,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 1_000_000,
-                evidence_hash: "sha256:frontier-lab-evidence-disputed-labels-a".to_string(),
+                evidence_hash: sha256_prefixed("frontier-lab-evidence-disputed-labels-a"),
                 external_ref: "private-frontier-lab-disputed-labels-a".to_string(),
             }),
         )
@@ -89896,7 +89995,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Disputed,
                 utility_delta_micros: 1_000_000,
-                evidence_hash: "sha256:frontier-lab-evidence-disputed-labels-b".to_string(),
+                evidence_hash: sha256_prefixed("frontier-lab-evidence-disputed-labels-b"),
                 external_ref: "private-frontier-lab-disputed-labels-b".to_string(),
             }),
         )
@@ -89961,9 +90060,9 @@ mod tests {
                 feature_schema_version: "ranking-features-quality-floor-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set-quality-floor".to_string(),
-                calibration_dataset_hash: "sha256:calibration-set-quality-floor".to_string(),
-                model_artifact_hash: "sha256:model-artifact-quality-floor".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-quality-floor"),
+                calibration_dataset_hash: sha256_prefixed("calibration-set-quality-floor"),
+                model_artifact_hash: sha256_prefixed("model-artifact-quality-floor"),
             }),
         )
         .await
@@ -89975,9 +90074,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::ModelTraining,
                 feature_schema_version: model.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:feature-vector-quality-floor".to_string(),
-                feature_names_hash: "sha256:feature-names-quality-floor".to_string(),
-                source_feature_hash: "sha256:redacted-summary-features-quality-floor".to_string(),
+                feature_vector_hash: sha256_prefixed("feature-vector-quality-floor"),
+                feature_names_hash: sha256_prefixed("feature-names-quality-floor"),
+                source_feature_hash: sha256_prefixed("redacted-summary-features-quality-floor"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -90017,7 +90116,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 500_000,
-                evidence_hash: "sha256:frontier-lab-evidence-quality-floor".to_string(),
+                evidence_hash: sha256_prefixed("frontier-lab-evidence-quality-floor"),
                 external_ref: "private-frontier-lab-quality-floor".to_string(),
             }),
         )
@@ -90066,9 +90165,9 @@ mod tests {
                 feature_schema_version: "ranking-features-dataset-bound-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set-dataset-bound".to_string(),
-                calibration_dataset_hash: "sha256:calibration-set-dataset-bound".to_string(),
-                model_artifact_hash: "sha256:model-artifact-dataset-bound".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-dataset-bound"),
+                calibration_dataset_hash: sha256_prefixed("calibration-set-dataset-bound"),
+                model_artifact_hash: sha256_prefixed("model-artifact-dataset-bound"),
             }),
         )
         .await
@@ -90081,7 +90180,7 @@ mod tests {
                 model_version: model.model_version,
                 target_use: TraceAllowedUse::ModelTraining,
                 policy_version: model.policy_version,
-                evaluation_dataset_hash: "sha256:other-calibration-eval-dataset".to_string(),
+                evaluation_dataset_hash: sha256_prefixed("other-calibration-eval-dataset"),
                 min_label_count: Some(1),
                 confidence_threshold: Some(0.5),
                 max_average_absolute_error_micros: Some(500_000),
@@ -90107,10 +90206,10 @@ mod tests {
             State(state.clone()),
             auth_headers("admin-token-a"),
             Json(TraceRankingCalibrationDatasetRequest {
-                calibration_dataset_hash: "sha256:retired-calibration-set".to_string(),
+                calibration_dataset_hash: sha256_prefixed("retired-calibration-set"),
                 target_use: TraceAllowedUse::ModelTraining,
                 policy_version: "trace-credit-policy-v1".to_string(),
-                source_manifest_hash: "sha256:retired-calibration-manifest".to_string(),
+                source_manifest_hash: sha256_prefixed("retired-calibration-manifest"),
                 source_count: 10,
                 label_source_count: 2,
                 label_actor_count: 2,
@@ -90128,9 +90227,9 @@ mod tests {
                 feature_schema_version: "ranking-features-retired-dataset-v1".to_string(),
                 policy_version: dataset.policy_version.clone(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set-retired-dataset".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-retired-dataset"),
                 calibration_dataset_hash: dataset.calibration_dataset_hash.clone(),
-                model_artifact_hash: "sha256:model-artifact-retired-dataset".to_string(),
+                model_artifact_hash: sha256_prefixed("model-artifact-retired-dataset"),
             }),
         )
         .await
@@ -90171,10 +90270,10 @@ mod tests {
             State(state.clone()),
             auth_headers("admin-token-a"),
             Json(TraceRankingCalibrationDatasetRequest {
-                calibration_dataset_hash: "sha256:underdiverse-calibration-set".to_string(),
+                calibration_dataset_hash: sha256_prefixed("underdiverse-calibration-set"),
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: "trace-credit-policy-v1".to_string(),
-                source_manifest_hash: "sha256:underdiverse-calibration-manifest".to_string(),
+                source_manifest_hash: sha256_prefixed("underdiverse-calibration-manifest"),
                 source_count: 10,
                 label_source_count: 1,
                 label_actor_count: 1,
@@ -90192,9 +90291,9 @@ mod tests {
                 feature_schema_version: "ranking-features-underdiverse-dataset-v1".to_string(),
                 policy_version: dataset.policy_version.clone(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set-underdiverse-dataset".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-underdiverse-dataset"),
                 calibration_dataset_hash: dataset.calibration_dataset_hash.clone(),
-                model_artifact_hash: "sha256:model-artifact-underdiverse-dataset".to_string(),
+                model_artifact_hash: sha256_prefixed("model-artifact-underdiverse-dataset"),
             }),
         )
         .await
@@ -90241,10 +90340,10 @@ mod tests {
             State(state.clone()),
             auth_headers("admin-token-a"),
             Json(TraceRankingCalibrationDatasetRequest {
-                calibration_dataset_hash: "sha256:undersized-calibration-set".to_string(),
+                calibration_dataset_hash: sha256_prefixed("undersized-calibration-set"),
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: "trace-credit-policy-v1".to_string(),
-                source_manifest_hash: "sha256:undersized-calibration-manifest".to_string(),
+                source_manifest_hash: sha256_prefixed("undersized-calibration-manifest"),
                 source_count: 1,
                 label_source_count: 2,
                 label_actor_count: 2,
@@ -90262,9 +90361,9 @@ mod tests {
                 feature_schema_version: "ranking-features-undersized-dataset-v1".to_string(),
                 policy_version: dataset.policy_version.clone(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set-undersized-dataset".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-undersized-dataset"),
                 calibration_dataset_hash: dataset.calibration_dataset_hash.clone(),
-                model_artifact_hash: "sha256:model-artifact-undersized-dataset".to_string(),
+                model_artifact_hash: sha256_prefixed("model-artifact-undersized-dataset"),
             }),
         )
         .await
@@ -90315,9 +90414,9 @@ mod tests {
                 feature_schema_version: "ranking-features-required-dataset-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set-required-dataset".to_string(),
-                calibration_dataset_hash: "sha256:calibration-set-required-dataset".to_string(),
-                model_artifact_hash: "sha256:model-artifact-required-dataset".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-required-dataset"),
+                calibration_dataset_hash: sha256_prefixed("calibration-set-required-dataset"),
+                model_artifact_hash: sha256_prefixed("model-artifact-required-dataset"),
             }),
         )
         .await
@@ -90353,7 +90452,7 @@ mod tests {
                 calibration_dataset_hash: model.calibration_dataset_hash.clone(),
                 target_use: TraceAllowedUse::ModelTraining,
                 policy_version: model.policy_version.clone(),
-                source_manifest_hash: "sha256:required-calibration-manifest".to_string(),
+                source_manifest_hash: sha256_prefixed("required-calibration-manifest"),
                 source_count: 10,
                 label_source_count: 2,
                 label_actor_count: 2,
@@ -90401,9 +90500,9 @@ mod tests {
                 feature_schema_version: "ranking-features-active-holdout-v1".to_string(),
                 policy_version: "trace-ranking-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set-active-holdout".to_string(),
-                calibration_dataset_hash: "sha256:calibration-set-active-holdout".to_string(),
-                model_artifact_hash: "sha256:model-artifact-active-holdout".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-active-holdout"),
+                calibration_dataset_hash: sha256_prefixed("calibration-set-active-holdout"),
+                model_artifact_hash: sha256_prefixed("model-artifact-active-holdout"),
             }),
         )
         .await
@@ -90416,7 +90515,7 @@ mod tests {
                 calibration_dataset_hash: model.calibration_dataset_hash.clone(),
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: model.policy_version.clone(),
-                source_manifest_hash: "sha256:active-calibration-manifest".to_string(),
+                source_manifest_hash: sha256_prefixed("active-calibration-manifest"),
                 source_count: 2,
                 label_source_count: 1,
                 label_actor_count: 1,
@@ -90517,9 +90616,9 @@ mod tests {
                 feature_schema_version: "ranking-features-diversity-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set-diversity".to_string(),
-                calibration_dataset_hash: "sha256:calibration-set-diversity".to_string(),
-                model_artifact_hash: "sha256:model-artifact-diversity".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-diversity"),
+                calibration_dataset_hash: sha256_prefixed("calibration-set-diversity"),
+                model_artifact_hash: sha256_prefixed("model-artifact-diversity"),
             }),
         )
         .await
@@ -90531,9 +90630,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::ModelTraining,
                 feature_schema_version: model.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:feature-vector-diversity".to_string(),
-                feature_names_hash: "sha256:feature-names-diversity".to_string(),
-                source_feature_hash: "sha256:redacted-summary-features-diversity".to_string(),
+                feature_vector_hash: sha256_prefixed("feature-vector-diversity"),
+                feature_names_hash: sha256_prefixed("feature-names-diversity"),
+                source_feature_hash: sha256_prefixed("redacted-summary-features-diversity"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -90573,7 +90672,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 2_500_000,
-                evidence_hash: "sha256:frontier-lab-evidence-diversity".to_string(),
+                evidence_hash: sha256_prefixed("frontier-lab-evidence-diversity"),
                 external_ref: "private-frontier-lab-diversity-batch".to_string(),
             }),
         )
@@ -90640,9 +90739,9 @@ mod tests {
                 feature_schema_version: "ranking-features-label-actors-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set-label-actors".to_string(),
-                calibration_dataset_hash: "sha256:calibration-set-label-actors".to_string(),
-                model_artifact_hash: "sha256:model-artifact-label-actors".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-label-actors"),
+                calibration_dataset_hash: sha256_prefixed("calibration-set-label-actors"),
+                model_artifact_hash: sha256_prefixed("model-artifact-label-actors"),
             }),
         )
         .await
@@ -90654,9 +90753,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::ModelTraining,
                 feature_schema_version: model.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:feature-vector-label-actors".to_string(),
-                feature_names_hash: "sha256:feature-names-label-actors".to_string(),
-                source_feature_hash: "sha256:redacted-summary-features-label-actors".to_string(),
+                feature_vector_hash: sha256_prefixed("feature-vector-label-actors"),
+                feature_names_hash: sha256_prefixed("feature-names-label-actors"),
+                source_feature_hash: sha256_prefixed("redacted-summary-features-label-actors"),
                 duplicate_score: Some(0.04),
                 novelty_score: Some(0.92),
                 privacy_risk_score: Some(0.01),
@@ -90707,7 +90806,7 @@ mod tests {
                     utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
                     label_outcome: StorageTraceRankingLabelOutcome::Useful,
                     utility_delta_micros: 1_500_000,
-                    evidence_hash: format!("sha256:{external_ref}-evidence"),
+                    evidence_hash: sha256_prefixed(&format!("{external_ref}-evidence")),
                     external_ref: external_ref.to_string(),
                 }),
             )
@@ -90771,9 +90870,9 @@ mod tests {
                 feature_schema_version: "ranking-features-cohort-error-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set-cohort-error".to_string(),
-                calibration_dataset_hash: "sha256:calibration-set-cohort-error".to_string(),
-                model_artifact_hash: "sha256:model-artifact-cohort-error".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-cohort-error"),
+                calibration_dataset_hash: sha256_prefixed("calibration-set-cohort-error"),
+                model_artifact_hash: sha256_prefixed("model-artifact-cohort-error"),
             }),
         )
         .await
@@ -90799,9 +90898,15 @@ mod tests {
                     submission_id,
                     target_use: TraceAllowedUse::ModelTraining,
                     feature_schema_version: model.feature_schema_version.clone(),
-                    feature_vector_hash: format!("sha256:feature-vector-cohort-error-{suffix}"),
-                    feature_names_hash: format!("sha256:feature-names-cohort-error-{suffix}"),
-                    source_feature_hash: format!("sha256:source-feature-cohort-error-{suffix}"),
+                    feature_vector_hash: sha256_prefixed(&format!(
+                        "feature-vector-cohort-error-{suffix}"
+                    )),
+                    feature_names_hash: sha256_prefixed(&format!(
+                        "feature-names-cohort-error-{suffix}"
+                    )),
+                    source_feature_hash: sha256_prefixed(&format!(
+                        "source-feature-cohort-error-{suffix}"
+                    )),
                     duplicate_score: Some(0.05),
                     novelty_score: Some(0.91),
                     privacy_risk_score: Some(0.02),
@@ -90841,7 +90946,7 @@ mod tests {
                     utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
                     label_outcome: StorageTraceRankingLabelOutcome::Useful,
                     utility_delta_micros,
-                    evidence_hash: format!("sha256:evidence-cohort-error-{suffix}"),
+                    evidence_hash: sha256_prefixed(&format!("evidence-cohort-error-{suffix}")),
                     external_ref: format!("private-cohort-error-batch-{suffix}"),
                 }),
             )
@@ -90909,9 +91014,9 @@ mod tests {
                 feature_schema_version: "ranking-features-activation-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Active,
-                training_dataset_hash: "sha256:training-set-activation".to_string(),
-                calibration_dataset_hash: "sha256:calibration-set-activation".to_string(),
-                model_artifact_hash: "sha256:model-artifact-activation".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-activation"),
+                calibration_dataset_hash: sha256_prefixed("calibration-set-activation"),
+                model_artifact_hash: sha256_prefixed("model-artifact-activation"),
             }),
         )
         .await
@@ -90931,9 +91036,9 @@ mod tests {
                 feature_schema_version: "ranking-features-activation-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set-activation".to_string(),
-                calibration_dataset_hash: "sha256:calibration-set-activation".to_string(),
-                model_artifact_hash: "sha256:model-artifact-activation".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-activation"),
+                calibration_dataset_hash: sha256_prefixed("calibration-set-activation"),
+                model_artifact_hash: sha256_prefixed("model-artifact-activation"),
             }),
         )
         .await
@@ -90945,9 +91050,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::ModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:feature-vector-activation".to_string(),
-                feature_names_hash: "sha256:feature-names-activation".to_string(),
-                source_feature_hash: "sha256:redacted-summary-features-activation".to_string(),
+                feature_vector_hash: sha256_prefixed("feature-vector-activation"),
+                feature_names_hash: sha256_prefixed("feature-names-activation"),
+                source_feature_hash: sha256_prefixed("redacted-summary-features-activation"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -90987,7 +91092,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 2_500_000,
-                evidence_hash: "sha256:frontier-lab-evidence-activation".to_string(),
+                evidence_hash: sha256_prefixed("frontier-lab-evidence-activation"),
                 external_ref: "private-frontier-lab-activation".to_string(),
             }),
         )
@@ -91114,7 +91219,7 @@ mod tests {
                 calibration_dataset_hash: candidate.calibration_dataset_hash,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 policy_version: candidate.policy_version,
-                source_manifest_hash: "sha256:risk-holdout-manifest".to_string(),
+                source_manifest_hash: sha256_prefixed("risk-holdout-manifest"),
                 source_count: 10,
                 label_source_count: 1,
                 label_actor_count: 1,
@@ -91175,9 +91280,9 @@ mod tests {
                 feature_schema_version: "ranking-features-risk-report-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set-risk-report".to_string(),
-                calibration_dataset_hash: "sha256:calibration-set-risk-report".to_string(),
-                model_artifact_hash: "sha256:model-artifact-risk-report".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-risk-report"),
+                calibration_dataset_hash: sha256_prefixed("calibration-set-risk-report"),
+                model_artifact_hash: sha256_prefixed("model-artifact-risk-report"),
             }),
         )
         .await
@@ -91189,9 +91294,9 @@ mod tests {
                 submission_id: calibration_submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:feature-vector-risk-report-calibration".to_string(),
-                feature_names_hash: "sha256:feature-names-risk-report-calibration".to_string(),
-                source_feature_hash: "sha256:source-feature-risk-report-calibration".to_string(),
+                feature_vector_hash: sha256_prefixed("feature-vector-risk-report-calibration"),
+                feature_names_hash: sha256_prefixed("feature-names-risk-report-calibration"),
+                source_feature_hash: sha256_prefixed("source-feature-risk-report-calibration"),
                 duplicate_score: Some(0.02),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.01),
@@ -91231,7 +91336,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 2_500_000,
-                evidence_hash: "sha256:frontier-lab-evidence-risk-report-calibration".to_string(),
+                evidence_hash: sha256_prefixed("frontier-lab-evidence-risk-report-calibration"),
                 external_ref: "private-frontier-lab-risk-report-calibration".to_string(),
             }),
         )
@@ -91275,9 +91380,9 @@ mod tests {
                 submission_id: drift_submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:feature-vector-risk-report-drift".to_string(),
-                feature_names_hash: "sha256:feature-names-risk-report-drift".to_string(),
-                source_feature_hash: "sha256:source-feature-risk-report-drift".to_string(),
+                feature_vector_hash: sha256_prefixed("feature-vector-risk-report-drift"),
+                feature_names_hash: sha256_prefixed("feature-names-risk-report-drift"),
+                source_feature_hash: sha256_prefixed("source-feature-risk-report-drift"),
                 duplicate_score: Some(0.03),
                 novelty_score: Some(0.88),
                 privacy_risk_score: Some(0.02),
@@ -91317,7 +91422,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 3_000_000,
-                evidence_hash: "sha256:reviewer-evidence-risk-report-drift".to_string(),
+                evidence_hash: sha256_prefixed("reviewer-evidence-risk-report-drift"),
                 external_ref: "private-reviewer-risk-report-drift".to_string(),
             }),
         )
@@ -91566,7 +91671,7 @@ mod tests {
                 label_source: StorageTraceRankingLabelSource::Reviewer,
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 preference_strength_micros: 800_000,
-                evidence_hash: "sha256:pairwise-risk-preference-evidence".to_string(),
+                evidence_hash: sha256_prefixed("pairwise-risk-preference-evidence"),
                 external_ref: "reviewer-private-pairwise-risk".to_string(),
             }),
         )
@@ -91661,7 +91766,7 @@ mod tests {
                 label_source: StorageTraceRankingLabelSource::Reviewer,
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 preference_strength_micros: 800_000,
-                evidence_hash: "sha256:pairwise-policy-reversed-evidence".to_string(),
+                evidence_hash: sha256_prefixed("pairwise-policy-reversed-evidence"),
                 external_ref: "reviewer-private-pairwise-policy-reversed".to_string(),
             }),
         )
@@ -91677,7 +91782,7 @@ mod tests {
                 label_source: StorageTraceRankingLabelSource::FrontierLab,
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 preference_strength_micros: 800_000,
-                evidence_hash: "sha256:pairwise-policy-correct-evidence".to_string(),
+                evidence_hash: sha256_prefixed("pairwise-policy-correct-evidence"),
                 external_ref: "frontier-private-pairwise-policy-correct".to_string(),
             }),
         )
@@ -91779,7 +91884,7 @@ mod tests {
                 label_source: StorageTraceRankingLabelSource::Reviewer,
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 preference_strength_micros: 800_000,
-                evidence_hash: "sha256:pairwise-floor-evidence".to_string(),
+                evidence_hash: sha256_prefixed("pairwise-floor-evidence"),
                 external_ref: "reviewer-private-pairwise-floor".to_string(),
             }),
         )
@@ -91882,9 +91987,9 @@ mod tests {
                 submission_id: drift_submission_id,
                 target_use: TraceAllowedUse::RankingModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:ranking-feature-risk-settle-drift".to_string(),
-                feature_names_hash: "sha256:ranking-feature-names-risk-settle-drift".to_string(),
-                source_feature_hash: "sha256:ranking-source-feature-risk-settle-drift".to_string(),
+                feature_vector_hash: sha256_prefixed("ranking-feature-risk-settle-drift"),
+                feature_names_hash: sha256_prefixed("ranking-feature-names-risk-settle-drift"),
+                source_feature_hash: sha256_prefixed("ranking-source-feature-risk-settle-drift"),
                 duplicate_score: Some(0.03),
                 novelty_score: Some(0.88),
                 privacy_risk_score: Some(0.02),
@@ -91924,7 +92029,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 2_000_000,
-                evidence_hash: "sha256:ranking-frontier-evidence-risk-settle-drift".to_string(),
+                evidence_hash: sha256_prefixed("ranking-frontier-evidence-risk-settle-drift"),
                 external_ref: "private-ranking-risk-settle-drift".to_string(),
             }),
         )
@@ -92049,9 +92154,9 @@ mod tests {
                 feature_schema_version: "ranking-features-regressed-v1".to_string(),
                 policy_version: "trace-credit-policy-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set-regressed".to_string(),
-                calibration_dataset_hash: "sha256:calibration-set-regressed".to_string(),
-                model_artifact_hash: "sha256:model-artifact-regressed".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-regressed"),
+                calibration_dataset_hash: sha256_prefixed("calibration-set-regressed"),
+                model_artifact_hash: sha256_prefixed("model-artifact-regressed"),
             }),
         )
         .await
@@ -92063,9 +92168,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::ModelTraining,
                 feature_schema_version: candidate.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:feature-vector-regressed".to_string(),
-                feature_names_hash: "sha256:feature-names-regressed".to_string(),
-                source_feature_hash: "sha256:redacted-summary-features-regressed".to_string(),
+                feature_vector_hash: sha256_prefixed("feature-vector-regressed"),
+                feature_names_hash: sha256_prefixed("feature-names-regressed"),
+                source_feature_hash: sha256_prefixed("redacted-summary-features-regressed"),
                 duplicate_score: Some(0.05),
                 novelty_score: Some(0.91),
                 privacy_risk_score: Some(0.02),
@@ -92105,7 +92210,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 2_500_000,
-                evidence_hash: "sha256:frontier-lab-evidence-regressed".to_string(),
+                evidence_hash: sha256_prefixed("frontier-lab-evidence-regressed"),
                 external_ref: "private-frontier-lab-regressed".to_string(),
             }),
         )
@@ -94792,9 +94897,9 @@ mod tests {
                 feature_schema_version: "ranking-features-db-v1".to_string(),
                 policy_version: "trace-credit-policy-db-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set-db".to_string(),
-                calibration_dataset_hash: "sha256:calibration-set-db".to_string(),
-                model_artifact_hash: "sha256:model-artifact-db".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-db"),
+                calibration_dataset_hash: sha256_prefixed("calibration-set-db"),
+                model_artifact_hash: sha256_prefixed("model-artifact-db"),
             }),
         )
         .await
@@ -94807,9 +94912,9 @@ mod tests {
                 feature_schema_version: "ranking-features-db-tenant-b-v1".to_string(),
                 policy_version: "trace-credit-policy-db-tenant-b-v1".to_string(),
                 status: StorageTraceRankingModelStatus::Candidate,
-                training_dataset_hash: "sha256:training-set-db-tenant-b".to_string(),
-                calibration_dataset_hash: "sha256:calibration-set-db-tenant-b".to_string(),
-                model_artifact_hash: "sha256:model-artifact-db-tenant-b".to_string(),
+                training_dataset_hash: sha256_prefixed("training-set-db-tenant-b"),
+                calibration_dataset_hash: sha256_prefixed("calibration-set-db-tenant-b"),
+                model_artifact_hash: sha256_prefixed("model-artifact-db-tenant-b"),
             }),
         )
         .await
@@ -94823,9 +94928,9 @@ mod tests {
                 submission_id,
                 target_use: TraceAllowedUse::ModelTraining,
                 feature_schema_version: model.feature_schema_version.clone(),
-                feature_vector_hash: "sha256:feature-vector-db".to_string(),
-                feature_names_hash: "sha256:feature-names-db".to_string(),
-                source_feature_hash: "sha256:redacted-summary-features-db".to_string(),
+                feature_vector_hash: sha256_prefixed("feature-vector-db"),
+                feature_names_hash: sha256_prefixed("feature-names-db"),
+                source_feature_hash: sha256_prefixed("redacted-summary-features-db"),
                 duplicate_score: Some(0.04),
                 novelty_score: Some(0.93),
                 privacy_risk_score: Some(0.01),
@@ -94865,7 +94970,7 @@ mod tests {
                 utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
                 label_outcome: StorageTraceRankingLabelOutcome::Useful,
                 utility_delta_micros: 2_450_000,
-                evidence_hash: "sha256:frontier-lab-evidence-db".to_string(),
+                evidence_hash: sha256_prefixed("frontier-lab-evidence-db"),
                 external_ref: "private-frontier-lab-db-batch".to_string(),
             }),
         )

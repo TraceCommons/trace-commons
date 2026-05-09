@@ -1029,6 +1029,11 @@ they store calibration dataset hash, target use, policy version, source-list
 manifest hash, source count, label-source count, label-actor count, lifecycle
 status, and a hashed actor principal. They do not store trace bodies, reviewer
 notes, raw lab refs, or source ids.
+Client-supplied ranking hashes are canonical `sha256:<64 hex>` digests across
+registered model training/calibration/artifact hashes, holdout source manifests,
+feature vector/name/source-feature hashes, absolute or preference label evidence
+hashes, and calibration-run evaluation datasets. Prefix-only symbolic values
+such as `sha256:training-set` are rejected at the route boundary.
 For an existing `(calibration_dataset_hash, target_use, policy_version)` holdout
 key, status-only lifecycle updates are append-only but must keep the source
 manifest hash, source count, label-source count, and label-actor count unchanged.
