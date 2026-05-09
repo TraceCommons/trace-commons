@@ -419,6 +419,18 @@ const TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_EXTERNAL_REF_PREFIX: &str =
     "TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_EXTERNAL_REF_PREFIX";
 const TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_REASON: &str =
     "TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_REASON";
+const TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_ENABLED: &str =
+    "TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_ENABLED";
+const TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_TOKEN: &str =
+    "TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_TOKEN";
+const TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_INTERVAL_SECONDS";
+const TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_LIMIT: &str =
+    "TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_LIMIT";
+const TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_DRY_RUN: &str =
+    "TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_DRY_RUN";
+const TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_PURPOSE: &str =
+    "TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_PURPOSE";
 const TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS: &str =
     "TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS";
 const TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY: &str =
@@ -511,6 +523,9 @@ const TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_REASON: &str = "scheduled trace credi
 const TRACE_PROCESS_EVALUATION_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 300;
 const TRACE_PROCESS_EVALUATION_SCHEDULER_DEFAULT_REASON: &str =
     "scheduled trace process evaluation";
+const TRACE_REVOCATION_PROPAGATION_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 300;
+const TRACE_REVOCATION_PROPAGATION_SCHEDULER_DEFAULT_PURPOSE: &str =
+    "scheduled trace revocation propagation";
 const TRACE_RANKING_DEFAULT_MIN_LABEL_COUNT: usize = 25;
 const TRACE_RANKING_DEFAULT_CONFIDENCE_THRESHOLD: f32 = 0.5;
 const TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS: i64 = 1_000_000;
@@ -569,6 +584,11 @@ async fn main() -> anyhow::Result<()> {
         state.process_evaluation_scheduler.as_ref(),
     )
     .await?;
+    validate_trace_revocation_propagation_scheduler_config(
+        state.as_ref(),
+        state.revocation_propagation_scheduler.as_ref(),
+    )
+    .await?;
     spawn_managed_eddsa_keyset_refresh_task(&state);
     spawn_trace_export_job_scheduler_task(&state, state.export_job_scheduler.clone());
     spawn_trace_vector_index_scheduler_task(&state, state.vector_index_scheduler.clone());
@@ -584,6 +604,10 @@ async fn main() -> anyhow::Result<()> {
     spawn_trace_process_evaluation_scheduler_task(
         &state,
         state.process_evaluation_scheduler.clone(),
+    );
+    spawn_trace_revocation_propagation_scheduler_task(
+        &state,
+        state.revocation_propagation_scheduler.clone(),
     );
     let bind = std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
     let addr = bind
@@ -668,6 +692,7 @@ struct AppState {
     benchmark_pipeline_scheduler: Option<TraceBenchmarkPipelineSchedulerConfig>,
     credit_cycle_scheduler: Option<TraceCreditCycleSchedulerConfig>,
     process_evaluation_scheduler: Option<TraceProcessEvaluationSchedulerConfig>,
+    revocation_propagation_scheduler: Option<TraceRevocationPropagationSchedulerConfig>,
     ranking_calibration_max_age: Option<Duration>,
     ranking_require_calibration_dataset_registry: bool,
     ranking_require_active_calibration_dataset: bool,
@@ -714,6 +739,11 @@ struct TraceBenchmarkPipelineSchedulerTickSummary {
 #[derive(Debug)]
 struct TraceProcessEvaluationSchedulerTickSummary {
     run: ProcessEvaluationWorkerRunResponse,
+}
+
+#[derive(Debug)]
+struct TraceRevocationPropagationSchedulerTickSummary {
+    run: TraceRevocationPropagationWorkerResponse,
 }
 
 #[derive(Clone)]
@@ -789,6 +819,15 @@ struct TraceProcessEvaluationSchedulerConfig {
     utility_category: Option<StorageTraceRankingUtilityCategory>,
     external_ref_prefix: Option<String>,
     reason: String,
+}
+
+#[derive(Clone)]
+struct TraceRevocationPropagationSchedulerConfig {
+    worker_token: SecretString,
+    interval: StdDuration,
+    limit: u32,
+    dry_run: bool,
+    purpose: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2177,6 +2216,8 @@ impl AppState {
         let credit_cycle_scheduler = parse_trace_credit_cycle_scheduler_config_from_env()?;
         let process_evaluation_scheduler =
             parse_trace_process_evaluation_scheduler_config_from_env()?;
+        let revocation_propagation_scheduler =
+            parse_trace_revocation_propagation_scheduler_config_from_env()?;
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
         let ranking_require_calibration_dataset_registry =
             env_truthy(TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY);
@@ -2382,6 +2423,7 @@ impl AppState {
             benchmark_pipeline_scheduler,
             credit_cycle_scheduler,
             process_evaluation_scheduler,
+            revocation_propagation_scheduler,
             ranking_calibration_max_age,
             ranking_require_calibration_dataset_registry,
             ranking_require_active_calibration_dataset,
@@ -3667,6 +3709,43 @@ fn parse_trace_process_evaluation_scheduler_config_from_env()
         utility_category,
         external_ref_prefix,
         reason,
+    }))
+}
+
+fn parse_trace_revocation_propagation_scheduler_config_from_env()
+-> anyhow::Result<Option<TraceRevocationPropagationSchedulerConfig>> {
+    let enabled = env_truthy(TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_ENABLED);
+    let worker_token = optional_trimmed_env(TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_TOKEN)?;
+    if !enabled && worker_token.is_none() {
+        return Ok(None);
+    }
+    let Some(worker_token) = worker_token else {
+        anyhow::bail!(
+            "{TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_TOKEN}"
+        );
+    };
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_INTERVAL_SECONDS,
+        TRACE_REVOCATION_PROPAGATION_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
+        5,
+        86_400,
+    )?;
+    let limit = parse_optional_scheduler_u32_env(
+        TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_LIMIT,
+        TRACE_REVOCATION_PROPAGATION_DEFAULT_LIMIT,
+        1,
+        TRACE_REVOCATION_PROPAGATION_MAX_LIMIT,
+    )?;
+    let purpose = optional_trimmed_env(TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_PURPOSE)?
+        .unwrap_or_else(|| TRACE_REVOCATION_PROPAGATION_SCHEDULER_DEFAULT_PURPOSE.to_string());
+    let purpose = validate_revocation_propagation_scheduler_purpose(&purpose)
+        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    Ok(Some(TraceRevocationPropagationSchedulerConfig {
+        worker_token: SecretString::from(worker_token),
+        interval: StdDuration::from_secs(interval_seconds),
+        limit,
+        dry_run: env_truthy(TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_DRY_RUN),
+        purpose,
     }))
 }
 
@@ -5693,6 +5772,48 @@ fn spawn_trace_process_evaluation_scheduler_task(
     });
 }
 
+fn spawn_trace_revocation_propagation_scheduler_task(
+    state: &Arc<AppState>,
+    config: Option<TraceRevocationPropagationSchedulerConfig>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    let state = state.clone();
+    tracing::info!(
+        interval_seconds = config.interval.as_secs(),
+        limit = config.limit,
+        dry_run = config.dry_run,
+        "Trace Commons revocation propagation scheduler enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(config.interval).await;
+            match run_trace_revocation_propagation_scheduler_tick(state.clone(), &config).await {
+                Ok(summary) => {
+                    tracing::info!(
+                        checked = summary.run.checked,
+                        completed = summary.run.completed,
+                        failed = summary.run.failed,
+                        skipped = summary.run.skipped,
+                        pending = summary.run.pending,
+                        next_attempt_scheduled = summary.run.next_attempt_scheduled,
+                        dry_run = summary.run.dry_run,
+                        "Trace Commons revocation propagation scheduler tick completed"
+                    );
+                }
+                Err((status, Json(error))) => {
+                    tracing::warn!(
+                        status = %status,
+                        error_hash = %safe_display_error_hash(&error.error),
+                        "Trace Commons revocation propagation scheduler tick failed"
+                    );
+                }
+            }
+        }
+    });
+}
+
 async fn validate_trace_export_job_scheduler_config(
     state: &AppState,
     config: Option<&TraceExportJobSchedulerConfig>,
@@ -5890,6 +6011,36 @@ fn trace_process_evaluation_scheduler_config_error(
 ) -> anyhow::Error {
     anyhow::anyhow!(
         "invalid Trace Commons process evaluation scheduler configuration: status={}, error={}",
+        error.0,
+        error.1.0.error
+    )
+}
+
+async fn validate_trace_revocation_propagation_scheduler_config(
+    state: &AppState,
+    config: Option<&TraceRevocationPropagationSchedulerConfig>,
+) -> anyhow::Result<()> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
+        .map_err(trace_revocation_propagation_scheduler_config_error)?;
+    let auth = authenticate(state, &headers)
+        .map_err(trace_revocation_propagation_scheduler_config_error)?;
+    require_revocation_propagation_operator(&auth)
+        .map_err(trace_revocation_propagation_scheduler_config_error)?;
+    anyhow::ensure!(
+        state.db_mirror.is_some(),
+        "invalid Trace Commons revocation propagation scheduler configuration: TRACE_COMMONS_DB_DUAL_WRITE is required"
+    );
+    Ok(())
+}
+
+fn trace_revocation_propagation_scheduler_config_error(
+    error: (StatusCode, Json<ApiError>),
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "invalid Trace Commons revocation propagation scheduler configuration: status={}, error={}",
         error.0,
         error.1.0.error
     )
@@ -6862,6 +7013,10 @@ struct TraceCommonsConfigStatusResponse {
     credit_cycle_scheduler_submit_near_outbox: Option<bool>,
     credit_cycle_scheduler_confirm_near_outbox: Option<bool>,
     credit_cycle_scheduler_limit: Option<usize>,
+    revocation_propagation_scheduler_configured: bool,
+    revocation_propagation_scheduler_interval_seconds: Option<u64>,
+    revocation_propagation_scheduler_limit: Option<u32>,
+    revocation_propagation_scheduler_dry_run: Option<bool>,
     artifact_store_configured: bool,
     artifact_object_store: Option<String>,
     artifact_object_store_io_enabled: bool,
@@ -7238,6 +7393,21 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .credit_cycle_scheduler
             .as_ref()
             .map(|config| config.limit),
+        revocation_propagation_scheduler_configured: state
+            .revocation_propagation_scheduler
+            .is_some(),
+        revocation_propagation_scheduler_interval_seconds: state
+            .revocation_propagation_scheduler
+            .as_ref()
+            .map(|config| config.interval.as_secs()),
+        revocation_propagation_scheduler_limit: state
+            .revocation_propagation_scheduler
+            .as_ref()
+            .map(|config| config.limit),
+        revocation_propagation_scheduler_dry_run: state
+            .revocation_propagation_scheduler
+            .as_ref()
+            .map(|config| config.dry_run),
         artifact_store_configured: state.artifact_store.is_some(),
         artifact_object_store: state
             .artifact_store
@@ -20018,6 +20188,23 @@ fn parse_benchmark_pipeline_scheduler_min_score(configured: &str) -> anyhow::Res
     Ok(parsed)
 }
 
+fn validate_revocation_propagation_scheduler_purpose(purpose: &str) -> ApiResult<String> {
+    let purpose = purpose.trim().to_string();
+    if purpose.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "revocation propagation scheduler requires a non-empty purpose",
+        ));
+    }
+    if purpose.len() > 1024 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "revocation propagation scheduler purpose is too long",
+        ));
+    }
+    Ok(purpose)
+}
+
 async fn append_ranking_model_version_with_db_mirror(
     state: &AppState,
     tenant: &TenantAuth,
@@ -26523,6 +26710,24 @@ async fn run_trace_process_evaluation_scheduler_tick(
     )
     .await?;
     Ok(TraceProcessEvaluationSchedulerTickSummary { run })
+}
+
+async fn run_trace_revocation_propagation_scheduler_tick(
+    state: Arc<AppState>,
+    config: &TraceRevocationPropagationSchedulerConfig,
+) -> ApiResult<TraceRevocationPropagationSchedulerTickSummary> {
+    let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())?;
+    let Json(run) = revocation_propagation_worker_handler(
+        State(state),
+        headers,
+        Json(TraceRevocationPropagationWorkerRequest {
+            purpose: Some(config.purpose.clone()),
+            dry_run: config.dry_run,
+            limit: config.limit,
+        }),
+    )
+    .await?;
+    Ok(TraceRevocationPropagationSchedulerTickSummary { run })
 }
 
 async fn current_trace_export_job_or_claimed(
@@ -55818,6 +56023,7 @@ mod tests {
             benchmark_pipeline_scheduler: None,
             credit_cycle_scheduler: None,
             process_evaluation_scheduler: None,
+            revocation_propagation_scheduler: None,
             ranking_calibration_max_age: None,
             ranking_require_calibration_dataset_registry: false,
             ranking_require_active_calibration_dataset: false,
@@ -60624,6 +60830,65 @@ mod tests {
         assert!(!object.contains_key("credit_cycle_scheduler_token"));
         assert!(!object.contains_key("credit_cycle_scheduler_reason"));
         assert!(!object.contains_key("credit_cycle_scheduler_near_contract_id"));
+    }
+
+    #[tokio::test]
+    async fn admin_config_status_reports_revocation_propagation_scheduler_without_token_or_purpose()
+    {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).revocation_propagation_scheduler =
+            Some(TraceRevocationPropagationSchedulerConfig {
+                worker_token: SecretString::from(
+                    "config-status-revocation-scheduler-token".to_string(),
+                ),
+                interval: StdDuration::from_secs(240),
+                limit: 21,
+                dry_run: true,
+                purpose: "do not expose raw revocation scheduler note".to_string(),
+            });
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/config-status")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("config status response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body bytes");
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(
+            value["revocation_propagation_scheduler_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["revocation_propagation_scheduler_interval_seconds"],
+            serde_json::json!(240)
+        );
+        assert_eq!(
+            value["revocation_propagation_scheduler_limit"],
+            serde_json::json!(21)
+        );
+        assert_eq!(
+            value["revocation_propagation_scheduler_dry_run"],
+            serde_json::json!(true)
+        );
+        assert!(!body_text.contains("config-status-revocation-scheduler-token"));
+        assert!(!body_text.contains("do not expose raw revocation scheduler note"));
+        let object = value.as_object().expect("config status is object");
+        assert!(!object.contains_key("revocation_propagation_scheduler_token"));
+        assert!(!object.contains_key("revocation_propagation_scheduler_purpose"));
     }
 
     #[tokio::test]
@@ -66880,6 +67145,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revocation_propagation_scheduler_config_requires_revocation_worker_auth_and_db_mirror()
+    {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = validate_trace_revocation_propagation_scheduler_config(
+            state.as_ref(),
+            Some(&TraceRevocationPropagationSchedulerConfig {
+                worker_token: SecretString::from("token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                limit: 5,
+                dry_run: true,
+                purpose: "scheduled revocation propagation".to_string(),
+            }),
+        )
+        .await
+        .expect_err("contributor token must not start revocation propagation scheduler");
+
+        assert!(
+            error
+                .to_string()
+                .contains("reviewer, admin, or revocation worker token required")
+        );
+
+        let missing_db = validate_trace_revocation_propagation_scheduler_config(
+            state.as_ref(),
+            Some(&TraceRevocationPropagationSchedulerConfig {
+                worker_token: SecretString::from("revocation-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                limit: 5,
+                dry_run: true,
+                purpose: "scheduled revocation propagation".to_string(),
+            }),
+        )
+        .await
+        .expect_err("revocation scheduler requires DB mirror");
+        assert!(
+            missing_db
+                .to_string()
+                .contains("TRACE_COMMONS_DB_DUAL_WRITE")
+        );
+    }
+
+    #[tokio::test]
     async fn credit_cycle_scheduler_config_requires_utility_worker_auth_and_live_near_adapters() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -71497,6 +71806,7 @@ mod tests {
             benchmark_pipeline_scheduler: None,
             credit_cycle_scheduler: None,
             process_evaluation_scheduler: None,
+            revocation_propagation_scheduler: None,
             ranking_calibration_max_age: None,
             ranking_require_calibration_dataset_registry: false,
             ranking_require_active_calibration_dataset: false,
@@ -72121,6 +72431,208 @@ mod tests {
         .await
         .expect_err("invalid revocation worker limit is rejected before DB checks");
         assert_eq!(invalid_limit.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn revocation_propagation_scheduler_tick_dry_run_keeps_due_items_pending() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            true,
+            false,
+            false,
+        );
+        let source_submission_id = Uuid::new_v4();
+        let propagation_item_id = Uuid::new_v4();
+        backend
+            .upsert_trace_revocation_propagation_item(StorageTraceRevocationPropagationItemWrite {
+                tenant_id: "tenant-a".to_string(),
+                propagation_item_id,
+                source_submission_id,
+                target: StorageTraceRevocationPropagationTarget::PhysicalDeleteReceipt {
+                    object_ref_id: None,
+                    object_store: "local_service".to_string(),
+                    object_key: "revocation-scheduler-dry-run".to_string(),
+                    receipt_sha256: "sha256:revocation-scheduler-dry-run-receipt".to_string(),
+                },
+                action: StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt,
+                status: StorageTraceRevocationPropagationItemStatus::Pending,
+                idempotency_key: sha256_prefixed("revocation-scheduler-dry-run"),
+                reason: "revocation scheduler dry-run item".to_string(),
+                attempt_count: 0,
+                last_error: None,
+                next_attempt_at: None,
+                completed_at: None,
+                evidence_hash: None,
+                metadata: BTreeMap::new(),
+            })
+            .await
+            .expect("revocation propagation item writes");
+
+        let summary = run_trace_revocation_propagation_scheduler_tick(
+            state,
+            &TraceRevocationPropagationSchedulerConfig {
+                worker_token: SecretString::from("revocation-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                limit: 10,
+                dry_run: true,
+                purpose: "scheduled revocation propagation dry run".to_string(),
+            },
+        )
+        .await
+        .expect("revocation propagation scheduler dry-run tick succeeds");
+
+        assert!(summary.run.dry_run);
+        assert_eq!(summary.run.checked, 1);
+        assert_eq!(summary.run.pending, 1);
+        assert_eq!(summary.run.completed, 0);
+        assert_eq!(summary.run.failed, 0);
+        assert_eq!(summary.run.skipped, 0);
+
+        let items = backend
+            .list_trace_revocation_propagation_items("tenant-a", source_submission_id)
+            .await
+            .expect("revocation propagation items read");
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].status,
+            StorageTraceRevocationPropagationItemStatus::Pending
+        );
+        assert_eq!(items[0].attempt_count, 0);
+        assert!(items[0].completed_at.is_none());
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn revocation_propagation_scheduler_tick_completes_tenant_due_items_only() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            true,
+            false,
+            false,
+        );
+        let source_submission_id = Uuid::new_v4();
+        let propagation_item_id = Uuid::new_v4();
+        let receipt_sha256 = "sha256:revocation-scheduler-live-receipt";
+        backend
+            .upsert_trace_revocation_propagation_item(StorageTraceRevocationPropagationItemWrite {
+                tenant_id: "tenant-a".to_string(),
+                propagation_item_id,
+                source_submission_id,
+                target: StorageTraceRevocationPropagationTarget::PhysicalDeleteReceipt {
+                    object_ref_id: None,
+                    object_store: "local_service".to_string(),
+                    object_key: "revocation-scheduler-live".to_string(),
+                    receipt_sha256: receipt_sha256.to_string(),
+                },
+                action: StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt,
+                status: StorageTraceRevocationPropagationItemStatus::Pending,
+                idempotency_key: sha256_prefixed("revocation-scheduler-live"),
+                reason: "revocation scheduler live item".to_string(),
+                attempt_count: 0,
+                last_error: None,
+                next_attempt_at: None,
+                completed_at: None,
+                evidence_hash: None,
+                metadata: BTreeMap::new(),
+            })
+            .await
+            .expect("revocation propagation item writes");
+        let tenant_b_source_submission_id = Uuid::new_v4();
+        let tenant_b_propagation_item_id = Uuid::new_v4();
+        backend
+            .upsert_trace_revocation_propagation_item(StorageTraceRevocationPropagationItemWrite {
+                tenant_id: "tenant-b".to_string(),
+                propagation_item_id: tenant_b_propagation_item_id,
+                source_submission_id: tenant_b_source_submission_id,
+                target: StorageTraceRevocationPropagationTarget::PhysicalDeleteReceipt {
+                    object_ref_id: None,
+                    object_store: "local_service".to_string(),
+                    object_key: "tenant-b-revocation-scheduler-live".to_string(),
+                    receipt_sha256: "sha256:tenant-b-revocation-scheduler-receipt".to_string(),
+                },
+                action: StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt,
+                status: StorageTraceRevocationPropagationItemStatus::Pending,
+                idempotency_key: sha256_prefixed("tenant-b-revocation-scheduler-live"),
+                reason: "tenant-b revocation scheduler live item".to_string(),
+                attempt_count: 0,
+                last_error: None,
+                next_attempt_at: None,
+                completed_at: None,
+                evidence_hash: None,
+                metadata: BTreeMap::new(),
+            })
+            .await
+            .expect("tenant-b revocation propagation item writes");
+
+        let summary = run_trace_revocation_propagation_scheduler_tick(
+            state,
+            &TraceRevocationPropagationSchedulerConfig {
+                worker_token: SecretString::from("revocation-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                limit: 10,
+                dry_run: false,
+                purpose: "scheduled revocation propagation".to_string(),
+            },
+        )
+        .await
+        .expect("revocation propagation scheduler tick succeeds");
+
+        assert!(!summary.run.dry_run);
+        assert_eq!(summary.run.checked, 1);
+        assert_eq!(summary.run.completed, 1);
+        assert_eq!(summary.run.failed, 0);
+        assert_eq!(summary.run.skipped, 0);
+        assert_eq!(summary.run.pending, 0);
+
+        let items = backend
+            .list_trace_revocation_propagation_items("tenant-a", source_submission_id)
+            .await
+            .expect("revocation propagation items read");
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].status,
+            StorageTraceRevocationPropagationItemStatus::Done
+        );
+        assert_eq!(items[0].attempt_count, 1);
+        assert_eq!(items[0].evidence_hash.as_deref(), Some(receipt_sha256));
+        assert!(items[0].completed_at.is_some());
+
+        let tenant_b_items = backend
+            .list_trace_revocation_propagation_items("tenant-b", tenant_b_source_submission_id)
+            .await
+            .expect("tenant-b revocation propagation items read");
+        assert_eq!(tenant_b_items.len(), 1);
+        assert_eq!(
+            tenant_b_items[0].status,
+            StorageTraceRevocationPropagationItemStatus::Pending
+        );
+        assert_eq!(tenant_b_items[0].attempt_count, 0);
+        assert!(tenant_b_items[0].completed_at.is_none());
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
     }
 
     #[tokio::test]
