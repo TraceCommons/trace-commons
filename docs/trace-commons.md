@@ -394,10 +394,13 @@ cargo run --bin tracedao-ingest
 File-backed compatibility writes also treat the authenticated tenant directory as
 the trust boundary. Before persisting tenant-local JSON/JSONL control-plane
 rows, the server validates embedded tenant ids and tenant storage refs for
-credit events, utility attestations, settlement batches, credit holds,
-NEAR/benchmark registry outbox rows, ranking model/evidence/calibration ledgers,
-audit rows, replay manifests, benchmark artifacts, and benchmark/ranker
-provenance manifests.
+submission metadata, derived metadata, revocation tombstones, credit events,
+utility attestations, settlement batches, credit holds, NEAR/benchmark registry
+outbox rows, ranking model/evidence/calibration ledgers, audit rows, replay
+manifests, benchmark artifacts, and benchmark/ranker provenance manifests.
+Submitted envelope bodies also normalize any server-looking
+`contributor.tenant_scope_ref` to the auth-derived tenant before persistence, so
+a forged envelope tenant reference cannot become a later read-time trap.
 
 The PostgreSQL RLS-ready gate also requires the runtime role to be separate from
 the Trace Commons table-owner role. Migrations can run as an owner/admin role,
