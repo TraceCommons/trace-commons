@@ -502,6 +502,8 @@ const TRACE_COMMONS_RANKING_MIN_PAIRWISE_LABEL_COUNT: &str =
     "TRACE_COMMONS_RANKING_MIN_PAIRWISE_LABEL_COUNT";
 const TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS: &str =
     "TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS";
+const TRACE_COMMONS_RANKING_MAX_LABELER_ISSUE_RATE_MICROS: &str =
+    "TRACE_COMMONS_RANKING_MAX_LABELER_ISSUE_RATE_MICROS";
 const DEFAULT_EDDSA_KEYSET_URL_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_NEAR_CREDIT_SUBMITTER_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_NEAR_CREDIT_CONFIRMATION_TIMEOUT_MS: u64 = 5_000;
@@ -599,6 +601,11 @@ const DEFAULT_TRACE_RANKING_MIN_PAIRWISE_LABEL_COUNT: usize = 0;
 const MAX_TRACE_RANKING_MIN_PAIRWISE_LABEL_COUNT: usize = 1_000_000;
 const DEFAULT_TRACE_RANKING_MIN_PAIRWISE_ACCURACY_MICROS: i64 = 500_000;
 const MAX_TRACE_RANKING_PAIRWISE_ACCURACY_MICROS: i64 = 1_000_000;
+const MAX_TRACE_RANKING_LABELER_ISSUE_RATE_MICROS: i64 = 1_000_000;
+const RANKING_CALIBRATION_LABEL_SOURCE_ISSUE_RATE_REASON: &str =
+    "calibration_label_source_issue_rate_above_threshold";
+const RANKING_CALIBRATION_LABEL_ACTOR_ISSUE_RATE_REASON: &str =
+    "calibration_label_actor_issue_rate_above_threshold";
 const RANKING_FEATURE_SERVER_PROVENANCE_TAG: &str = "feature_provenance:server_derived";
 const RANKING_FEATURE_VECTOR_METADATA_TAG: &str = "feature_input:vector_metadata";
 const RANKING_FEATURE_DERIVED_METADATA_TAG: &str = "feature_input:derived_metadata";
@@ -790,6 +797,7 @@ struct AppState {
     ranking_min_label_source_count: usize,
     ranking_min_pairwise_label_count: usize,
     ranking_min_pairwise_accuracy_micros: i64,
+    ranking_max_labeler_issue_rate_micros: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -2376,6 +2384,8 @@ impl AppState {
         let ranking_min_pairwise_label_count = parse_ranking_min_pairwise_label_count_from_env()?;
         let (ranking_min_pairwise_accuracy_micros, ranking_min_pairwise_accuracy_configured) =
             parse_ranking_min_pairwise_accuracy_micros_from_env()?;
+        let ranking_max_labeler_issue_rate_micros =
+            parse_ranking_max_labeler_issue_rate_micros_from_env()?;
         validate_ranking_pairwise_threshold_config(
             ranking_min_pairwise_label_count,
             ranking_min_pairwise_accuracy_micros,
@@ -2576,6 +2586,7 @@ impl AppState {
             ranking_min_label_source_count,
             ranking_min_pairwise_label_count,
             ranking_min_pairwise_accuracy_micros,
+            ranking_max_labeler_issue_rate_micros,
         })
     }
 }
@@ -7273,6 +7284,24 @@ fn parse_ranking_min_pairwise_accuracy_micros(configured: &str) -> anyhow::Resul
     Ok(parsed)
 }
 
+fn parse_ranking_max_labeler_issue_rate_micros_from_env() -> anyhow::Result<Option<i64>> {
+    match optional_trimmed_env(TRACE_COMMONS_RANKING_MAX_LABELER_ISSUE_RATE_MICROS)? {
+        Some(value) => Ok(Some(parse_ranking_max_labeler_issue_rate_micros(&value)?)),
+        None => Ok(None),
+    }
+}
+
+fn parse_ranking_max_labeler_issue_rate_micros(configured: &str) -> anyhow::Result<i64> {
+    let parsed = configured.trim().parse::<i64>().with_context(|| {
+        format!("{TRACE_COMMONS_RANKING_MAX_LABELER_ISSUE_RATE_MICROS} must be an integer")
+    })?;
+    anyhow::ensure!(
+        (0..=MAX_TRACE_RANKING_LABELER_ISSUE_RATE_MICROS).contains(&parsed),
+        "{TRACE_COMMONS_RANKING_MAX_LABELER_ISSUE_RATE_MICROS} must be between 0 and {MAX_TRACE_RANKING_LABELER_ISSUE_RATE_MICROS}"
+    );
+    Ok(parsed)
+}
+
 fn validate_ranking_pairwise_threshold_config(
     ranking_min_pairwise_label_count: usize,
     ranking_min_pairwise_accuracy_micros: i64,
@@ -7561,6 +7590,7 @@ struct TraceCommonsConfigStatusResponse {
     ranking_min_label_source_count: usize,
     ranking_min_pairwise_label_count: usize,
     ranking_min_pairwise_accuracy_micros: i64,
+    ranking_max_labeler_issue_rate_micros: Option<i64>,
     ranking_worker_run_stale_after_hours: i64,
     near_credit_submitter_configured: bool,
     near_credit_submitter_timeout_ms: Option<u64>,
@@ -7860,6 +7890,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         ranking_min_label_source_count: state.ranking_min_label_source_count,
         ranking_min_pairwise_label_count: state.ranking_min_pairwise_label_count,
         ranking_min_pairwise_accuracy_micros: state.ranking_min_pairwise_accuracy_micros,
+        ranking_max_labeler_issue_rate_micros: state.ranking_max_labeler_issue_rate_micros,
         ranking_worker_run_stale_after_hours: TRACE_RANKING_WORKER_RUN_STALE_AFTER_HOURS,
         near_credit_submitter_configured: state.near_credit_submitter.is_some(),
         near_credit_submitter_timeout_ms: state.near_credit_submitter_timeout_ms,
@@ -19725,6 +19756,35 @@ async fn append_ranking_prediction_credit_for_record(
     .await?;
     let calibration_thresholds =
         effective_ranking_calibration_thresholds(state, Some(&calibration_run));
+    if state.ranking_max_labeler_issue_rate_micros.is_some() {
+        let predictions = read_ranking_predictions_for_admin(state, tenant)
+            .await
+            .map_err(internal_error)?;
+        let labels = read_ranking_labels_for_admin(state, tenant)
+            .await
+            .map_err(internal_error)?;
+        let preference_labels = read_ranking_preference_labels_for_admin(state, tenant)
+            .await
+            .map_err(internal_error)?;
+        let reason_codes = ranking_calibration_labeler_reliability_reason_codes(
+            state,
+            &tenant.tenant_id,
+            model,
+            prediction.target_use,
+            &predictions,
+            &labels,
+            &preference_labels,
+        );
+        if !reason_codes.is_empty() {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                format!(
+                    "ranking prediction credit requires calibration labeler reliability: reason_codes={}",
+                    reason_codes.join(",")
+                ),
+            ));
+        }
+    }
     if prediction.confidence < calibration_thresholds.confidence_threshold {
         return Err(api_error(
             StatusCode::CONFLICT,
@@ -22578,6 +22638,74 @@ fn reliability_issue_rate_micros(stats: &TraceRankingLabelerReliabilityStats) ->
     Some(((stats.issue_count as i128 * 1_000_000i128) / label_count as i128) as i64)
 }
 
+fn ranking_calibration_joined_labelers(
+    model: &TraceRankingModelVersionRecord,
+    target_use: TraceAllowedUse,
+    predictions: &[TraceRankingPredictionRecord],
+    labels: &[TraceRankingLabelRecord],
+) -> (BTreeSet<StorageTraceRankingLabelSource>, BTreeSet<String>) {
+    let matching_predictions = predictions
+        .iter()
+        .filter(|prediction| ranking_prediction_matches_model_target(prediction, model, target_use))
+        .collect::<Vec<_>>();
+    let matching_labels = ranking_calibration_effective_labels(
+        labels.iter().filter(|label| label.target_use == target_use),
+    );
+    let mut latest_prediction_by_submission = BTreeMap::new();
+    for prediction in &matching_predictions {
+        latest_prediction_by_submission.insert(prediction.submission_id, *prediction);
+    }
+
+    let mut label_sources = BTreeSet::new();
+    let mut label_actor_hashes = BTreeSet::new();
+    for label in matching_labels {
+        if latest_prediction_by_submission.contains_key(&label.submission_id) {
+            label_sources.insert(label.label_source);
+            label_actor_hashes.insert(sha256_prefixed(&label.actor_principal_ref));
+        }
+    }
+    (label_sources, label_actor_hashes)
+}
+
+fn ranking_calibration_labeler_reliability_reason_codes(
+    state: &AppState,
+    tenant_id: &str,
+    model: &TraceRankingModelVersionRecord,
+    target_use: TraceAllowedUse,
+    predictions: &[TraceRankingPredictionRecord],
+    labels: &[TraceRankingLabelRecord],
+    preference_labels: &[TraceRankingPreferenceLabelRecord],
+) -> Vec<String> {
+    let Some(max_issue_rate_micros) = state.ranking_max_labeler_issue_rate_micros else {
+        return Vec::new();
+    };
+    let (calibration_label_sources, calibration_label_actor_hashes) =
+        ranking_calibration_joined_labelers(model, target_use, predictions, labels);
+    if calibration_label_sources.is_empty() && calibration_label_actor_hashes.is_empty() {
+        return Vec::new();
+    }
+
+    let reliability = ranking_labeler_reliability_report(tenant_id, labels, preference_labels);
+    let mut reason_codes = Vec::new();
+    if reliability.sources.iter().any(|record| {
+        calibration_label_sources.contains(&record.label_source)
+            && record
+                .issue_rate_micros
+                .is_some_and(|rate| rate > max_issue_rate_micros)
+    }) {
+        reason_codes.push(RANKING_CALIBRATION_LABEL_SOURCE_ISSUE_RATE_REASON.to_string());
+    }
+    if reliability.actors.iter().any(|record| {
+        calibration_label_actor_hashes.contains(&record.actor_principal_hash)
+            && record
+                .issue_rate_micros
+                .is_some_and(|rate| rate > max_issue_rate_micros)
+    }) {
+        reason_codes.push(RANKING_CALIBRATION_LABEL_ACTOR_ISSUE_RATE_REASON.to_string());
+    }
+    reason_codes
+}
+
 fn preference_label_matches_adjudication_pair(
     label: &TraceRankingPreferenceLabelRecord,
     left_submission_id: Uuid,
@@ -23308,6 +23436,15 @@ fn ranking_model_risk_record(
     if ranking_adjudication_issue_count_for_target(&adjudication, target_use) > 0 {
         risk_codes.push(RANKING_ADJUDICATION_ISSUES_REASON.to_string());
     }
+    risk_codes.extend(ranking_calibration_labeler_reliability_reason_codes(
+        state,
+        &tenant.tenant_id,
+        model,
+        target_use,
+        evidence.predictions,
+        evidence.labels,
+        evidence.preference_labels,
+    ));
     if let Some(reason) = ranking_calibration_dataset_gate_reason(
         evidence.calibration_datasets,
         &model.calibration_dataset_hash,
@@ -23602,6 +23739,15 @@ fn ranking_dataset_target_readiness_record(
     if ranking_model_training_calibration_datasets_overlap(model) {
         reason_codes.push("training_calibration_dataset_overlap".to_string());
     }
+    reason_codes.extend(ranking_calibration_labeler_reliability_reason_codes(
+        state,
+        &tenant.tenant_id,
+        model,
+        target_use,
+        evidence.predictions,
+        evidence.labels,
+        evidence.preference_labels,
+    ));
     if let Some(reason) = ranking_calibration_dataset_gate_reason(
         evidence.calibration_datasets,
         &model.calibration_dataset_hash,
@@ -57000,6 +57146,7 @@ mod tests {
             ranking_min_pairwise_label_count: DEFAULT_TRACE_RANKING_MIN_PAIRWISE_LABEL_COUNT,
             ranking_min_pairwise_accuracy_micros:
                 DEFAULT_TRACE_RANKING_MIN_PAIRWISE_ACCURACY_MICROS,
+            ranking_max_labeler_issue_rate_micros: None,
         })
     }
 
@@ -58866,6 +59013,16 @@ mod tests {
                 .expect("pairwise accuracy floor parses"),
             850_000
         );
+        assert_eq!(
+            parse_ranking_max_labeler_issue_rate_micros("0")
+                .expect("zero issue-rate ceiling parses"),
+            0
+        );
+        assert_eq!(
+            parse_ranking_max_labeler_issue_rate_micros("250000")
+                .expect("labeler issue-rate ceiling parses"),
+            250_000
+        );
 
         let label_error = parse_ranking_min_pairwise_label_count("many")
             .expect_err("non-numeric pairwise floor is invalid");
@@ -58880,6 +59037,13 @@ mod tests {
             accuracy_error
                 .to_string()
                 .contains(TRACE_COMMONS_RANKING_MIN_PAIRWISE_ACCURACY_MICROS)
+        );
+        let labeler_error = parse_ranking_max_labeler_issue_rate_micros("1000001")
+            .expect_err("over-range labeler issue-rate ceiling is invalid");
+        assert!(
+            labeler_error
+                .to_string()
+                .contains(TRACE_COMMONS_RANKING_MAX_LABELER_ISSUE_RATE_MICROS)
         );
     }
 
@@ -60256,6 +60420,10 @@ mod tests {
         assert_eq!(
             value["ranking_min_pairwise_accuracy_micros"],
             serde_json::json!(DEFAULT_TRACE_RANKING_MIN_PAIRWISE_ACCURACY_MICROS)
+        );
+        assert_eq!(
+            value["ranking_max_labeler_issue_rate_micros"],
+            serde_json::Value::Null
         );
         assert_eq!(
             value["ranking_worker_run_stale_after_hours"],
@@ -73477,6 +73645,7 @@ mod tests {
             ranking_min_pairwise_label_count: DEFAULT_TRACE_RANKING_MIN_PAIRWISE_LABEL_COUNT,
             ranking_min_pairwise_accuracy_micros:
                 DEFAULT_TRACE_RANKING_MIN_PAIRWISE_ACCURACY_MICROS,
+            ranking_max_labeler_issue_rate_micros: None,
         });
 
         let mut envelope = sample_envelope().await;
@@ -89111,6 +89280,198 @@ mod tests {
             read_all_credit_events(temp.path(), "tenant-a")
                 .expect("credit reads")
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn ranking_credit_paths_block_unreliable_calibration_labelers_when_gate_enabled() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let (candidate, prediction) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-labeler-risk-v1").await;
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration");
+        assert!(calibration.promotable);
+        let Json(active) = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "activate model before reliability ceiling rises".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can promote calibrated model");
+        assert_eq!(active.model_status, StorageTraceRankingModelStatus::Active);
+
+        let mut issue_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut issue_envelope);
+        issue_envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        issue_envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        issue_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let issue_submission_id = issue_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(issue_envelope),
+        )
+        .await
+        .expect("unrelated model-training source submission succeeds");
+        let _ = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: issue_submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::FrontierLab,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 750_000,
+                evidence_hash: sha256_prefixed("labeler-risk-frontier-issue"),
+                external_ref: "private-labeler-risk-frontier-issue".to_string(),
+            }),
+        )
+        .await
+        .expect("utility worker can write issue-participating frontier label");
+        let _ = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: issue_submission_id,
+                target_use: TraceAllowedUse::ModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::ModelTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Rejected,
+                utility_delta_micros: -750_000,
+                evidence_hash: sha256_prefixed("labeler-risk-reviewer-issue"),
+                external_ref: "private-labeler-risk-reviewer-issue".to_string(),
+            }),
+        )
+        .await
+        .expect("reviewer can write conflicting issue label");
+
+        Arc::make_mut(&mut state).ranking_max_labeler_issue_rate_micros = Some(499_999);
+        let Json(risk) =
+            ranking_model_risk_report_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect labeler reliability model risk");
+        assert_eq!(
+            risk.risk_code_counts
+                .get("calibration_label_source_issue_rate_above_threshold"),
+            Some(&1)
+        );
+        assert_eq!(
+            risk.risk_code_counts
+                .get("calibration_label_actor_issue_rate_above_threshold"),
+            Some(&1)
+        );
+
+        let Json(run) = ranking_prediction_credit_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionCreditRunRequest {
+                dry_run: false,
+                allow_at_risk_models: true,
+                reason: "risk override must not bypass unreliable calibration labelers".to_string(),
+                limit: Some(10),
+                model_version: Some(candidate.model_version.clone()),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                policy_version: Some(candidate.policy_version.clone()),
+            }),
+        )
+        .await
+        .expect("labeler reliability gate skips ineligible prediction");
+        assert!(run.allow_at_risk_models);
+        assert_eq!(run.checked_count, 1);
+        assert_eq!(run.credited_count, 0);
+        assert_eq!(run.skipped_ineligible_count, 1);
+        assert_eq!(run.pending_after_count, 1);
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit reads")
+                .is_empty()
+        );
+
+        let Json(manual_credit) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(prediction.submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::RankingUtility,
+                credit_points_delta: prediction.settlement_score_micros as f32 / 1_000_000.0,
+                reason: Some("manual labeler-risk ranking credit should not settle".to_string()),
+                external_ref: Some(ranking_prediction_external_ref(
+                    prediction.ranking_prediction_id,
+                )),
+            }),
+        )
+        .await
+        .expect("reviewer can append manually bound ranking credit");
+        let Json(readiness) = ranking_credit_readiness_report_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+        )
+        .await
+        .expect("admin can inspect labeler-risk readiness");
+        assert_eq!(readiness.pending_ranking_credit_event_count, 1);
+        assert_eq!(readiness.ready_count, 0);
+        assert_eq!(readiness.blocked_count, 1);
+        assert_eq!(readiness.events[0].event_id, manual_credit.event_id);
+        assert!(
+            readiness.events[0]
+                .reason_codes
+                .contains(&"calibration_label_source_issue_rate_above_threshold".to_string())
+        );
+        assert!(
+            readiness.events[0]
+                .reason_codes
+                .contains(&"calibration_label_actor_issue_rate_above_threshold".to_string())
+        );
+
+        let Json(settlement) = credit_settlement_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: candidate.policy_version,
+                reason: "settlement excludes unreliable calibration labelers".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: None,
+                ranking_model_version: Some(active.model_version),
+                ranking_target_use: Some(TraceAllowedUse::RankingModelTraining),
+            }),
+        )
+        .await
+        .expect("settlement evaluates labeler-risk ranking credits");
+        assert_eq!(settlement.settled_source_event_count, 0);
+        assert_eq!(settlement.ranking_credit_events_excluded_count, 1);
+        assert_eq!(
+            settlement
+                .ranking_credit_events_excluded_reason_counts
+                .get("calibration_label_source_issue_rate_above_threshold"),
+            Some(&1)
+        );
+        assert_eq!(
+            settlement
+                .ranking_credit_events_excluded_reason_counts
+                .get("calibration_label_actor_issue_rate_above_threshold"),
+            Some(&1)
         );
     }
 
