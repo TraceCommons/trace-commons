@@ -48190,7 +48190,7 @@ fn audit_backfill_storage_projection(
     let action = match event.kind.as_str() {
         "submitted" => StorageTraceAuditAction::Submit,
         "read" | "trace_content_read" => StorageTraceAuditAction::Read,
-        "review_decision" => StorageTraceAuditAction::Review,
+        "review_decision" | "review_lease" => StorageTraceAuditAction::Review,
         "credit_mutate" | "credit_settlement_issuer_approval" => {
             StorageTraceAuditAction::CreditMutate
         }
@@ -65048,6 +65048,75 @@ mod tests {
         let projected_event = trace_commons_audit_event_from_storage("tenant-a", storage_event)
             .expect("storage audit projects");
         assert_eq!(projected_event.kind, "trace_content_read");
+        assert_eq!(projected_event.reason, audit_event.reason);
+    }
+
+    #[test]
+    fn audit_backfill_preserves_review_lease_metadata_action() {
+        let auth = test_reviewer_auth("tenant-a");
+        let lease_expires_at = Utc::now() + Duration::minutes(30);
+        let review_due_at = Utc::now() + Duration::hours(2);
+        let audit_event = TraceCommonsAuditEvent::review_lease(
+            &auth,
+            Uuid::new_v4(),
+            StorageTraceReviewLeaseAuditAction::Claim,
+            Some(lease_expires_at),
+            Some(review_due_at),
+        );
+
+        let (action, metadata) = audit_backfill_storage_projection(&audit_event);
+
+        assert_eq!(action, StorageTraceAuditAction::Review);
+        let metadata_json =
+            serde_json::to_value(&metadata).expect("review lease metadata serializes");
+        assert_eq!(
+            metadata_json.get("kind").and_then(|value| value.as_str()),
+            Some("review_lease")
+        );
+        assert_eq!(
+            metadata_json.get("action").and_then(|value| value.as_str()),
+            Some("claim")
+        );
+        assert_eq!(
+            metadata_json
+                .get("lease_expires_at")
+                .and_then(|value| value.as_str())
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&Utc)),
+            Some(lease_expires_at)
+        );
+        assert_eq!(
+            metadata_json
+                .get("review_due_at")
+                .and_then(|value| value.as_str())
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&Utc)),
+            Some(review_due_at)
+        );
+
+        let storage_event = StorageTraceAuditEventRecord {
+            audit_event_id: audit_event.event_id,
+            tenant_id: audit_event.tenant_id.clone(),
+            audit_sequence: 1,
+            actor_principal_ref: audit_event.actor_principal_ref.clone().unwrap(),
+            actor_role: "reviewer".to_string(),
+            action,
+            reason: audit_event.reason.clone(),
+            request_id: None,
+            submission_id: Some(audit_event.submission_id),
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: None,
+            metadata,
+            occurred_at: audit_event.created_at,
+        };
+        let projected_event = trace_commons_audit_event_from_storage("tenant-a", storage_event)
+            .expect("storage audit projects");
+        assert_eq!(projected_event.kind, "review_lease");
+        assert_eq!(projected_event.status, Some(TraceCorpusStatus::Quarantined));
         assert_eq!(projected_event.reason, audit_event.reason);
     }
 
