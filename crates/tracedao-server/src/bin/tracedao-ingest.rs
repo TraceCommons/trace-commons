@@ -9707,9 +9707,16 @@ fn trace_audit_reason_bool(reason: Option<&str>, key: &str) -> Option<bool> {
 }
 
 fn trace_maintenance_audit_purpose_hash(reason: Option<&str>) -> Option<String> {
+    match trace_audit_reason_value(reason, "purpose_hash") {
+        Some(hash) if is_canonical_sha256_prefixed_hash(hash) => Some(hash.to_string()),
+        Some(_) => None,
+        None => trace_audit_reason_value(reason, "purpose").map(sha256_prefixed),
+    }
+}
+
+fn trace_maintenance_audit_reason_has_invalid_hash(reason: Option<&str>) -> bool {
     trace_audit_reason_value(reason, "purpose_hash")
-        .map(ToOwned::to_owned)
-        .or_else(|| trace_audit_reason_value(reason, "purpose").map(sha256_prefixed))
+        .is_some_and(|hash| !is_canonical_sha256_prefixed_hash(hash))
 }
 
 fn trace_maintenance_audit_action_counts_from_reason(
@@ -9743,6 +9750,9 @@ fn trace_maintenance_audit_metadata_from_reason(
     surface: &str,
     reason: Option<&str>,
 ) -> Option<StorageTraceAuditSafeMetadata> {
+    if trace_maintenance_audit_reason_has_invalid_hash(reason) {
+        return None;
+    }
     let dry_run = trace_audit_reason_bool(reason, "dry_run")?;
     let action_counts = trace_maintenance_audit_action_counts_from_reason(reason);
     if action_counts.is_empty() {
@@ -47507,24 +47517,31 @@ fn normalize_audit_event_metadata(
             ),
         };
     }
-    if trace_maintenance_audit_kind(&event.kind)
-        && let Some(expected) =
+    if trace_maintenance_audit_kind(&event.kind) {
+        if trace_maintenance_audit_reason_has_invalid_hash(event.reason.as_deref()) {
+            anyhow::bail!(
+                "maintenance audit event {} requires canonical hash reason fields",
+                event.event_id
+            );
+        }
+        if let Some(expected) =
             trace_maintenance_audit_metadata_from_reason(&event.kind, event.reason.as_deref())
-    {
-        return match metadata {
-            StorageTraceAuditSafeMetadata::Empty => Ok(expected),
-            StorageTraceAuditSafeMetadata::Maintenance { .. } if metadata == expected => {
-                Ok(metadata)
-            }
-            StorageTraceAuditSafeMetadata::Maintenance { .. } => anyhow::bail!(
-                "maintenance audit event {} metadata does not match reason fields",
-                event.event_id
-            ),
-            _ => anyhow::bail!(
-                "maintenance audit event {} requires maintenance metadata",
-                event.event_id
-            ),
-        };
+        {
+            return match metadata {
+                StorageTraceAuditSafeMetadata::Empty => Ok(expected),
+                StorageTraceAuditSafeMetadata::Maintenance { .. } if metadata == expected => {
+                    Ok(metadata)
+                }
+                StorageTraceAuditSafeMetadata::Maintenance { .. } => anyhow::bail!(
+                    "maintenance audit event {} metadata does not match reason fields",
+                    event.event_id
+                ),
+                _ => anyhow::bail!(
+                    "maintenance audit event {} requires maintenance metadata",
+                    event.event_id
+                ),
+            };
+        }
     }
     Ok(metadata)
 }
@@ -66790,6 +66807,48 @@ mod tests {
             .expect("maintenance DB audit projects without canonical drift");
         assert_eq!(projected_event.kind, "maintenance");
         assert_eq!(projected_event.reason, audit_event.reason);
+    }
+
+    #[test]
+    fn audit_mirror_normalization_rejects_noncanonical_maintenance_purpose_hash() {
+        let audit_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: Uuid::nil(),
+            kind: "maintenance".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Admin),
+            actor_principal_ref: Some(principal_storage_ref("admin-token-a")),
+            reason: Some(
+                "purpose_hash=raw-frontier-lab-purpose;dry_run=false;records_marked_revoked=1"
+                    .to_string(),
+            ),
+            export_count: Some(1),
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+
+        let metadata = trace_maintenance_audit_metadata_from_reason(
+            "maintenance",
+            audit_event.reason.as_deref(),
+        );
+        assert!(metadata.is_none());
+
+        let error = normalize_audit_event_metadata(
+            &audit_event,
+            StorageTraceAuditAction::Retain,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .expect_err("noncanonical maintenance purpose_hash must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("requires canonical hash reason fields")
+        );
     }
 
     #[test]
