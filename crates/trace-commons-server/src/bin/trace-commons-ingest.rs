@@ -457,6 +457,11 @@ const TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN: &str =
     "TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN";
 const TRACE_COMMONS_PROCESS_EVALUATOR_TIMEOUT_MS: &str =
     "TRACE_COMMONS_PROCESS_EVALUATOR_TIMEOUT_MS";
+const TRACE_COMMONS_REMOTE_OBJECT_DELETER_URL: &str = "TRACE_COMMONS_REMOTE_OBJECT_DELETER_URL";
+const TRACE_COMMONS_REMOTE_OBJECT_DELETER_BEARER_TOKEN: &str =
+    "TRACE_COMMONS_REMOTE_OBJECT_DELETER_BEARER_TOKEN";
+const TRACE_COMMONS_REMOTE_OBJECT_DELETER_TIMEOUT_MS: &str =
+    "TRACE_COMMONS_REMOTE_OBJECT_DELETER_TIMEOUT_MS";
 const TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_URL: &str =
     "TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_URL";
 const TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_BEARER_TOKEN: &str =
@@ -527,6 +532,7 @@ const DEFAULT_BENCHMARK_REGISTRY_SUBMITTER_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_BENCHMARK_REGISTRY_CONFIRMATION_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_BENCHMARK_EVALUATOR_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_PROCESS_EVALUATOR_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_REMOTE_OBJECT_DELETER_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_WORKER_CACHE_INVALIDATOR_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_VECTOR_EMBEDDER_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_VECTOR_SEARCH_TIMEOUT_MS: u64 = 30_000;
@@ -796,6 +802,8 @@ struct AppState {
     benchmark_evaluator_timeout_ms: Option<u64>,
     process_evaluator: Option<Arc<dyn TraceProcessEvaluator>>,
     process_evaluator_timeout_ms: Option<u64>,
+    remote_object_deleter: Option<Arc<dyn TraceRemoteObjectDeleter>>,
+    remote_object_deleter_timeout_ms: Option<u64>,
     worker_cache_invalidator: Option<Arc<dyn TraceWorkerCacheInvalidator>>,
     worker_cache_invalidator_timeout_ms: Option<u64>,
     vector_embedder: Option<Arc<dyn TraceVectorEmbedder>>,
@@ -2366,6 +2374,11 @@ impl AppState {
             .as_ref()
             .map(|config| config.timeout_ms);
         let process_evaluator = process_evaluator_config.map(|config| config.evaluator);
+        let remote_object_deleter_config = trace_remote_object_deleter_from_env()?;
+        let remote_object_deleter_timeout_ms = remote_object_deleter_config
+            .as_ref()
+            .map(|config| config.timeout_ms);
+        let remote_object_deleter = remote_object_deleter_config.map(|config| config.deleter);
         let worker_cache_invalidator_config = trace_worker_cache_invalidator_from_env()?;
         let worker_cache_invalidator_timeout_ms = worker_cache_invalidator_config
             .as_ref()
@@ -2616,6 +2629,8 @@ impl AppState {
             benchmark_evaluator_timeout_ms,
             process_evaluator,
             process_evaluator_timeout_ms,
+            remote_object_deleter,
+            remote_object_deleter_timeout_ms,
             worker_cache_invalidator,
             worker_cache_invalidator_timeout_ms,
             vector_embedder,
@@ -2954,6 +2969,11 @@ struct ConfiguredTraceProcessEvaluator {
     timeout_ms: u64,
 }
 
+struct ConfiguredTraceRemoteObjectDeleter {
+    deleter: Arc<dyn TraceRemoteObjectDeleter>,
+    timeout_ms: u64,
+}
+
 struct ConfiguredTraceWorkerCacheInvalidator {
     invalidator: Arc<dyn TraceWorkerCacheInvalidator>,
     timeout_ms: u64,
@@ -3140,6 +3160,34 @@ fn trace_process_evaluator_from_env() -> anyhow::Result<Option<ConfiguredTracePr
             client,
             url,
             bearer_token: optional_trimmed_env(TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN)?
+                .map(SecretString::from),
+        }),
+        timeout_ms,
+    }))
+}
+
+fn trace_remote_object_deleter_from_env()
+-> anyhow::Result<Option<ConfiguredTraceRemoteObjectDeleter>> {
+    let Some(url) = optional_trimmed_env(TRACE_COMMONS_REMOTE_OBJECT_DELETER_URL)? else {
+        return Ok(None);
+    };
+    let parsed = reqwest::Url::parse(&url)
+        .with_context(|| format!("invalid {TRACE_COMMONS_REMOTE_OBJECT_DELETER_URL}"))?;
+    validate_trace_remote_object_deleter_url(&parsed)?;
+    let timeout = parse_trace_remote_object_deleter_timeout_from_env()?;
+    let timeout_ms = timeout.as_millis() as u64;
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout.min(StdDuration::from_secs(3)))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("trace-commons-remote-object-deleter/0.1")
+        .build()
+        .context("failed to build remote object deleter HTTP client")?;
+    Ok(Some(ConfiguredTraceRemoteObjectDeleter {
+        deleter: Arc::new(HttpTraceRemoteObjectDeleter {
+            client,
+            url,
+            bearer_token: optional_trimmed_env(TRACE_COMMONS_REMOTE_OBJECT_DELETER_BEARER_TOKEN)?
                 .map(SecretString::from),
         }),
         timeout_ms,
@@ -3381,6 +3429,31 @@ fn validate_trace_process_evaluator_url(url: &reqwest::Url) -> anyhow::Result<()
     Ok(())
 }
 
+fn validate_trace_remote_object_deleter_url(url: &reqwest::Url) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        matches!(url.scheme(), "https" | "http"),
+        "{TRACE_COMMONS_REMOTE_OBJECT_DELETER_URL} must use http or https"
+    );
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "{TRACE_COMMONS_REMOTE_OBJECT_DELETER_URL} must not include embedded credentials"
+    );
+    anyhow::ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "{TRACE_COMMONS_REMOTE_OBJECT_DELETER_URL} must not include query strings or fragments"
+    );
+    let host = url.host_str().map(str::to_ascii_lowercase).ok_or_else(|| {
+        anyhow::anyhow!("{TRACE_COMMONS_REMOTE_OBJECT_DELETER_URL} requires a host")
+    })?;
+    if url.scheme() == "http" {
+        anyhow::ensure!(
+            is_loopback_or_localhost_host(&host),
+            "{TRACE_COMMONS_REMOTE_OBJECT_DELETER_URL} may use http only for localhost loopback deleters"
+        );
+    }
+    Ok(())
+}
+
 fn validate_trace_worker_cache_invalidator_url(url: &reqwest::Url) -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(url.scheme(), "https" | "http"),
@@ -3559,6 +3632,20 @@ fn parse_trace_process_evaluator_timeout_from_env() -> anyhow::Result<StdDuratio
     anyhow::ensure!(
         (1..=120_000).contains(&timeout_ms),
         "{TRACE_COMMONS_PROCESS_EVALUATOR_TIMEOUT_MS} must be between 1 and 120000"
+    );
+    Ok(StdDuration::from_millis(timeout_ms))
+}
+
+fn parse_trace_remote_object_deleter_timeout_from_env() -> anyhow::Result<StdDuration> {
+    let timeout_ms = match optional_trimmed_env(TRACE_COMMONS_REMOTE_OBJECT_DELETER_TIMEOUT_MS)? {
+        Some(configured) => configured.parse::<u64>().with_context(|| {
+            format!("{TRACE_COMMONS_REMOTE_OBJECT_DELETER_TIMEOUT_MS} must be milliseconds")
+        })?,
+        None => DEFAULT_REMOTE_OBJECT_DELETER_TIMEOUT_MS,
+    };
+    anyhow::ensure!(
+        (1..=30_000).contains(&timeout_ms),
+        "{TRACE_COMMONS_REMOTE_OBJECT_DELETER_TIMEOUT_MS} must be between 1 and 30000"
     );
     Ok(StdDuration::from_millis(timeout_ms))
 }
@@ -7882,6 +7969,8 @@ struct TraceCommonsConfigStatusResponse {
     benchmark_evaluator_timeout_ms: Option<u64>,
     process_evaluator_configured: bool,
     process_evaluator_timeout_ms: Option<u64>,
+    remote_object_deleter_configured: bool,
+    remote_object_deleter_timeout_ms: Option<u64>,
     worker_cache_invalidator_configured: bool,
     worker_cache_invalidator_timeout_ms: Option<u64>,
     process_evaluation_worker_run_default_limit: usize,
@@ -8208,6 +8297,8 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         benchmark_evaluator_timeout_ms: state.benchmark_evaluator_timeout_ms,
         process_evaluator_configured: state.process_evaluator.is_some(),
         process_evaluator_timeout_ms: state.process_evaluator_timeout_ms,
+        remote_object_deleter_configured: state.remote_object_deleter.is_some(),
+        remote_object_deleter_timeout_ms: state.remote_object_deleter_timeout_ms,
         worker_cache_invalidator_configured: state.worker_cache_invalidator.is_some(),
         worker_cache_invalidator_timeout_ms: state.worker_cache_invalidator_timeout_ms,
         process_evaluation_worker_run_default_limit:
@@ -35676,6 +35767,73 @@ impl TraceProcessEvaluator for HttpTraceProcessEvaluator {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceRemoteObjectDeleteRequest {
+    tenant_storage_ref: String,
+    propagation_item_id: Uuid,
+    object_ref_id: Uuid,
+    source_submission_ref_hash: String,
+    artifact_kind: StorageTraceObjectArtifactKind,
+    object_store: String,
+    object_key: String,
+    object_key_hash: String,
+    content_sha256: String,
+    encryption_key_ref_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TraceRemoteObjectDeleteResponse {
+    evidence_hash: String,
+    #[serde(default)]
+    deleted: bool,
+    #[serde(default)]
+    already_absent: bool,
+}
+
+#[async_trait::async_trait]
+trait TraceRemoteObjectDeleter: Send + Sync {
+    async fn delete_remote_object(
+        &self,
+        request: TraceRemoteObjectDeleteRequest,
+    ) -> anyhow::Result<TraceRemoteObjectDeleteResponse>;
+}
+
+#[derive(Clone)]
+struct HttpTraceRemoteObjectDeleter {
+    client: reqwest::Client,
+    url: String,
+    bearer_token: Option<SecretString>,
+}
+
+#[async_trait::async_trait]
+impl TraceRemoteObjectDeleter for HttpTraceRemoteObjectDeleter {
+    async fn delete_remote_object(
+        &self,
+        request: TraceRemoteObjectDeleteRequest,
+    ) -> anyhow::Result<TraceRemoteObjectDeleteResponse> {
+        let mut builder = self
+            .client
+            .post(&self.url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&request);
+        if let Some(bearer_token) = &self.bearer_token {
+            builder = builder.bearer_auth(bearer_token.expose_secret());
+        }
+        let response = builder
+            .send()
+            .await
+            .context("failed to delete remote trace object")?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!("remote object deleter returned HTTP {}", status.as_u16());
+        }
+        response
+            .json()
+            .await
+            .context("failed to decode remote object deleter response")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TraceWorkerCacheInvalidationRequest {
     tenant_storage_ref: String,
     propagation_item_id: Uuid,
@@ -43091,6 +43249,16 @@ async fn delete_object_payload_for_revocation_propagation(
             "delete_object_payload_already_deleted",
         ));
     }
+    if object_ref.object_store == TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE {
+        return delete_disabled_remote_object_payload_for_revocation_propagation(
+            state,
+            db,
+            tenant,
+            item,
+            &object_ref,
+        )
+        .await;
+    }
     if !is_service_owned_trace_object_store(&object_ref.object_store) {
         return Ok(skipped_revocation_propagation_item(
             item,
@@ -43239,6 +43407,78 @@ async fn delete_object_payload_for_revocation_propagation(
     ))
 }
 
+async fn delete_disabled_remote_object_payload_for_revocation_propagation(
+    state: &AppState,
+    db: &dyn Database,
+    tenant: &TenantAuth,
+    item: &StorageTraceRevocationPropagationItemRecord,
+    object_ref: &StorageTraceObjectRefRecord,
+) -> anyhow::Result<TraceRevocationPropagationItemOutcome> {
+    if !is_supported_service_owned_physical_delete_artifact_kind(object_ref.artifact_kind) {
+        return Ok(skipped_revocation_propagation_item(
+            item,
+            "object payload artifact kind is not supported for physical deletion",
+        ));
+    }
+    let Some(deleter) = &state.remote_object_deleter else {
+        return Ok(skipped_revocation_propagation_item(
+            item,
+            revocation_payload_delete_skip_reason_for_object_store(&object_ref.object_store),
+        ));
+    };
+    validate_trace_sha256_hash(&object_ref.content_sha256, "remote object content_sha256")
+        .map_err(|(_, Json(error))| anyhow::anyhow!(error.error))?;
+    let response = deleter
+        .delete_remote_object(remote_object_delete_request_for_revocation(
+            tenant, item, object_ref,
+        ))
+        .await
+        .context("failed to delete configured remote trace object")?;
+    let evidence_hash = validate_trace_sha256_hash(
+        &response.evidence_hash,
+        "remote object delete evidence_hash",
+    )
+    .map_err(|(_, Json(error))| anyhow::anyhow!(error.error))?;
+    if !response.deleted && !response.already_absent {
+        return Ok(skipped_revocation_propagation_item(
+            item,
+            "remote object deleter did not confirm deletion",
+        ));
+    }
+    db.mark_trace_object_ref_deleted(
+        &tenant.tenant_id,
+        item.source_submission_id,
+        &object_ref.object_store,
+        &object_ref.object_key,
+    )
+    .await
+    .context("failed to mark remote trace object ref deleted")?;
+    record_physical_delete_receipt_for_revocation_propagation(db, item, object_ref).await?;
+    Ok(TraceRevocationPropagationItemOutcome::Done { evidence_hash })
+}
+
+fn remote_object_delete_request_for_revocation(
+    tenant: &TenantAuth,
+    item: &StorageTraceRevocationPropagationItemRecord,
+    object_ref: &StorageTraceObjectRefRecord,
+) -> TraceRemoteObjectDeleteRequest {
+    TraceRemoteObjectDeleteRequest {
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        propagation_item_id: item.propagation_item_id,
+        object_ref_id: object_ref.object_ref_id,
+        source_submission_ref_hash: sha256_prefixed(&format!(
+            "trace_remote_object_delete:v1:{}:{}:{}",
+            tenant.tenant_id, item.source_submission_id, object_ref.object_ref_id
+        )),
+        artifact_kind: object_ref.artifact_kind,
+        object_store: object_ref.object_store.clone(),
+        object_key: object_ref.object_key.clone(),
+        object_key_hash: sha256_prefixed(&object_ref.object_key),
+        content_sha256: object_ref.content_sha256.clone(),
+        encryption_key_ref_hash: sha256_prefixed(&object_ref.encryption_key_ref),
+    }
+}
+
 async fn record_physical_delete_receipt_for_revocation_propagation(
     db: &dyn Database,
     item: &StorageTraceRevocationPropagationItemRecord,
@@ -43266,7 +43506,7 @@ async fn record_physical_delete_receipt_for_revocation_propagation(
         target: StorageTraceRevocationPropagationTarget::PhysicalDeleteReceipt {
             object_ref_id: Some(object_ref.object_ref_id),
             object_store: object_ref.object_store.clone(),
-            object_key: object_ref.object_key.clone(),
+            object_key: physical_delete_receipt_object_key_ref(object_ref),
             receipt_sha256: receipt_sha256.clone(),
         },
         action: StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt,
@@ -43286,6 +43526,14 @@ async fn record_physical_delete_receipt_for_revocation_propagation(
     .await
     .context("failed to record physical delete receipt")?;
     Ok(())
+}
+
+fn physical_delete_receipt_object_key_ref(object_ref: &StorageTraceObjectRefRecord) -> String {
+    if object_ref.object_store == TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE {
+        sha256_prefixed(&object_ref.object_key)
+    } else {
+        object_ref.object_key.clone()
+    }
 }
 
 fn physical_delete_receipt_hash(
@@ -59393,6 +59641,8 @@ mod tests {
             benchmark_evaluator_timeout_ms: None,
             process_evaluator: None,
             process_evaluator_timeout_ms: None,
+            remote_object_deleter: None,
+            remote_object_deleter_timeout_ms: None,
             worker_cache_invalidator: None,
             worker_cache_invalidator_timeout_ms: None,
             vector_embedder: None,
@@ -61686,6 +61936,87 @@ mod tests {
     }
 
     #[test]
+    fn remote_object_delete_request_hashes_sensitive_refs_for_adapter_boundary() {
+        let submission_id =
+            Uuid::parse_str("171746f9-4d3d-4b44-84f4-61866da7a3f6").expect("uuid parses");
+        let object_ref_id =
+            Uuid::parse_str("21d84c1a-3b25-47e1-bb93-eae6f1ef128a").expect("uuid parses");
+        let propagation_item_id =
+            Uuid::parse_str("7fc7da51-5871-466a-a4a9-0ebd34d76baf").expect("uuid parses");
+        let now = Utc::now();
+        let tenant = TenantAuth {
+            tenant_id: "tenant-a".to_string(),
+            role: TokenRole::RevocationWorker,
+            principal_ref: principal_storage_ref("revocation-worker-token-a"),
+            expires_at: None,
+            auth_method: TraceAuthMethod::StaticToken,
+            signed_claim_issuer: None,
+            signed_claim_audiences: BTreeSet::new(),
+            signed_claim_subject: None,
+            allowed_consent_scopes: BTreeSet::new(),
+            allowed_uses: BTreeSet::new(),
+        };
+        let item = StorageTraceRevocationPropagationItemRecord {
+            tenant_id: "tenant-a".to_string(),
+            propagation_item_id,
+            source_submission_id: submission_id,
+            trace_id: Uuid::new_v4(),
+            target_kind: StorageTraceRevocationPropagationTargetKind::ObjectRef,
+            target: StorageTraceRevocationPropagationTarget::ObjectRef { object_ref_id },
+            action: StorageTraceRevocationPropagationAction::DeleteObjectPayload,
+            status: StorageTraceRevocationPropagationItemStatus::Pending,
+            idempotency_key: sha256_prefixed("remote-object-delete-request-test"),
+            reason: "revoked trace remote object payload deletion".to_string(),
+            attempt_count: 0,
+            last_error: None,
+            next_attempt_at: None,
+            completed_at: None,
+            evidence_hash: None,
+            metadata: BTreeMap::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        let object_ref = StorageTraceObjectRefRecord {
+            tenant_id: "tenant-a".to_string(),
+            submission_id,
+            object_ref_id,
+            artifact_kind: StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            object_store: TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE.to_string(),
+            object_key: "tenants/tenant-secret/object-key-secret.json".to_string(),
+            content_sha256:
+                "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    .to_string(),
+            encryption_key_ref: "kms-secret-ref".to_string(),
+            size_bytes: 128,
+            compression: None,
+            created_by_job_id: None,
+            invalidated_at: None,
+            deleted_at: None,
+            updated_at: now,
+            created_at: now,
+        };
+
+        let request = remote_object_delete_request_for_revocation(&tenant, &item, &object_ref);
+        assert_eq!(request.tenant_storage_ref, tenant_storage_ref("tenant-a"));
+        assert_eq!(request.propagation_item_id, propagation_item_id);
+        assert_eq!(request.object_ref_id, object_ref_id);
+        assert_eq!(request.object_key, object_ref.object_key);
+        assert_eq!(
+            request.object_key_hash,
+            sha256_prefixed("tenants/tenant-secret/object-key-secret.json")
+        );
+        assert_eq!(
+            request.encryption_key_ref_hash,
+            sha256_prefixed("kms-secret-ref")
+        );
+        assert!(request.source_submission_ref_hash.starts_with("sha256:"));
+        let request_text = serde_json::to_string(&request).expect("request serializes");
+        assert!(!request_text.contains("tenant-a"));
+        assert!(!request_text.contains(&submission_id.to_string()));
+        assert!(!request_text.contains("kms-secret-ref"));
+    }
+
+    #[test]
     fn remote_service_file_adapter_enables_object_io_without_plaintext_fallback() {
         let temp = tempfile::tempdir().expect("temp dir");
         let key = trace_commons_server::secrets::keychain::generate_master_key_hex();
@@ -63941,6 +64272,9 @@ mod tests {
         Arc::make_mut(&mut state).process_evaluator =
             Some(Arc::new(FakeProcessEvaluator::default()));
         Arc::make_mut(&mut state).process_evaluator_timeout_ms = Some(6_789);
+        Arc::make_mut(&mut state).remote_object_deleter =
+            Some(Arc::new(FakeRemoteObjectDeleter::default()));
+        Arc::make_mut(&mut state).remote_object_deleter_timeout_ms = Some(7_123);
         Arc::make_mut(&mut state).worker_cache_invalidator =
             Some(Arc::new(FakeWorkerCacheInvalidator::default()));
         Arc::make_mut(&mut state).worker_cache_invalidator_timeout_ms = Some(7_890);
@@ -63989,6 +64323,14 @@ mod tests {
             serde_json::json!(6_789)
         );
         assert_eq!(
+            value["remote_object_deleter_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["remote_object_deleter_timeout_ms"],
+            serde_json::json!(7_123)
+        );
+        assert_eq!(
             value["worker_cache_invalidator_configured"],
             serde_json::json!(true)
         );
@@ -64022,6 +64364,8 @@ mod tests {
         assert!(!object.contains_key("benchmark_evaluator_bearer_token"));
         assert!(!object.contains_key("process_evaluator_url"));
         assert!(!object.contains_key("process_evaluator_bearer_token"));
+        assert!(!object.contains_key("remote_object_deleter_url"));
+        assert!(!object.contains_key("remote_object_deleter_bearer_token"));
         assert!(!object.contains_key("worker_cache_invalidator_url"));
         assert!(!object.contains_key("worker_cache_invalidator_bearer_token"));
         assert!(!object.contains_key("vector_embedder_url"));
@@ -64033,6 +64377,8 @@ mod tests {
         assert!(!body_text.contains(TRACE_COMMONS_BENCHMARK_EVALUATOR_BEARER_TOKEN));
         assert!(!body_text.contains(TRACE_COMMONS_PROCESS_EVALUATOR_URL));
         assert!(!body_text.contains(TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN));
+        assert!(!body_text.contains(TRACE_COMMONS_REMOTE_OBJECT_DELETER_URL));
+        assert!(!body_text.contains(TRACE_COMMONS_REMOTE_OBJECT_DELETER_BEARER_TOKEN));
         assert!(!body_text.contains(TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_URL));
         assert!(!body_text.contains(TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_BEARER_TOKEN));
         assert!(!body_text.contains(TRACE_COMMONS_VECTOR_EMBEDDER_URL));
@@ -77528,6 +77874,8 @@ mod tests {
             benchmark_evaluator_timeout_ms: None,
             process_evaluator: None,
             process_evaluator_timeout_ms: None,
+            remote_object_deleter: None,
+            remote_object_deleter_timeout_ms: None,
             worker_cache_invalidator: None,
             worker_cache_invalidator_timeout_ms: None,
             vector_embedder: None,
@@ -78975,6 +79323,240 @@ mod tests {
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+    }
+
+    #[tokio::test]
+    async fn revocation_worker_deletes_disabled_remote_object_payload_with_configured_deleter() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("aws_s3"),
+            Some("trace-commons-prod-bucket-secret"),
+            Some("arn:aws:kms:us-west-2:123456789012:key/trace-commons-secret"),
+            Some("aws-iam-role:trace-commons-writer-secret"),
+        )
+        .expect("disabled remote config parses");
+        let artifact_store = ConfiguredTraceArtifactStore::remote_disabled(remote_config);
+        let mut state =
+            test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
+                temp.path().to_path_buf(),
+                Some(backend.clone()),
+                Some(artifact_store),
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                BTreeMap::new(),
+                false,
+                false,
+                true,
+                false,
+            );
+        Arc::make_mut(&mut state).require_db_mirror_writes = true;
+        let fake_deleter = Arc::new(FakeRemoteObjectDeleter::default());
+        Arc::make_mut(&mut state).remote_object_deleter = Some(fake_deleter.clone());
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission mirrors to DB");
+
+        let object_ref_id = deterministic_trace_uuid_for_external_ref(
+            "configured-remote-deleter-object-ref",
+            "tenant-a",
+            submission_id,
+            "submitted-envelope",
+        );
+        let secret_object_key = format!(
+            "tenants/{}/trace-commons-prod-bucket-secret/disabled-payload-secret.json",
+            tenant_storage_ref("tenant-a")
+        );
+        backend
+            .append_trace_object_ref(StorageTraceObjectRefWrite {
+                object_ref_id,
+                tenant_id: "tenant-a".to_string(),
+                submission_id,
+                artifact_kind: StorageTraceObjectArtifactKind::SubmittedEnvelope,
+                object_store: TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE.to_string(),
+                object_key: secret_object_key.clone(),
+                content_sha256:
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_string(),
+                encryption_key_ref: "arn:aws:kms:us-west-2:123456789012:key/trace-commons-secret"
+                    .to_string(),
+                size_bytes: 128,
+                compression: None,
+                created_by_job_id: None,
+            })
+            .await
+            .expect("disabled remote object ref writes");
+
+        let propagation_item_id = deterministic_trace_uuid_for_external_ref(
+            "configured-remote-deleter-propagation-item",
+            "tenant-a",
+            submission_id,
+            &object_ref_id.to_string(),
+        );
+        backend
+            .upsert_trace_revocation_propagation_item(StorageTraceRevocationPropagationItemWrite {
+                tenant_id: "tenant-a".to_string(),
+                propagation_item_id,
+                source_submission_id: submission_id,
+                target: StorageTraceRevocationPropagationTarget::ObjectRef { object_ref_id },
+                action: StorageTraceRevocationPropagationAction::DeleteObjectPayload,
+                status: StorageTraceRevocationPropagationItemStatus::Pending,
+                idempotency_key: sha256_prefixed(&format!(
+                    "configured-remote-object-delete:{submission_id}:{object_ref_id}"
+                )),
+                reason: "revoked trace configured remote object payload deletion".to_string(),
+                attempt_count: 0,
+                last_error: None,
+                next_attempt_at: None,
+                completed_at: None,
+                evidence_hash: None,
+                metadata: BTreeMap::new(),
+            })
+            .await
+            .expect("disabled remote propagation item writes");
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/workers/revocation-propagation")
+                    .header(AUTHORIZATION, "Bearer revocation-worker-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "configured remote deleter revocation",
+                            "dry_run": false,
+                            "limit": 1
+                        })
+                        .to_string(),
+                    ))
+                    .expect("worker request builds"),
+            )
+            .await
+            .expect("revocation worker response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("worker response parses");
+        assert_eq!(value["checked"], serde_json::json!(1));
+        assert_eq!(value["completed"], serde_json::json!(1));
+        assert_eq!(value["failed"], serde_json::json!(0));
+        assert_eq!(value["skipped"], serde_json::json!(0));
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        for secret in [
+            "revocation-worker-token-a",
+            "trace-commons-prod-bucket-secret",
+            "trace-commons-secret",
+            "trace-commons-writer-secret",
+            "disabled-payload-secret",
+        ] {
+            assert!(!body_text.contains(secret), "response leaked {secret}");
+        }
+
+        let calls = fake_deleter
+            .calls
+            .lock()
+            .expect("fake remote deleter calls lock")
+            .clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tenant_storage_ref, tenant_storage_ref("tenant-a"));
+        assert_eq!(calls[0].propagation_item_id, propagation_item_id);
+        assert_eq!(calls[0].object_ref_id, object_ref_id);
+        assert_eq!(
+            calls[0].object_store,
+            TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE
+        );
+        assert_eq!(calls[0].object_key, secret_object_key);
+        assert_eq!(
+            calls[0].object_key_hash,
+            sha256_prefixed(&secret_object_key)
+        );
+        assert!(calls[0].source_submission_ref_hash.starts_with("sha256:"));
+        assert_eq!(
+            calls[0].encryption_key_ref_hash,
+            sha256_prefixed("arn:aws:kms:us-west-2:123456789012:key/trace-commons-secret")
+        );
+
+        let propagation_items = backend
+            .list_trace_revocation_propagation_items("tenant-a", submission_id)
+            .await
+            .expect("revocation propagation items read");
+        let completed = propagation_items
+            .iter()
+            .find(|item| item.propagation_item_id == propagation_item_id)
+            .expect("configured remote delete item remains");
+        assert_eq!(
+            completed.status,
+            StorageTraceRevocationPropagationItemStatus::Done
+        );
+        assert_eq!(
+            completed.evidence_hash,
+            Some(fake_deleter.evidence_hash.clone())
+        );
+        assert!(completed.last_error.is_none());
+
+        let object_refs = backend
+            .list_trace_object_refs("tenant-a", submission_id)
+            .await
+            .expect("object refs read after configured remote delete");
+        let object_ref = object_refs
+            .iter()
+            .find(|object_ref| object_ref.object_ref_id == object_ref_id)
+            .expect("disabled remote object ref remains");
+        assert!(object_ref.deleted_at.is_some());
+
+        let receipt = propagation_items
+            .iter()
+            .find(|item| {
+                item.action == StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt
+            })
+            .expect("physical delete receipt was recorded");
+        let StorageTraceRevocationPropagationTarget::PhysicalDeleteReceipt {
+            object_key,
+            receipt_sha256,
+            ..
+        } = &receipt.target
+        else {
+            panic!("physical delete receipt target expected");
+        };
+        assert!(object_key.starts_with("sha256:"));
+        assert!(receipt_sha256.starts_with("sha256:"));
+        let persisted_text =
+            serde_json::to_string(&propagation_items).expect("propagation items serialize");
+        for secret in [
+            "trace-commons-prod-bucket-secret",
+            "trace-commons-secret",
+            "trace-commons-writer-secret",
+            "disabled-payload-secret",
+        ] {
+            assert!(
+                !persisted_text.contains(secret),
+                "stored propagation item leaked {secret}"
+            );
+        }
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
 
     #[tokio::test]
@@ -90864,6 +91446,48 @@ mod tests {
                 .expect("fake process evaluator calls lock")
                 .push(request);
             Ok(self.response.clone())
+        }
+    }
+
+    #[derive(Clone)]
+    struct FakeRemoteObjectDeleter {
+        calls: Arc<std::sync::Mutex<Vec<TraceRemoteObjectDeleteRequest>>>,
+        evidence_hash: String,
+        deleted: bool,
+        already_absent: bool,
+        failure: Option<String>,
+    }
+
+    impl Default for FakeRemoteObjectDeleter {
+        fn default() -> Self {
+            Self {
+                calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+                evidence_hash: sha256_prefixed("trace remote object deleted"),
+                deleted: true,
+                already_absent: false,
+                failure: None,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TraceRemoteObjectDeleter for FakeRemoteObjectDeleter {
+        async fn delete_remote_object(
+            &self,
+            request: TraceRemoteObjectDeleteRequest,
+        ) -> anyhow::Result<TraceRemoteObjectDeleteResponse> {
+            if let Some(failure) = &self.failure {
+                anyhow::bail!("{failure}");
+            }
+            self.calls
+                .lock()
+                .expect("fake remote object deleter calls lock")
+                .push(request);
+            Ok(TraceRemoteObjectDeleteResponse {
+                evidence_hash: self.evidence_hash.clone(),
+                deleted: self.deleted,
+                already_absent: self.already_absent,
+            })
         }
     }
 
