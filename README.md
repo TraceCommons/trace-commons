@@ -63,8 +63,11 @@ settlement unless the supplied `issuer_approval_evidence_hash` matches a recorde
 approval for the tenant, policy version, canonical lowercase `sha256:<64 hex>`
 source-list hash, and canonical approval evidence hash while still allowing
 dry-runs. Settlement and issuer-approval `policy_version` values are bounded
-safe identifiers, so they can be stored, audited, and mirrored into NEAR receipt
-args without carrying free-form operator text. Set
+safe identifiers, and when
+`TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS` is configured the
+approval endpoint rejects unlisted policy versions before writing audit rows, so
+they can be stored, audited, and mirrored into NEAR receipt args without
+carrying free-form operator text. Set
 `TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS` to make those
 central approvals expire for live issuance and settlement drills; startup
 rejects that max-age knob unless required issuer approval is enabled.
