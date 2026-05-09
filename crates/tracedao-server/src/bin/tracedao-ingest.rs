@@ -11332,12 +11332,6 @@ impl TraceNearCreditConfirmer for HttpTraceNearCreditConfirmer {
         {
             anyhow::bail!("confirmed NEAR credit response requires near_transaction_hash");
         }
-        if response.status == TraceNearCreditConfirmationStatus::Failed {
-            response.error_detail = Some(normalize_outbox_error_detail(
-                response.error_detail.as_deref().unwrap_or_default(),
-                "failed NEAR credit response",
-            )?);
-        }
         Ok(response)
     }
 }
@@ -11492,12 +11486,6 @@ impl TraceBenchmarkRegistryConfirmer for HttpTraceBenchmarkRegistryConfirmer {
             && response.external_receipt_ref.is_none()
         {
             anyhow::bail!("confirmed benchmark registry response requires external_receipt_ref");
-        }
-        if response.status == TraceBenchmarkRegistryConfirmationStatus::Failed {
-            response.error_detail = Some(normalize_outbox_error_detail(
-                response.error_detail.as_deref().unwrap_or_default(),
-                "failed benchmark registry response",
-            )?);
         }
         Ok(response)
     }
@@ -47127,7 +47115,7 @@ fn update_benchmark_registry_outbox_item_status(
             item.confirmed_at = None;
         }
         if status == StorageTraceBenchmarkRegistryOutboxStatus::Submitted {
-            item.last_error_hash = None;
+            item.last_error_hash = last_error_hash.clone();
             item.confirmed_at = None;
         }
         updated = Some(item.clone());
@@ -94470,6 +94458,57 @@ mod tests {
             outbox[0].status,
             StorageTraceBenchmarkRegistryOutboxStatus::Failed
         );
+        assert!(outbox[0].last_error_hash.is_some());
+    }
+
+    #[tokio::test]
+    async fn benchmark_registry_outbox_confirm_worker_keeps_oversized_failure_detail_hash_only() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).benchmark_registry_confirmer =
+            Some(Arc::new(FakeBenchmarkRegistryConfirmer {
+                status: TraceBenchmarkRegistryConfirmationStatus::Failed,
+                error_detail: Some("x".repeat(2048)),
+                ..FakeBenchmarkRegistryConfirmer::default()
+            }));
+
+        let benchmark_outbox_id = Uuid::new_v4();
+        let item = submitted_benchmark_registry_outbox_item(
+            benchmark_outbox_id,
+            StorageTraceBenchmarkRegistryOutboxOperation::Publish,
+        );
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-a", &item)
+            .expect("benchmark registry outbox file writes");
+
+        let Json(response) = benchmark_registry_outbox_confirm_worker_handler(
+            State(state),
+            auth_headers("benchmark-worker-token-a"),
+            Json(TraceBenchmarkRegistryOutboxConfirmWorkerRequest {
+                purpose: Some("confirm_registry_oversized_failed_detail".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("oversized adapter failure detail is recorded as item retry state");
+
+        assert_eq!(response.checked, 1);
+        assert_eq!(response.confirmed, 0);
+        assert_eq!(response.failed, 1);
+        assert_eq!(response.pending, 1);
+
+        let outbox = read_all_benchmark_registry_outbox_items(temp.path(), "tenant-a")
+            .expect("benchmark registry outbox reads");
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(
+            outbox[0].status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Submitted
+        );
+        assert_eq!(
+            outbox[0].external_receipt_ref.as_deref(),
+            Some("external-registry:receipt:publish")
+        );
+        assert!(outbox[0].confirmed_at.is_none());
         assert!(outbox[0].last_error_hash.is_some());
     }
 
