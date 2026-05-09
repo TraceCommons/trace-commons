@@ -630,9 +630,11 @@ credit ledger entries through delayed-credit mutation, utility-credit jobs,
 utility attestations, ranking prediction-credit, or export-generated utility
 credit. Those positive-credit paths fail before source reads, process-evaluation
 envelope rewrites, benchmark artifacts, ranker provenance, or worker-run ledgers
-are created. Unlisted utility-worker principals cannot start live settlement or
-credit-cycle schedulers, and unlisted benchmark-worker principals cannot submit,
-confirm, manually mark, or schedule live benchmark registry outbox mutations.
+are created, and queued benchmark/ranker export-job claim-and-run paths fail
+before the job is claimed. Unlisted utility-worker principals cannot start live
+settlement or credit-cycle schedulers, and unlisted benchmark-worker principals
+cannot submit, confirm, manually mark, or schedule live benchmark registry outbox
+mutations.
 Non-positive reviewer adjustments, such as abuse penalties, remain available
 because they do not issue new credit.
 Live settlement re-checks the profile before
