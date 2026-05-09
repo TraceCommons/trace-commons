@@ -585,14 +585,17 @@ can append `credit_settlement` rollout-smoke evidence directly. When
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE=true`, the drill
 reports `credit_settlement_central_issuer_profile_incomplete` until the same
 central issuance controls required at startup are configured, including managed
-EdDSA signed-token enforcement and tenant access-grant enforcement for exact
-issuer principals plus
+EdDSA signed-token enforcement, tenant access-grant enforcement, exact hashed
+issuer principal refs through
+`TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS`, and
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY=true`.
 Operational summary and metrics expose the same central
 issuer profile as aggregate safe signals: required, ready,
 missing-control-count, managed-EdDSA enforcement, and tenant-grant enforcement.
-Live settlement re-checks the profile before writing settlement batches or NEAR
-outbox rows. When rollout-smoke readiness is required, live settlement then
+When the principal allowlist is configured, unlisted admins can still inspect
+dry-runs but cannot record source-list issuer approvals or finalize live
+settlement. Live settlement re-checks the profile before writing settlement
+batches or NEAR outbox rows. When rollout-smoke readiness is required, live settlement then
 requires `rollout_smoke.ready: true` and rejects with safe status/count fields
 before any live repair or write path, while dry-run settlement and the drill
 stay available for diagnostics.
@@ -1780,8 +1783,10 @@ When TraceDAO centrally runs the issuer, set
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE=true`; startup
 then requires fail-closed DB mirror writes, PostgreSQL RLS readiness, a
 per-account settlement cap, an allowed settlement policy-version list, managed
-EdDSA signed-token enforcement plus tenant access-grant enforcement for exact
-issuer principals, required fresh source-list issuer approval, a pinned required
+EdDSA signed-token enforcement plus tenant access-grant enforcement, exact
+central issuer principal refs in
+`TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS`, required fresh
+source-list issuer approval, a pinned required
 NEAR credit contract, configured NEAR
 submit/confirm adapters, bearer auth on both adapter directions, and the
 rollout-smoke live-settlement gate

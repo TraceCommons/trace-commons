@@ -256,6 +256,8 @@ const TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE";
+const TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID: &str =
@@ -761,6 +763,7 @@ struct AppState {
     credit_settlement_require_issuer_approval: bool,
     credit_settlement_issuer_approval_max_age: Option<Duration>,
     credit_settlement_require_central_issuer_profile: bool,
+    credit_settlement_central_issuer_principal_refs: Arc<BTreeSet<String>>,
     credit_settlement_require_rollout_smoke_ready: bool,
     credit_settlement_near_contract_id: Option<String>,
     credit_settlement_require_near_contract: bool,
@@ -2246,6 +2249,8 @@ impl AppState {
         )?;
         let credit_settlement_require_central_issuer_profile =
             env_truthy(TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE);
+        let credit_settlement_central_issuer_principal_refs =
+            parse_central_issuer_principal_refs_from_env()?;
         let credit_settlement_require_rollout_smoke_ready =
             env_truthy(TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY);
         let credit_settlement_near_contract_id =
@@ -2315,6 +2320,8 @@ impl AppState {
                 require_issuer_approval: credit_settlement_require_issuer_approval,
                 issuer_approval_freshness_configured: credit_settlement_issuer_approval_max_age
                     .is_some(),
+                central_issuer_principal_refs_configured:
+                    !credit_settlement_central_issuer_principal_refs.is_empty(),
                 require_rollout_smoke_ready: credit_settlement_require_rollout_smoke_ready,
                 near_contract_configured: credit_settlement_near_contract_id.is_some(),
                 require_near_contract: credit_settlement_require_near_contract,
@@ -2566,6 +2573,9 @@ impl AppState {
             credit_settlement_require_issuer_approval,
             credit_settlement_issuer_approval_max_age,
             credit_settlement_require_central_issuer_profile,
+            credit_settlement_central_issuer_principal_refs: Arc::new(
+                credit_settlement_central_issuer_principal_refs,
+            ),
             credit_settlement_require_rollout_smoke_ready,
             credit_settlement_near_contract_id,
             credit_settlement_require_near_contract,
@@ -6984,6 +6994,40 @@ fn parse_credit_settlement_allowed_policy_versions(
     Ok(policy_versions)
 }
 
+fn parse_central_issuer_principal_refs_from_env() -> anyhow::Result<BTreeSet<String>> {
+    match optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS)? {
+        Some(configured) => parse_credit_settlement_central_issuer_principal_refs(&configured),
+        None => Ok(BTreeSet::new()),
+    }
+}
+
+fn parse_credit_settlement_central_issuer_principal_refs(
+    configured: &str,
+) -> anyhow::Result<BTreeSet<String>> {
+    let mut principal_refs = BTreeSet::new();
+    for principal_ref in configured.split(',').map(str::trim) {
+        if principal_ref.is_empty() {
+            continue;
+        }
+        anyhow::ensure!(
+            is_canonical_principal_storage_ref(principal_ref),
+            "{TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS} must contain canonical hashed principal refs"
+        );
+        principal_refs.insert(principal_ref.to_string());
+    }
+    anyhow::ensure!(
+        !principal_refs.is_empty(),
+        "{TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS} must contain at least one principal ref when set"
+    );
+    Ok(principal_refs)
+}
+
+fn is_canonical_principal_storage_ref(value: &str) -> bool {
+    value
+        .strip_prefix("principal_")
+        .is_some_and(is_canonical_sha256_prefixed_hash)
+}
+
 fn parse_credit_settlement_issuer_approval_max_age_from_env() -> anyhow::Result<Option<Duration>> {
     let Some(value) =
         optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS)?
@@ -7035,6 +7079,7 @@ struct CreditSettlementCentralIssuerProfileConfig {
     policy_version_allowlist_configured: bool,
     require_issuer_approval: bool,
     issuer_approval_freshness_configured: bool,
+    central_issuer_principal_refs_configured: bool,
     require_rollout_smoke_ready: bool,
     near_contract_configured: bool,
     require_near_contract: bool,
@@ -7063,6 +7108,9 @@ fn credit_settlement_central_issuer_profile_config_from_state(
         issuer_approval_freshness_configured: state
             .credit_settlement_issuer_approval_max_age
             .is_some(),
+        central_issuer_principal_refs_configured: !state
+            .credit_settlement_central_issuer_principal_refs
+            .is_empty(),
         require_rollout_smoke_ready: state.credit_settlement_require_rollout_smoke_ready,
         near_contract_configured: state.credit_settlement_near_contract_id.is_some(),
         require_near_contract: state.credit_settlement_require_near_contract,
@@ -7107,6 +7155,9 @@ fn credit_settlement_central_issuer_profile_missing_config(
     }
     if !config.issuer_approval_freshness_configured {
         missing.push(TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS);
+    }
+    if !config.central_issuer_principal_refs_configured {
+        missing.push(TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS);
     }
     if !config.require_rollout_smoke_ready {
         missing.push(TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY);
@@ -7663,6 +7714,7 @@ struct TraceCommonsConfigStatusResponse {
     credit_settlement_require_issuer_approval: bool,
     credit_settlement_issuer_approval_max_age_hours: Option<i64>,
     credit_settlement_require_central_issuer_profile: bool,
+    credit_settlement_central_issuer_principal_ref_count: usize,
     credit_settlement_require_rollout_smoke_ready: bool,
     credit_settlement_central_issuer_profile_ready: bool,
     credit_settlement_central_issuer_profile_missing_controls: Vec<&'static str>,
@@ -7931,6 +7983,9 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .map(|max_age| max_age.num_hours()),
         credit_settlement_require_central_issuer_profile: state
             .credit_settlement_require_central_issuer_profile,
+        credit_settlement_central_issuer_principal_ref_count: state
+            .credit_settlement_central_issuer_principal_refs
+            .len(),
         credit_settlement_require_rollout_smoke_ready: state
             .credit_settlement_require_rollout_smoke_ready,
         credit_settlement_central_issuer_profile_ready: central_issuer_profile_ready,
@@ -12412,6 +12467,7 @@ async fn credit_settlement_approval_handler(
 ) -> ApiResult<Json<TraceCreditSettlementIssuerApprovalResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
+    require_credit_settlement_approval_principal_if_configured(state.as_ref(), &tenant)?;
     let response = TraceCreditSettlementIssuerApprovalResponse::from_request(&tenant, request)?;
     append_audit_event_with_db_mirror(
         state.as_ref(),
@@ -13641,6 +13697,7 @@ async fn run_credit_settlement(
     let issuer_approval_evidence_hash = validate_credit_settlement_issuer_approval_evidence_hash(
         body.issuer_approval_evidence_hash.as_deref(),
     )?;
+    require_credit_settlement_central_issuer_principal_if_configured(state, tenant, body.dry_run)?;
     require_credit_settlement_central_issuer_profile_if_configured(state, body.dry_run)?;
     require_credit_settlement_issuer_approval_if_configured(
         state,
@@ -14478,6 +14535,49 @@ fn require_credit_settlement_central_issuer_profile_if_configured(
     Err(api_error(
         StatusCode::CONFLICT,
         "live credit settlement requires complete central issuer profile",
+    ))
+}
+
+fn require_credit_settlement_central_issuer_principal_if_configured(
+    state: &AppState,
+    tenant: &TenantAuth,
+    dry_run: bool,
+) -> ApiResult<()> {
+    if dry_run
+        || state
+            .credit_settlement_central_issuer_principal_refs
+            .is_empty()
+    {
+        return Ok(());
+    }
+    if state
+        .credit_settlement_central_issuer_principal_refs
+        .contains(&tenant.principal_ref)
+    {
+        return Ok(());
+    }
+    Err(api_error(
+        StatusCode::FORBIDDEN,
+        "live credit settlement requires an authorized central issuer principal",
+    ))
+}
+
+fn require_credit_settlement_approval_principal_if_configured(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> ApiResult<()> {
+    if state
+        .credit_settlement_central_issuer_principal_refs
+        .is_empty()
+        || state
+            .credit_settlement_central_issuer_principal_refs
+            .contains(&tenant.principal_ref)
+    {
+        return Ok(());
+    }
+    Err(api_error(
+        StatusCode::FORBIDDEN,
+        "credit settlement issuer approval requires an authorized central issuer principal",
     ))
 }
 
@@ -57490,6 +57590,7 @@ mod tests {
             credit_settlement_require_issuer_approval: false,
             credit_settlement_issuer_approval_max_age: None,
             credit_settlement_require_central_issuer_profile: false,
+            credit_settlement_central_issuer_principal_refs: Arc::new(BTreeSet::new()),
             credit_settlement_require_rollout_smoke_ready: false,
             credit_settlement_near_contract_id: None,
             credit_settlement_require_near_contract: false,
@@ -59258,6 +59359,28 @@ mod tests {
     }
 
     #[test]
+    fn central_issuer_principal_refs_parse_hash_only_allowlist() {
+        let admin_ref = principal_storage_ref("admin-token-a");
+        let utility_ref = principal_storage_ref("utility-worker-token-a");
+        let parsed = parse_credit_settlement_central_issuer_principal_refs(&format!(
+            "{admin_ref}, {utility_ref}, {admin_ref}"
+        ))
+        .expect("central issuer principal refs parse");
+
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed.contains(&admin_ref));
+        assert!(parsed.contains(&utility_ref));
+
+        let raw_error = parse_credit_settlement_central_issuer_principal_refs("admin-token-a")
+            .expect_err("raw principals are rejected");
+        assert!(
+            raw_error
+                .to_string()
+                .contains(TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS)
+        );
+    }
+
+    #[test]
     fn central_issuer_profile_requires_fail_closed_credit_controls() {
         validate_credit_settlement_central_issuer_profile_config(
             false,
@@ -59272,6 +59395,7 @@ mod tests {
                 policy_version_allowlist_configured: false,
                 require_issuer_approval: false,
                 issuer_approval_freshness_configured: false,
+                central_issuer_principal_refs_configured: false,
                 require_rollout_smoke_ready: false,
                 near_contract_configured: false,
                 require_near_contract: false,
@@ -59297,6 +59421,7 @@ mod tests {
                 policy_version_allowlist_configured: true,
                 require_issuer_approval: true,
                 issuer_approval_freshness_configured: true,
+                central_issuer_principal_refs_configured: true,
                 require_rollout_smoke_ready: true,
                 near_contract_configured: true,
                 require_near_contract: true,
@@ -59317,6 +59442,37 @@ mod tests {
         assert!(text.contains(TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_BEARER_TOKEN));
         assert!(text.contains(TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_BEARER_TOKEN));
 
+        let missing_principal_allowlist = validate_credit_settlement_central_issuer_profile_config(
+            true,
+            CreditSettlementCentralIssuerProfileConfig {
+                db_mirror_configured: true,
+                require_db_mirror_writes: true,
+                require_postgres_trace_rls_ready: true,
+                postgres_runtime_role_hash_configured: true,
+                require_managed_eddsa_signed_tokens: true,
+                require_tenant_access_grants: true,
+                account_cap_configured: true,
+                policy_version_allowlist_configured: true,
+                require_issuer_approval: true,
+                issuer_approval_freshness_configured: true,
+                central_issuer_principal_refs_configured: false,
+                require_rollout_smoke_ready: true,
+                near_contract_configured: true,
+                require_near_contract: true,
+                near_submitter_configured: true,
+                near_submitter_auth_configured: true,
+                near_confirmer_configured: true,
+                near_confirmer_auth_configured: true,
+                near_adapter_auth_required: true,
+            },
+        )
+        .expect_err("central issuer profile requires exact issuer principal refs");
+        assert!(
+            missing_principal_allowlist
+                .to_string()
+                .contains("TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS")
+        );
+
         validate_credit_settlement_central_issuer_profile_config(
             true,
             CreditSettlementCentralIssuerProfileConfig {
@@ -59330,6 +59486,7 @@ mod tests {
                 policy_version_allowlist_configured: true,
                 require_issuer_approval: true,
                 issuer_approval_freshness_configured: true,
+                central_issuer_principal_refs_configured: true,
                 require_rollout_smoke_ready: true,
                 near_contract_configured: true,
                 require_near_contract: true,
@@ -60865,6 +61022,10 @@ mod tests {
             serde_json::json!(false)
         );
         assert_eq!(
+            value["credit_settlement_central_issuer_principal_ref_count"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
             value["credit_settlement_require_rollout_smoke_ready"],
             serde_json::json!(false)
         );
@@ -60885,6 +61046,9 @@ mod tests {
         )));
         assert!(central_issuer_missing_controls.contains(&serde_json::json!(
             TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS
+        )));
+        assert!(central_issuer_missing_controls.contains(&serde_json::json!(
+            TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS
         )));
         assert!(central_issuer_missing_controls.contains(&serde_json::json!(
             TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY
@@ -74288,6 +74452,7 @@ mod tests {
             credit_settlement_require_issuer_approval: false,
             credit_settlement_issuer_approval_max_age: None,
             credit_settlement_require_central_issuer_profile: false,
+            credit_settlement_central_issuer_principal_refs: Arc::new(BTreeSet::new()),
             credit_settlement_require_rollout_smoke_ready: false,
             credit_settlement_near_contract_id: None,
             credit_settlement_require_near_contract: false,
@@ -83310,6 +83475,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn central_issuer_principal_allowlist_blocks_approval_and_live_settlement_writes() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
+            Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+
+        let source_list_hash = sha256_prefixed("central issuer principal source list");
+        let approval_hash = sha256_prefixed("central issuer principal approval");
+        let approval_error = credit_settlement_approval_handler(
+            State(state.clone()),
+            auth_headers("admin-token-b"),
+            Json(TraceCreditSettlementIssuerApprovalRequest {
+                policy_version: "trace-credit-policy-v1".to_string(),
+                source_list_hash: source_list_hash.clone(),
+                evidence_hash: approval_hash.clone(),
+                reason: "tenant b admin is not the central issuer".to_string(),
+                evidence_ref: Some("private-lab-review:blocked-principal".to_string()),
+            }),
+        )
+        .await
+        .expect_err("unlisted admin cannot record issuer approval");
+        assert_eq!(approval_error.0, StatusCode::FORBIDDEN);
+        assert!(
+            read_all_audit_events(temp.path(), "tenant-b")
+                .expect("tenant-b audit reads")
+                .is_empty()
+        );
+
+        let live_error = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-b"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "tenant b admin must not finalize central issuance".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect_err("unlisted admin cannot finalize live settlement");
+        assert_eq!(live_error.0, StatusCode::FORBIDDEN);
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-b")
+                .expect("tenant-b settlement reads")
+                .is_empty()
+        );
+
+        let Json(dry_run) = credit_settlement_handler(
+            State(state.clone()),
+            auth_headers("admin-token-b"),
+            Json(TraceCreditSettlementRunRequest {
+                dry_run: true,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "tenant b admin can still inspect dry-run state".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: None,
+                ranking_model_version: None,
+                ranking_target_use: None,
+            }),
+        )
+        .await
+        .expect("principal allowlist does not block dry-run inspection");
+        assert_eq!(dry_run.settled_source_event_count, 0);
+
+        let Json(approval) = credit_settlement_approval_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementIssuerApprovalRequest {
+                policy_version: "trace-credit-policy-v1".to_string(),
+                source_list_hash,
+                evidence_hash: approval_hash.clone(),
+                reason: "central issuer principal approved exact source list".to_string(),
+                evidence_ref: Some("private-lab-review:authorized-principal".to_string()),
+            }),
+        )
+        .await
+        .expect("listed central issuer principal can record approval");
+        assert_eq!(approval.evidence_hash, approval_hash);
+        assert!(
+            read_all_audit_events(temp.path(), "tenant-a")
+                .expect("tenant-a audit reads")
+                .iter()
+                .any(|event| event.kind == "credit_settlement_issuer_approval")
+        );
+    }
+
+    #[tokio::test]
     async fn credit_settlement_can_require_central_issuer_approval_for_live_batches() {
         use axum::body::Body;
         use tower::ServiceExt;
@@ -84439,7 +84694,7 @@ mod tests {
         );
         assert_eq!(
             summary_json["promotion_gates"]["credit_settlement_central_issuer_profile_missing_control_count"],
-            serde_json::json!(17)
+            serde_json::json!(19)
         );
         assert_eq!(
             summary_json["promotion_gates"]["credit_settlement_managed_eddsa_signed_tokens_required"],
@@ -84476,7 +84731,7 @@ mod tests {
             "tracedao_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"central_issuer_profile_ready\"}} 0"
         )));
         assert!(metrics.contains(&format!(
-            "tracedao_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"central_issuer_profile_missing_control_count\"}} 17"
+            "tracedao_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"central_issuer_profile_missing_control_count\"}} 19"
         )));
         assert!(metrics.contains(&format!(
             "tracedao_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"managed_eddsa_signed_tokens_required\"}} 0"

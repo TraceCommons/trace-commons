@@ -70,13 +70,16 @@ trusting a broader actor reputation system. That profile fails startup unless
 DB mirror writes and PostgreSQL RLS readiness are fail-closed, the expected
 PostgreSQL serving role is pinned with `TRACE_COMMONS_POSTGRES_RUNTIME_ROLE_SHA256`,
 per-account caps are configured, managed EdDSA signed-token enforcement plus tenant access-grant
-enforcement are enabled for exact issuer principals, fresh central source-list
+enforcement are enabled, exact central issuer principal refs are pinned with
+`TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS`, fresh central source-list
 approvals are required, a single NEAR credit contract is pinned and required,
 NEAR submit/confirm adapters are configured, and adapter bearer auth is required
 for both directions. The profile also requires
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY=true`, which makes
 live settlement require a fresh green rollout-smoke preflight while keeping
-dry-runs and drills available. Admin
+dry-runs and drills available. When that principal allowlist is configured,
+unlisted admins can still inspect dry-runs but cannot record issuer approvals or
+finalize live settlement. Admin
 config status returns safe missing-control names for that central issuer profile
 so operators can see which gate still needs configuration without exposing
 adapter URLs, bearer tokens, approval evidence, or account refs. The
