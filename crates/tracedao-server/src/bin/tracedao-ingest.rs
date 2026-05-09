@@ -75949,6 +75949,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn db_replay_export_reads_tenant_allowlist_keeps_fallback_tenant_file_backed() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(backend.clone()),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+            TraceTenantRolloutFeature::DbReplayExportReads,
+            &["tenant-a"],
+        );
+
+        let mut tenant_a_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_a_envelope);
+        tenant_a_envelope.consent.scopes = vec![ConsentScope::DebuggingEvaluation];
+        tenant_a_envelope.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        tenant_a_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::Evaluation];
+        set_metadata_only_user_message(
+            &mut tenant_a_envelope,
+            "tenant-a DB replay export selection canary",
+        );
+        let tenant_a_submission_id = tenant_a_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(tenant_a_envelope),
+        )
+        .await
+        .expect("tenant-a replay source mirrors to DB");
+        let tenant_a_metadata_path =
+            submission_metadata_path(temp.path(), "tenant-a", tenant_a_submission_id);
+        assert!(tenant_a_metadata_path.exists());
+        std::fs::remove_file(&tenant_a_metadata_path)
+            .expect("tenant-a file metadata removed for DB replay canary");
+
+        let Json(tenant_a_export) = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("tenant_a_db_replay_canary".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: Some("debugging_evaluation".to_string()),
+            }),
+        )
+        .await
+        .expect("tenant-a allowlisted replay export selects DB metadata");
+        assert_eq!(tenant_a_export.item_count, 1);
+        assert_eq!(
+            tenant_a_export.items[0].submission_id,
+            tenant_a_submission_id
+        );
+        assert!(
+            tenant_a_export.items[0].object_ref_id.is_some(),
+            "tenant-a DB replay export should read the submitted body through the DB object ref"
+        );
+
+        let mut tenant_b_file_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_b_file_envelope);
+        tenant_b_file_envelope.consent.scopes = vec![ConsentScope::DebuggingEvaluation];
+        tenant_b_file_envelope.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        tenant_b_file_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::Evaluation];
+        set_metadata_only_user_message(
+            &mut tenant_b_file_envelope,
+            "tenant-b file-backed replay export fallback",
+        );
+        let tenant_b_file_submission_id = tenant_b_file_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_file_envelope),
+        )
+        .await
+        .expect("tenant-b file-backed replay source mirrors to DB");
+
+        let mut tenant_b_db_only_envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut tenant_b_db_only_envelope);
+        tenant_b_db_only_envelope.consent.scopes = vec![ConsentScope::DebuggingEvaluation];
+        tenant_b_db_only_envelope.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        tenant_b_db_only_envelope.trace_card.allowed_uses = vec![TraceAllowedUse::Evaluation];
+        set_metadata_only_user_message(
+            &mut tenant_b_db_only_envelope,
+            "tenant-b DB replay export row should stay hidden",
+        );
+        let tenant_b_db_only_submission_id = tenant_b_db_only_envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-b"),
+            Json(tenant_b_db_only_envelope),
+        )
+        .await
+        .expect("tenant-b DB-mirrored replay source succeeds");
+        let tenant_b_db_only_metadata_path =
+            submission_metadata_path(temp.path(), "tenant-b", tenant_b_db_only_submission_id);
+        assert!(tenant_b_db_only_metadata_path.exists());
+        std::fs::remove_file(&tenant_b_db_only_metadata_path)
+            .expect("tenant-b DB-only replay metadata removed");
+
+        let Json(tenant_b_export) = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-b"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: Some("tenant_b_replay_fallback".to_string()),
+                status: Some(TraceCorpusStatus::Accepted),
+                privacy_risk: Some(ResidualPiiRisk::Low),
+                consent_scope: Some("debugging_evaluation".to_string()),
+            }),
+        )
+        .await
+        .expect("tenant-b non-allowlisted replay export uses file metadata");
+        assert_eq!(tenant_b_export.item_count, 1);
+        assert_eq!(
+            tenant_b_export.items[0].submission_id,
+            tenant_b_file_submission_id
+        );
+        assert_ne!(
+            tenant_b_export.items[0].submission_id, tenant_b_db_only_submission_id,
+            "tenant-b fallback must ignore DB-mirrored replay rows when file metadata is absent"
+        );
+        assert!(
+            tenant_b_export.items[0].object_ref_id.is_none(),
+            "tenant-b fallback replay export should not use DB object refs"
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+    }
+
+    #[tokio::test]
     async fn object_primary_review_tenant_allowlist_keeps_fallback_tenant_file_backed() {
         let Some(backend) = postgres_backend_for_ingest_test().await else {
             return;
