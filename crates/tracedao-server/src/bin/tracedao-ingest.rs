@@ -10221,6 +10221,8 @@ struct TraceCreditSettlementDrillRequest {
     #[serde(default)]
     account_limit: Option<usize>,
     #[serde(default)]
+    source_event_limit: Option<usize>,
+    #[serde(default)]
     require_pending: Option<bool>,
     #[serde(default)]
     require_near_contract: Option<bool>,
@@ -13356,6 +13358,7 @@ async fn run_credit_settlement_drill(
         .unwrap_or("trace_commons_credit_settlement_drill")
         .to_string();
     let account_limit = validate_credit_risk_summary_account_limit(request.account_limit)?;
+    let source_event_limit = validate_credit_settlement_run_limit(request.source_event_limit)?;
     let require_pending = request.require_pending.unwrap_or(true);
     let require_near_contract = request.require_near_contract.unwrap_or(true);
     let require_near_submitter = request
@@ -13404,7 +13407,7 @@ async fn run_credit_settlement_drill(
             ranking_model_version: request.ranking_model_version,
             ranking_target_use: request.ranking_target_use,
         },
-        None,
+        source_event_limit,
     )
     .await?;
     let issuer_approval_check =
@@ -13643,7 +13646,7 @@ fn credit_settlement_drill_evidence_hash(
         central_issuer_profile_missing_controls,
     } = inputs;
     let mut evidence = serde_json::json!({
-            "schema": "trace_commons_credit_settlement_drill.v3",
+            "schema": "trace_commons_credit_settlement_drill.v4",
             "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
             "actor_principal_ref": tenant.principal_ref,
             "purpose_hash": sha256_prefixed(purpose),
@@ -13697,6 +13700,14 @@ fn credit_settlement_drill_evidence_hash(
         fields.insert(
             "policy_version_allowed".to_string(),
             serde_json::Value::Bool(settlement.policy_version_allowed),
+        );
+        fields.insert(
+            "source_event_limit".to_string(),
+            serde_json::json!(settlement.limit),
+        );
+        fields.insert(
+            "source_list_hash".to_string(),
+            serde_json::Value::String(settlement.source_list_hash.clone()),
         );
         fields.insert(
             "credit_settlement_central_issuer_profile_missing_controls".to_string(),
@@ -84258,6 +84269,7 @@ mod tests {
                 ranking_model_version: None,
                 ranking_target_use: None,
                 account_limit: None,
+                source_event_limit: None,
                 require_pending: None,
                 require_near_contract: Some(false),
                 require_near_submitter: Some(false),
@@ -84948,6 +84960,7 @@ mod tests {
                 ranking_model_version: None,
                 ranking_target_use: None,
                 account_limit: None,
+                source_event_limit: None,
                 require_pending: None,
                 require_near_contract: Some(false),
                 require_near_submitter: None,
@@ -87551,6 +87564,160 @@ mod tests {
                 .expect("settlement reads")
                 .len(),
             2
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_settlement_drill_source_event_limit_matches_worker_approval_batch() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_require_issuer_approval = true;
+        Arc::make_mut(&mut state).credit_settlement_max_micros_per_account = Some(10_000_000);
+        let mut submission_ids = Vec::new();
+        for _ in 0..3 {
+            let mut envelope = sample_envelope().await;
+            make_metadata_only_low_risk(&mut envelope);
+            envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+            envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+            envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+            submission_ids.push(envelope.submission_id);
+            let _ = submit_trace_handler(
+                State(state.clone()),
+                auth_headers("token-a"),
+                Json(envelope),
+            )
+            .await
+            .expect("training submission succeeds");
+        }
+        let Json(credit) = utility_credit_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceUtilityCreditJobRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.0,
+                reason: "frontier lab limited source-list drill value".to_string(),
+                external_ref: "frontier:limited-source-list-drill".to_string(),
+                submission_ids,
+            }),
+        )
+        .await
+        .expect("utility worker can append training credits");
+        assert_eq!(credit.appended_count, 3);
+        let first_source_event_id = read_all_credit_events(temp.path(), "tenant-a")
+            .expect("credit events read")
+            .into_iter()
+            .map(|event| event.event_id)
+            .min()
+            .expect("at least one credit event exists");
+        let expected_source_list_hash =
+            source_credit_event_ids_hash("trace-credit-policy-v1", &[first_source_event_id]);
+        let approval_hash = sha256_prefixed("limited source-list approval");
+
+        let drill_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/credit-settlement-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "policy_version": "trace-credit-policy-v1",
+                            "issuer_approval_evidence_hash": approval_hash,
+                            "source_event_limit": 1,
+                            "require_near_contract": false,
+                            "require_near_submitter": false,
+                            "require_near_confirmer": false
+                        })
+                        .to_string(),
+                    ))
+                    .expect("limited drill request builds"),
+            )
+            .await
+            .expect("limited drill response");
+        assert_eq!(drill_response.status(), StatusCode::OK);
+        let drill_body = axum::body::to_bytes(drill_response.into_body(), 16384)
+            .await
+            .expect("limited drill body reads");
+        let drill: serde_json::Value =
+            serde_json::from_slice(&drill_body).expect("limited drill json parses");
+        assert_eq!(drill["ready"], serde_json::json!(false));
+        assert_eq!(
+            drill["blocking_gaps"],
+            serde_json::json!(["issuer_approval_evidence_hash_unrecorded"])
+        );
+        assert_eq!(drill["settlement"]["limit"], serde_json::json!(1));
+        assert_eq!(
+            drill["settlement"]["settled_source_event_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            drill["settlement"]["eligible_source_event_count"],
+            serde_json::json!(3)
+        );
+        assert_eq!(
+            drill["settlement"]["source_list_hash"],
+            serde_json::json!(expected_source_list_hash)
+        );
+        let drill_text = std::str::from_utf8(&drill_body).expect("drill response is utf8");
+        assert!(!drill_text.contains("frontier lab limited source-list drill value"));
+        assert!(!drill_text.contains("frontier:limited-source-list-drill"));
+
+        let Json(_) = credit_settlement_approval_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementIssuerApprovalRequest {
+                policy_version: "trace-credit-policy-v1".to_string(),
+                source_list_hash: expected_source_list_hash,
+                evidence_hash: approval_hash.clone(),
+                reason: "central issuer approved first limited source-list batch".to_string(),
+                evidence_ref: Some("private-lab-review:limited-source-list".to_string()),
+            }),
+        )
+        .await
+        .expect("admin records approval for the limited source list");
+
+        let settlement_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/workers/credit-settlements/run")
+                    .header(AUTHORIZATION, "Bearer utility-worker-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "dry_run": false,
+                            "policy_version": "trace-credit-policy-v1",
+                            "reason": "scheduled first approved limited settlement",
+                            "issuer_approval_evidence_hash": approval_hash,
+                            "limit": 1
+                        })
+                        .to_string(),
+                    ))
+                    .expect("limited worker request builds"),
+            )
+            .await
+            .expect("limited worker response");
+        assert_eq!(settlement_response.status(), StatusCode::OK);
+        let settlement_body = axum::body::to_bytes(settlement_response.into_body(), 16384)
+            .await
+            .expect("limited worker body reads");
+        let settlement: serde_json::Value =
+            serde_json::from_slice(&settlement_body).expect("limited worker json parses");
+        assert_eq!(
+            settlement["settled_source_event_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(settlement["pending_after_count"], serde_json::json!(2));
+        let batches =
+            read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(
+            batches[0].source_credit_event_ids,
+            vec![first_source_event_id]
         );
     }
 
