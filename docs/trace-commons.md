@@ -1831,8 +1831,8 @@ For unattended cron-style operation, utility workers can call
 per-step limits and NEAR options as the direct coordinator, and a bounded
 `limit` for candidate selection. It scans latest candidate and active models,
 prefers candidates before active models, skips any model/policy/target that
-already has a live non-stale `credit_cycle` worker-run claim, and runs a
-read-only calibration preflight before creating a direct cycle claim. Candidates
+already has a live non-stale `credit_cycle` worker-run claim for live runs, and
+runs a read-only calibration preflight before creating a direct cycle claim. Candidates
 with no matching prediction evidence, no target labels, no labels that join to
 the model's matching predictions, non-promotable current calibration evidence,
 or uncleared pairwise evidence, diversity, or accuracy policy risk are reported as scheduler
@@ -1842,9 +1842,10 @@ minimum label count, minimum confidence threshold, and maximum average absolute
 error ceiling even when a scheduler request supplies looser per-run values. The response reports
 checked, started, skipped, active-claim skipped, still-pending, and skip-reason
 counts plus a per-candidate decision list and the nested cycle responses.
-Requests with `preflight_only: true` stop after eligibility checks and return
-`eligible`/`skipped` decisions without invoking the direct coordinator or
-creating worker rows, credit events, settlement batches, or NEAR outbox rows.
+Requests with `preflight_only: true` ignore active live claims, stop after
+eligibility checks, and return `eligible`/`skipped` decisions without invoking
+the direct coordinator or creating worker rows, credit events, settlement
+batches, or NEAR outbox rows.
 This gives external schedulers a safe retry surface without granting generic
 admin settlement access. When the central issuer principal allowlist is
 configured, the route rejects non-dry-run, non-preflight scheduler requests from
