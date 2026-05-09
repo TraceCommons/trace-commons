@@ -468,6 +468,8 @@ const TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_BEARER_TOKEN: &str =
     "TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_BEARER_TOKEN";
 const TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_TIMEOUT_MS: &str =
     "TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_TIMEOUT_MS";
+const TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_REQUIRE_EXTERNAL: &str =
+    "TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_REQUIRE_EXTERNAL";
 const TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_ENABLED: &str =
     "TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_ENABLED";
 const TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_TOKEN: &str =
@@ -806,6 +808,7 @@ struct AppState {
     remote_object_deleter_timeout_ms: Option<u64>,
     worker_cache_invalidator: Option<Arc<dyn TraceWorkerCacheInvalidator>>,
     worker_cache_invalidator_timeout_ms: Option<u64>,
+    require_external_worker_cache_invalidator: bool,
     vector_embedder: Option<Arc<dyn TraceVectorEmbedder>>,
     vector_embedder_timeout_ms: Option<u64>,
     require_external_vector_embedder: bool,
@@ -2385,6 +2388,13 @@ impl AppState {
             .map(|config| config.timeout_ms);
         let worker_cache_invalidator =
             worker_cache_invalidator_config.map(|config| config.invalidator);
+        let require_external_worker_cache_invalidator =
+            env_truthy(TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_REQUIRE_EXTERNAL);
+        if require_external_worker_cache_invalidator && worker_cache_invalidator.is_none() {
+            anyhow::bail!(
+                "{TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_REQUIRE_EXTERNAL} requires {TRACE_COMMONS_WORKER_CACHE_INVALIDATOR_URL}"
+            );
+        }
         let vector_embedder_config = trace_vector_embedder_from_env()?;
         let vector_embedder_timeout_ms = vector_embedder_config
             .as_ref()
@@ -2633,6 +2643,7 @@ impl AppState {
             remote_object_deleter_timeout_ms,
             worker_cache_invalidator,
             worker_cache_invalidator_timeout_ms,
+            require_external_worker_cache_invalidator,
             vector_embedder,
             vector_embedder_timeout_ms,
             require_external_vector_embedder,
@@ -7973,6 +7984,7 @@ struct TraceCommonsConfigStatusResponse {
     remote_object_deleter_timeout_ms: Option<u64>,
     worker_cache_invalidator_configured: bool,
     worker_cache_invalidator_timeout_ms: Option<u64>,
+    worker_cache_invalidator_required: bool,
     process_evaluation_worker_run_default_limit: usize,
     process_evaluation_worker_run_max_limit: usize,
     process_evaluation_scheduler_configured: bool,
@@ -8301,6 +8313,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         remote_object_deleter_timeout_ms: state.remote_object_deleter_timeout_ms,
         worker_cache_invalidator_configured: state.worker_cache_invalidator.is_some(),
         worker_cache_invalidator_timeout_ms: state.worker_cache_invalidator_timeout_ms,
+        worker_cache_invalidator_required: state.require_external_worker_cache_invalidator,
         process_evaluation_worker_run_default_limit:
             TRACE_PROCESS_EVALUATION_WORKER_RUN_DEFAULT_LIMIT,
         process_evaluation_worker_run_max_limit: TRACE_PROCESS_EVALUATION_WORKER_RUN_MAX_LIMIT,
@@ -34374,6 +34387,45 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             value,
         );
     }
+    body.push_str("# HELP trace_commons_operational_revocation_propagation_readiness Safe revocation-propagation infrastructure readiness flags.\n");
+    body.push_str("# TYPE trace_commons_operational_revocation_propagation_readiness gauge\n");
+    for (state, value) in [
+        (
+            "worker_cache_invalidator_required",
+            usize::from(
+                response
+                    .revocation_propagation
+                    .worker_cache_invalidator_required,
+            ),
+        ),
+        (
+            "worker_cache_invalidator_configured",
+            usize::from(
+                response
+                    .revocation_propagation
+                    .worker_cache_invalidator_configured,
+            ),
+        ),
+        (
+            "worker_cache_invalidator_ready",
+            usize::from(
+                response
+                    .revocation_propagation
+                    .worker_cache_invalidator_ready,
+            ),
+        ),
+    ] {
+        push_prometheus_gauge(
+            &mut body,
+            &mut metric_count,
+            "trace_commons_operational_revocation_propagation_readiness",
+            &[
+                ("tenant_storage_ref", &response.tenant_storage_ref),
+                ("state", state),
+            ],
+            value,
+        );
+    }
     body.push_str("# HELP trace_commons_operational_rollout_smoke_missing_evidence Count of required rollout smoke checks without captured rehearsal evidence.\n");
     body.push_str("# TYPE trace_commons_operational_rollout_smoke_missing_evidence gauge\n");
     push_prometheus_gauge(
@@ -43022,6 +43074,9 @@ async fn invalidate_worker_queue_for_revocation_propagation(
             validate_trace_sha256_hash(&response.evidence_hash, "worker cache evidence_hash")
                 .map_err(|(_, Json(error))| anyhow::anyhow!(error.error))?;
         return Ok(TraceRevocationPropagationItemOutcome::Done { evidence_hash });
+    }
+    if state.require_external_worker_cache_invalidator {
+        anyhow::bail!("worker cache invalidator is required but not configured");
     }
 
     Ok(done_revocation_propagation_item(
@@ -56924,7 +56979,7 @@ impl TraceOperationalObjectStoreSummary {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct TraceOperationalRevocationPropagationSummary {
     latest_run_recorded: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -56935,6 +56990,27 @@ struct TraceOperationalRevocationPropagationSummary {
     latest_failed_count: usize,
     latest_skipped_count: usize,
     latest_pending_count: usize,
+    worker_cache_invalidator_required: bool,
+    worker_cache_invalidator_configured: bool,
+    worker_cache_invalidator_ready: bool,
+}
+
+impl Default for TraceOperationalRevocationPropagationSummary {
+    fn default() -> Self {
+        Self {
+            latest_run_recorded: false,
+            latest_run_at: None,
+            latest_run_dry_run: false,
+            latest_checked_count: 0,
+            latest_completed_count: 0,
+            latest_failed_count: 0,
+            latest_skipped_count: 0,
+            latest_pending_count: 0,
+            worker_cache_invalidator_required: false,
+            worker_cache_invalidator_configured: false,
+            worker_cache_invalidator_ready: true,
+        }
+    }
 }
 
 impl TraceOperationalRevocationPropagationSummary {
@@ -56970,7 +57046,12 @@ async fn read_revocation_propagation_summary_for_admin(
     } else {
         read_all_audit_events(&state.root, &tenant.tenant_id)?
     };
-    TraceOperationalRevocationPropagationSummary::from_audit_events(&events)
+    let mut summary = TraceOperationalRevocationPropagationSummary::from_audit_events(&events)?;
+    summary.worker_cache_invalidator_required = state.require_external_worker_cache_invalidator;
+    summary.worker_cache_invalidator_configured = state.worker_cache_invalidator.is_some();
+    summary.worker_cache_invalidator_ready =
+        !summary.worker_cache_invalidator_required || summary.worker_cache_invalidator_configured;
+    Ok(summary)
 }
 
 fn trace_revocation_propagation_summary_from_audit_event(
@@ -57006,6 +57087,7 @@ fn trace_revocation_propagation_summary_from_audit_event(
             latest_failed_count,
             latest_skipped_count,
             latest_pending_count,
+            ..TraceOperationalRevocationPropagationSummary::default()
         })
     })())
 }
@@ -57426,6 +57508,9 @@ struct TraceOperationalPromotionGateSummary {
     ranking_worker_run_skip_reason_counts: BTreeMap<String, usize>,
     revocation_propagation_latest_failed_count: usize,
     revocation_propagation_latest_skipped_count: usize,
+    worker_cache_invalidator_required: bool,
+    worker_cache_invalidator_configured: bool,
+    worker_cache_invalidator_missing: bool,
     credit_settlement_central_issuer_profile_required: bool,
     credit_settlement_central_issuer_profile_ready: bool,
     credit_settlement_central_issuer_profile_missing_control_count: usize,
@@ -57556,6 +57641,10 @@ impl TraceOperationalPromotionGateSummary {
             inputs.revocation_propagation.latest_failed_count;
         let revocation_propagation_latest_skipped_count =
             inputs.revocation_propagation.latest_skipped_count;
+        let worker_cache_invalidator_required = state.require_external_worker_cache_invalidator;
+        let worker_cache_invalidator_configured = state.worker_cache_invalidator.is_some();
+        let worker_cache_invalidator_missing =
+            worker_cache_invalidator_required && !worker_cache_invalidator_configured;
         let credit_settlement_central_issuer_profile_required =
             state.credit_settlement_require_central_issuer_profile;
         let central_issuer_profile_config =
@@ -57790,6 +57879,9 @@ impl TraceOperationalPromotionGateSummary {
             "revocation_propagation_failures",
             revocation_propagation_latest_failed_count,
         );
+        if worker_cache_invalidator_missing {
+            blocking_gates.push("worker_cache_invalidator_required_missing".to_string());
+        }
         if credit_settlement_account_cap_missing {
             blocking_gates.push("credit_settlement_account_cap_missing".to_string());
         }
@@ -57925,6 +58017,9 @@ impl TraceOperationalPromotionGateSummary {
             ranking_worker_run_skip_reason_counts,
             revocation_propagation_latest_failed_count,
             revocation_propagation_latest_skipped_count,
+            worker_cache_invalidator_required,
+            worker_cache_invalidator_configured,
+            worker_cache_invalidator_missing,
             credit_settlement_central_issuer_profile_required,
             credit_settlement_central_issuer_profile_ready,
             credit_settlement_central_issuer_profile_missing_control_count,
@@ -59698,6 +59793,7 @@ mod tests {
             remote_object_deleter_timeout_ms: None,
             worker_cache_invalidator: None,
             worker_cache_invalidator_timeout_ms: None,
+            require_external_worker_cache_invalidator: false,
             vector_embedder: None,
             vector_embedder_timeout_ms: None,
             require_external_vector_embedder: false,
@@ -64331,6 +64427,7 @@ mod tests {
         Arc::make_mut(&mut state).worker_cache_invalidator =
             Some(Arc::new(FakeWorkerCacheInvalidator::default()));
         Arc::make_mut(&mut state).worker_cache_invalidator_timeout_ms = Some(7_890);
+        Arc::make_mut(&mut state).require_external_worker_cache_invalidator = true;
         Arc::make_mut(&mut state).vector_embedder = Some(Arc::new(FakeVectorEmbedder::default()));
         Arc::make_mut(&mut state).vector_embedder_timeout_ms = Some(8_901);
         Arc::make_mut(&mut state).require_external_vector_embedder = true;
@@ -64390,6 +64487,10 @@ mod tests {
         assert_eq!(
             value["worker_cache_invalidator_timeout_ms"],
             serde_json::json!(7_890)
+        );
+        assert_eq!(
+            value["worker_cache_invalidator_required"],
+            serde_json::json!(true)
         );
         assert_eq!(
             value["process_evaluation_worker_run_default_limit"],
@@ -78022,6 +78123,7 @@ mod tests {
             remote_object_deleter_timeout_ms: None,
             worker_cache_invalidator: None,
             worker_cache_invalidator_timeout_ms: None,
+            require_external_worker_cache_invalidator: false,
             vector_embedder: None,
             vector_embedder_timeout_ms: None,
             require_external_vector_embedder: false,
@@ -79841,6 +79943,74 @@ mod tests {
             serde_json::to_string(&calls[0]).expect("invalidator request serializes");
         assert!(!request_text.contains("tenant-a"));
         assert!(!request_text.contains(&submission_id.to_string()));
+    }
+
+    #[tokio::test]
+    async fn worker_queue_invalidation_fails_closed_when_required_invalidator_missing() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).require_external_worker_cache_invalidator = true;
+
+        let submission_id =
+            Uuid::parse_str("2f997bf0-07a2-4d13-82c0-53b9114573a1").expect("static uuid parses");
+        let propagation_item_id =
+            Uuid::parse_str("f7af077b-e985-49fe-9a70-e7c5a22d21d5").expect("static uuid parses");
+        let queue_surface = "process_evaluation_queue";
+        let queue_key_hash =
+            trace_revocation_worker_queue_key_hash("tenant-a", submission_id, queue_surface);
+        let now = Utc::now();
+        let item = StorageTraceRevocationPropagationItemRecord {
+            tenant_id: "tenant-a".to_string(),
+            propagation_item_id,
+            source_submission_id: submission_id,
+            trace_id: Uuid::new_v4(),
+            target_kind: StorageTraceRevocationPropagationTargetKind::WorkerQueue,
+            target: StorageTraceRevocationPropagationTarget::WorkerQueue {
+                queue_surface: queue_surface.to_string(),
+                queue_key_hash,
+            },
+            action: StorageTraceRevocationPropagationAction::InvalidateWorkerQueue,
+            status: StorageTraceRevocationPropagationItemStatus::Pending,
+            idempotency_key: sha256_prefixed("required-worker-cache-invalidation-test-item"),
+            reason: "revoked trace worker queue invalidation;surface=process_evaluation_queue"
+                .to_string(),
+            attempt_count: 0,
+            last_error: None,
+            next_attempt_at: None,
+            completed_at: None,
+            evidence_hash: None,
+            metadata: BTreeMap::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        let tenant = TenantAuth {
+            tenant_id: "tenant-a".to_string(),
+            role: TokenRole::RevocationWorker,
+            principal_ref: principal_storage_ref("revocation-worker-token-a"),
+            expires_at: None,
+            auth_method: TraceAuthMethod::StaticToken,
+            signed_claim_issuer: None,
+            signed_claim_audiences: BTreeSet::new(),
+            signed_claim_subject: None,
+            allowed_consent_scopes: BTreeSet::new(),
+            allowed_uses: BTreeSet::new(),
+        };
+
+        let err = match invalidate_worker_queue_for_revocation_propagation(
+            state.as_ref(),
+            &tenant,
+            &item,
+        )
+        .await
+        {
+            Ok(_) => panic!("required missing invalidator should fail closed"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("worker cache invalidator is required but not configured"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[tokio::test]
@@ -111168,6 +111338,84 @@ mod tests {
         assert!(!body_text.contains("admin-token-a"));
         assert!(!body_text.contains("revocation-worker-token-a"));
         assert!(!body_text.contains("disabled_remote_probe"));
+    }
+
+    #[tokio::test]
+    async fn operational_summary_blocks_required_worker_cache_invalidator_without_adapter() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).require_external_worker_cache_invalidator = true;
+
+        let Json(operational) =
+            operational_summary_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary");
+        let operational_json =
+            serde_json::to_value(&operational).expect("operational summary serializes");
+        assert_eq!(
+            operational_json["revocation_propagation"]["worker_cache_invalidator_required"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            operational_json["revocation_propagation"]["worker_cache_invalidator_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            operational_json["revocation_propagation"]["worker_cache_invalidator_ready"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            operational_json["promotion_gates"]["worker_cache_invalidator_required"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            operational_json["promotion_gates"]["worker_cache_invalidator_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            operational_json["promotion_gates"]["worker_cache_invalidator_missing"],
+            serde_json::json!(true)
+        );
+        assert!(
+            operational
+                .promotion_gates
+                .blocking_gates
+                .contains(&"worker_cache_invalidator_required_missing".to_string())
+        );
+
+        let metrics_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/operational-metrics")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("metrics response");
+        assert_eq!(metrics_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(metrics_response.into_body(), 65536)
+            .await
+            .expect("body reads");
+        let body_text = std::str::from_utf8(&body).expect("metrics body is utf8");
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_revocation_propagation_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"worker_cache_invalidator_required\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_revocation_propagation_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"worker_cache_invalidator_configured\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_revocation_propagation_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"worker_cache_invalidator_ready\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "trace_commons_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"worker_cache_invalidator_required_missing\"}} 1"
+        )));
+        assert!(!body_text.contains("admin-token-a"));
     }
 
     #[tokio::test]

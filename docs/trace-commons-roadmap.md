@@ -357,7 +357,7 @@ The highest-value next work is:
 1. Finish DB-read parity and reconciliation so reviewer, analytics, replay, audit, and contributor surfaces can graduate from optional flags with confidence.
 2. Introduce service-owned encrypted object storage and route remaining review/export body reads through object refs.
 3. Add tenant policy/RLS hardening before broadening reviewer/admin/export access.
-4. Complete retention/revocation propagation for benchmark, ranking, worker, and already-published export artifacts.
+4. Harden retention/revocation propagation with production operator adapters, including required external worker-cache invalidation and remote object-deleter deployment for cloud stores.
 5. Build the private vector worker and benchmark conversion workers only after object-primary reads and worker authorization are in place.
 
 This ordering keeps the corpus trustworthy before it becomes more useful: metadata parity and object ownership come first, then policy/audit hardening, then derived data products.
