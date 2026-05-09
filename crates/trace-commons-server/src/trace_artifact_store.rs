@@ -5,7 +5,9 @@
 //! redacted artifact, encrypt it with the existing IronClaw secrets crypto, and
 //! persist only ciphertext plus non-sensitive routing metadata.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Context;
 use base64::Engine;
@@ -16,6 +18,8 @@ use sha2::{Digest, Sha256};
 use crate::secrets::SecretsCrypto;
 
 pub const TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_VERSION: &str = "ironclaw.trace_artifact_ciphertext.v1";
+
+static TRACE_ARTIFACT_WRITE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EncryptedTraceArtifactReceipt {
@@ -1278,18 +1282,85 @@ fn sha256_hex(input: &[u8]) -> String {
 }
 
 fn write_json_file<T: Serialize + ?Sized>(path: &Path, value: &T) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create trace artifact dir {}", parent.display()))?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create trace artifact dir {}", parent.display()))?;
+    let body =
+        serde_json::to_vec_pretty(value).context("failed to serialize encrypted trace artifact")?;
+    for _ in 0..32 {
+        let temp_path = trace_artifact_temp_path(parent, path)?;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(mut file) => {
+                if let Err(error) = file
+                    .write_all(&body)
+                    .and_then(|()| file.sync_all())
+                    .with_context(|| {
+                        format!(
+                            "failed to write encrypted trace artifact temp file {}",
+                            temp_path.display()
+                        )
+                    })
+                {
+                    let _ = std::fs::remove_file(&temp_path);
+                    return Err(error);
+                }
+                drop(file);
+                if let Err(error) = std::fs::rename(&temp_path, path).with_context(|| {
+                    format!(
+                        "failed to commit encrypted trace artifact {}",
+                        path.display()
+                    )
+                }) {
+                    let _ = std::fs::remove_file(&temp_path);
+                    return Err(error);
+                }
+                sync_trace_artifact_dir(parent)?;
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to create encrypted trace artifact temp file {}",
+                        temp_path.display()
+                    )
+                });
+            }
+        }
     }
-    let body = serde_json::to_string_pretty(value)
-        .context("failed to serialize encrypted trace artifact")?;
-    std::fs::write(path, body).with_context(|| {
+    anyhow::bail!(
+        "failed to allocate unique encrypted trace artifact temp file for {}",
+        path.display()
+    )
+}
+
+fn trace_artifact_temp_path(parent: &Path, path: &Path) -> anyhow::Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .context("trace artifact path must include a file name")?;
+    let counter = TRACE_ARTIFACT_WRITE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut temp_file_name = std::ffi::OsString::from(".");
+    temp_file_name.push(file_name);
+    temp_file_name.push(format!(".{}.{}.tmp", std::process::id(), counter));
+    Ok(parent.join(temp_file_name))
+}
+
+fn sync_trace_artifact_dir(path: &Path) -> anyhow::Result<()> {
+    let dir = std::fs::File::open(path).with_context(|| {
         format!(
-            "failed to write encrypted trace artifact {}",
+            "failed to open trace artifact dir {} for sync",
             path.display()
         )
-    })
+    })?;
+    dir.sync_all()
+        .with_context(|| format!("failed to sync trace artifact dir {}", path.display()))
 }
 
 #[cfg(test)]
@@ -1787,6 +1858,66 @@ mod tests {
             .read_scoped_json(&scope, &first_receipt.object_ref)
             .expect("failed overwrite must keep first artifact readable");
         assert_eq!(round_trip, first_payload);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_remote_provider_replaces_object_path_symlink_instead_of_following_it() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let key = crate::secrets::keychain::generate_master_key_hex();
+        let config = TraceArtifactProviderConfig::service_owned_remote("trace-commons-prod")
+            .expect("remote provider config");
+        let provider = FileRemoteTraceArtifactProvider::new(temp.path());
+        let store = ServiceOwnedTraceArtifactStore::new(
+            config,
+            SecretsCrypto::new(SecretString::from(key)).expect("test crypto"),
+            provider.clone(),
+        );
+        let scope = TraceArtifactScope::new("tenant:sha256:alpha", "submission-alpha");
+        let payload = json!({"stored": "remote"});
+
+        let receipt = store
+            .put_scoped_json(
+                &scope,
+                TraceArtifactKind::ContributionEnvelope,
+                "submitted-envelope",
+                &payload,
+            )
+            .expect("remote artifact writes");
+        let artifact = store
+            .read_scoped_artifact(&scope, &receipt.object_ref)
+            .expect("remote artifact reads before symlink swap");
+        let object_path = temp
+            .path()
+            .join(&receipt.object_ref.object_store)
+            .join(&receipt.object_ref.object_key);
+        let external_path = temp.path().join("external-object-record.json");
+        let tampered_record = FileRemoteTraceArtifactRecord {
+            object_ref: receipt.object_ref.clone(),
+            artifact: artifact.clone(),
+            invalidated_at: Some(Utc::now()),
+            invalidation_reason: Some(TraceArtifactInvalidationReason::Revoked),
+        };
+        let external_body =
+            serde_json::to_string_pretty(&tampered_record).expect("tampered record serializes");
+        std::fs::write(&external_path, &external_body).expect("external record writes");
+        std::fs::remove_file(&object_path).expect("object path can be replaced by symlink");
+        std::os::unix::fs::symlink(&external_path, &object_path).expect("object symlink writes");
+
+        provider
+            .put_encrypted_artifact(receipt.object_ref.clone(), artifact)
+            .expect("remote provider rewrites object path");
+
+        let external_after =
+            std::fs::read_to_string(&external_path).expect("external record remains readable");
+        assert_eq!(external_after, external_body);
+        let object_metadata = std::fs::symlink_metadata(&object_path)
+            .expect("object path metadata reads after rewrite");
+        assert!(!object_metadata.file_type().is_symlink());
+        let round_trip: serde_json::Value = store
+            .read_scoped_json(&scope, &receipt.object_ref)
+            .expect("rewritten object remains readable");
+        assert_eq!(round_trip, payload);
     }
 
     #[test]
