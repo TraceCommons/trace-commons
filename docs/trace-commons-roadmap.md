@@ -149,6 +149,7 @@ Verification gates:
 
 - For sampled tenants, DB-backed contributor status/credit, reviewer lists, analytics, replay export selection, and audit event reads match file-backed behavior.
 - Backfill-only maintenance reports malformed pilot submission/derived metadata as bounded item failures instead of aborting the whole backfill, and keeps valid records moving.
+- The retention-maintenance worker route can be owned by the server through the optional in-process scheduler: startup validates retention-worker auth, scheduler ticks call the same narrow worker route, tenant-scoped dry-run/live purge behavior is tested through the caller, and config status exposes only safe scheduler shape.
 - The dedicated vector-index worker route is worker-scoped and bounded: it requires a configured DB mirror before doing work, accepts an optional 1-500 item limit, reports checked/indexed/skipped/pending counts, and avoids retention-maintenance side effects. The optional in-process vector-index scheduler now validates vector-worker auth plus DB mirror availability at startup and calls that same bounded route without exposing worker tokens or raw purpose text in config status.
 - PostgreSQL tests prove duplicate ids/hashes under separate tenants do not cross-read or cross-mutate.
 
