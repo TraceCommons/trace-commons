@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 use deadpool_postgres::Pool;
+use sha2::{Digest, Sha256};
 
 use crate::config::DatabaseConfig;
 use crate::db::{Database, TraceCorpusRlsDiagnostics};
@@ -547,6 +548,7 @@ impl Database for PgBackend {
         let current_role = client
             .query_one(
                 "SELECT
+                    current_user AS current_role_name,
                     EXISTS (
                         SELECT 1
                         FROM pg_class c
@@ -627,6 +629,7 @@ impl Database for PgBackend {
         policy_expression_mismatch_tables.sort();
         policy_expression_mismatch_tables.dedup();
 
+        let current_role_name: String = current_role.get("current_role_name");
         let owns_unforced_trace_tables: bool = current_role.get("owns_unforced_trace_tables");
         let owns_trace_tables: bool = current_role.get("owns_trace_tables");
         let bypass_role: bool = current_role.get("bypass_role");
@@ -641,11 +644,17 @@ impl Database for PgBackend {
             rls_disabled_tables,
             force_rls_disabled_tables,
             policy_expression_mismatch_tables,
+            current_role_hash: sha256_prefixed(&current_role_name),
             current_role_bypasses_rls: owns_unforced_trace_tables || bypass_role,
             current_role_owns_trace_tables: owns_trace_tables,
             tenant_context_transaction_local,
         }))
     }
+}
+
+fn sha256_prefixed(input: &str) -> String {
+    let digest = Sha256::digest(input.as_bytes());
+    format!("sha256:{}", hex::encode(digest))
 }
 
 async fn trace_tenant_context_is_transaction_local(

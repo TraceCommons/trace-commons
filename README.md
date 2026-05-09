@@ -67,8 +67,9 @@ rejects that max-age knob unless required issuer approval is enabled.
 Set `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE=true` for
 the early production mode where TraceCommons centrally runs issuance instead of
 trusting a broader actor reputation system. That profile fails startup unless
-DB mirror writes and PostgreSQL RLS readiness are fail-closed, per-account caps
-are configured, managed EdDSA signed-token enforcement plus tenant access-grant
+DB mirror writes and PostgreSQL RLS readiness are fail-closed, the expected
+PostgreSQL serving role is pinned with `TRACE_COMMONS_POSTGRES_RUNTIME_ROLE_SHA256`,
+per-account caps are configured, managed EdDSA signed-token enforcement plus tenant access-grant
 enforcement are enabled for exact issuer principals, fresh central source-list
 approvals are required, a single NEAR credit contract is pinned and required,
 NEAR submit/confirm adapters are configured, and adapter bearer auth is required
@@ -336,7 +337,7 @@ claiming, claimed replay/benchmark/ranker-training job execution, a bounded
 queued export scheduler, controlled failed-job retry, and bounded retry/backoff
 worker automation for replayable worker exports, stale export-job blockers with
 an admin-only stale export-job recovery route, PostgreSQL RLS readiness aggregate
-counts, safe
+counts, runtime-role hash match gauges, safe
 promotion-gate counts in the read audit row, and structured warning logs for the
 aggregate gate set plus each individual promotion gate whenever promotion gates
 are blocked or warning. NEAR credit and benchmark registry outbox workers also

@@ -24,6 +24,7 @@ pub struct TraceCorpusRlsDiagnostics {
     pub rls_disabled_tables: Vec<String>,
     pub force_rls_disabled_tables: Vec<String>,
     pub policy_expression_mismatch_tables: Vec<String>,
+    pub current_role_hash: String,
     pub current_role_bypasses_rls: bool,
     pub current_role_owns_trace_tables: bool,
     pub tenant_context_transaction_local: bool,
@@ -48,6 +49,14 @@ impl TraceCorpusRlsDiagnostics {
 
     pub fn production_ready(&self) -> bool {
         self.rls_ready() && self.force_rls_ready()
+    }
+
+    pub fn runtime_role_matches_expected_hash(&self, expected_hash: Option<&str>) -> bool {
+        expected_hash.is_none_or(|expected_hash| self.current_role_hash == expected_hash)
+    }
+
+    pub fn production_ready_with_expected_runtime_role(&self, expected_hash: Option<&str>) -> bool {
+        self.production_ready() && self.runtime_role_matches_expected_hash(expected_hash)
     }
 }
 

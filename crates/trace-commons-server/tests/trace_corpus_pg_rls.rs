@@ -116,6 +116,8 @@ fn ready_rls_diagnostics() -> TraceCorpusRlsDiagnostics {
         rls_disabled_tables: Vec::new(),
         force_rls_disabled_tables: Vec::new(),
         policy_expression_mismatch_tables: Vec::new(),
+        current_role_hash:
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string(),
         current_role_bypasses_rls: false,
         current_role_owns_trace_tables: false,
         tenant_context_transaction_local: true,
