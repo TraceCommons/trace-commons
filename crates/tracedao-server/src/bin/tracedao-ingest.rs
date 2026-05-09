@@ -43280,16 +43280,11 @@ async fn delete_object_payload_for_revocation_propagation(
     ensure_local_trace_object_ref_key_ref(&object_ref, &tenant.tenant_id)?;
     let artifact_kind = match object_ref.artifact_kind {
         StorageTraceObjectArtifactKind::SubmittedEnvelope
+        | StorageTraceObjectArtifactKind::RescrubbedEnvelope
         | StorageTraceObjectArtifactKind::ReviewSnapshot => TraceArtifactKind::ContributionEnvelope,
         StorageTraceObjectArtifactKind::WorkerIntermediate => TraceArtifactKind::VectorPayload,
         StorageTraceObjectArtifactKind::BenchmarkArtifact => TraceArtifactKind::BenchmarkConversion,
         StorageTraceObjectArtifactKind::ExportArtifact => TraceArtifactKind::RankerTrainingExport,
-        _ => {
-            return Ok(skipped_revocation_propagation_item(
-                item,
-                "object payload artifact kind is not supported for physical deletion",
-            ));
-        }
     };
     let Some(store) = state.artifact_store.as_ref() else {
         anyhow::bail!("service-owned encrypted object store is not configured");
@@ -45236,6 +45231,7 @@ fn is_supported_service_owned_physical_delete_artifact_kind(
     matches!(
         artifact_kind,
         StorageTraceObjectArtifactKind::SubmittedEnvelope
+            | StorageTraceObjectArtifactKind::RescrubbedEnvelope
             | StorageTraceObjectArtifactKind::ReviewSnapshot
             | StorageTraceObjectArtifactKind::WorkerIntermediate
             | StorageTraceObjectArtifactKind::BenchmarkArtifact
@@ -80168,6 +80164,40 @@ mod tests {
             .await
             .expect("review snapshot object ref writes");
 
+        let rescrubbed_receipt = store
+            .put_json(
+                &tenant_ref,
+                TraceArtifactKind::ContributionEnvelope,
+                "revocation-effects-rescrubbed-envelope",
+                &serde_json::json!({
+                    "tenant_storage_ref": tenant_ref,
+                    "submission_id": submission_id,
+                    "artifact": "rescrubbed_envelope"
+                }),
+            )
+            .expect("rescrubbed envelope artifact writes");
+        backend
+            .append_trace_object_ref(StorageTraceObjectRefWrite {
+                object_ref_id: deterministic_trace_uuid_for_external_ref(
+                    "revocation-effects-rescrubbed-object-ref",
+                    "tenant-a",
+                    submission_id,
+                    "rescrubbed_envelope",
+                ),
+                tenant_id: "tenant-a".to_string(),
+                submission_id,
+                artifact_kind: StorageTraceObjectArtifactKind::RescrubbedEnvelope,
+                object_store: store.object_store_name().to_string(),
+                object_key: rescrubbed_receipt.object_key,
+                content_sha256: format!("sha256:{}", rescrubbed_receipt.ciphertext_sha256),
+                encryption_key_ref: format!("tenant:{tenant_ref}"),
+                size_bytes: 128,
+                compression: None,
+                created_by_job_id: None,
+            })
+            .await
+            .expect("rescrubbed envelope object ref writes");
+
         let vector_entry_id = Uuid::new_v4();
         let vector_payload = TraceVectorPayloadArtifact {
             artifact_schema_version: TRACE_VECTOR_PAYLOAD_SCHEMA_VERSION.to_string(),
@@ -80349,7 +80379,7 @@ mod tests {
                     item.action == StorageTraceRevocationPropagationAction::DeleteObjectPayload
                 })
                 .count(),
-            5
+            6
         );
 
         let Json(worker) = revocation_propagation_worker_handler(
@@ -80363,7 +80393,7 @@ mod tests {
         )
         .await
         .expect("revocation worker applies canary effects");
-        assert!(worker.completed >= 6);
+        assert!(worker.completed >= 7);
         assert_eq!(worker.failed, 0);
 
         let response = app(state.clone())
@@ -80400,10 +80430,10 @@ mod tests {
         assert_eq!(value["blocking_gaps"], serde_json::json!([]));
         assert_eq!(value["reversed_credit_event_count"], serde_json::json!(1));
         assert_eq!(value["near_reversal_outbox_count"], serde_json::json!(1));
-        assert_eq!(value["object_delete_item_count"], serde_json::json!(5));
-        assert_eq!(value["object_delete_done_count"], serde_json::json!(5));
-        assert_eq!(value["deleted_object_ref_count"], serde_json::json!(5));
-        assert_eq!(value["physical_delete_receipt_count"], serde_json::json!(5));
+        assert_eq!(value["object_delete_item_count"], serde_json::json!(6));
+        assert_eq!(value["object_delete_done_count"], serde_json::json!(6));
+        assert_eq!(value["deleted_object_ref_count"], serde_json::json!(6));
+        assert_eq!(value["physical_delete_receipt_count"], serde_json::json!(6));
 
         let evidence = value["recorded_evidence"]
             .as_array()
