@@ -237,6 +237,25 @@ submission ids, and raw external refs. Requests can set
 can provide a ranking target plus `external_ref_prefix` to append idempotent
 system ranking labels from the evaluator response.
 
+Deployments that want the server to own this loop can configure
+`TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_TOKEN` with a process-evaluation
+worker bearer token. Startup validates the token, requires explicit
+`TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_EVALUATOR_REF`, and defaults
+`TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_REQUIRE_EXTERNAL_EVALUATOR` to true
+so startup fails unless `TRACE_COMMONS_PROCESS_EVALUATOR_URL` is configured.
+`TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_INTERVAL_SECONDS` controls the
+sleep interval (default 300), `TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_LIMIT`
+caps each pass from 1 to 100, and
+`TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_DRY_RUN=true` records only the safe
+worker-run ledger while avoiding evaluator calls, trace writes, and ranking
+label writes. When
+`TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_TARGET_USE` is set, deployments must
+also set `TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_EXTERNAL_REF_PREFIX`; the
+optional `TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_UTILITY_CATEGORY` overrides
+the worker's ranking-training default. Config-status returns only booleans,
+limits, target use, and intervals, never the scheduler token, raw reason,
+evaluator ref, or external-ref prefix.
+
 When `--utility-credit-points-delta` is set, the helper also sends a trimmed
 `utility_external_ref`; the service uses that external reference to append an
 idempotent `training_utility` delayed credit event for the evaluated accepted
