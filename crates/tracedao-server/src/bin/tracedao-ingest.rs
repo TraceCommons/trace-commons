@@ -397,6 +397,28 @@ const TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN: &str =
     "TRACE_COMMONS_PROCESS_EVALUATOR_BEARER_TOKEN";
 const TRACE_COMMONS_PROCESS_EVALUATOR_TIMEOUT_MS: &str =
     "TRACE_COMMONS_PROCESS_EVALUATOR_TIMEOUT_MS";
+const TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_ENABLED: &str =
+    "TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_ENABLED";
+const TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_TOKEN: &str =
+    "TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_TOKEN";
+const TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_INTERVAL_SECONDS";
+const TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_LIMIT: &str =
+    "TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_LIMIT";
+const TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_DRY_RUN: &str =
+    "TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_DRY_RUN";
+const TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_REQUIRE_EXTERNAL_EVALUATOR: &str =
+    "TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_REQUIRE_EXTERNAL_EVALUATOR";
+const TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_EVALUATOR_REF: &str =
+    "TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_EVALUATOR_REF";
+const TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_TARGET_USE: &str =
+    "TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_TARGET_USE";
+const TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_UTILITY_CATEGORY: &str =
+    "TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_UTILITY_CATEGORY";
+const TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_EXTERNAL_REF_PREFIX: &str =
+    "TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_EXTERNAL_REF_PREFIX";
+const TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_REASON: &str =
+    "TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_REASON";
 const TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS: &str =
     "TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS";
 const TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY: &str =
@@ -486,6 +508,9 @@ const TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_REASON: &str =
 const TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_MIN_SCORE: f32 = 1.0;
 const TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 300;
 const TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_REASON: &str = "scheduled trace credit cycle";
+const TRACE_PROCESS_EVALUATION_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 300;
+const TRACE_PROCESS_EVALUATION_SCHEDULER_DEFAULT_REASON: &str =
+    "scheduled trace process evaluation";
 const TRACE_RANKING_DEFAULT_MIN_LABEL_COUNT: usize = 25;
 const TRACE_RANKING_DEFAULT_CONFIDENCE_THRESHOLD: f32 = 0.5;
 const TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS: i64 = 1_000_000;
@@ -539,6 +564,11 @@ async fn main() -> anyhow::Result<()> {
         state.credit_cycle_scheduler.as_ref(),
     )
     .await?;
+    validate_trace_process_evaluation_scheduler_config(
+        state.as_ref(),
+        state.process_evaluation_scheduler.as_ref(),
+    )
+    .await?;
     spawn_managed_eddsa_keyset_refresh_task(&state);
     spawn_trace_export_job_scheduler_task(&state, state.export_job_scheduler.clone());
     spawn_trace_vector_index_scheduler_task(&state, state.vector_index_scheduler.clone());
@@ -551,6 +581,10 @@ async fn main() -> anyhow::Result<()> {
         state.benchmark_pipeline_scheduler.clone(),
     );
     spawn_trace_credit_cycle_scheduler_task(&state, state.credit_cycle_scheduler.clone());
+    spawn_trace_process_evaluation_scheduler_task(
+        &state,
+        state.process_evaluation_scheduler.clone(),
+    );
     let bind = std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
     let addr = bind
         .parse::<SocketAddr>()
@@ -633,6 +667,7 @@ struct AppState {
     benchmark_registry_scheduler: Option<TraceBenchmarkRegistrySchedulerConfig>,
     benchmark_pipeline_scheduler: Option<TraceBenchmarkPipelineSchedulerConfig>,
     credit_cycle_scheduler: Option<TraceCreditCycleSchedulerConfig>,
+    process_evaluation_scheduler: Option<TraceProcessEvaluationSchedulerConfig>,
     ranking_calibration_max_age: Option<Duration>,
     ranking_require_calibration_dataset_registry: bool,
     ranking_require_active_calibration_dataset: bool,
@@ -674,6 +709,11 @@ struct TraceBenchmarkRegistrySchedulerTickSummary {
 struct TraceBenchmarkPipelineSchedulerTickSummary {
     evaluation: BenchmarkEvaluationWorkerRunResponse,
     publication: BenchmarkRegistryPublicationWorkerRunResponse,
+}
+
+#[derive(Debug)]
+struct TraceProcessEvaluationSchedulerTickSummary {
+    run: ProcessEvaluationWorkerRunResponse,
 }
 
 #[derive(Clone)]
@@ -735,6 +775,20 @@ struct TraceCreditCycleSchedulerConfig {
     confirm_near_outbox: bool,
     near_contract_id: Option<String>,
     limit: usize,
+}
+
+#[derive(Clone)]
+struct TraceProcessEvaluationSchedulerConfig {
+    worker_token: SecretString,
+    interval: StdDuration,
+    limit: usize,
+    dry_run: bool,
+    require_external_evaluator: bool,
+    evaluator_ref: String,
+    target_use: Option<TraceAllowedUse>,
+    utility_category: Option<StorageTraceRankingUtilityCategory>,
+    external_ref_prefix: Option<String>,
+    reason: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2121,6 +2175,8 @@ impl AppState {
         let benchmark_pipeline_scheduler =
             parse_trace_benchmark_pipeline_scheduler_config_from_env()?;
         let credit_cycle_scheduler = parse_trace_credit_cycle_scheduler_config_from_env()?;
+        let process_evaluation_scheduler =
+            parse_trace_process_evaluation_scheduler_config_from_env()?;
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
         let ranking_require_calibration_dataset_registry =
             env_truthy(TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY);
@@ -2325,6 +2381,7 @@ impl AppState {
             benchmark_registry_scheduler,
             benchmark_pipeline_scheduler,
             credit_cycle_scheduler,
+            process_evaluation_scheduler,
             ranking_calibration_max_age,
             ranking_require_calibration_dataset_registry,
             ranking_require_active_calibration_dataset,
@@ -3523,9 +3580,107 @@ fn parse_trace_credit_cycle_scheduler_config_from_env()
     }))
 }
 
+fn parse_trace_process_evaluation_scheduler_config_from_env()
+-> anyhow::Result<Option<TraceProcessEvaluationSchedulerConfig>> {
+    let enabled = env_truthy(TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_ENABLED);
+    let worker_token = optional_trimmed_env(TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_TOKEN)?;
+    if !enabled && worker_token.is_none() {
+        return Ok(None);
+    }
+    let Some(worker_token) = worker_token else {
+        anyhow::bail!(
+            "{TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_TOKEN}"
+        );
+    };
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_INTERVAL_SECONDS,
+        TRACE_PROCESS_EVALUATION_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
+        5,
+        86_400,
+    )?;
+    let limit = parse_optional_scheduler_usize_env(
+        TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_LIMIT,
+        TRACE_PROCESS_EVALUATION_WORKER_RUN_DEFAULT_LIMIT,
+        1,
+        TRACE_PROCESS_EVALUATION_WORKER_RUN_MAX_LIMIT,
+    )?;
+    let evaluator_ref =
+        optional_trimmed_env(TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_EVALUATOR_REF)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_TOKEN} requires {TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_EVALUATOR_REF}"
+                )
+            })
+            .and_then(|configured| {
+                normalize_process_evaluation_worker_evaluator_ref(Some(configured))
+                    .map_err(|error| anyhow::anyhow!(error.1.0.error))
+            })?;
+    let target_use =
+        match optional_trimmed_env(TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_TARGET_USE)? {
+            Some(configured) => Some(parse_trace_allowed_use_env(
+                TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_TARGET_USE,
+                &configured,
+            )?),
+            None => None,
+        };
+    let utility_category =
+        optional_trimmed_env(TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_UTILITY_CATEGORY)?
+            .map(|configured| {
+                parse_trace_ranking_utility_category_env(
+                    TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_UTILITY_CATEGORY,
+                    &configured,
+                )
+            })
+            .transpose()?;
+    let external_ref_prefix =
+        optional_trimmed_env(TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_EXTERNAL_REF_PREFIX)?
+            .map(|configured| {
+                normalize_process_evaluation_external_ref_prefix(Some(configured))
+                    .map_err(|error| anyhow::anyhow!(error.1.0.error))
+            })
+            .transpose()?;
+    if target_use.is_some() && external_ref_prefix.is_none() {
+        anyhow::bail!(
+            "{TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_TARGET_USE} requires {TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_EXTERNAL_REF_PREFIX}"
+        );
+    }
+    if target_use.is_none() && (utility_category.is_some() || external_ref_prefix.is_some()) {
+        anyhow::bail!(
+            "{TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_UTILITY_CATEGORY} and {TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_EXTERNAL_REF_PREFIX} require {TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_TARGET_USE}"
+        );
+    }
+    let reason = optional_trimmed_env(TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_REASON)?
+        .unwrap_or_else(|| TRACE_PROCESS_EVALUATION_SCHEDULER_DEFAULT_REASON.to_string());
+    let reason = normalize_process_evaluation_worker_reason(Some(reason))
+        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    Ok(Some(TraceProcessEvaluationSchedulerConfig {
+        worker_token: SecretString::from(worker_token),
+        interval: StdDuration::from_secs(interval_seconds),
+        limit,
+        dry_run: env_truthy(TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_DRY_RUN),
+        require_external_evaluator: parse_optional_scheduler_bool_env(
+            TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_REQUIRE_EXTERNAL_EVALUATOR,
+            true,
+        )?,
+        evaluator_ref,
+        target_use,
+        utility_category,
+        external_ref_prefix,
+        reason,
+    }))
+}
+
 fn parse_trace_allowed_use_env(name: &'static str, value: &str) -> anyhow::Result<TraceAllowedUse> {
     serde_json::from_value(serde_json::Value::String(value.trim().to_string()))
         .with_context(|| format!("{name} must be a valid trace allowed use"))
+}
+
+fn parse_trace_ranking_utility_category_env(
+    name: &'static str,
+    value: &str,
+) -> anyhow::Result<StorageTraceRankingUtilityCategory> {
+    serde_json::from_value(serde_json::Value::String(value.trim().to_string()))
+        .with_context(|| format!("{name} must be a valid trace ranking utility category"))
 }
 
 fn parse_optional_scheduler_u64_env(
@@ -5490,6 +5645,54 @@ fn spawn_trace_credit_cycle_scheduler_task(
     });
 }
 
+fn spawn_trace_process_evaluation_scheduler_task(
+    state: &Arc<AppState>,
+    config: Option<TraceProcessEvaluationSchedulerConfig>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    let state = state.clone();
+    tracing::info!(
+        interval_seconds = config.interval.as_secs(),
+        limit = config.limit,
+        dry_run = config.dry_run,
+        require_external_evaluator = config.require_external_evaluator,
+        evaluator_ref_configured = !config.evaluator_ref.is_empty(),
+        target_use = ?config.target_use,
+        utility_category_configured = config.utility_category.is_some(),
+        external_ref_prefix_configured = config.external_ref_prefix.is_some(),
+        "Trace Commons process evaluation scheduler enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(config.interval).await;
+            match run_trace_process_evaluation_scheduler_tick(state.clone(), &config).await {
+                Ok(summary) => {
+                    tracing::info!(
+                        checked = summary.run.checked_count,
+                        evaluated = summary.run.evaluated_count,
+                        labels_appended = summary.run.ranking_label_appended_count,
+                        labels_skipped_existing = summary.run.ranking_label_skipped_existing_count,
+                        skipped_existing = summary.run.skipped_existing_count,
+                        skipped_ineligible = summary.run.skipped_ineligible_count,
+                        pending_after = summary.run.pending_after_count,
+                        dry_run = summary.run.dry_run,
+                        "Trace Commons process evaluation scheduler tick completed"
+                    );
+                }
+                Err((status, Json(error))) => {
+                    tracing::warn!(
+                        status = %status,
+                        error_hash = %safe_display_error_hash(&error.error),
+                        "Trace Commons process evaluation scheduler tick failed"
+                    );
+                }
+            }
+        }
+    });
+}
+
 async fn validate_trace_export_job_scheduler_config(
     state: &AppState,
     config: Option<&TraceExportJobSchedulerConfig>,
@@ -5654,6 +5857,39 @@ async fn validate_trace_credit_cycle_scheduler_config(
 fn trace_credit_cycle_scheduler_config_error(error: (StatusCode, Json<ApiError>)) -> anyhow::Error {
     anyhow::anyhow!(
         "invalid Trace Commons credit cycle scheduler configuration: status={}, error={}",
+        error.0,
+        error.1.0.error
+    )
+}
+
+async fn validate_trace_process_evaluation_scheduler_config(
+    state: &AppState,
+    config: Option<&TraceProcessEvaluationSchedulerConfig>,
+) -> anyhow::Result<()> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
+        .map_err(trace_process_evaluation_scheduler_config_error)?;
+    let auth = authenticate_with_tenant_access_grant(state, &headers)
+        .await
+        .map_err(trace_process_evaluation_scheduler_config_error)?;
+    require_process_evaluation_operator(&auth)
+        .map_err(trace_process_evaluation_scheduler_config_error)?;
+    if config.require_external_evaluator {
+        anyhow::ensure!(
+            state.process_evaluator.is_some(),
+            "invalid Trace Commons process evaluation scheduler configuration: TRACE_COMMONS_PROCESS_EVALUATOR_URL is required when TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_REQUIRE_EXTERNAL_EVALUATOR is true"
+        );
+    }
+    Ok(())
+}
+
+fn trace_process_evaluation_scheduler_config_error(
+    error: (StatusCode, Json<ApiError>),
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "invalid Trace Commons process evaluation scheduler configuration: status={}, error={}",
         error.0,
         error.1.0.error
     )
@@ -6568,6 +6804,15 @@ struct TraceCommonsConfigStatusResponse {
     process_evaluator_timeout_ms: Option<u64>,
     process_evaluation_worker_run_default_limit: usize,
     process_evaluation_worker_run_max_limit: usize,
+    process_evaluation_scheduler_configured: bool,
+    process_evaluation_scheduler_interval_seconds: Option<u64>,
+    process_evaluation_scheduler_limit: Option<usize>,
+    process_evaluation_scheduler_dry_run: Option<bool>,
+    process_evaluation_scheduler_require_external_evaluator: Option<bool>,
+    process_evaluation_scheduler_evaluator_ref_configured: Option<bool>,
+    process_evaluation_scheduler_target_use: Option<TraceAllowedUse>,
+    process_evaluation_scheduler_utility_category_configured: Option<bool>,
+    process_evaluation_scheduler_external_ref_prefix_configured: Option<bool>,
     vector_embedder_configured: bool,
     vector_embedder_timeout_ms: Option<u64>,
     vector_embedder_required: bool,
@@ -6815,6 +7060,39 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         process_evaluation_worker_run_default_limit:
             TRACE_PROCESS_EVALUATION_WORKER_RUN_DEFAULT_LIMIT,
         process_evaluation_worker_run_max_limit: TRACE_PROCESS_EVALUATION_WORKER_RUN_MAX_LIMIT,
+        process_evaluation_scheduler_configured: state.process_evaluation_scheduler.is_some(),
+        process_evaluation_scheduler_interval_seconds: state
+            .process_evaluation_scheduler
+            .as_ref()
+            .map(|config| config.interval.as_secs()),
+        process_evaluation_scheduler_limit: state
+            .process_evaluation_scheduler
+            .as_ref()
+            .map(|config| config.limit),
+        process_evaluation_scheduler_dry_run: state
+            .process_evaluation_scheduler
+            .as_ref()
+            .map(|config| config.dry_run),
+        process_evaluation_scheduler_require_external_evaluator: state
+            .process_evaluation_scheduler
+            .as_ref()
+            .map(|config| config.require_external_evaluator),
+        process_evaluation_scheduler_evaluator_ref_configured: state
+            .process_evaluation_scheduler
+            .as_ref()
+            .map(|config| !config.evaluator_ref.is_empty()),
+        process_evaluation_scheduler_target_use: state
+            .process_evaluation_scheduler
+            .as_ref()
+            .and_then(|config| config.target_use),
+        process_evaluation_scheduler_utility_category_configured: state
+            .process_evaluation_scheduler
+            .as_ref()
+            .map(|config| config.utility_category.is_some()),
+        process_evaluation_scheduler_external_ref_prefix_configured: state
+            .process_evaluation_scheduler
+            .as_ref()
+            .map(|config| config.external_ref_prefix.is_some()),
         vector_embedder_configured: state.vector_embedder.is_some(),
         vector_embedder_timeout_ms: state.vector_embedder_timeout_ms,
         vector_embedder_required: state.require_external_vector_embedder,
@@ -26222,6 +26500,29 @@ async fn run_trace_credit_cycle_scheduler_tick(
     )
     .await?;
     Ok(response)
+}
+
+async fn run_trace_process_evaluation_scheduler_tick(
+    state: Arc<AppState>,
+    config: &TraceProcessEvaluationSchedulerConfig,
+) -> ApiResult<TraceProcessEvaluationSchedulerTickSummary> {
+    let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())?;
+    let Json(run) = process_evaluation_worker_run_handler(
+        State(state),
+        headers,
+        Json(ProcessEvaluationWorkerRunRequest {
+            limit: Some(config.limit),
+            dry_run: Some(config.dry_run),
+            evaluator_ref: Some(config.evaluator_ref.clone()),
+            require_external_evaluator: Some(config.require_external_evaluator),
+            target_use: config.target_use,
+            utility_category: config.utility_category,
+            external_ref_prefix: config.external_ref_prefix.clone(),
+            reason: Some(config.reason.clone()),
+        }),
+    )
+    .await?;
+    Ok(TraceProcessEvaluationSchedulerTickSummary { run })
 }
 
 async fn current_trace_export_job_or_claimed(
@@ -55516,6 +55817,7 @@ mod tests {
             benchmark_registry_scheduler: None,
             benchmark_pipeline_scheduler: None,
             credit_cycle_scheduler: None,
+            process_evaluation_scheduler: None,
             ranking_calibration_max_age: None,
             ranking_require_calibration_dataset_registry: false,
             ranking_require_active_calibration_dataset: false,
@@ -60144,6 +60446,93 @@ mod tests {
         assert!(!object.contains_key("benchmark_pipeline_scheduler_reason"));
         assert!(!object.contains_key("benchmark_pipeline_scheduler_evaluator_ref"));
         assert!(!object.contains_key("benchmark_pipeline_scheduler_registry_ref_prefix"));
+    }
+
+    #[tokio::test]
+    async fn admin_config_status_reports_process_evaluation_scheduler_without_secrets_or_refs() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).process_evaluation_scheduler =
+            Some(TraceProcessEvaluationSchedulerConfig {
+                worker_token: SecretString::from(
+                    "config-status-process-scheduler-token".to_string(),
+                ),
+                interval: StdDuration::from_secs(180),
+                limit: 9,
+                dry_run: true,
+                require_external_evaluator: true,
+                evaluator_ref: "trajectory-judge:config-status".to_string(),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                utility_category: Some(StorageTraceRankingUtilityCategory::RankingTraining),
+                external_ref_prefix: Some("process-eval-config-status".to_string()),
+                reason: "do not expose raw process scheduler note".to_string(),
+            });
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/config-status")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("config status response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body bytes");
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(
+            value["process_evaluation_scheduler_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["process_evaluation_scheduler_interval_seconds"],
+            serde_json::json!(180)
+        );
+        assert_eq!(
+            value["process_evaluation_scheduler_limit"],
+            serde_json::json!(9)
+        );
+        assert_eq!(
+            value["process_evaluation_scheduler_dry_run"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["process_evaluation_scheduler_require_external_evaluator"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["process_evaluation_scheduler_evaluator_ref_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["process_evaluation_scheduler_target_use"],
+            serde_json::json!(TraceAllowedUse::RankingModelTraining)
+        );
+        assert_eq!(
+            value["process_evaluation_scheduler_utility_category_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["process_evaluation_scheduler_external_ref_prefix_configured"],
+            serde_json::json!(true)
+        );
+        assert!(!body_text.contains("config-status-process-scheduler-token"));
+        assert!(!body_text.contains("do not expose raw process scheduler note"));
+        assert!(!body_text.contains("trajectory-judge:config-status"));
+        assert!(!body_text.contains("process-eval-config-status"));
+        let object = value.as_object().expect("config status is object");
+        assert!(!object.contains_key("process_evaluation_scheduler_token"));
+        assert!(!object.contains_key("process_evaluation_scheduler_reason"));
+        assert!(!object.contains_key("process_evaluation_scheduler_evaluator_ref"));
+        assert!(!object.contains_key("process_evaluation_scheduler_external_ref_prefix"));
     }
 
     #[tokio::test]
@@ -66417,6 +66806,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_evaluation_scheduler_config_requires_process_worker_auth_and_external_evaluator_when_required()
+     {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+
+        let error = validate_trace_process_evaluation_scheduler_config(
+            state.as_ref(),
+            Some(&TraceProcessEvaluationSchedulerConfig {
+                worker_token: SecretString::from("token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                limit: 5,
+                dry_run: false,
+                require_external_evaluator: false,
+                evaluator_ref: "trajectory-judge:v1".to_string(),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                utility_category: Some(StorageTraceRankingUtilityCategory::RankingTraining),
+                external_ref_prefix: Some("process-eval-scheduler".to_string()),
+                reason: "scheduled process evaluation".to_string(),
+            }),
+        )
+        .await
+        .expect_err("contributor token must not start process evaluation scheduler");
+
+        assert!(
+            error
+                .to_string()
+                .contains("reviewer, admin, or process evaluation worker token required")
+        );
+
+        let missing_evaluator = validate_trace_process_evaluation_scheduler_config(
+            state.as_ref(),
+            Some(&TraceProcessEvaluationSchedulerConfig {
+                worker_token: SecretString::from("process-eval-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                limit: 5,
+                dry_run: false,
+                require_external_evaluator: true,
+                evaluator_ref: "trajectory-judge:v1".to_string(),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                utility_category: Some(StorageTraceRankingUtilityCategory::RankingTraining),
+                external_ref_prefix: Some("process-eval-scheduler".to_string()),
+                reason: "scheduled external process evaluation".to_string(),
+            }),
+        )
+        .await
+        .expect_err("required external process evaluator must be configured");
+        assert!(
+            missing_evaluator
+                .to_string()
+                .contains(TRACE_COMMONS_PROCESS_EVALUATOR_URL)
+        );
+
+        let fake_evaluator = FakeProcessEvaluator::default();
+        Arc::make_mut(&mut state).process_evaluator = Some(Arc::new(fake_evaluator));
+        validate_trace_process_evaluation_scheduler_config(
+            state.as_ref(),
+            Some(&TraceProcessEvaluationSchedulerConfig {
+                worker_token: SecretString::from("process-eval-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                limit: 5,
+                dry_run: false,
+                require_external_evaluator: true,
+                evaluator_ref: "trajectory-judge:v1".to_string(),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                utility_category: Some(StorageTraceRankingUtilityCategory::RankingTraining),
+                external_ref_prefix: Some("process-eval-scheduler".to_string()),
+                reason: "scheduled external process evaluation".to_string(),
+            }),
+        )
+        .await
+        .expect("process evaluation scheduler can start with worker auth and evaluator");
+    }
+
+    #[tokio::test]
     async fn credit_cycle_scheduler_config_requires_utility_worker_auth_and_live_near_adapters() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -71033,6 +71496,7 @@ mod tests {
             benchmark_registry_scheduler: None,
             benchmark_pipeline_scheduler: None,
             credit_cycle_scheduler: None,
+            process_evaluation_scheduler: None,
             ranking_calibration_max_age: None,
             ranking_require_calibration_dataset_registry: false,
             ranking_require_active_calibration_dataset: false,
@@ -82451,6 +82915,171 @@ mod tests {
         let outbox = read_all_benchmark_registry_outbox_items(temp.path(), "tenant-a")
             .expect("benchmark registry outbox reads");
         assert!(outbox.is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_evaluation_scheduler_tick_evaluates_and_appends_system_ranking_label() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let fake_evaluator = FakeProcessEvaluator::default();
+        let evaluator_calls = fake_evaluator.calls.clone();
+        Arc::make_mut(&mut state).process_evaluator = Some(Arc::new(fake_evaluator));
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![
+            ConsentScope::DebuggingEvaluation,
+            ConsentScope::RankingTraining,
+        ];
+        envelope.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        envelope.trace_card.allowed_uses = vec![
+            TraceAllowedUse::Evaluation,
+            TraceAllowedUse::RankingModelTraining,
+        ];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("accepted evaluation source submission succeeds");
+
+        let summary = run_trace_process_evaluation_scheduler_tick(
+            state.clone(),
+            &TraceProcessEvaluationSchedulerConfig {
+                worker_token: SecretString::from("process-eval-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                limit: 10,
+                dry_run: false,
+                require_external_evaluator: true,
+                evaluator_ref: "trajectory-judge:v3".to_string(),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                utility_category: Some(StorageTraceRankingUtilityCategory::RankingTraining),
+                external_ref_prefix: Some("process-eval-scheduler:nightly".to_string()),
+                reason: "scheduled external process evaluation".to_string(),
+            },
+        )
+        .await
+        .expect("process evaluation scheduler tick runs through worker handler");
+
+        assert_eq!(summary.run.checked_count, 1);
+        assert_eq!(summary.run.evaluated_count, 1);
+        assert_eq!(summary.run.ranking_label_appended_count, 1);
+        assert_eq!(summary.run.skipped_existing_count, 0);
+        assert_eq!(summary.run.pending_after_count, 0);
+        assert_eq!(summary.run.evaluated_submission_ids, vec![submission_id]);
+
+        let calls = evaluator_calls
+            .lock()
+            .expect("fake process evaluator calls lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].evaluator_ref, "trajectory-judge:v3");
+        assert_eq!(
+            calls[0].target_use,
+            Some(TraceAllowedUse::RankingModelTraining)
+        );
+
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let stored = read_envelope_by_record(state.as_ref(), &record).expect("envelope reads");
+        let process_eval = stored
+            .process_evaluation
+            .as_ref()
+            .expect("process evaluation stored");
+        assert_eq!(process_eval.evaluator_version, "trajectory-judge:v3");
+        assert_eq!(process_eval.overall_score, Some(0.88));
+
+        let labels = read_all_ranking_labels(temp.path(), "tenant-a").expect("labels read");
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].submission_id, submission_id);
+        assert_eq!(
+            labels[0].label_source,
+            StorageTraceRankingLabelSource::System
+        );
+        assert_eq!(labels[0].target_use, TraceAllowedUse::RankingModelTraining);
+        assert_eq!(labels[0].utility_delta_micros, 880_000);
+        let labels_json = serde_json::to_string(&labels).expect("labels serialize");
+        assert!(!labels_json.contains("process-eval-scheduler:nightly"));
+    }
+
+    #[tokio::test]
+    async fn process_evaluation_scheduler_tick_dry_run_skips_evaluator_and_trace_writes() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let fake_evaluator = FakeProcessEvaluator::default();
+        let evaluator_calls = fake_evaluator.calls.clone();
+        Arc::make_mut(&mut state).process_evaluator = Some(Arc::new(fake_evaluator));
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![
+            ConsentScope::DebuggingEvaluation,
+            ConsentScope::RankingTraining,
+        ];
+        envelope.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+        envelope.trace_card.allowed_uses = vec![
+            TraceAllowedUse::Evaluation,
+            TraceAllowedUse::RankingModelTraining,
+        ];
+        let submission_id = envelope.submission_id;
+
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("accepted evaluation source submission succeeds");
+
+        let summary = run_trace_process_evaluation_scheduler_tick(
+            state.clone(),
+            &TraceProcessEvaluationSchedulerConfig {
+                worker_token: SecretString::from("process-eval-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                limit: 10,
+                dry_run: true,
+                require_external_evaluator: true,
+                evaluator_ref: "trajectory-judge:v3".to_string(),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                utility_category: Some(StorageTraceRankingUtilityCategory::RankingTraining),
+                external_ref_prefix: Some("process-eval-scheduler:dry-run".to_string()),
+                reason: "scheduled external process evaluation dry run".to_string(),
+            },
+        )
+        .await
+        .expect("process evaluation scheduler dry-run tick succeeds");
+
+        assert!(summary.run.dry_run);
+        assert_eq!(summary.run.checked_count, 1);
+        assert_eq!(summary.run.evaluated_count, 0);
+        assert_eq!(
+            summary
+                .run
+                .skipped_reason_counts
+                .get("external_evaluator_dry_run")
+                .copied(),
+            Some(1)
+        );
+        assert!(
+            evaluator_calls
+                .lock()
+                .expect("fake process evaluator calls lock")
+                .is_empty()
+        );
+
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        let stored = read_envelope_by_record(state.as_ref(), &record).expect("envelope reads");
+        assert!(stored.process_evaluation.is_none());
+        assert!(
+            read_all_ranking_labels(temp.path(), "tenant-a")
+                .expect("labels read")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
