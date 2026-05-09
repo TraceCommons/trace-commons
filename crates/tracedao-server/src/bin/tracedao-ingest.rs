@@ -1895,6 +1895,7 @@ impl AppState {
                 db_mirror_configured: db_mirror.is_some(),
                 require_db_mirror_writes,
                 require_postgres_trace_rls_ready,
+                require_managed_eddsa_signed_tokens,
                 require_tenant_access_grants,
                 account_cap_configured: credit_settlement_max_micros_per_account.is_some(),
                 require_issuer_approval: credit_settlement_require_issuer_approval,
@@ -5294,6 +5295,7 @@ struct CreditSettlementCentralIssuerProfileConfig {
     db_mirror_configured: bool,
     require_db_mirror_writes: bool,
     require_postgres_trace_rls_ready: bool,
+    require_managed_eddsa_signed_tokens: bool,
     require_tenant_access_grants: bool,
     account_cap_configured: bool,
     require_issuer_approval: bool,
@@ -5320,6 +5322,7 @@ fn credit_settlement_central_issuer_profile_config_from_state(
         db_mirror_configured: state.db_mirror.is_some(),
         require_db_mirror_writes: state.require_db_mirror_writes,
         require_postgres_trace_rls_ready: state.require_postgres_trace_rls_ready,
+        require_managed_eddsa_signed_tokens: state.require_managed_eddsa_signed_tokens,
         require_tenant_access_grants: state.require_tenant_access_grants,
         account_cap_configured: state.credit_settlement_max_micros_per_account.is_some(),
         require_issuer_approval: state.credit_settlement_require_issuer_approval,
@@ -5348,6 +5351,9 @@ fn credit_settlement_central_issuer_profile_missing_config(
     }
     if !config.require_postgres_trace_rls_ready {
         missing.push(TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY);
+    }
+    if !config.require_managed_eddsa_signed_tokens {
+        missing.push(TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS);
     }
     if !config.require_tenant_access_grants {
         missing.push(TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS);
@@ -55668,6 +55674,7 @@ mod tests {
                 db_mirror_configured: false,
                 require_db_mirror_writes: false,
                 require_postgres_trace_rls_ready: false,
+                require_managed_eddsa_signed_tokens: false,
                 require_tenant_access_grants: false,
                 account_cap_configured: false,
                 require_issuer_approval: false,
@@ -55689,6 +55696,7 @@ mod tests {
                 db_mirror_configured: true,
                 require_db_mirror_writes: true,
                 require_postgres_trace_rls_ready: true,
+                require_managed_eddsa_signed_tokens: true,
                 require_tenant_access_grants: true,
                 account_cap_configured: true,
                 require_issuer_approval: true,
@@ -55717,6 +55725,7 @@ mod tests {
                 db_mirror_configured: true,
                 require_db_mirror_writes: true,
                 require_postgres_trace_rls_ready: true,
+                require_managed_eddsa_signed_tokens: true,
                 require_tenant_access_grants: true,
                 account_cap_configured: true,
                 require_issuer_approval: true,
@@ -57143,6 +57152,9 @@ mod tests {
         );
         assert!(central_issuer_missing_controls.contains(&serde_json::json!(
             TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL
+        )));
+        assert!(central_issuer_missing_controls.contains(&serde_json::json!(
+            TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS
         )));
         assert!(central_issuer_missing_controls.contains(&serde_json::json!(
             TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS
