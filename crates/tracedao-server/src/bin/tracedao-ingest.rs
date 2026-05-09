@@ -15454,6 +15454,14 @@ async fn ranking_model_versions_handler(
     let records = read_ranking_model_versions_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &tenant,
+        "ranking_model_versions",
+        records.len(),
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(records))
 }
 
@@ -15511,6 +15519,14 @@ async fn ranking_calibration_datasets_handler(
     let records = read_ranking_calibration_datasets_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &tenant,
+        "ranking_calibration_datasets",
+        records.len(),
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(records))
 }
 
@@ -15523,9 +15539,16 @@ async fn ranking_calibration_dataset_conflict_report_handler(
     let read = read_ranking_calibration_datasets_for_admin_reconciliation(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
-    Ok(Json(ranking_calibration_dataset_conflict_report(
-        &tenant, read,
-    )))
+    let report = ranking_calibration_dataset_conflict_report(&tenant, read);
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &tenant,
+        "ranking_calibration_dataset_conflicts",
+        report.conflict_count,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(report))
 }
 
 async fn ranking_calibration_dataset_conflict_quarantine_handler(
@@ -16980,6 +17003,9 @@ async fn ranking_features_handler(
     let records = read_ranking_features_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    append_control_plane_read_audit(state.as_ref(), &tenant, "ranking_features", records.len())
+        .await
+        .map_err(internal_error)?;
     Ok(Json(records))
 }
 
@@ -17787,6 +17813,14 @@ async fn ranking_predictions_handler(
     let records = read_ranking_predictions_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &tenant,
+        "ranking_predictions",
+        records.len(),
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(records))
 }
 
@@ -17847,6 +17881,9 @@ async fn ranking_labels_handler(
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
     let records = read_ranking_labels_for_admin(state.as_ref(), &tenant)
+        .await
+        .map_err(internal_error)?;
+    append_control_plane_read_audit(state.as_ref(), &tenant, "ranking_labels", records.len())
         .await
         .map_err(internal_error)?;
     Ok(Json(records))
@@ -17931,6 +17968,14 @@ async fn ranking_preference_labels_handler(
     let records = read_ranking_preference_labels_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &tenant,
+        "ranking_preference_labels",
+        records.len(),
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(records))
 }
 
@@ -17946,11 +17991,16 @@ async fn ranking_adjudication_report_handler(
     let preference_labels = read_ranking_preference_labels_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
-    Ok(Json(ranking_adjudication_report(
-        &tenant.tenant_id,
-        &labels,
-        &preference_labels,
-    )))
+    let report = ranking_adjudication_report(&tenant.tenant_id, &labels, &preference_labels);
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &tenant,
+        "ranking_adjudication_report",
+        report.issue_group_count,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(report))
 }
 
 async fn ranking_labeler_reliability_report_handler(
@@ -17965,11 +18015,16 @@ async fn ranking_labeler_reliability_report_handler(
     let preference_labels = read_ranking_preference_labels_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
-    Ok(Json(ranking_labeler_reliability_report(
-        &tenant.tenant_id,
-        &labels,
-        &preference_labels,
-    )))
+    let report = ranking_labeler_reliability_report(&tenant.tenant_id, &labels, &preference_labels);
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &tenant,
+        "ranking_labeler_reliability_report",
+        report.source_count.saturating_add(report.actor_count),
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(report))
 }
 
 async fn ranking_calibration_report_handler(
@@ -17990,13 +18045,22 @@ async fn ranking_calibration_report_handler(
     let labels = read_ranking_labels_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
-    Ok(Json(ranking_calibration_report(
+    let report = ranking_calibration_report(
         &tenant.tenant_id,
         model_versions.len(),
         features.len(),
         &predictions,
         &labels,
-    )))
+    );
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &tenant,
+        "ranking_calibration_report",
+        report.joined_label_prediction_count,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(report))
 }
 
 async fn ranking_pairwise_evaluation_report_handler(
@@ -18014,12 +18078,21 @@ async fn ranking_pairwise_evaluation_report_handler(
     let preference_labels = read_ranking_preference_labels_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
-    Ok(Json(ranking_pairwise_evaluation_report(
+    let report = ranking_pairwise_evaluation_report(
         &tenant.tenant_id,
         &model_versions,
         &predictions,
         &preference_labels,
-    )))
+    );
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &tenant,
+        "ranking_pairwise_evaluation_report",
+        report.models.len(),
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(report))
 }
 
 async fn ranking_model_risk_report_handler(
@@ -18046,7 +18119,7 @@ async fn ranking_model_risk_report_handler(
     let calibration_runs = read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
-    Ok(Json(ranking_model_risk_report(
+    let report = ranking_model_risk_report(
         state.as_ref(),
         &tenant,
         &model_versions,
@@ -18057,7 +18130,16 @@ async fn ranking_model_risk_report_handler(
             calibration_datasets: &calibration_datasets,
             calibration_runs: &calibration_runs,
         },
-    )))
+    );
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &tenant,
+        "ranking_model_risk_report",
+        report.models.len(),
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(report))
 }
 
 async fn ranking_model_backtest_report_handler(
@@ -18084,7 +18166,7 @@ async fn ranking_model_backtest_report_handler(
     let calibration_runs = read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
-    Ok(Json(ranking_model_backtest_report(
+    let report = ranking_model_backtest_report(
         state.as_ref(),
         &tenant,
         &model_versions,
@@ -18095,7 +18177,16 @@ async fn ranking_model_backtest_report_handler(
             calibration_datasets: &calibration_datasets,
             calibration_runs: &calibration_runs,
         },
-    )))
+    );
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &tenant,
+        "ranking_model_backtest_report",
+        report.models.len(),
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(report))
 }
 
 async fn ranking_dataset_readiness_report_handler(
@@ -18126,19 +18217,26 @@ async fn ranking_dataset_readiness_report_handler(
     let calibration_runs = read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
-    Ok(Json(ranking_dataset_readiness_report(
-        RankingDatasetReadinessReportInputs {
-            state: state.as_ref(),
-            tenant: &tenant,
-            model_versions: &model_versions,
-            predictions: &predictions,
-            labels: &labels,
-            preference_labels: &preference_labels,
-            calibration_datasets: &calibration_datasets,
-            calibration_dataset_manifest_conflict_count,
-            calibration_runs: &calibration_runs,
-        },
-    )))
+    let report = ranking_dataset_readiness_report(RankingDatasetReadinessReportInputs {
+        state: state.as_ref(),
+        tenant: &tenant,
+        model_versions: &model_versions,
+        predictions: &predictions,
+        labels: &labels,
+        preference_labels: &preference_labels,
+        calibration_datasets: &calibration_datasets,
+        calibration_dataset_manifest_conflict_count,
+        calibration_runs: &calibration_runs,
+    });
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &tenant,
+        "ranking_dataset_readiness_report",
+        report.datasets.len(),
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(report))
 }
 
 async fn ranking_credit_readiness_report_handler(
@@ -18181,23 +18279,30 @@ async fn ranking_credit_readiness_report_handler(
     let calibration_runs = read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
-    Ok(Json(ranking_credit_readiness_report(
-        RankingCreditReadinessInputs {
-            state: state.as_ref(),
-            tenant: &tenant,
-            credit_events: &credit_events,
-            settlement_batches: &settlement_batches,
-            held_credit_accounts: &held_credit_accounts,
-            features: &features,
-            predictions: &predictions,
-            model_versions: &model_versions,
-            labels: &labels,
-            preference_labels: &preference_labels,
-            calibration_datasets: &calibration_datasets,
-            calibration_dataset_manifest_conflict_count,
-            calibration_runs: &calibration_runs,
-        },
-    )))
+    let report = ranking_credit_readiness_report(RankingCreditReadinessInputs {
+        state: state.as_ref(),
+        tenant: &tenant,
+        credit_events: &credit_events,
+        settlement_batches: &settlement_batches,
+        held_credit_accounts: &held_credit_accounts,
+        features: &features,
+        predictions: &predictions,
+        model_versions: &model_versions,
+        labels: &labels,
+        preference_labels: &preference_labels,
+        calibration_datasets: &calibration_datasets,
+        calibration_dataset_manifest_conflict_count,
+        calibration_runs: &calibration_runs,
+    });
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &tenant,
+        "ranking_credit_readiness_report",
+        report.events.len(),
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(report))
 }
 
 async fn ranking_model_readiness_drill_handler(
@@ -18641,6 +18746,14 @@ async fn ranking_calibration_runs_handler(
     let records = read_ranking_calibration_runs_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &tenant,
+        "ranking_calibration_runs",
+        records.len(),
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(records))
 }
 
@@ -18653,6 +18766,14 @@ async fn ranking_worker_runs_handler(
     let records = read_ranking_worker_runs_for_admin(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &tenant,
+        "ranking_worker_runs",
+        records.len(),
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(records))
 }
 
@@ -89008,6 +89129,160 @@ mod tests {
             (Some("utility_attestations".to_string()), Some(0)),
             (Some("near_credit_outbox".to_string()), Some(0)),
             (Some("benchmark_registry_outbox".to_string()), Some(0)),
+        ]);
+        assert_eq!(read_surfaces, expected_surfaces);
+    }
+
+    #[tokio::test]
+    async fn admin_ranking_reads_append_audit_breadcrumbs() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let Json(model_versions) =
+            ranking_model_versions_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list ranking model versions");
+        assert!(model_versions.is_empty());
+        let Json(calibration_datasets) = ranking_calibration_datasets_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+        )
+        .await
+        .expect("admin can list ranking calibration datasets");
+        assert!(calibration_datasets.is_empty());
+        let Json(conflict_report) = ranking_calibration_dataset_conflict_report_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+        )
+        .await
+        .expect("admin can inspect ranking calibration dataset conflicts");
+        assert_eq!(conflict_report.conflict_count, 0);
+        let Json(features) =
+            ranking_features_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list ranking features");
+        assert!(features.is_empty());
+        let Json(predictions) =
+            ranking_predictions_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list ranking predictions");
+        assert!(predictions.is_empty());
+        let Json(labels) =
+            ranking_labels_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list ranking labels");
+        assert!(labels.is_empty());
+        let Json(preference_labels) =
+            ranking_preference_labels_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list ranking preference labels");
+        assert!(preference_labels.is_empty());
+        let Json(adjudication) = ranking_adjudication_report_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+        )
+        .await
+        .expect("admin can inspect ranking adjudication");
+        assert_eq!(adjudication.issue_group_count, 0);
+        let Json(reliability) = ranking_labeler_reliability_report_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+        )
+        .await
+        .expect("admin can inspect ranking labeler reliability");
+        assert_eq!(reliability.source_count, 0);
+        assert_eq!(reliability.actor_count, 0);
+        let Json(calibration) =
+            ranking_calibration_report_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect ranking calibration");
+        assert_eq!(calibration.joined_label_prediction_count, 0);
+        let Json(pairwise) = ranking_pairwise_evaluation_report_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+        )
+        .await
+        .expect("admin can inspect ranking pairwise evaluation");
+        assert!(pairwise.models.is_empty());
+        let Json(model_risk) =
+            ranking_model_risk_report_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect ranking model risk");
+        assert!(model_risk.models.is_empty());
+        let Json(backtest) = ranking_model_backtest_report_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+        )
+        .await
+        .expect("admin can inspect ranking model backtests");
+        assert!(backtest.models.is_empty());
+        let Json(dataset_readiness) = ranking_dataset_readiness_report_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+        )
+        .await
+        .expect("admin can inspect ranking dataset readiness");
+        assert!(dataset_readiness.datasets.is_empty());
+        let Json(credit_readiness) = ranking_credit_readiness_report_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+        )
+        .await
+        .expect("admin can inspect ranking credit readiness");
+        assert!(credit_readiness.events.is_empty());
+        let Json(calibration_runs) =
+            ranking_calibration_runs_handler(State(state.clone()), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list ranking calibration runs");
+        assert!(calibration_runs.is_empty());
+        let Json(worker_runs) =
+            ranking_worker_runs_handler(State(state), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list ranking worker runs");
+        assert!(worker_runs.is_empty());
+
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        let read_surfaces = audit_events
+            .iter()
+            .filter(|event| event.kind == "read")
+            .map(|event| {
+                let reason = event.reason.as_deref();
+                (
+                    trace_audit_reason_value(reason, "surface").map(str::to_string),
+                    trace_audit_reason_u32(reason, "item_count"),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let expected_surfaces = BTreeSet::from([
+            (Some("ranking_model_versions".to_string()), Some(0)),
+            (Some("ranking_calibration_datasets".to_string()), Some(0)),
+            (
+                Some("ranking_calibration_dataset_conflicts".to_string()),
+                Some(0),
+            ),
+            (Some("ranking_features".to_string()), Some(0)),
+            (Some("ranking_predictions".to_string()), Some(0)),
+            (Some("ranking_labels".to_string()), Some(0)),
+            (Some("ranking_preference_labels".to_string()), Some(0)),
+            (Some("ranking_adjudication_report".to_string()), Some(0)),
+            (
+                Some("ranking_labeler_reliability_report".to_string()),
+                Some(0),
+            ),
+            (Some("ranking_calibration_report".to_string()), Some(0)),
+            (
+                Some("ranking_pairwise_evaluation_report".to_string()),
+                Some(0),
+            ),
+            (Some("ranking_model_risk_report".to_string()), Some(0)),
+            (Some("ranking_model_backtest_report".to_string()), Some(0)),
+            (
+                Some("ranking_dataset_readiness_report".to_string()),
+                Some(0),
+            ),
+            (Some("ranking_credit_readiness_report".to_string()), Some(0)),
+            (Some("ranking_calibration_runs".to_string()), Some(0)),
+            (Some("ranking_worker_runs".to_string()), Some(0)),
         ]);
         assert_eq!(read_surfaces, expected_surfaces);
     }
