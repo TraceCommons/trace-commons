@@ -48736,10 +48736,9 @@ fn storage_audit_canonical_kind(event: &StorageTraceAuditEventRecord) -> String 
             &event.metadata,
             StorageTraceAuditSafeMetadata::Maintenance { .. }
         )
-        && event
-            .reason
-            .as_deref()
-            .is_some_and(|reason| reason.starts_with("purpose="))
+        && event.reason.as_deref().is_some_and(|reason| {
+            reason.starts_with("purpose=") || reason.starts_with("purpose_hash=")
+        })
     {
         return "maintenance".to_string();
     }
@@ -55360,6 +55359,7 @@ impl TraceCommonsAuditEvent {
         dry_run: bool,
         counts: TraceMaintenanceAuditCounts,
     ) -> Self {
+        let purpose_hash = sha256_prefixed(purpose);
         Self {
             event_id: Uuid::new_v4(),
             tenant_id: auth.tenant_id.clone(),
@@ -55370,7 +55370,7 @@ impl TraceCommonsAuditEvent {
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
             reason: Some(format!(
-                "purpose={purpose};dry_run={dry_run};records_marked_revoked={};records_marked_expired={};records_marked_purged={};derived_marked_revoked={};derived_marked_expired={};export_cache_files_pruned={};export_provenance_invalidated={};benchmark_artifacts_invalidated={};trace_object_files_deleted={};encrypted_artifacts_deleted={};db_mirror_backfilled={};db_mirror_backfill_failed={};vector_entries_indexed={}",
+                "purpose_hash={purpose_hash};dry_run={dry_run};records_marked_revoked={};records_marked_expired={};records_marked_purged={};derived_marked_revoked={};derived_marked_expired={};export_cache_files_pruned={};export_provenance_invalidated={};benchmark_artifacts_invalidated={};trace_object_files_deleted={};encrypted_artifacts_deleted={};db_mirror_backfilled={};db_mirror_backfill_failed={};vector_entries_indexed={}",
                 counts.records_marked_revoked,
                 counts.records_marked_expired,
                 counts.records_marked_purged,
@@ -75512,6 +75512,7 @@ mod tests {
             },
         )
         .expect("revocation tombstone writes");
+        let maintenance_purpose = "ranker provenance invalidation frontier lab batch 77";
         let Json(response) = maintenance_handler(
             State(state.clone()),
             auth_headers("admin-token-a"),
@@ -75519,7 +75520,7 @@ mod tests {
                 dry_run: false,
                 prune_export_cache: false,
                 max_export_age_hours: None,
-                purpose: Some("ranker_provenance_invalidation".to_string()),
+                purpose: Some(maintenance_purpose.to_string()),
                 backfill_db_mirror: false,
                 purge_expired_before: None,
                 index_vectors: false,
@@ -75565,6 +75566,17 @@ mod tests {
                 .expect("maintenance audit reason")
                 .contains("export_provenance_invalidated=2")
         );
+        let maintenance_reason = maintenance_audit
+            .reason
+            .as_deref()
+            .expect("maintenance audit reason");
+        assert!(maintenance_reason.contains(&format!(
+            "purpose_hash={}",
+            sha256_prefixed(maintenance_purpose)
+        )));
+        assert!(!maintenance_reason.contains(maintenance_purpose));
+        assert!(!maintenance_reason.contains("frontier"));
+        assert!(!maintenance_reason.contains("batch 77"));
     }
 
     #[tokio::test]
