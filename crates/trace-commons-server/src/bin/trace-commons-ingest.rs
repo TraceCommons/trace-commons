@@ -5309,12 +5309,6 @@ struct CreditSettlementCentralIssuerProfileConfig {
     near_adapter_auth_required: bool,
 }
 
-fn credit_settlement_central_issuer_profile_ready(
-    config: &CreditSettlementCentralIssuerProfileConfig,
-) -> bool {
-    credit_settlement_central_issuer_profile_missing_config(config).is_empty()
-}
-
 fn credit_settlement_central_issuer_profile_config_from_state(
     state: &AppState,
 ) -> CreditSettlementCentralIssuerProfileConfig {
@@ -8814,6 +8808,7 @@ struct TraceCreditSettlementDrillResponse {
     issuer_approval_evidence_fresh: bool,
     credit_settlement_central_issuer_profile_required: bool,
     credit_settlement_central_issuer_profile_ready: bool,
+    credit_settlement_central_issuer_profile_missing_controls: Vec<&'static str>,
     risk_summary: TraceCreditRiskSummaryResponse,
     settlement: TraceCreditSettlementRunResponse,
     blocking_gaps: Vec<String>,
@@ -11069,6 +11064,9 @@ async fn run_credit_settlement_drill(
     let near_confirmer_auth_configured = state.near_credit_confirmer_auth_configured;
     let central_issuer_profile_config =
         credit_settlement_central_issuer_profile_config_from_state(state);
+    let central_issuer_profile_missing_controls =
+        credit_settlement_central_issuer_profile_missing_config(&central_issuer_profile_config);
+    let central_issuer_profile_ready = central_issuer_profile_missing_controls.is_empty();
     let issuer_approval_evidence_hash = validate_credit_settlement_issuer_approval_evidence_hash(
         request.issuer_approval_evidence_hash.as_deref(),
     )?;
@@ -11127,9 +11125,7 @@ async fn run_credit_settlement_drill(
         issuer_approval_max_age: state.credit_settlement_issuer_approval_max_age,
         issuer_approval_evidence_fresh: issuer_approval_check.fresh,
         central_issuer_profile_required: state.credit_settlement_require_central_issuer_profile,
-        central_issuer_profile_ready: credit_settlement_central_issuer_profile_ready(
-            &central_issuer_profile_config,
-        ),
+        central_issuer_profile_ready,
     };
     let blocking_gaps =
         credit_settlement_drill_blocking_gaps(&risk_summary, &settlement, &readiness);
@@ -11141,6 +11137,7 @@ async fn run_credit_settlement_drill(
             risk_summary: &risk_summary,
             settlement: &settlement,
             blocking_gaps: &blocking_gaps,
+            central_issuer_profile_missing_controls: &central_issuer_profile_missing_controls,
         });
     let mut response = TraceCreditSettlementDrillResponse {
         tenant_id: tenant.tenant_id.clone(),
@@ -11171,6 +11168,8 @@ async fn run_credit_settlement_drill(
         credit_settlement_central_issuer_profile_required: readiness
             .central_issuer_profile_required,
         credit_settlement_central_issuer_profile_ready: readiness.central_issuer_profile_ready,
+        credit_settlement_central_issuer_profile_missing_controls:
+            central_issuer_profile_missing_controls,
         risk_summary,
         settlement,
         blocking_gaps,
@@ -11310,6 +11309,7 @@ struct TraceCreditSettlementDrillEvidenceHashInputs<'a> {
     risk_summary: &'a TraceCreditRiskSummaryResponse,
     settlement: &'a TraceCreditSettlementRunResponse,
     blocking_gaps: &'a [String],
+    central_issuer_profile_missing_controls: &'a [&'static str],
 }
 
 fn credit_settlement_drill_evidence_hash(
@@ -11322,10 +11322,10 @@ fn credit_settlement_drill_evidence_hash(
         risk_summary,
         settlement,
         blocking_gaps,
+        central_issuer_profile_missing_controls,
     } = inputs;
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_credit_settlement_drill.v2",
+    let mut evidence = serde_json::json!({
+            "schema": "trace_commons_credit_settlement_drill.v3",
             "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
             "actor_principal_ref": tenant.principal_ref,
             "purpose_hash": sha256_prefixed(purpose),
@@ -11374,9 +11374,19 @@ fn credit_settlement_drill_evidence_hash(
             "ranking_credit_events_excluded_reason_counts":
                 &settlement.ranking_credit_events_excluded_reason_counts,
             "blocking_gaps": blocking_gaps,
-        })
-        .to_string(),
-    )
+    });
+    if let serde_json::Value::Object(fields) = &mut evidence {
+        fields.insert(
+            "credit_settlement_central_issuer_profile_missing_controls".to_string(),
+            serde_json::Value::Array(
+                central_issuer_profile_missing_controls
+                    .iter()
+                    .map(|control| serde_json::Value::String((*control).to_string()))
+                    .collect(),
+            ),
+        );
+    }
+    sha256_prefixed(&evidence.to_string())
 }
 
 async fn run_credit_settlement(
@@ -30667,6 +30677,28 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
                 response
                     .promotion_gates
                     .credit_settlement_central_issuer_profile_ready,
+            ),
+        ),
+        (
+            "central_issuer_profile_missing_control_count",
+            response
+                .promotion_gates
+                .credit_settlement_central_issuer_profile_missing_control_count,
+        ),
+        (
+            "managed_eddsa_signed_tokens_required",
+            usize::from(
+                response
+                    .promotion_gates
+                    .credit_settlement_managed_eddsa_signed_tokens_required,
+            ),
+        ),
+        (
+            "tenant_access_grants_required",
+            usize::from(
+                response
+                    .promotion_gates
+                    .credit_settlement_tenant_access_grants_required,
             ),
         ),
         (
@@ -51936,6 +51968,9 @@ struct TraceOperationalPromotionGateSummary {
     revocation_propagation_latest_skipped_count: usize,
     credit_settlement_central_issuer_profile_required: bool,
     credit_settlement_central_issuer_profile_ready: bool,
+    credit_settlement_central_issuer_profile_missing_control_count: usize,
+    credit_settlement_managed_eddsa_signed_tokens_required: bool,
+    credit_settlement_tenant_access_grants_required: bool,
     credit_settlement_account_cap_configured: bool,
     credit_settlement_account_cap_missing: bool,
     credit_settlement_near_contract_required: bool,
@@ -52053,8 +52088,16 @@ impl TraceOperationalPromotionGateSummary {
             state.credit_settlement_require_central_issuer_profile;
         let central_issuer_profile_config =
             credit_settlement_central_issuer_profile_config_from_state(state);
+        let central_issuer_profile_missing_controls =
+            credit_settlement_central_issuer_profile_missing_config(&central_issuer_profile_config);
+        let credit_settlement_central_issuer_profile_missing_control_count =
+            central_issuer_profile_missing_controls.len();
         let credit_settlement_central_issuer_profile_ready =
-            credit_settlement_central_issuer_profile_ready(&central_issuer_profile_config);
+            credit_settlement_central_issuer_profile_missing_control_count == 0;
+        let credit_settlement_managed_eddsa_signed_tokens_required =
+            central_issuer_profile_config.require_managed_eddsa_signed_tokens;
+        let credit_settlement_tenant_access_grants_required =
+            central_issuer_profile_config.require_tenant_access_grants;
         let credit_settlement_account_cap_configured =
             state.credit_settlement_max_micros_per_account.is_some();
         let credit_settlement_account_cap_missing =
@@ -52386,6 +52429,9 @@ impl TraceOperationalPromotionGateSummary {
             revocation_propagation_latest_skipped_count,
             credit_settlement_central_issuer_profile_required,
             credit_settlement_central_issuer_profile_ready,
+            credit_settlement_central_issuer_profile_missing_control_count,
+            credit_settlement_managed_eddsa_signed_tokens_required,
+            credit_settlement_tenant_access_grants_required,
             credit_settlement_account_cap_configured,
             credit_settlement_account_cap_missing,
             credit_settlement_near_contract_required,
@@ -76975,6 +77021,18 @@ mod tests {
             summary_json["promotion_gates"]["credit_settlement_central_issuer_profile_ready"],
             serde_json::json!(false)
         );
+        assert_eq!(
+            summary_json["promotion_gates"]["credit_settlement_central_issuer_profile_missing_control_count"],
+            serde_json::json!(15)
+        );
+        assert_eq!(
+            summary_json["promotion_gates"]["credit_settlement_managed_eddsa_signed_tokens_required"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            summary_json["promotion_gates"]["credit_settlement_tenant_access_grants_required"],
+            serde_json::json!(false)
+        );
         assert!(
             summary
                 .promotion_gates
@@ -76992,6 +77050,15 @@ mod tests {
         )));
         assert!(metrics.contains(&format!(
             "trace_commons_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"central_issuer_profile_ready\"}} 0"
+        )));
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"central_issuer_profile_missing_control_count\"}} 15"
+        )));
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"managed_eddsa_signed_tokens_required\"}} 0"
+        )));
+        assert!(metrics.contains(&format!(
+            "trace_commons_operational_credit_settlement_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"tenant_access_grants_required\"}} 0"
         )));
     }
 
@@ -77537,6 +77604,15 @@ mod tests {
             value["credit_settlement_central_issuer_profile_ready"],
             serde_json::json!(false)
         );
+        let missing_controls = value["credit_settlement_central_issuer_profile_missing_controls"]
+            .as_array()
+            .expect("central issuer missing controls are visible");
+        assert!(missing_controls.contains(&serde_json::json!(
+            TRACE_COMMONS_REQUIRE_MANAGED_EDDSA_SIGNED_TOKENS
+        )));
+        assert!(missing_controls.contains(&serde_json::json!(
+            TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS
+        )));
         assert_eq!(
             value["blocking_gaps"],
             serde_json::json!(["credit_settlement_central_issuer_profile_incomplete"])
