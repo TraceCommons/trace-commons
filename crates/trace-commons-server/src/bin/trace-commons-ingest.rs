@@ -13197,6 +13197,10 @@ async fn credit_settlement_approval_handler(
     require_admin(&tenant)?;
     require_credit_settlement_approval_principal_if_configured(state.as_ref(), &tenant)?;
     let response = TraceCreditSettlementIssuerApprovalResponse::from_request(&tenant, request)?;
+    require_credit_settlement_issuer_approval_policy_version_allowed_if_configured(
+        state.as_ref(),
+        &response.policy_version,
+    )?;
     append_audit_event_with_db_mirror(
         state.as_ref(),
         &tenant,
@@ -15133,6 +15137,21 @@ fn require_credit_settlement_policy_version_allowed_for_live(
         StatusCode::CONFLICT,
         format!(
             "live credit settlement policy_version is not listed in {TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS}"
+        ),
+    ))
+}
+
+fn require_credit_settlement_issuer_approval_policy_version_allowed_if_configured(
+    state: &AppState,
+    policy_version: &str,
+) -> ApiResult<()> {
+    if credit_settlement_policy_version_allowed(state, policy_version) {
+        return Ok(());
+    }
+    Err(api_error(
+        StatusCode::CONFLICT,
+        format!(
+            "credit settlement issuer approval policy_version is not listed in {TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS}"
         ),
     ))
 }
@@ -88557,6 +88576,67 @@ mod tests {
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].policy_version, "trace-credit-policy-v2");
         assert_eq!(batches[0].source_credit_event_ids, vec![event.event_id]);
+    }
+
+    #[tokio::test]
+    async fn credit_settlement_policy_allowlist_blocks_unapproved_issuer_approval_without_audit() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_allowed_policy_versions =
+            Arc::new(BTreeSet::from(["trace-credit-policy-v2".to_string()]));
+
+        let source_list_hash = sha256_prefixed("unapproved issuer policy source list");
+        let evidence_hash = sha256_prefixed("unapproved issuer policy evidence");
+        let error = credit_settlement_approval_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementIssuerApprovalRequest {
+                policy_version: "trace-credit-policy-v1".to_string(),
+                source_list_hash: source_list_hash.clone(),
+                evidence_hash: evidence_hash.clone(),
+                reason: "operator attempted to approve an unlisted policy".to_string(),
+                evidence_ref: Some("private-lab-review:unlisted-policy".to_string()),
+            }),
+        )
+        .await
+        .expect_err("issuer approvals must use allowlisted settlement policies");
+
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert!(
+            error
+                .1
+                .0
+                .error
+                .contains(TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS)
+        );
+        assert!(
+            read_all_audit_events(temp.path(), "tenant-a")
+                .expect("tenant-a audit reads")
+                .is_empty()
+        );
+
+        let Json(approval) = credit_settlement_approval_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementIssuerApprovalRequest {
+                policy_version: "trace-credit-policy-v2".to_string(),
+                source_list_hash,
+                evidence_hash: evidence_hash.clone(),
+                reason: "operator approved an allowlisted policy".to_string(),
+                evidence_ref: Some("private-lab-review:listed-policy".to_string()),
+            }),
+        )
+        .await
+        .expect("allowlisted settlement policy approval records");
+
+        assert_eq!(approval.policy_version, "trace-credit-policy-v2");
+        assert_eq!(approval.evidence_hash, evidence_hash);
+        assert!(
+            read_all_audit_events(temp.path(), "tenant-a")
+                .expect("tenant-a audit reads")
+                .iter()
+                .any(|event| event.kind == "credit_settlement_issuer_approval")
+        );
     }
 
     #[tokio::test]
