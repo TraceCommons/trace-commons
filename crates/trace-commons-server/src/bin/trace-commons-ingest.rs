@@ -12511,7 +12511,7 @@ async fn credit_settlement_approval_handler(
         &tenant,
         TraceCommonsAuditEvent::credit_settlement_issuer_approval(&response),
         StorageTraceAuditAction::CreditMutate,
-        StorageTraceAuditSafeMetadata::Empty,
+        trace_credit_settlement_issuer_approval_audit_metadata(&response),
     )
     .await
     .map_err(internal_error)?;
@@ -14496,18 +14496,75 @@ fn validate_credit_settlement_issuer_approval_reason(reason: &str) -> ApiResult<
 fn trace_credit_settlement_issuer_approval_audit_reason(
     approval: &TraceCreditSettlementIssuerApprovalResponse,
 ) -> String {
+    trace_credit_settlement_issuer_approval_audit_reason_from_parts(
+        &approval.policy_version,
+        &approval.source_list_hash,
+        &approval.evidence_hash,
+        &approval.reason_hash,
+        approval.evidence_ref_hash.as_deref(),
+    )
+}
+
+fn trace_credit_settlement_issuer_approval_audit_reason_from_parts(
+    policy_version: &str,
+    source_list_hash: &str,
+    evidence_hash: &str,
+    reason_hash: &str,
+    evidence_ref_hash: Option<&str>,
+) -> String {
     let mut reason = format!(
         "surface=credit_settlement_issuer_approval;policy_version={};source_list_hash={};evidence_hash={};reason_hash={}",
-        approval.policy_version,
-        approval.source_list_hash,
-        approval.evidence_hash,
-        approval.reason_hash
+        policy_version, source_list_hash, evidence_hash, reason_hash
     );
-    if let Some(evidence_ref_hash) = approval.evidence_ref_hash.as_deref() {
+    if let Some(evidence_ref_hash) = evidence_ref_hash {
         reason.push_str(";evidence_ref_hash=");
         reason.push_str(evidence_ref_hash);
     }
     reason
+}
+
+fn trace_credit_settlement_issuer_approval_audit_metadata(
+    approval: &TraceCreditSettlementIssuerApprovalResponse,
+) -> StorageTraceAuditSafeMetadata {
+    StorageTraceAuditSafeMetadata::CreditSettlementIssuerApproval {
+        policy_version: approval.policy_version.clone(),
+        source_list_hash: approval.source_list_hash.clone(),
+        evidence_hash: approval.evidence_hash.clone(),
+        reason_hash: approval.reason_hash.clone(),
+        evidence_ref_hash: approval.evidence_ref_hash.clone(),
+    }
+}
+
+fn trace_credit_settlement_issuer_approval_audit_metadata_from_reason(
+    reason: Option<&str>,
+) -> Option<StorageTraceAuditSafeMetadata> {
+    if !trace_audit_reason_is_credit_settlement_issuer_approval(reason) {
+        return None;
+    }
+    let policy_version = trace_audit_reason_value(reason, "policy_version")?.to_string();
+    let source_list_hash = trace_audit_reason_value(reason, "source_list_hash")?.to_string();
+    let evidence_hash = trace_audit_reason_value(reason, "evidence_hash")?.to_string();
+    let reason_hash = trace_audit_reason_value(reason, "reason_hash")?.to_string();
+    if !is_canonical_sha256_prefixed_hash(&source_list_hash)
+        || !is_canonical_sha256_prefixed_hash(&evidence_hash)
+        || !is_canonical_sha256_prefixed_hash(&reason_hash)
+    {
+        return None;
+    }
+    let evidence_ref_hash = match trace_audit_reason_value(reason, "evidence_ref_hash") {
+        Some(hash) if is_canonical_sha256_prefixed_hash(hash) => Some(hash.to_string()),
+        Some(_) => return None,
+        None => None,
+    };
+    Some(
+        StorageTraceAuditSafeMetadata::CreditSettlementIssuerApproval {
+            policy_version,
+            source_list_hash,
+            evidence_hash,
+            reason_hash,
+            evidence_ref_hash,
+        },
+    )
 }
 
 fn trace_audit_reason_is_credit_settlement_issuer_approval(reason: Option<&str>) -> bool {
@@ -39909,6 +39966,27 @@ fn trace_commons_audit_event_from_storage(
             reason_hash: _,
             external_ref_hash: _,
         } => (None, event.reason.clone(), None),
+        StorageTraceAuditSafeMetadata::CreditSettlementIssuerApproval {
+            policy_version,
+            source_list_hash,
+            evidence_hash,
+            reason_hash,
+            evidence_ref_hash,
+        } => (
+            None,
+            event.reason.clone().or_else(|| {
+                Some(
+                    trace_credit_settlement_issuer_approval_audit_reason_from_parts(
+                        policy_version,
+                        source_list_hash,
+                        evidence_hash,
+                        reason_hash,
+                        evidence_ref_hash.as_deref(),
+                    ),
+                )
+            }),
+            None,
+        ),
         StorageTraceAuditSafeMetadata::ProcessEvaluation {
             evaluator_version_hash: _,
             label_count: _,
@@ -40168,6 +40246,14 @@ fn storage_audit_event_kind(
         && matches!(metadata, StorageTraceAuditSafeMetadata::ReviewLease { .. })
     {
         return "review_lease".to_string();
+    }
+    if let StorageTraceAuditAction::CreditMutate = action
+        && matches!(
+            metadata,
+            StorageTraceAuditSafeMetadata::CreditSettlementIssuerApproval { .. }
+        )
+    {
+        return "credit_settlement_issuer_approval".to_string();
     }
     if let StorageTraceAuditAction::Read = action
         && matches!(
@@ -46516,6 +46602,38 @@ fn normalize_audit_event_metadata(
             ),
         };
     }
+    if action == StorageTraceAuditAction::CreditMutate
+        && event.kind == "credit_settlement_issuer_approval"
+    {
+        let expected =
+            trace_credit_settlement_issuer_approval_audit_metadata_from_reason(
+                event.reason.as_deref(),
+            )
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "credit settlement issuer approval audit event {} requires canonical hash reason fields",
+                    event.event_id
+                )
+            })?;
+        return match metadata {
+            StorageTraceAuditSafeMetadata::Empty => Ok(expected),
+            StorageTraceAuditSafeMetadata::CreditSettlementIssuerApproval { .. }
+                if metadata == expected =>
+            {
+                Ok(metadata)
+            }
+            StorageTraceAuditSafeMetadata::CreditSettlementIssuerApproval { .. } => {
+                anyhow::bail!(
+                    "credit settlement issuer approval audit event {} metadata does not match reason fields",
+                    event.event_id
+                )
+            }
+            _ => anyhow::bail!(
+                "credit settlement issuer approval audit event {} requires issuer approval metadata",
+                event.event_id
+            ),
+        };
+    }
     if action == StorageTraceAuditAction::Revoke && event.kind == "revoked" {
         let expected = trace_revocation_audit_metadata_from_reason(event.reason.as_deref())
             .ok_or_else(|| {
@@ -47894,6 +48012,21 @@ fn storage_audit_canonical_reason(event: &StorageTraceAuditEventRecord) -> Optio
             surface,
             purpose_hash.as_deref(),
         )),
+        StorageTraceAuditSafeMetadata::CreditSettlementIssuerApproval {
+            policy_version,
+            source_list_hash,
+            evidence_hash,
+            reason_hash,
+            evidence_ref_hash,
+        } => Some(
+            trace_credit_settlement_issuer_approval_audit_reason_from_parts(
+                policy_version,
+                source_list_hash,
+                evidence_hash,
+                reason_hash,
+                evidence_ref_hash.as_deref(),
+            ),
+        ),
         _ => None,
     }
 }
@@ -48575,6 +48708,12 @@ fn audit_backfill_storage_projection(
         "trace_content_read" => {
             trace_content_read_audit_metadata_from_reason(event.reason.as_deref())
                 .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
+        }
+        "credit_settlement_issuer_approval" => {
+            trace_credit_settlement_issuer_approval_audit_metadata_from_reason(
+                event.reason.as_deref(),
+            )
+            .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
         }
         "revoked" => trace_revocation_audit_metadata_from_reason(event.reason.as_deref())
             .unwrap_or(StorageTraceAuditSafeMetadata::Empty),
@@ -65695,6 +65834,50 @@ mod tests {
         )
         .expect("issuer approval request is valid");
         let audit_event = TraceCommonsAuditEvent::credit_settlement_issuer_approval(&approval);
+        let (action, metadata) = audit_backfill_storage_projection(&audit_event);
+        assert_eq!(action, StorageTraceAuditAction::CreditMutate);
+        let metadata_json =
+            serde_json::to_value(&metadata).expect("issuer approval metadata serializes");
+        assert_eq!(
+            metadata_json.get("kind").and_then(|value| value.as_str()),
+            Some("credit_settlement_issuer_approval")
+        );
+        assert_eq!(
+            metadata_json
+                .get("policy_version")
+                .and_then(|value| value.as_str()),
+            Some(approval.policy_version.as_str())
+        );
+        assert_eq!(
+            metadata_json
+                .get("source_list_hash")
+                .and_then(|value| value.as_str()),
+            Some(approval.source_list_hash.as_str())
+        );
+        assert_eq!(
+            metadata_json
+                .get("evidence_hash")
+                .and_then(|value| value.as_str()),
+            Some(approval.evidence_hash.as_str())
+        );
+        assert_eq!(
+            metadata_json
+                .get("reason_hash")
+                .and_then(|value| value.as_str()),
+            Some(approval.reason_hash.as_str())
+        );
+        assert_eq!(
+            metadata_json
+                .get("evidence_ref_hash")
+                .and_then(|value| value.as_str()),
+            approval.evidence_ref_hash.as_deref()
+        );
+        assert!(!metadata_json.to_string().contains("private-lab-review"));
+        assert!(
+            !metadata_json
+                .to_string()
+                .contains("central issuer approved")
+        );
         let storage_event = StorageTraceAuditEventRecord {
             audit_event_id: audit_event.event_id,
             tenant_id: audit_event.tenant_id.clone(),
@@ -65711,7 +65894,7 @@ mod tests {
             previous_event_hash: None,
             event_hash: None,
             canonical_event_json: None,
-            metadata: StorageTraceAuditSafeMetadata::Empty,
+            metadata,
             occurred_at: audit_event.created_at,
         };
 
@@ -84530,6 +84713,75 @@ mod tests {
                 .expect("audit reads")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn credit_settlement_approval_mirrors_typed_hash_only_audit_metadata() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        let source_list_hash = sha256_prefixed("typed issuer approval source list");
+        let evidence_hash = sha256_prefixed("typed issuer approval evidence");
+
+        let Json(response) = credit_settlement_approval_handler(
+            State(state),
+            auth_headers("admin-token-a"),
+            Json(TraceCreditSettlementIssuerApprovalRequest {
+                policy_version: "trace-credit-policy-v1".to_string(),
+                source_list_hash: source_list_hash.clone(),
+                evidence_hash: evidence_hash.clone(),
+                reason: "central issuer reviewed typed audit metadata".to_string(),
+                evidence_ref: Some("private-lab-review:typed-audit".to_string()),
+            }),
+        )
+        .await
+        .expect("issuer approval records");
+
+        let events = backend
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("DB audit events read");
+        let event = events
+            .iter()
+            .find(|event| event.action == StorageTraceAuditAction::CreditMutate)
+            .expect("issuer approval audit mirrored");
+        match &event.metadata {
+            StorageTraceAuditSafeMetadata::CreditSettlementIssuerApproval {
+                policy_version,
+                source_list_hash: stored_source_list_hash,
+                evidence_hash: stored_evidence_hash,
+                reason_hash,
+                evidence_ref_hash,
+            } => {
+                assert_eq!(policy_version, "trace-credit-policy-v1");
+                assert_eq!(stored_source_list_hash, &source_list_hash);
+                assert_eq!(stored_evidence_hash, &evidence_hash);
+                assert_eq!(reason_hash, &response.reason_hash);
+                assert_eq!(
+                    evidence_ref_hash.as_deref(),
+                    response.evidence_ref_hash.as_deref()
+                );
+            }
+            other => panic!("issuer approval audit metadata was not typed: {other:?}"),
+        }
+        let audit_json = serde_json::to_string(&events).expect("audit events serialize");
+        assert!(!audit_json.contains("central issuer reviewed typed audit metadata"));
+        assert!(!audit_json.contains("private-lab-review:typed-audit"));
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
 
     #[tokio::test]
