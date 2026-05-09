@@ -12970,6 +12970,19 @@ fn credit_cycle_scheduler_candidate_skip_reason(
         if pairwise.joined_pair_prediction_count < state.ranking_min_pairwise_label_count {
             return Some("pairwise_evidence_below_threshold".to_string());
         }
+        let pairwise_diversity_required = state.ranking_min_pairwise_label_count > 0
+            && state.ranking_min_label_source_count > 1
+            && pairwise.joined_pair_prediction_count >= state.ranking_min_pairwise_label_count;
+        if pairwise_diversity_required
+            && pairwise.joined_label_source_count < state.ranking_min_label_source_count
+        {
+            return Some("pairwise_label_source_underdiverse".to_string());
+        }
+        if pairwise_diversity_required
+            && pairwise.joined_label_actor_count < state.ranking_min_label_source_count
+        {
+            return Some("pairwise_label_actor_underdiverse".to_string());
+        }
         if pairwise.joined_pair_prediction_count > 0
             && pairwise
                 .pairwise_accuracy_micros
@@ -96684,6 +96697,142 @@ mod tests {
         assert!(
             read_all_near_credit_outbox_items(temp.path(), "tenant-a")
                 .expect("outbox reads")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_preflight_blocks_pairwise_labels_from_single_actor() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let (candidate, calibrated_prediction) = seed_credit_cycle_ready_candidate(
+            state.clone(),
+            "trace-ranker-credit-cycle-pairwise-actor-v1",
+        )
+        .await;
+        let _ = ranking_label_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(TraceRankingLabelRequest {
+                submission_id: calibrated_prediction.submission_id,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                label_source: StorageTraceRankingLabelSource::Reviewer,
+                utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                label_outcome: StorageTraceRankingLabelOutcome::Useful,
+                utility_delta_micros: 1_250_000,
+                evidence_hash: sha256_prefixed("scheduler-pairwise-actor-reviewer-absolute-label"),
+                external_ref: "reviewer-private-scheduler-pairwise-actor-absolute".to_string(),
+            }),
+        )
+        .await
+        .expect("reviewer can add absolute label diversity for calibration");
+        Arc::make_mut(&mut state).ranking_min_label_source_count = 2;
+        Arc::make_mut(&mut state).ranking_min_pairwise_label_count = 2;
+        Arc::make_mut(&mut state).ranking_min_pairwise_accuracy_micros = 600_000;
+
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist source-diverse calibration");
+        assert!(calibration.promotable);
+        assert_eq!(calibration.joined_label_source_count, 2);
+        assert_eq!(calibration.joined_label_actor_count, 2);
+
+        let lower_scored = seed_pairwise_ranking_prediction_source(
+            state.clone(),
+            &candidate,
+            "scheduler-pairwise-actor",
+            500_000,
+        )
+        .await;
+        for (label_source, suffix) in [
+            (StorageTraceRankingLabelSource::Reviewer, "reviewer"),
+            (StorageTraceRankingLabelSource::FrontierLab, "frontier"),
+        ] {
+            let _ = ranking_preference_label_handler(
+                State(state.clone()),
+                auth_headers("admin-token-a"),
+                Json(TraceRankingPreferenceLabelRequest {
+                    preferred_submission_id: calibrated_prediction.submission_id,
+                    rejected_submission_id: lower_scored.submission_id,
+                    target_use: TraceAllowedUse::RankingModelTraining,
+                    label_source,
+                    utility_category: StorageTraceRankingUtilityCategory::RankingTraining,
+                    preference_strength_micros: 800_000,
+                    evidence_hash: sha256_prefixed(&format!(
+                        "scheduler-pairwise-actor-{suffix}-evidence"
+                    )),
+                    external_ref: format!("admin-private-scheduler-pairwise-actor-{suffix}"),
+                }),
+            )
+            .await
+            .expect("admin can record pairwise labels across source categories");
+        }
+
+        let Json(scheduler) = credit_cycle_scheduler_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleSchedulerRunRequest {
+                dry_run: false,
+                preflight_only: true,
+                submit_near_outbox: false,
+                confirm_near_outbox: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: None,
+                policy_version: Some(candidate.policy_version.clone()),
+                reason: "preflight should block same-actor pairwise labels".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: Some(1),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect("scheduler preflight evaluates pairwise actor diversity");
+
+        assert_eq!(scheduler.checked_count, 1);
+        assert_eq!(scheduler.eligible_count, 0);
+        assert_eq!(scheduler.started_count, 0);
+        assert_eq!(scheduler.skipped_count, 1);
+        assert_eq!(
+            scheduler
+                .skipped_reason_counts
+                .get("pairwise_label_actor_underdiverse"),
+            Some(&1)
+        );
+        assert_eq!(
+            scheduler.decisions[0].skip_reason.as_deref(),
+            Some("pairwise_label_actor_underdiverse")
+        );
+        assert!(scheduler.cycles.is_empty());
+        assert!(
+            read_all_ranking_worker_runs(temp.path(), "tenant-a")
+                .expect("worker runs read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit events read")
                 .is_empty()
         );
     }
