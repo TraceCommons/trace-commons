@@ -594,11 +594,13 @@ issuer profile as aggregate safe signals: required, ready,
 missing-control-count, managed-EdDSA enforcement, and tenant-grant enforcement.
 When the principal allowlist is configured, unlisted admins can still inspect
 dry-runs but cannot record source-list issuer approvals or finalize live
-settlement. Live settlement re-checks the profile before writing settlement
-batches or NEAR outbox rows. When rollout-smoke readiness is required, live settlement then
-requires `rollout_smoke.ready: true` and rejects with safe status/count fields
-before any live repair or write path, while dry-run settlement and the drill
-stay available for diagnostics.
+settlement, and unlisted utility-worker principals cannot start live settlement
+or credit-cycle schedulers. Live settlement re-checks the profile before
+writing settlement batches or NEAR outbox rows. When rollout-smoke readiness is
+required, live settlement then requires `rollout_smoke.ready: true` and rejects
+with safe status/count fields before any live repair or write path, while
+dry-run settlement, credit-cycle preflight, and the drill stay available for
+diagnostics.
 Final settlement requests can include `issuer_approval_evidence_hash` to bind
 the batch to a central operator approval artifact. Set
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` to reject live
@@ -614,9 +616,10 @@ then calls the same `/v1/workers/credit-settlements/run` route with
 `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_DRY_RUN`, and optional
 source-list approval, NEAR contract, ranking model, and target-use gates.
 Startup validates the scheduler token through utility-worker auth, validates
-the configured policy and contract identifiers, and rejects live scheduler
-startup when required central issuer approval or a required NEAR contract is
-missing. Raw scheduler tokens, reasons, policy versions, approval hashes,
+the configured policy and contract identifiers, rejects unlisted live scheduler
+principals when the central issuer principal allowlist is configured, and
+rejects live scheduler startup when required central issuer approval or a
+required NEAR contract is missing. Raw scheduler tokens, reasons, policy versions, approval hashes,
 contract ids, and ranking model ids are not returned by config-status,
 operational summary, or metrics.
 Set `TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID` to bind live issuance to
@@ -1815,9 +1818,10 @@ This gives external schedulers a safe retry surface without granting generic
 admin settlement access.
 Deployments that want the server to own this scan loop can configure
 `TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TOKEN` with a utility-worker bearer token;
-startup validates that token and, for live NEAR submission/confirmation,
-requires the matching relayer/confirmer adapters and bearer-token readiness when
-adapter auth is required. The in-process scheduler sleeps for
+startup validates that token, requires it to be listed in the central issuer
+principal allowlist for live cycles when that allowlist is configured, and, for
+live NEAR submission/confirmation, requires the matching relayer/confirmer
+adapters and bearer-token readiness when adapter auth is required. The in-process scheduler sleeps for
 `TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_INTERVAL_SECONDS` (default 300), then
 calls the same scheduler worker route with `TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TARGET_USE`
 (default `ranking_model_training`), optional model/policy filters, optional NEAR
@@ -1902,7 +1906,11 @@ bounded batches until no eligible settlement work remains.
 For ranking-derived credit, `POST /v1/workers/credit-cycle/run` wraps this route
 after model calibration, promotion, and prediction-credit issuance so a
 scheduler can move one model/policy/target through the credit path without
-gaining generic admin settlement access.
+gaining generic admin settlement access. When the central issuer principal
+allowlist is configured, live credit-cycle worker calls must use a listed
+principal before any cycle worker-run claim, prediction-credit write, settlement
+batch, or NEAR outbox side effect can occur; dry-runs remain available for
+inspection.
 
 Before a non-dry-run batch is finalized, the server rereads finalized settlement
 batches and rejects any source credit event that has already been finalized in a

@@ -6571,6 +6571,12 @@ async fn validate_trace_credit_cycle_scheduler_config(
         .await
         .map_err(trace_credit_cycle_scheduler_config_error)?;
     require_utility_operator(&auth).map_err(trace_credit_cycle_scheduler_config_error)?;
+    require_credit_settlement_central_issuer_principal_if_configured(
+        state,
+        &auth,
+        config.dry_run || config.preflight_only,
+    )
+    .map_err(trace_credit_cycle_scheduler_config_error)?;
     if !config.dry_run && !config.preflight_only {
         if config.submit_near_outbox {
             anyhow::ensure!(
@@ -6621,6 +6627,8 @@ async fn validate_trace_credit_settlement_scheduler_config(
         .await
         .map_err(trace_credit_settlement_scheduler_config_error)?;
     require_utility_operator(&auth).map_err(trace_credit_settlement_scheduler_config_error)?;
+    require_credit_settlement_central_issuer_principal_if_configured(state, &auth, config.dry_run)
+        .map_err(trace_credit_settlement_scheduler_config_error)?;
     if config.ranking_target_use.is_some() && config.ranking_model_version.is_none() {
         anyhow::bail!(
             "invalid Trace Commons credit settlement scheduler configuration: {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_RANKING_TARGET_USE} requires {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_RANKING_MODEL_VERSION}"
@@ -12963,6 +12971,11 @@ async fn credit_cycle_worker_run_handler(
     let reason = validate_credit_cycle_worker_reason(&body.reason)?;
     let issuer_approval_evidence_hash = validate_credit_settlement_issuer_approval_evidence_hash(
         body.issuer_approval_evidence_hash.as_deref(),
+    )?;
+    require_credit_settlement_central_issuer_principal_if_configured(
+        state.as_ref(),
+        &tenant,
+        body.dry_run,
     )?;
     require_credit_settlement_central_issuer_profile_if_configured(state.as_ref(), body.dry_run)?;
     require_credit_settlement_issuer_approval_if_configured(
@@ -69319,6 +69332,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn credit_settlement_scheduler_requires_authorized_central_issuer_for_live() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
+            Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+
+        let live_error = validate_trace_credit_settlement_scheduler_config(
+            state.as_ref(),
+            Some(&TraceCreditSettlementSchedulerConfig {
+                worker_token: SecretString::from("utility-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                dry_run: false,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "scheduled live credit settlement from unlisted principal".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
+                limit: 5,
+            }),
+        )
+        .await
+        .expect_err("live settlement scheduler requires listed central issuer principal");
+        assert!(
+            live_error
+                .to_string()
+                .contains("live credit settlement requires an authorized central issuer principal")
+        );
+
+        validate_trace_credit_settlement_scheduler_config(
+            state.as_ref(),
+            Some(&TraceCreditSettlementSchedulerConfig {
+                worker_token: SecretString::from("utility-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                dry_run: true,
+                policy_version: "trace-credit-policy-v1".to_string(),
+                reason: "scheduled dry-run credit settlement from unlisted principal".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                ranking_model_version: None,
+                ranking_target_use: None,
+                limit: 5,
+            }),
+        )
+        .await
+        .expect("dry-run settlement scheduler can inspect from unlisted principal");
+    }
+
+    #[tokio::test]
     async fn vector_index_scheduler_config_requires_vector_worker_auth_at_startup() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
@@ -69712,6 +69774,59 @@ mod tests {
         )
         .await
         .expect("preflight scheduler can start without live NEAR adapters");
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_scheduler_requires_authorized_central_issuer_for_live() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
+            Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+
+        let live_error = validate_trace_credit_cycle_scheduler_config(
+            state.as_ref(),
+            Some(&TraceCreditCycleSchedulerConfig {
+                worker_token: SecretString::from("utility-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: None,
+                policy_version: None,
+                reason: "scheduled live credit cycle from unlisted principal".to_string(),
+                dry_run: false,
+                preflight_only: false,
+                submit_near_outbox: false,
+                confirm_near_outbox: false,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: 1,
+            }),
+        )
+        .await
+        .expect_err("live scheduler requires listed central issuer principal");
+        assert!(
+            live_error
+                .to_string()
+                .contains("live credit settlement requires an authorized central issuer principal")
+        );
+
+        validate_trace_credit_cycle_scheduler_config(
+            state.as_ref(),
+            Some(&TraceCreditCycleSchedulerConfig {
+                worker_token: SecretString::from("utility-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: None,
+                policy_version: None,
+                reason: "scheduled central issuer preflight from unlisted principal".to_string(),
+                dry_run: false,
+                preflight_only: true,
+                submit_near_outbox: false,
+                confirm_near_outbox: false,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                limit: 1,
+            }),
+        )
+        .await
+        .expect("preflight-only scheduler can inspect from unlisted principal");
     }
 
     #[test]
@@ -94616,6 +94731,73 @@ mod tests {
         assert_eq!(
             error.1.0.error,
             "live credit settlement requires complete central issuer profile"
+        );
+        assert!(
+            read_all_ranking_worker_runs(temp.path(), "tenant-a")
+                .expect("worker runs read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit events read")
+                .is_empty()
+        );
+        assert!(
+            read_all_credit_settlement_batches(temp.path(), "tenant-a")
+                .expect("settlement batches read")
+                .is_empty()
+        );
+        assert!(
+            read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+                .expect("outbox reads")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_cycle_worker_requires_authorized_central_issuer_before_side_effects() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
+            Arc::new(BTreeSet::from([principal_storage_ref("admin-token-a")]));
+        let (candidate, _) = seed_credit_cycle_ready_candidate(
+            state.clone(),
+            "trace-ranker-credit-cycle-principal-v1",
+        )
+        .await;
+
+        let error = credit_cycle_worker_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceCreditCycleWorkerRunRequest {
+                dry_run: false,
+                submit_near_outbox: false,
+                confirm_near_outbox: false,
+                target_use: TraceAllowedUse::RankingModelTraining,
+                model_version: candidate.model_version.clone(),
+                policy_version: candidate.policy_version.clone(),
+                reason: "scheduled credit cycle with unlisted central issuer".to_string(),
+                issuer_approval_evidence_hash: None,
+                near_contract_id: Some("trace-credits.testnet".to_string()),
+                calibration_limit: Some(10),
+                model_promotion_limit: Some(10),
+                prediction_credit_limit: Some(10),
+                credit_settlement_limit: Some(10),
+                near_outbox_limit: Some(10),
+                near_outbox_confirm_limit: Some(10),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+                allow_at_risk_models: false,
+            }),
+        )
+        .await
+        .expect_err("central issuer principal gate rejects before claiming the cycle");
+
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.1.0.error,
+            "live credit settlement requires an authorized central issuer principal"
         );
         assert!(
             read_all_ranking_worker_runs(temp.path(), "tenant-a")
