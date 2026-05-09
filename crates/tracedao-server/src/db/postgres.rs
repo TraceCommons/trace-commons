@@ -729,4 +729,37 @@ mod tests {
             "central RLS policy migration and diagnostics registry drifted"
         );
     }
+
+    #[test]
+    fn trace_corpus_pg_client_access_enters_tenant_context_transactions() {
+        let source = include_str!("trace_corpus_pg.rs");
+        let client_marker = concat!("self.", "pool().get().await?");
+        let tenant_context_marker = "Self::begin_trace_tenant_transaction";
+        let mut checked_client_accesses = 0;
+
+        for (line_number, line) in source.lines().enumerate() {
+            if !line.contains(client_marker) {
+                continue;
+            }
+            checked_client_accesses += 1;
+
+            let tenant_context_window = source
+                .lines()
+                .skip(line_number + 1)
+                .take(8)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                tenant_context_window.contains(tenant_context_marker),
+                "trace_corpus_pg.rs:{} gets a PostgreSQL client without immediately entering \
+                 transaction-local trace tenant context",
+                line_number + 1
+            );
+        }
+
+        assert!(
+            checked_client_accesses >= TRACE_COMMONS_RLS_TABLES.len(),
+            "trace corpus tenant-context guard did not inspect the expected store surface"
+        );
+    }
 }
