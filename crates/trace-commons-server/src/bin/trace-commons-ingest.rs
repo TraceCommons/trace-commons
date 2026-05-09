@@ -29596,6 +29596,9 @@ struct TraceRevocationEffectsDrillResponse {
     deleted_object_ref_count: usize,
     physical_delete_receipt_count: usize,
     object_deletion_refs_ready: bool,
+    worker_queue_invalidation_item_count: usize,
+    worker_queue_invalidation_done_count: usize,
+    worker_queue_invalidation_ready: bool,
     blocking_gaps: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     recorded_evidence: Vec<TraceRolloutSmokeEvidenceResponse>,
@@ -30396,6 +30399,42 @@ async fn run_revocation_effects_drill(
         && deleted_object_ref_count >= object_delete_item_count
         && physical_delete_receipt_count >= object_delete_item_count;
 
+    let worker_queue_invalidation_items = propagation_items
+        .iter()
+        .filter(|item| {
+            item.action == StorageTraceRevocationPropagationAction::InvalidateWorkerQueue
+        })
+        .collect::<Vec<_>>();
+    let worker_queue_invalidation_item_count = worker_queue_invalidation_items.len();
+    let expected_worker_queue_targets = trace_revocation_worker_queue_invalidation_targets(
+        &tenant.tenant_id,
+        request.submission_id,
+    )
+    .into_iter()
+    .collect::<BTreeMap<_, _>>();
+    let verified_worker_queue_surfaces = worker_queue_invalidation_items
+        .iter()
+        .filter(|item| item.status == StorageTraceRevocationPropagationItemStatus::Done)
+        .filter_map(|item| match &item.target {
+            StorageTraceRevocationPropagationTarget::WorkerQueue {
+                queue_surface,
+                queue_key_hash,
+            } if expected_worker_queue_targets
+                .get(queue_surface)
+                .is_some_and(|expected_hash| expected_hash == queue_key_hash) =>
+            {
+                Some(queue_surface.clone())
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let worker_queue_invalidation_done_count = verified_worker_queue_surfaces.len();
+    let worker_queue_invalidation_ready = worker_queue_invalidation_item_count
+        >= expected_worker_queue_targets.len()
+        && expected_worker_queue_targets
+            .keys()
+            .all(|queue_surface| verified_worker_queue_surfaces.contains(queue_surface));
+
     let mut response = TraceRevocationEffectsDrillResponse {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
@@ -30415,6 +30454,9 @@ async fn run_revocation_effects_drill(
         deleted_object_ref_count,
         physical_delete_receipt_count,
         object_deletion_refs_ready,
+        worker_queue_invalidation_item_count,
+        worker_queue_invalidation_done_count,
+        worker_queue_invalidation_ready,
         blocking_gaps: Vec::new(),
         recorded_evidence: Vec::new(),
     };
@@ -31946,18 +31988,27 @@ fn revocation_effects_drill_blocking_gaps(
         "object_deletion_refs_not_verified",
         !response.object_deletion_refs_ready,
     );
+    push_key_rotation_gap(
+        &mut gaps,
+        "worker_queue_invalidation_not_verified",
+        !response.worker_queue_invalidation_ready,
+    );
     gaps
 }
 
 fn revocation_effects_drill_check_statuses(
     response: &TraceRevocationEffectsDrillResponse,
-) -> [(&'static str, bool); 2] {
+) -> [(&'static str, bool); 3] {
     [
         (
             "delayed_credit_reversal",
             response.delayed_credit_reversal_ready,
         ),
         ("object_deletion_refs", response.object_deletion_refs_ready),
+        (
+            "worker_queue_invalidation",
+            response.worker_queue_invalidation_ready,
+        ),
     ]
 }
 
@@ -32776,6 +32827,9 @@ fn revocation_effects_drill_evidence_hash(
             "deleted_object_ref_count": response.deleted_object_ref_count,
             "physical_delete_receipt_count": response.physical_delete_receipt_count,
             "object_deletion_refs_ready": response.object_deletion_refs_ready,
+            "worker_queue_invalidation_item_count": response.worker_queue_invalidation_item_count,
+            "worker_queue_invalidation_done_count": response.worker_queue_invalidation_done_count,
+            "worker_queue_invalidation_ready": response.worker_queue_invalidation_ready,
             "blocking_gaps": response.blocking_gaps,
         })
         .to_string(),
@@ -40975,6 +41029,13 @@ async fn mirror_revocation_to_db(
     )
     .await
     .context("failed to enqueue object payload delete propagation items")?;
+    let worker_queue_items_enqueued = enqueue_worker_queue_invalidation_items_for_revocation(
+        db.as_ref(),
+        &tenant.tenant_id,
+        submission_id,
+    )
+    .await
+    .context("failed to enqueue worker queue invalidation propagation items")?;
 
     let audit_source = record
         .map(|record| {
@@ -41004,7 +41065,8 @@ async fn mirror_revocation_to_db(
             || export_manifests_invalidated > 0
             || export_manifest_items_invalidated > 0
             || credit_reversal_items_enqueued > 0
-            || object_delete_items_enqueued > 0)
+            || object_delete_items_enqueued > 0
+            || worker_queue_items_enqueued > 0)
     {
         let mut action_counts = lifecycle_invalidation_action_counts(
             invalidation_counts,
@@ -41023,6 +41085,12 @@ async fn mirror_revocation_to_db(
             action_counts.insert(
                 "object_delete_items_enqueued".to_string(),
                 object_delete_items_enqueued.min(u32::MAX as usize) as u32,
+            );
+        }
+        if worker_queue_items_enqueued > 0 {
+            action_counts.insert(
+                "worker_queue_items_enqueued".to_string(),
+                worker_queue_items_enqueued.min(u32::MAX as usize) as u32,
             );
         }
         if let Some(ledger) = retention_ledger {
@@ -41062,6 +41130,94 @@ async fn mirror_revocation_to_db(
     }
 
     Ok(())
+}
+
+fn trace_revocation_worker_queue_invalidation_targets(
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> Vec<(String, String)> {
+    ["process_evaluation_queue", "ranking_training_queue"]
+        .into_iter()
+        .map(|queue_surface| {
+            (
+                queue_surface.to_string(),
+                trace_revocation_worker_queue_key_hash(tenant_id, submission_id, queue_surface),
+            )
+        })
+        .collect()
+}
+
+fn is_revocation_worker_queue_surface(queue_surface: &str) -> bool {
+    matches!(
+        queue_surface,
+        "process_evaluation_queue" | "ranking_training_queue"
+    )
+}
+
+fn trace_revocation_worker_queue_key_hash(
+    tenant_id: &str,
+    submission_id: Uuid,
+    queue_surface: &str,
+) -> String {
+    sha256_prefixed(&format!(
+        "trace_revocation_worker_queue:v1:{tenant_id}:{submission_id}:{queue_surface}"
+    ))
+}
+
+async fn enqueue_worker_queue_invalidation_items_for_revocation(
+    db: &dyn Database,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> anyhow::Result<usize> {
+    let existing_idempotency_keys = db
+        .list_trace_revocation_propagation_items(tenant_id, submission_id)
+        .await
+        .context("failed to read existing revocation propagation items")?
+        .into_iter()
+        .map(|item| item.idempotency_key)
+        .collect::<BTreeSet<_>>();
+    let mut enqueued = 0usize;
+    for (queue_surface, queue_key_hash) in
+        trace_revocation_worker_queue_invalidation_targets(tenant_id, submission_id)
+    {
+        let idempotency_key = sha256_prefixed(&format!(
+            "trace_revocation_worker_queue_invalidation:v1:{tenant_id}:{submission_id}:{queue_surface}"
+        ));
+        if existing_idempotency_keys.contains(&idempotency_key) {
+            continue;
+        }
+        db.upsert_trace_revocation_propagation_item(StorageTraceRevocationPropagationItemWrite {
+            tenant_id: tenant_id.to_string(),
+            propagation_item_id: deterministic_trace_uuid_for_external_ref(
+                "revocation-worker-queue-invalidation",
+                tenant_id,
+                submission_id,
+                &queue_surface,
+            ),
+            source_submission_id: submission_id,
+            target: StorageTraceRevocationPropagationTarget::WorkerQueue {
+                queue_surface: queue_surface.clone(),
+                queue_key_hash,
+            },
+            action: StorageTraceRevocationPropagationAction::InvalidateWorkerQueue,
+            status: StorageTraceRevocationPropagationItemStatus::Pending,
+            idempotency_key,
+            reason: format!("revoked trace worker queue invalidation;surface={queue_surface}"),
+            attempt_count: 0,
+            last_error: None,
+            next_attempt_at: None,
+            completed_at: None,
+            evidence_hash: None,
+            metadata: BTreeMap::from([
+                ("source".to_string(), "mirror_revocation_to_db".to_string()),
+                ("queue_surface".to_string(), queue_surface),
+            ]),
+        })
+        .await
+        .context("failed to upsert worker queue invalidation propagation item")?;
+        enqueued += 1;
+    }
+    Ok(enqueued)
 }
 
 async fn enqueue_object_payload_delete_items_for_revocation(
@@ -41473,6 +41629,9 @@ async fn apply_revocation_propagation_item(
                 "invalidate_ranker_artifact",
             ))
         }
+        StorageTraceRevocationPropagationAction::InvalidateWorkerQueue => {
+            invalidate_worker_queue_for_revocation_propagation(tenant, item).await
+        }
         StorageTraceRevocationPropagationAction::ReverseCreditSettlement => {
             reverse_credit_settlement_for_revocation_propagation(state, db, tenant, item).await
         }
@@ -41497,6 +41656,44 @@ async fn apply_revocation_propagation_item(
             }
         }
     }
+}
+
+async fn invalidate_worker_queue_for_revocation_propagation(
+    tenant: &TenantAuth,
+    item: &StorageTraceRevocationPropagationItemRecord,
+) -> anyhow::Result<TraceRevocationPropagationItemOutcome> {
+    let StorageTraceRevocationPropagationTarget::WorkerQueue {
+        queue_surface,
+        queue_key_hash,
+    } = &item.target
+    else {
+        return Ok(skipped_revocation_propagation_item(
+            item,
+            "worker queue invalidation requires a worker-queue target",
+        ));
+    };
+    if !is_revocation_worker_queue_surface(queue_surface) {
+        return Ok(skipped_revocation_propagation_item(
+            item,
+            "worker queue invalidation target surface is not supported",
+        ));
+    }
+    let expected_key_hash = trace_revocation_worker_queue_key_hash(
+        &tenant.tenant_id,
+        item.source_submission_id,
+        queue_surface,
+    );
+    if queue_key_hash != &expected_key_hash {
+        return Ok(skipped_revocation_propagation_item(
+            item,
+            "worker queue invalidation target hash does not match tenant submission",
+        ));
+    }
+
+    Ok(done_revocation_propagation_item(
+        item,
+        &format!("invalidate_worker_queue:{queue_surface}"),
+    ))
 }
 
 async fn reverse_credit_settlement_for_revocation_propagation(
@@ -76313,6 +76510,217 @@ mod tests {
             value["error"],
             serde_json::json!("trace revocation effects drill requires configured DB mirror")
         );
+    }
+
+    #[test]
+    fn revocation_worker_queue_invalidation_targets_are_hash_only_and_stable() {
+        let submission_id =
+            Uuid::parse_str("f4b0770e-8ff2-48f1-8bd3-22563846ff47").expect("static uuid parses");
+        let targets = trace_revocation_worker_queue_invalidation_targets("tenant-a", submission_id);
+        let repeated =
+            trace_revocation_worker_queue_invalidation_targets("tenant-a", submission_id);
+        assert_eq!(targets, repeated);
+        assert_eq!(targets.len(), 2);
+        let surfaces = targets
+            .iter()
+            .map(|(surface, _)| surface.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            surfaces,
+            BTreeSet::from(["process_evaluation_queue", "ranking_training_queue"])
+        );
+        for (surface, queue_key_hash) in targets {
+            assert!(is_revocation_worker_queue_surface(&surface));
+            assert!(queue_key_hash.starts_with("sha256:"));
+            assert!(!queue_key_hash.contains("tenant-a"));
+            assert!(!queue_key_hash.contains(&submission_id.to_string()));
+        }
+    }
+
+    #[tokio::test]
+    async fn revocation_enqueues_worker_queue_invalidation_and_drill_verifies_completion() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            true,
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission mirrors to DB");
+
+        let revoke_status = revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(submission_id),
+        )
+        .await
+        .expect("contributor can revoke trace");
+        assert_eq!(revoke_status, StatusCode::NO_CONTENT);
+
+        let propagation_items = backend
+            .list_trace_revocation_propagation_items("tenant-a", submission_id)
+            .await
+            .expect("revocation propagation items read");
+        let worker_queue_items = propagation_items
+            .iter()
+            .filter(|item| {
+                serde_json::to_value(item.action)
+                    .expect("action serializes")
+                    .as_str()
+                    == Some("invalidate_worker_queue")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(worker_queue_items.len(), 2);
+
+        let surfaces = worker_queue_items
+            .iter()
+            .map(|item| {
+                let target = serde_json::to_value(&item.target).expect("target serializes");
+                assert_eq!(target["kind"], serde_json::json!("worker_queue"));
+                let queue_key_hash = target["queue_key_hash"]
+                    .as_str()
+                    .expect("queue key hash is present");
+                assert!(queue_key_hash.starts_with("sha256:"));
+                target["queue_surface"]
+                    .as_str()
+                    .expect("queue surface is present")
+                    .to_string()
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            surfaces,
+            BTreeSet::from([
+                "process_evaluation_queue".to_string(),
+                "ranking_training_queue".to_string()
+            ])
+        );
+        let worker_queue_text =
+            serde_json::to_string(&worker_queue_items).expect("worker queue items serialize");
+        assert!(!worker_queue_text.contains("token-a"));
+        assert!(!worker_queue_text.contains("Please inspect the workspace"));
+
+        let Json(worker) = revocation_propagation_worker_handler(
+            State(state.clone()),
+            auth_headers("revocation-worker-token-a"),
+            Json(TraceRevocationPropagationWorkerRequest {
+                purpose: Some("worker_queue_revocation_invalidation".to_string()),
+                dry_run: false,
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("revocation worker applies worker queue invalidations");
+        assert_eq!(worker.failed, 0);
+        assert_eq!(worker.skipped, 0);
+        assert_eq!(worker.completed, 2);
+
+        let propagation_items = backend
+            .list_trace_revocation_propagation_items("tenant-a", submission_id)
+            .await
+            .expect("revocation propagation items read after worker");
+        let completed_worker_queue_items = propagation_items
+            .iter()
+            .filter(|item| {
+                serde_json::to_value(item.action)
+                    .expect("action serializes")
+                    .as_str()
+                    == Some("invalidate_worker_queue")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(completed_worker_queue_items.len(), 2);
+        assert!(completed_worker_queue_items.iter().all(|item| {
+            item.status == StorageTraceRevocationPropagationItemStatus::Done
+                && item
+                    .evidence_hash
+                    .as_deref()
+                    .is_some_and(|hash| hash.starts_with("sha256:"))
+        }));
+
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/revocation-effects-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "worker queue revocation effects drill",
+                            "submission_id": submission_id,
+                            "record_evidence": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("revocation effects drill response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("revocation effects drill response parses");
+        assert_eq!(
+            value["worker_queue_invalidation_ready"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["worker_queue_invalidation_item_count"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            value["worker_queue_invalidation_done_count"],
+            serde_json::json!(2)
+        );
+        assert!(
+            value["blocking_gaps"]
+                .as_array()
+                .expect("blocking gaps is an array")
+                .iter()
+                .all(|gap| gap.as_str() != Some("worker_queue_invalidation_not_verified"))
+        );
+        assert!(
+            value["recorded_evidence"]
+                .as_array()
+                .expect("recorded evidence list")
+                .iter()
+                .any(|item| {
+                    item["check_name"] == serde_json::json!("worker_queue_invalidation")
+                        && item["status"] == serde_json::json!("passed")
+                })
+        );
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(!body_text.contains("token-a"));
+        assert!(!body_text.contains("Please inspect the workspace"));
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
 
     #[tokio::test]
