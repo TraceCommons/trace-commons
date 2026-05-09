@@ -19976,20 +19976,35 @@ async fn count_pending_ranking_prediction_credits(
         .into_iter()
         .map(|event| event.event_id)
         .collect::<BTreeSet<_>>();
-    Ok(predictions
-        .iter()
-        .filter(|prediction| {
-            prediction.settlement_score_micros > 0
-                && model_version
-                    .is_none_or(|model_version| prediction.model_version == model_version)
-                && target_use.is_none_or(|target_use| prediction.target_use == target_use)
-                && policy_version.is_none_or(|policy_version| {
-                    prediction.prediction_policy_version == policy_version
-                })
-                && !existing_event_ids
-                    .contains(&ranking_prediction_credit_event_id(tenant, prediction))
-        })
-        .count())
+    let mut pending_count = 0usize;
+    for prediction in predictions.iter().filter(|prediction| {
+        prediction.settlement_score_micros > 0
+            && model_version.is_none_or(|model_version| prediction.model_version == model_version)
+            && target_use.is_none_or(|target_use| prediction.target_use == target_use)
+            && policy_version
+                .is_none_or(|policy_version| prediction.prediction_policy_version == policy_version)
+            && !existing_event_ids.contains(&ranking_prediction_credit_event_id(tenant, prediction))
+    }) {
+        match read_ranking_source_submission(
+            state,
+            tenant,
+            prediction.submission_id,
+            prediction.target_use,
+        )
+        .await
+        {
+            Ok(_) => pending_count += 1,
+            Err((status, _)) if ranking_prediction_credit_run_can_skip_status(status) => {}
+            Err((status, error)) => {
+                anyhow::bail!(
+                    "failed to count pending ranking prediction credit: status={}, error={}",
+                    status.as_u16(),
+                    error.0.error
+                );
+            }
+        }
+    }
+    Ok(pending_count)
 }
 
 async fn ranking_prediction_model_risk_codes(
@@ -91957,6 +91972,85 @@ mod tests {
             assert_eq!(chunk[0].status, TraceRankingWorkerRunStatus::Running);
             assert_eq!(chunk[1].status, TraceRankingWorkerRunStatus::Completed);
         }
+    }
+
+    #[tokio::test]
+    async fn ranking_prediction_credit_run_drops_revoked_predictions_from_pending_after_count() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let (candidate, prediction) =
+            seed_credit_cycle_ready_candidate(state.clone(), "trace-ranker-credit-revoked-v1")
+                .await;
+        let Json(calibration) = ranking_calibration_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingCalibrationRunRequest {
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                evaluation_dataset_hash: candidate.calibration_dataset_hash.clone(),
+                min_label_count: Some(1),
+                confidence_threshold: Some(0.5),
+                max_average_absolute_error_micros: Some(100_000),
+            }),
+        )
+        .await
+        .expect("utility worker can persist promotable calibration");
+        assert!(calibration.promotable);
+        let Json(_) = ranking_model_promotion_handler(
+            State(state.clone()),
+            auth_headers("admin-token-a"),
+            Json(TraceRankingModelPromotionRequest {
+                dry_run: false,
+                model_version: candidate.model_version.clone(),
+                target_use: TraceAllowedUse::RankingModelTraining,
+                policy_version: candidate.policy_version.clone(),
+                reason: "promote before revocation invalidates prediction credit".to_string(),
+            }),
+        )
+        .await
+        .expect("admin can promote calibrated model");
+
+        revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(prediction.submission_id),
+        )
+        .await
+        .expect("contributor can revoke prediction source before credit run");
+
+        let Json(run) = ranking_prediction_credit_run_handler(
+            State(state.clone()),
+            auth_headers("utility-worker-token-a"),
+            Json(TraceRankingPredictionCreditRunRequest {
+                dry_run: false,
+                allow_at_risk_models: true,
+                reason: "revoked prediction source should leave no actionable pending credit"
+                    .to_string(),
+                limit: Some(10),
+                model_version: Some(candidate.model_version),
+                target_use: Some(TraceAllowedUse::RankingModelTraining),
+                policy_version: Some(candidate.policy_version),
+            }),
+        )
+        .await
+        .expect("worker run skips revoked prediction source");
+        assert_eq!(run.checked_count, 1);
+        assert_eq!(run.credited_count, 0);
+        assert_eq!(run.skipped_ineligible_count, 1);
+        assert_eq!(run.pending_after_count, 0);
+        assert!(
+            read_all_credit_events(temp.path(), "tenant-a")
+                .expect("credit reads")
+                .is_empty()
+        );
+
+        let Json(worker_runs) =
+            ranking_worker_runs_handler(State(state), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can list prediction credit run");
+        assert_eq!(worker_runs.len(), 1);
+        assert_eq!(worker_runs[0].pending_after_count, 0);
     }
 
     #[tokio::test]
