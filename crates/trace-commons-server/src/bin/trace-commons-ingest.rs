@@ -30879,6 +30879,11 @@ struct TraceDbReconciliationDrillResponse {
     file_revocation_tombstone_count: usize,
     db_tombstone_count: usize,
     db_object_ref_count: usize,
+    accepted_without_active_envelope_object_ref_count: usize,
+    unreadable_active_envelope_object_ref_count: usize,
+    hash_mismatched_active_envelope_object_ref_count: usize,
+    key_ref_mismatched_active_envelope_object_ref_count: usize,
+    store_mismatched_active_envelope_object_ref_count: usize,
     active_vector_entries: usize,
     invalid_active_vector_entries: usize,
     blocking_gaps: Vec<String>,
@@ -30952,6 +30957,21 @@ async fn run_db_reconciliation_drill(
         file_revocation_tombstone_count: report.file_revocation_tombstone_count,
         db_tombstone_count: report.db_tombstone_count,
         db_object_ref_count: report.db_object_ref_count,
+        accepted_without_active_envelope_object_ref_count: report
+            .accepted_without_active_envelope_object_ref
+            .len(),
+        unreadable_active_envelope_object_ref_count: report
+            .unreadable_active_envelope_object_refs
+            .len(),
+        hash_mismatched_active_envelope_object_ref_count: report
+            .hash_mismatched_active_envelope_object_refs
+            .len(),
+        key_ref_mismatched_active_envelope_object_ref_count: report
+            .key_ref_mismatched_active_envelope_object_refs
+            .len(),
+        store_mismatched_active_envelope_object_ref_count: report
+            .store_mismatched_active_envelope_object_refs
+            .len(),
         active_vector_entries: report.active_vector_entries,
         invalid_active_vector_entries: report.invalid_active_vector_entries,
         blocking_gaps: report.blocking_gaps.clone(),
@@ -32149,6 +32169,26 @@ fn db_reconciliation_drill_evidence_hash(
             DbCount {
                 name: "object_refs",
                 count: report.db_object_ref_count,
+            },
+            DbCount {
+                name: "accepted_without_active_envelope_object_refs",
+                count: report.accepted_without_active_envelope_object_ref.len(),
+            },
+            DbCount {
+                name: "unreadable_active_envelope_object_refs",
+                count: report.unreadable_active_envelope_object_refs.len(),
+            },
+            DbCount {
+                name: "hash_mismatched_active_envelope_object_refs",
+                count: report.hash_mismatched_active_envelope_object_refs.len(),
+            },
+            DbCount {
+                name: "key_ref_mismatched_active_envelope_object_refs",
+                count: report.key_ref_mismatched_active_envelope_object_refs.len(),
+            },
+            DbCount {
+                name: "store_mismatched_active_envelope_object_refs",
+                count: report.store_mismatched_active_envelope_object_refs.len(),
             },
             DbCount {
                 name: "active_vector_entries",
@@ -74510,6 +74550,26 @@ mod tests {
         assert_eq!(value["db_submission_count"], serde_json::json!(1));
         assert_eq!(value["file_derived_count"], serde_json::json!(1));
         assert_eq!(value["db_derived_count"], serde_json::json!(1));
+        assert_eq!(
+            value["accepted_without_active_envelope_object_ref_count"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            value["unreadable_active_envelope_object_ref_count"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            value["hash_mismatched_active_envelope_object_ref_count"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            value["key_ref_mismatched_active_envelope_object_ref_count"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            value["store_mismatched_active_envelope_object_ref_count"],
+            serde_json::json!(0)
+        );
         assert_eq!(value["blocking_gaps"], serde_json::json!([]));
         assert_eq!(
             value["recorded_evidence"]["check_name"],
@@ -78141,6 +78201,9 @@ mod tests {
 
     #[tokio::test]
     async fn maintenance_reconciliation_reports_envelope_object_ref_store_mismatch() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
         let Some(backend) = postgres_backend_for_ingest_test().await else {
             return;
         };
@@ -78202,7 +78265,7 @@ mod tests {
             .expect("object ref alias is drifted in DB");
 
         let Json(response) = maintenance_handler(
-            State(state),
+            State(state.clone()),
             auth_headers("admin-token-a"),
             Json(TraceMaintenanceRequest {
                 purpose: Some("object_ref_store_mismatch_reconcile".to_string()),
@@ -78232,6 +78295,48 @@ mod tests {
                 .blocking_gaps
                 .iter()
                 .any(|gap| { gap == "store_mismatched_active_envelope_object_refs=1" })
+        );
+
+        let drill_response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/db-reconciliation-drill")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "purpose": "operator DB reconciliation drill after object-ref store mismatch",
+                            "record_evidence": false
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("DB reconciliation drill response");
+        assert_eq!(drill_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(drill_response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("DB reconciliation drill response parses");
+        assert_eq!(value["ready"], serde_json::json!(false));
+        assert_eq!(
+            value["store_mismatched_active_envelope_object_ref_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            value["unreadable_active_envelope_object_ref_count"],
+            serde_json::json!(0)
+        );
+        assert!(
+            value["blocking_gaps"]
+                .as_array()
+                .expect("blocking gaps are present")
+                .contains(&serde_json::json!(
+                    "store_mismatched_active_envelope_object_refs=1"
+                ))
         );
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
