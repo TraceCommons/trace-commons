@@ -1233,6 +1233,18 @@ pub enum TraceAuditSafeMetadata {
         near_transaction_hash_hash: Option<String>,
         last_error_hash: Option<String>,
     },
+    BenchmarkRegistryOutboxStatus {
+        benchmark_outbox_id: Uuid,
+        conversion_id: Uuid,
+        operation: TraceBenchmarkRegistryOutboxOperation,
+        registry_ref_hash: String,
+        artifact_payload_hash: String,
+        source_submission_ids_hash: String,
+        evaluator_ref_hash: Option<String>,
+        status: TraceBenchmarkRegistryOutboxStatus,
+        external_receipt_ref_hash: Option<String>,
+        last_error_hash: Option<String>,
+    },
     ProcessEvaluation {
         evaluator_version_hash: String,
         label_count: u32,
