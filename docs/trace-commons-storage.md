@@ -91,7 +91,7 @@ This repository owns the production-storage surface:
 Production still needs stronger guarantees before broad tenant rollout:
 
 - Relational metadata for broader workflow state, credit, audit, retention, and export manifests.
-- Encrypted object storage for redacted envelope bodies and large derived artifacts. The current service-owned local backend remains the lowest-risk migration step; enabled `remote_service` with the filesystem provider records a remote service-owned object-store alias in `trace_object_refs`, stores ciphertext under tenant/submission-hashed paths, verifies ciphertext hashes on read, and exercises the same object-primary guardrails. Cloud remote providers are still disabled until they can write/read ciphertext without exposing bucket credentials to contributors or reviewers.
+- Encrypted object storage for redacted envelope bodies and large derived artifacts. The current service-owned local backend remains the lowest-risk migration step; enabled `remote_service` with the filesystem provider records a remote service-owned object-store alias in `trace_object_refs`, stores ciphertext under tenant/submission-hashed paths, rejects mismatched encrypted object records before write, verifies ciphertext hashes on read, and exercises the same object-primary guardrails. Cloud remote providers are still disabled until they can write/read ciphertext without exposing bucket credentials to contributors or reviewers.
 - A vector store for approved redacted summaries and allowed redacted trace fields.
 - Tenant isolation derived from authenticated request identity, never from envelope fields.
 - Idempotent revocation and retention propagation across metadata, objects, vectors, worker queues, exports, and credit.

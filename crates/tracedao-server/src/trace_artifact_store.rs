@@ -380,6 +380,13 @@ impl RemoteTraceArtifactProvider for FileRemoteTraceArtifactProvider {
         artifact: EncryptedTraceArtifact,
     ) -> anyhow::Result<()> {
         validate_file_remote_object_ref(&object_ref)?;
+        verify_encrypted_artifact(
+            &artifact,
+            object_ref.tenant_storage_ref.as_str(),
+            &object_ref.artifact_kind,
+            object_ref.object_key.as_str(),
+            object_ref.ciphertext_sha256.as_str(),
+        )?;
         let record = FileRemoteTraceArtifactRecord {
             object_ref,
             artifact,
@@ -1687,6 +1694,45 @@ mod tests {
             .delete_scoped_artifact(&scope, &receipt.object_ref)
             .expect("remote artifact delete is idempotent");
         assert!(!deleted_again.deleted);
+    }
+
+    #[test]
+    fn file_remote_provider_rejects_mismatched_artifact_record_before_write() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let key = crate::secrets::keychain::generate_master_key_hex();
+        let config = TraceArtifactProviderConfig::service_owned_remote("trace-commons-prod")
+            .expect("remote provider config");
+        let provider = FileRemoteTraceArtifactProvider::new(temp.path());
+        let store = ServiceOwnedTraceArtifactStore::new(
+            config,
+            SecretsCrypto::new(SecretString::from(key)).expect("test crypto"),
+            provider.clone(),
+        );
+        let scope = TraceArtifactScope::new("tenant:sha256:alpha", "submission-alpha");
+        let payload = json!({"stored": "remote"});
+
+        let receipt = store
+            .put_scoped_json(
+                &scope,
+                TraceArtifactKind::ContributionEnvelope,
+                "submitted-envelope",
+                &payload,
+            )
+            .expect("remote artifact writes");
+        let mut tampered = store
+            .read_scoped_artifact(&scope, &receipt.object_ref)
+            .expect("remote artifact reads before tamper");
+        tampered.receipt.tenant_storage_ref = "tenant:sha256:beta".to_string();
+
+        let write_error = provider
+            .put_encrypted_artifact(receipt.object_ref.clone(), tampered)
+            .expect_err("provider write must reject artifact/object-ref mismatch");
+        assert!(write_error.to_string().contains("tenant mismatch"));
+
+        let round_trip: serde_json::Value = store
+            .read_scoped_json(&scope, &receipt.object_ref)
+            .expect("failed tamper write must not overwrite original artifact");
+        assert_eq!(round_trip, payload);
     }
 
     #[test]
