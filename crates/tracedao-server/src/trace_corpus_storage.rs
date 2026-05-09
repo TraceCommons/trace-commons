@@ -1521,6 +1521,7 @@ pub enum TraceRevocationPropagationTargetKind {
     BenchmarkArtifact,
     RankerArtifact,
     CreditSettlement,
+    WorkerQueue,
     PhysicalDeleteReceipt,
 }
 
@@ -1559,6 +1560,10 @@ pub enum TraceRevocationPropagationTarget {
         credit_account_ref: String,
         settlement_state_at_selection: TraceCreditSettlementState,
     },
+    WorkerQueue {
+        queue_surface: String,
+        queue_key_hash: String,
+    },
     PhysicalDeleteReceipt {
         object_ref_id: Option<Uuid>,
         object_store: String,
@@ -1582,6 +1587,7 @@ impl TraceRevocationPropagationTarget {
             }
             Self::RankerArtifact { .. } => TraceRevocationPropagationTargetKind::RankerArtifact,
             Self::CreditSettlement { .. } => TraceRevocationPropagationTargetKind::CreditSettlement,
+            Self::WorkerQueue { .. } => TraceRevocationPropagationTargetKind::WorkerQueue,
             Self::PhysicalDeleteReceipt { .. } => {
                 TraceRevocationPropagationTargetKind::PhysicalDeleteReceipt
             }
@@ -1598,6 +1604,7 @@ pub enum TraceRevocationPropagationAction {
     InvalidateBenchmarkArtifact,
     InvalidateRankerArtifact,
     ReverseCreditSettlement,
+    InvalidateWorkerQueue,
     DeleteObjectPayload,
     RecordPhysicalDeleteReceipt,
 }

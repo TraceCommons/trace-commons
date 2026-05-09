@@ -466,6 +466,7 @@ CREATE TABLE trace_revocation_propagation_items (
             'benchmark_artifact',
             'ranker_artifact',
             'credit_settlement',
+            'worker_queue',
             'physical_delete_receipt'
         )
     ),
@@ -478,6 +479,7 @@ CREATE TABLE trace_revocation_propagation_items (
             'invalidate_benchmark_artifact',
             'invalidate_ranker_artifact',
             'reverse_credit_settlement',
+            'invalidate_worker_queue',
             'delete_object_payload',
             'record_physical_delete_receipt'
         )
