@@ -1203,6 +1203,12 @@ the stale-run promotion blocker.
 
 `GET /v1/admin/ranking/credit-readiness-report` lists pending positive `ranking_utility` credit events that have not already settled and explains whether each can settle under the referenced active-model prediction. Blocked rows include machine-readable reasons such as missing prediction refs, missing or inactive models, missing/stale/non-promotable/under-diverse calibration, score mismatches, held credit accounts, low-confidence predictions, and uncleared active-model risk codes such as current evidence drift, plus the calibration run/report/joined-evidence hashes when available.
 
+Admin ranking model, evidence, worker-run, and report reads append the same
+DB-mirrored aggregate read-audit breadcrumbs as the credit control plane. The
+audit reason stores only the code-owned ranking surface name and bounded item
+count, so operators can reconcile privileged inspection without leaking trace
+bodies, raw lab references, external refs, or reviewer notes.
+
 Model-derived ranking credit also applies the latest calibration run's confidence threshold and active-model risk report to each active-model prediction at issuance, readiness, and settlement time. Low-confidence or uncleared-risk predictions remain visible in admin evidence and risk reports, but `/v1/workers/ranking/prediction-credit` rejects them and settlement excludes manually appended ranking utility events that reference them.
 
 Ranking calibration runs apply both caller-supplied thresholds and
