@@ -7565,14 +7565,16 @@ fn trace_content_read_audit_metadata_from_reason(
     reason: Option<&str>,
 ) -> Option<StorageTraceAuditSafeMetadata> {
     let surface = trace_audit_reason_value(reason, "surface")?.to_string();
-    let purpose_hash = trace_audit_reason_value(reason, "purpose_hash")
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            trace_audit_reason_value(reason, "purpose")
-                .map(str::trim)
-                .filter(|purpose| !purpose.is_empty())
-                .map(sha256_prefixed)
-        });
+    let purpose_hash = match trace_audit_reason_value(reason, "purpose_hash") {
+        Some(_) => Some(trace_audit_reason_canonical_sha256_value(
+            reason,
+            "purpose_hash",
+        )?),
+        None => trace_audit_reason_value(reason, "purpose")
+            .map(str::trim)
+            .filter(|purpose| !purpose.is_empty())
+            .map(sha256_prefixed),
+    };
     Some(StorageTraceAuditSafeMetadata::TraceContentRead {
         surface,
         purpose_hash,
@@ -7602,8 +7604,10 @@ fn tenant_policy_audit_metadata_from_reason(
         policy_version: trace_audit_reason_value(reason, "policy_version")?.to_string(),
         allowed_consent_scope_count: trace_audit_reason_u32(reason, "allowed_consent_scope_count")?,
         allowed_use_count: trace_audit_reason_u32(reason, "allowed_use_count")?,
-        policy_projection_hash: trace_audit_reason_value(reason, "policy_projection_hash")?
-            .to_string(),
+        policy_projection_hash: trace_audit_reason_canonical_sha256_value(
+            reason,
+            "policy_projection_hash",
+        )?,
     })
 }
 
@@ -7616,8 +7620,10 @@ fn tenant_access_grant_audit_metadata_from_reason(
         status: trace_audit_reason_enum::<StorageTraceTenantAccessGrantStatus>(reason, "status")?,
         allowed_consent_scope_count: trace_audit_reason_u32(reason, "allowed_consent_scope_count")?,
         allowed_use_count: trace_audit_reason_u32(reason, "allowed_use_count")?,
-        grant_projection_hash: trace_audit_reason_value(reason, "grant_projection_hash")?
-            .to_string(),
+        grant_projection_hash: trace_audit_reason_canonical_sha256_value(
+            reason,
+            "grant_projection_hash",
+        )?,
     })
 }
 
@@ -7648,7 +7654,7 @@ fn ranking_worker_run_recovery_audit_metadata_from_reason(
     let run_kind = trace_audit_reason_enum::<StorageTraceRankingWorkerRunKind>(reason, "run_kind")?;
     let recovered_status =
         trace_audit_reason_enum::<StorageTraceRankingWorkerRunStatus>(reason, "status")?;
-    let reason_hash = trace_audit_reason_value(reason, "reason_hash")?.to_string();
+    let reason_hash = trace_audit_reason_canonical_sha256_value(reason, "reason_hash")?;
     Some(StorageTraceAuditSafeMetadata::RankingWorkerRunRecovery {
         ranking_worker_run_id,
         run_kind,
@@ -7664,7 +7670,7 @@ fn export_job_recovery_audit_metadata_from_reason(
         .and_then(|value| Uuid::parse_str(value).ok())?;
     let recovered_status =
         trace_audit_reason_enum::<StorageTraceExportJobStatus>(reason, "status")?;
-    let reason_hash = trace_audit_reason_value(reason, "reason_hash")?.to_string();
+    let reason_hash = trace_audit_reason_canonical_sha256_value(reason, "reason_hash")?;
     Some(StorageTraceAuditSafeMetadata::ExportJobRecovery {
         export_job_id,
         recovered_status,
@@ -73741,12 +73747,13 @@ mod tests {
     #[test]
     fn audit_backfill_preserves_tenant_policy_update_metadata() {
         let auth = test_reviewer_auth("tenant-a");
+        let policy_projection_hash = sha256_prefixed("policy-projection");
         let event = TraceCommonsAuditEvent::tenant_policy_update(
             &auth,
             "trace-policy-v1",
             2,
             3,
-            "sha256:policy-projection",
+            &policy_projection_hash,
         );
 
         let (action, metadata) = audit_backfill_storage_projection(&event);
@@ -73758,7 +73765,7 @@ mod tests {
                 policy_version: "trace-policy-v1".to_string(),
                 allowed_consent_scope_count: 2,
                 allowed_use_count: 3,
-                policy_projection_hash: "sha256:policy-projection".to_string(),
+                policy_projection_hash,
             }
         );
     }
@@ -73766,7 +73773,7 @@ mod tests {
     #[test]
     fn audit_backfill_preserves_tenant_access_grant_update_metadata() {
         let grant_id = Uuid::from_u128(0x77);
-        let projection_hash = "sha256:grant-projection";
+        let projection_hash = sha256_prefixed("grant-projection");
         let event = TraceCommonsAuditEvent {
             event_id: Uuid::from_u128(0x88),
             tenant_id: "tenant-a".to_string(),
@@ -73797,9 +73804,124 @@ mod tests {
                 status: StorageTraceTenantAccessGrantStatus::Revoked,
                 allowed_consent_scope_count: 2,
                 allowed_use_count: 1,
-                grant_projection_hash: projection_hash.to_string(),
+                grant_projection_hash: projection_hash,
             }
         );
+    }
+
+    #[test]
+    fn audit_backfill_rejects_noncanonical_safe_metadata_hashes() {
+        let tenant_policy_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: Uuid::nil(),
+            kind: "tenant_policy_update".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Admin),
+            actor_principal_ref: Some(principal_storage_ref("admin-token-a")),
+            reason: Some(
+                "policy_version=trace-policy-v1;allowed_consent_scope_count=2;allowed_use_count=3;policy_projection_hash=sha256:not-canonical"
+                    .to_string(),
+            ),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+        let (action, metadata) = audit_backfill_storage_projection(&tenant_policy_event);
+        assert_eq!(action, StorageTraceAuditAction::PolicyUpdate);
+        assert_eq!(metadata, StorageTraceAuditSafeMetadata::Empty);
+
+        let grant_id = Uuid::from_u128(0x77);
+        let grant_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: Uuid::nil(),
+            kind: "tenant_access_grant_update".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Admin),
+            actor_principal_ref: Some(principal_storage_ref("admin-token-a")),
+            reason: Some(format!(
+                "action=revoked;grant_id={grant_id};role=reviewer;status=revoked;allowed_consent_scope_count=2;allowed_use_count=1;grant_projection_hash=sha256:not-canonical"
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+        let (action, metadata) = audit_backfill_storage_projection(&grant_event);
+        assert_eq!(action, StorageTraceAuditAction::PolicyUpdate);
+        assert_eq!(metadata, StorageTraceAuditSafeMetadata::Empty);
+
+        let content_read_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: Uuid::new_v4(),
+            kind: "trace_content_read".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Reviewer),
+            actor_principal_ref: Some(principal_storage_ref("review-token-a")),
+            reason: Some("surface=review_decision;purpose_hash=sha256:not-canonical".to_string()),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+        let (action, metadata) = audit_backfill_storage_projection(&content_read_event);
+        assert_eq!(action, StorageTraceAuditAction::Read);
+        assert_eq!(metadata, StorageTraceAuditSafeMetadata::Empty);
+
+        let export_job_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: Uuid::nil(),
+            kind: "export_job_recovery".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Admin),
+            actor_principal_ref: Some(principal_storage_ref("admin-token-a")),
+            reason: Some(format!(
+                "export_job_id={};status=failed;reason_hash=sha256:not-canonical",
+                Uuid::from_u128(0x101)
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+        let (action, metadata) = audit_backfill_storage_projection(&export_job_event);
+        assert_eq!(action, StorageTraceAuditAction::ExportJobRecovery);
+        assert_eq!(metadata, StorageTraceAuditSafeMetadata::Empty);
+
+        let ranking_worker_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: Uuid::nil(),
+            kind: "ranking_worker_run_recovery".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Admin),
+            actor_principal_ref: Some(principal_storage_ref("admin-token-a")),
+            reason: Some(format!(
+                "ranking_worker_run_id={};run_kind=prediction_credit;status=failed;reason_hash=sha256:not-canonical",
+                Uuid::from_u128(0x202)
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+        let (action, metadata) = audit_backfill_storage_projection(&ranking_worker_event);
+        assert_eq!(action, StorageTraceAuditAction::RankingWorkerRunRecovery);
+        assert_eq!(metadata, StorageTraceAuditSafeMetadata::Empty);
     }
 
     #[test]
