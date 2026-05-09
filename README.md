@@ -78,9 +78,10 @@ for both directions. The profile also requires
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY=true`, which makes
 live settlement require a fresh green rollout-smoke preflight while keeping
 dry-runs and drills available. When that principal allowlist is configured,
-unlisted admins can still inspect dry-runs but cannot record issuer approvals or
-finalize live settlement, and unlisted utility-worker principals cannot start
-live settlement or credit-cycle schedulers. Admin
+unlisted admins can still inspect dry-runs but cannot record issuer approvals,
+finalize live settlement, or manually mark NEAR credit outbox rows, and
+unlisted utility-worker principals cannot start live settlement, credit-cycle,
+or NEAR credit outbox schedulers or run live NEAR submit/confirm workers. Admin
 config status returns safe missing-control names for that central issuer profile
 so operators can see which gate still needs configuration without exposing
 adapter URLs, bearer tokens, approval evidence, or account refs. The
