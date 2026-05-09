@@ -9833,6 +9833,102 @@ fn trace_credit_hold_audit_metadata_from_reason(
     })
 }
 
+fn trace_near_credit_outbox_status_transaction_hash_hash(
+    near_transaction_hash: Option<&str>,
+) -> Option<String> {
+    near_transaction_hash
+        .map(str::trim)
+        .filter(|hash| !hash.is_empty())
+        .map(sha256_prefixed)
+}
+
+fn trace_near_credit_outbox_status_audit_reason_from_parts(
+    near_outbox_id: Uuid,
+    settlement_batch_id: Uuid,
+    credit_account_hash: &str,
+    status: StorageTraceCreditSettlementNearStatus,
+    near_transaction_hash_hash: Option<&str>,
+    last_error_hash: Option<&str>,
+) -> String {
+    let mut reason = format!(
+        "near_outbox_id={};settlement_batch_id={};credit_account_hash={};status={}",
+        near_outbox_id,
+        settlement_batch_id,
+        credit_account_hash,
+        serde_enum_tag(&status)
+    );
+    if let Some(near_transaction_hash_hash) = near_transaction_hash_hash {
+        reason.push_str(";near_transaction_hash_hash=");
+        reason.push_str(near_transaction_hash_hash);
+    }
+    if let Some(last_error_hash) = last_error_hash {
+        reason.push_str(";last_error_hash=");
+        reason.push_str(last_error_hash);
+    }
+    reason
+}
+
+fn trace_near_credit_outbox_status_audit_reason(item: &TraceNearCreditOutboxItem) -> String {
+    trace_near_credit_outbox_status_audit_reason_from_parts(
+        item.near_outbox_id,
+        item.settlement_batch_id,
+        &item.credit_account_hash,
+        item.status,
+        trace_near_credit_outbox_status_transaction_hash_hash(
+            item.near_transaction_hash.as_deref(),
+        )
+        .as_deref(),
+        item.last_error_hash.as_deref(),
+    )
+}
+
+fn trace_near_credit_outbox_status_audit_metadata(
+    item: &TraceNearCreditOutboxItem,
+) -> StorageTraceAuditSafeMetadata {
+    StorageTraceAuditSafeMetadata::NearCreditOutboxStatus {
+        near_outbox_id: item.near_outbox_id,
+        settlement_batch_id: item.settlement_batch_id,
+        credit_account_hash: item.credit_account_hash.clone(),
+        status: item.status,
+        near_transaction_hash_hash: trace_near_credit_outbox_status_transaction_hash_hash(
+            item.near_transaction_hash.as_deref(),
+        ),
+        last_error_hash: item.last_error_hash.clone(),
+    }
+}
+
+fn trace_near_credit_outbox_status_audit_metadata_from_reason(
+    reason: Option<&str>,
+) -> Option<StorageTraceAuditSafeMetadata> {
+    let near_outbox_id = trace_audit_reason_value(reason, "near_outbox_id")
+        .and_then(|id| Uuid::parse_str(id).ok())?;
+    let settlement_batch_id = trace_audit_reason_value(reason, "settlement_batch_id")
+        .and_then(|id| Uuid::parse_str(id).ok())?;
+    let credit_account_hash =
+        trace_audit_reason_canonical_sha256_value(reason, "credit_account_hash")?;
+    let status =
+        trace_audit_reason_enum::<StorageTraceCreditSettlementNearStatus>(reason, "status")?;
+    let near_transaction_hash_hash =
+        match trace_audit_reason_value(reason, "near_transaction_hash_hash") {
+            Some(hash) if is_canonical_sha256_prefixed_hash(hash) => Some(hash.to_string()),
+            Some(_) => return None,
+            None => None,
+        };
+    let last_error_hash = match trace_audit_reason_value(reason, "last_error_hash") {
+        Some(hash) if is_canonical_sha256_prefixed_hash(hash) => Some(hash.to_string()),
+        Some(_) => return None,
+        None => None,
+    };
+    Some(StorageTraceAuditSafeMetadata::NearCreditOutboxStatus {
+        near_outbox_id,
+        settlement_batch_id,
+        credit_account_hash,
+        status,
+        near_transaction_hash_hash,
+        last_error_hash,
+    })
+}
+
 fn trace_audit_reason_is_rollout_smoke_evidence(reason: Option<&str>) -> bool {
     trace_audit_reason_value(reason, "surface") == Some("rollout_smoke_evidence")
 }
@@ -15732,7 +15828,40 @@ async fn mark_near_credit_outbox_status_handler(
     .await
     .map_err(internal_error)?
     .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "NEAR credit outbox item not found"))?;
+    append_near_credit_outbox_status_audit(state.as_ref(), &tenant, &updated)
+        .await
+        .map_err(internal_error)?;
     Ok(Json(updated))
+}
+
+async fn append_near_credit_outbox_status_audit(
+    state: &AppState,
+    tenant: &TenantAuth,
+    item: &TraceNearCreditOutboxItem,
+) -> anyhow::Result<()> {
+    append_audit_event_with_db_mirror(
+        state,
+        tenant,
+        TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "near_credit_outbox_status".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(tenant.role),
+            actor_principal_ref: Some(tenant.principal_ref.clone()),
+            reason: Some(trace_near_credit_outbox_status_audit_reason(item)),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        },
+        StorageTraceAuditAction::CreditMutate,
+        trace_near_credit_outbox_status_audit_metadata(item),
+    )
+    .await
 }
 
 fn require_near_credit_manual_status_adapter_auth(
@@ -40128,6 +40257,27 @@ fn trace_commons_audit_event_from_storage(
             }),
             None,
         ),
+        StorageTraceAuditSafeMetadata::NearCreditOutboxStatus {
+            near_outbox_id,
+            settlement_batch_id,
+            credit_account_hash,
+            status,
+            near_transaction_hash_hash,
+            last_error_hash,
+        } => (
+            None,
+            event.reason.clone().or_else(|| {
+                Some(trace_near_credit_outbox_status_audit_reason_from_parts(
+                    *near_outbox_id,
+                    *settlement_batch_id,
+                    credit_account_hash,
+                    *status,
+                    near_transaction_hash_hash.as_deref(),
+                    last_error_hash.as_deref(),
+                ))
+            }),
+            None,
+        ),
         StorageTraceAuditSafeMetadata::ProcessEvaluation {
             evaluator_version_hash: _,
             label_count: _,
@@ -40404,6 +40554,14 @@ fn storage_audit_event_kind(
             StorageTraceCreditHoldAuditAction::Released => "credit_hold_release",
         }
         .to_string();
+    }
+    if let StorageTraceAuditAction::CreditMutate = action
+        && matches!(
+            metadata,
+            StorageTraceAuditSafeMetadata::NearCreditOutboxStatus { .. }
+        )
+    {
+        return "near_credit_outbox_status".to_string();
     }
     if let StorageTraceAuditAction::Read = action
         && matches!(
@@ -46810,6 +46968,34 @@ fn normalize_audit_event_metadata(
             ),
         };
     }
+    if action == StorageTraceAuditAction::CreditMutate && event.kind == "near_credit_outbox_status"
+    {
+        let expected = trace_near_credit_outbox_status_audit_metadata_from_reason(
+            event.reason.as_deref(),
+        )
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "NEAR credit outbox status audit event {} requires canonical hash reason fields",
+                event.event_id
+            )
+        })?;
+        return match metadata {
+            StorageTraceAuditSafeMetadata::Empty => Ok(expected),
+            StorageTraceAuditSafeMetadata::NearCreditOutboxStatus { .. }
+                if metadata == expected =>
+            {
+                Ok(metadata)
+            }
+            StorageTraceAuditSafeMetadata::NearCreditOutboxStatus { .. } => anyhow::bail!(
+                "NEAR credit outbox status audit event {} metadata does not match reason fields",
+                event.event_id
+            ),
+            _ => anyhow::bail!(
+                "NEAR credit outbox status audit event {} requires NEAR credit outbox status metadata",
+                event.event_id
+            ),
+        };
+    }
     if action == StorageTraceAuditAction::Revoke && event.kind == "revoked" {
         let expected = trace_revocation_audit_metadata_from_reason(event.reason.as_deref())
             .ok_or_else(|| {
@@ -48216,6 +48402,21 @@ fn storage_audit_canonical_reason(event: &StorageTraceAuditEventRecord) -> Optio
             *hold_reason,
             reason_hash,
         )),
+        StorageTraceAuditSafeMetadata::NearCreditOutboxStatus {
+            near_outbox_id,
+            settlement_batch_id,
+            credit_account_hash,
+            status,
+            near_transaction_hash_hash,
+            last_error_hash,
+        } => Some(trace_near_credit_outbox_status_audit_reason_from_parts(
+            *near_outbox_id,
+            *settlement_batch_id,
+            credit_account_hash,
+            *status,
+            near_transaction_hash_hash.as_deref(),
+            last_error_hash.as_deref(),
+        )),
         _ => None,
     }
 }
@@ -48850,7 +49051,8 @@ fn audit_backfill_storage_projection(
         "credit_mutate"
         | "credit_settlement_issuer_approval"
         | "credit_hold"
-        | "credit_hold_release" => StorageTraceAuditAction::CreditMutate,
+        | "credit_hold_release"
+        | "near_credit_outbox_status" => StorageTraceAuditAction::CreditMutate,
         "revoked" => StorageTraceAuditAction::Revoke,
         "dataset_export" | "ranker_training_candidates_export" | "ranker_training_pairs_export" => {
             StorageTraceAuditAction::Export
@@ -48907,6 +49109,10 @@ fn audit_backfill_storage_projection(
         }
         "credit_hold" | "credit_hold_release" => {
             trace_credit_hold_audit_metadata_from_reason(&event.kind, event.reason.as_deref())
+                .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
+        }
+        "near_credit_outbox_status" => {
+            trace_near_credit_outbox_status_audit_metadata_from_reason(event.reason.as_deref())
                 .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
         }
         "revoked" => trace_revocation_audit_metadata_from_reason(event.reason.as_deref())
@@ -66282,6 +66488,215 @@ mod tests {
                 .to_string()
                 .contains("frontier lab re-attested")
         );
+    }
+
+    #[test]
+    fn audit_mirror_normalization_derives_near_credit_outbox_status_metadata_from_reason() {
+        let near_outbox_id = Uuid::new_v4();
+        let settlement_batch_id = Uuid::new_v4();
+        let credit_account_hash = sha256_prefixed("principal:credit-account");
+        let last_error_hash = sha256_prefixed("adapter timeout while checking receipt");
+        let item = TraceNearCreditOutboxItem {
+            near_outbox_id,
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            settlement_batch_id,
+            credit_account_hash: credit_account_hash.clone(),
+            near_call: NearCreditReceiptCall::freeze_account(
+                "trace-credits.testnet",
+                credit_account_hash.clone(),
+                sha256_prefixed("hold reason"),
+            )
+            .expect("freeze call builds"),
+            status: StorageTraceCreditSettlementNearStatus::Failed,
+            created_at: Utc::now(),
+            submitted_at: Some(Utc::now()),
+            near_transaction_hash: Some(TEST_NEAR_TX_HASH_5.to_string()),
+            last_error_hash: Some(last_error_hash.clone()),
+            confirmed_at: None,
+        };
+        let audit_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: item.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "near_credit_outbox_status".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::UtilityWorker),
+            actor_principal_ref: Some(principal_storage_ref("utility-worker-token-a")),
+            reason: Some(trace_near_credit_outbox_status_audit_reason(&item)),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+
+        let metadata = normalize_audit_event_metadata(
+            &audit_event,
+            StorageTraceAuditAction::CreditMutate,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .expect("NEAR status metadata normalizes");
+        let metadata_json =
+            serde_json::to_value(&metadata).expect("NEAR status metadata serializes");
+        let near_outbox_id_text = near_outbox_id.to_string();
+        let settlement_batch_id_text = settlement_batch_id.to_string();
+        let near_transaction_hash_hash = sha256_prefixed(TEST_NEAR_TX_HASH_5);
+
+        assert_eq!(
+            metadata_json.get("kind").and_then(|value| value.as_str()),
+            Some("near_credit_outbox_status")
+        );
+        assert_eq!(
+            metadata_json
+                .get("near_outbox_id")
+                .and_then(|value| value.as_str()),
+            Some(near_outbox_id_text.as_str())
+        );
+        assert_eq!(
+            metadata_json
+                .get("settlement_batch_id")
+                .and_then(|value| value.as_str()),
+            Some(settlement_batch_id_text.as_str())
+        );
+        assert_eq!(
+            metadata_json
+                .get("credit_account_hash")
+                .and_then(|value| value.as_str()),
+            Some(credit_account_hash.as_str())
+        );
+        assert_eq!(
+            metadata_json.get("status").and_then(|value| value.as_str()),
+            Some("failed")
+        );
+        assert_eq!(
+            metadata_json
+                .get("near_transaction_hash_hash")
+                .and_then(|value| value.as_str()),
+            Some(near_transaction_hash_hash.as_str())
+        );
+        assert_eq!(
+            metadata_json
+                .get("last_error_hash")
+                .and_then(|value| value.as_str()),
+            Some(last_error_hash.as_str())
+        );
+        assert!(!metadata_json.to_string().contains(TEST_NEAR_TX_HASH_5));
+        assert!(
+            !metadata_json
+                .to_string()
+                .contains("adapter timeout while checking receipt")
+        );
+    }
+
+    #[test]
+    fn db_audit_projection_preserves_near_credit_outbox_status_hash_only_metadata() {
+        let near_outbox_id = Uuid::new_v4();
+        let settlement_batch_id = Uuid::new_v4();
+        let credit_account_hash = sha256_prefixed("principal:credit-account");
+        let item = TraceNearCreditOutboxItem {
+            near_outbox_id,
+            tenant_id: "tenant-a".to_string(),
+            tenant_storage_ref: tenant_storage_ref("tenant-a"),
+            settlement_batch_id,
+            credit_account_hash: credit_account_hash.clone(),
+            near_call: NearCreditReceiptCall::freeze_account(
+                "trace-credits.testnet",
+                credit_account_hash.clone(),
+                sha256_prefixed("hold reason"),
+            )
+            .expect("freeze call builds"),
+            status: StorageTraceCreditSettlementNearStatus::Submitted,
+            created_at: Utc::now(),
+            submitted_at: Some(Utc::now()),
+            near_transaction_hash: Some(TEST_NEAR_TX_HASH_4.to_string()),
+            last_error_hash: None,
+            confirmed_at: None,
+        };
+        let audit_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: item.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "near_credit_outbox_status".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::UtilityWorker),
+            actor_principal_ref: Some(principal_storage_ref("utility-worker-token-a")),
+            reason: Some(trace_near_credit_outbox_status_audit_reason(&item)),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+
+        let (action, metadata) = audit_backfill_storage_projection(&audit_event);
+        assert_eq!(action, StorageTraceAuditAction::CreditMutate);
+        let metadata_json =
+            serde_json::to_value(&metadata).expect("NEAR status metadata serializes");
+        assert_eq!(
+            metadata_json.get("kind").and_then(|value| value.as_str()),
+            Some("near_credit_outbox_status")
+        );
+        let near_outbox_id_text = near_outbox_id.to_string();
+        let settlement_batch_id_text = settlement_batch_id.to_string();
+        let near_transaction_hash_hash = sha256_prefixed(TEST_NEAR_TX_HASH_4);
+        assert_eq!(
+            metadata_json
+                .get("near_outbox_id")
+                .and_then(|value| value.as_str()),
+            Some(near_outbox_id_text.as_str())
+        );
+        assert_eq!(
+            metadata_json
+                .get("settlement_batch_id")
+                .and_then(|value| value.as_str()),
+            Some(settlement_batch_id_text.as_str())
+        );
+        assert_eq!(
+            metadata_json
+                .get("credit_account_hash")
+                .and_then(|value| value.as_str()),
+            Some(credit_account_hash.as_str())
+        );
+        assert_eq!(
+            metadata_json.get("status").and_then(|value| value.as_str()),
+            Some("submitted")
+        );
+        assert_eq!(
+            metadata_json
+                .get("near_transaction_hash_hash")
+                .and_then(|value| value.as_str()),
+            Some(near_transaction_hash_hash.as_str())
+        );
+        assert!(!metadata_json.to_string().contains(TEST_NEAR_TX_HASH_4));
+        assert!(!metadata_json.to_string().contains("utility-worker-token-a"));
+
+        let storage_event = StorageTraceAuditEventRecord {
+            audit_event_id: audit_event.event_id,
+            tenant_id: audit_event.tenant_id.clone(),
+            audit_sequence: 1,
+            actor_principal_ref: audit_event.actor_principal_ref.clone().unwrap(),
+            actor_role: "utility_worker".to_string(),
+            action,
+            reason: audit_event.reason.clone(),
+            request_id: None,
+            submission_id: None,
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: None,
+            metadata,
+            occurred_at: audit_event.created_at,
+        };
+        let projected_event = trace_commons_audit_event_from_storage("tenant-a", storage_event)
+            .expect("storage audit projects");
+
+        assert_eq!(projected_event.kind, "near_credit_outbox_status");
+        assert_eq!(projected_event.reason, audit_event.reason);
     }
 
     #[test]
@@ -84616,6 +85031,24 @@ mod tests {
             Some(TEST_NEAR_TX_HASH_4)
         );
         assert!(submitted.submitted_at.is_some());
+
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        let status_audit = audit_events
+            .iter()
+            .find(|event| event.kind == "near_credit_outbox_status")
+            .expect("manual NEAR outbox status audit exists");
+        let status_audit_reason = status_audit
+            .reason
+            .as_deref()
+            .expect("status audit reason is recorded");
+        assert!(status_audit_reason.contains(&outbox[0].near_outbox_id.to_string()));
+        assert!(status_audit_reason.contains("status=submitted"));
+        assert!(status_audit_reason.contains(&format!(
+            "near_transaction_hash_hash={}",
+            sha256_prefixed(TEST_NEAR_TX_HASH_4)
+        )));
+        assert!(!status_audit_reason.contains(TEST_NEAR_TX_HASH_4));
+        assert!(!status_audit_reason.contains("utility-worker-token-a"));
     }
 
     #[tokio::test]

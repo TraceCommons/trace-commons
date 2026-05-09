@@ -740,7 +740,10 @@ contract ids, adapter URLs, or raw failure text.
 The NEAR credit outbox submit/confirm workers emit the same safe shape in
 runtime logs: completion summaries include only tenant refs, purpose hashes, and
 counts, and per-row failures include only the outbox id plus a hash of the
-sanitized error. Benchmark registry outbox submit/confirm workers use the same
+sanitized error. Manual NEAR outbox status changes also append
+`near_credit_outbox_status` audit rows with typed hash-only metadata for the
+outbox id, settlement batch id, account hash, status, transaction-hash hash, and
+last-error hash. Benchmark registry outbox submit/confirm workers use the same
 pattern and also terminalize malformed submitted receipts per item before
 calling the external confirmer.
 
@@ -972,6 +975,11 @@ The service exposes:
 - `POST /v1/workers/near-credit-outbox/submit`
 - `POST /v1/workers/near-credit-outbox/confirm`
 - `POST /v1/workers/near-credit-outbox/mark-status`
+
+Manual NEAR outbox status changes append `near_credit_outbox_status` audit rows
+with typed hash-only metadata: outbox id, settlement batch id, account hash,
+status, transaction-hash hash, and last-error hash.
+
 - `GET|POST /v1/admin/ranking/model-versions`
 - `GET|POST /v1/admin/ranking/calibration-datasets`
 - `POST /v1/admin/ranking/model-promotions`
@@ -1592,6 +1600,7 @@ The current implementation is a usable MVP for local development and controlled 
 - Add append-only audit events for every trace read, write, review decision, credit mutation, revocation, export, retention purge, and worker-derived artifact.
 - Include tenant id, actor or job id, role, submission id, action, reason, request id, decision inputs, and output artifact ids.
 - Make audit logs tamper-evident and queryable by tenant/security reviewers without exposing raw trace content.
+- Mirror privileged credit-control metadata as typed hash-only audit records, including source-list issuer approvals, credit holds/releases, and manual NEAR outbox status changes.
 - Add sampled audit reconciliation jobs that compare object storage, metadata rows, vector ids, export manifests, credit ledger rows, and revocation tombstones.
 
 ### Retention and Deletion
