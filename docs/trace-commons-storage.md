@@ -610,7 +610,7 @@ maintenance, whose dedicated worker surface rejects ordinary reviewer tokens bef
 metadata for accepted submissions, running configured process-evaluator batches over
 derived summaries and hashes, when supplied with an external reference appending
 idempotent `training_utility` delayed credit for the evaluated accepted submission, and
-attaching idempotent hash-only system ranking labels for ranking-allowed traces. These
+attaching idempotent hash-only system ranking labels for ranking-allowed traces; its worker surfaces reject ordinary reviewer tokens before source lookup or trace-body reads. These
 worker roles are intentionally not treated as reviewers for generic trace listing, audit
 reads, policy administration, review decisions, or unrestricted credit mutation.
 
@@ -693,7 +693,7 @@ an optional `worker_intermediate` object ref, and expose only safe aggregate val
 tool-selection, argument-quality, ordering, verification, side-effect-safety ratings, and
 overall score. DB derived ids are versioned by evaluator version rather than overwritten, so
 rerunning a new rubric version preserves the previous process-evaluation row. Process-evaluation
-requests may also include a bounded utility credit delta plus external reference; the
+worker requests require admin or process-evaluation worker credentials and reject ordinary reviewer tokens before source lookup. Requests may also include a bounded utility credit delta plus external reference; the
 service appends `training_utility` delayed credit idempotently and reports appended/skipped
 counts without making the worker a generic credit mutator. Requests may also include a
 ranking-label projection; the service validates the target use before reading the trace body
