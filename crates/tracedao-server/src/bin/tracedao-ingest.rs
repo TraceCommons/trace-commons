@@ -317,6 +317,20 @@ const TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_DRY_RUN: &str =
     "TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_DRY_RUN";
 const TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_PURPOSE: &str =
     "TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_PURPOSE";
+const TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_ENABLED: &str =
+    "TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_ENABLED";
+const TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_TOKEN: &str =
+    "TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_TOKEN";
+const TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_INTERVAL_SECONDS";
+const TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_SUBMIT_LIMIT: &str =
+    "TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_SUBMIT_LIMIT";
+const TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_CONFIRM_LIMIT: &str =
+    "TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_CONFIRM_LIMIT";
+const TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_DRY_RUN: &str =
+    "TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_DRY_RUN";
+const TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_PURPOSE: &str =
+    "TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_PURPOSE";
 const TRACE_COMMONS_VECTOR_EMBEDDER_URL: &str = "TRACE_COMMONS_VECTOR_EMBEDDER_URL";
 const TRACE_COMMONS_VECTOR_EMBEDDER_BEARER_TOKEN: &str =
     "TRACE_COMMONS_VECTOR_EMBEDDER_BEARER_TOKEN";
@@ -413,6 +427,9 @@ const TRACE_EXPORT_JOB_RETRY_MAX_DELAY_SECONDS_LIMIT: i64 = 86_400;
 const TRACE_EXPORT_JOB_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 60;
 const TRACE_VECTOR_INDEX_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 60;
 const TRACE_VECTOR_INDEX_SCHEDULER_DEFAULT_PURPOSE: &str = "scheduled trace vector index";
+const TRACE_BENCHMARK_REGISTRY_SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 60;
+const TRACE_BENCHMARK_REGISTRY_SCHEDULER_DEFAULT_PURPOSE: &str =
+    "scheduled trace benchmark registry outbox";
 const TRACE_RANKING_DEFAULT_MIN_LABEL_COUNT: usize = 25;
 const TRACE_RANKING_DEFAULT_CONFIDENCE_THRESHOLD: f32 = 0.5;
 const TRACE_RANKING_DEFAULT_MAX_AVERAGE_ABSOLUTE_ERROR_MICROS: i64 = 1_000_000;
@@ -451,9 +468,18 @@ async fn main() -> anyhow::Result<()> {
         state.vector_index_scheduler.as_ref(),
     )
     .await?;
+    validate_trace_benchmark_registry_scheduler_config(
+        state.as_ref(),
+        state.benchmark_registry_scheduler.as_ref(),
+    )
+    .await?;
     spawn_managed_eddsa_keyset_refresh_task(&state);
     spawn_trace_export_job_scheduler_task(&state, state.export_job_scheduler.clone());
     spawn_trace_vector_index_scheduler_task(&state, state.vector_index_scheduler.clone());
+    spawn_trace_benchmark_registry_scheduler_task(
+        &state,
+        state.benchmark_registry_scheduler.clone(),
+    );
     let bind = std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
     let addr = bind
         .parse::<SocketAddr>()
@@ -532,6 +558,7 @@ struct AppState {
     require_external_vector_searcher: bool,
     export_job_scheduler: Option<TraceExportJobSchedulerConfig>,
     vector_index_scheduler: Option<TraceVectorIndexSchedulerConfig>,
+    benchmark_registry_scheduler: Option<TraceBenchmarkRegistrySchedulerConfig>,
     ranking_calibration_max_age: Option<Duration>,
     ranking_require_calibration_dataset_registry: bool,
     ranking_require_active_calibration_dataset: bool,
@@ -563,6 +590,12 @@ struct TraceExportJobSchedulerTickSummary {
     run_queued: TraceExportJobsRunQueuedResponse,
 }
 
+#[derive(Debug)]
+struct TraceBenchmarkRegistrySchedulerTickSummary {
+    submit: TraceBenchmarkRegistryOutboxSubmitWorkerResponse,
+    confirm: TraceBenchmarkRegistryOutboxConfirmWorkerResponse,
+}
+
 #[derive(Clone)]
 struct TraceAnalyticsNoiseConfig {
     key: SecretString,
@@ -580,6 +613,16 @@ struct TraceVectorIndexSchedulerConfig {
     worker_token: SecretString,
     interval: StdDuration,
     limit: usize,
+    dry_run: bool,
+    purpose: String,
+}
+
+#[derive(Clone)]
+struct TraceBenchmarkRegistrySchedulerConfig {
+    worker_token: SecretString,
+    interval: StdDuration,
+    submit_limit: u32,
+    confirm_limit: u32,
     dry_run: bool,
     purpose: String,
 }
@@ -1959,6 +2002,8 @@ impl AppState {
         }
         let export_job_scheduler = parse_trace_export_job_scheduler_config_from_env()?;
         let vector_index_scheduler = parse_trace_vector_index_scheduler_config_from_env()?;
+        let benchmark_registry_scheduler =
+            parse_trace_benchmark_registry_scheduler_config_from_env()?;
         let ranking_calibration_max_age = parse_ranking_calibration_max_age_from_env()?;
         let ranking_require_calibration_dataset_registry =
             env_truthy(TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY);
@@ -2157,6 +2202,7 @@ impl AppState {
             require_external_vector_searcher,
             export_job_scheduler,
             vector_index_scheduler,
+            benchmark_registry_scheduler,
             ranking_calibration_max_age,
             ranking_require_calibration_dataset_registry,
             ranking_require_active_calibration_dataset,
@@ -3163,6 +3209,50 @@ fn parse_trace_vector_index_scheduler_config_from_env()
         interval: StdDuration::from_secs(interval_seconds),
         limit,
         dry_run: env_truthy(TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_DRY_RUN),
+        purpose,
+    }))
+}
+
+fn parse_trace_benchmark_registry_scheduler_config_from_env()
+-> anyhow::Result<Option<TraceBenchmarkRegistrySchedulerConfig>> {
+    let enabled = env_truthy(TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_ENABLED);
+    let worker_token = optional_trimmed_env(TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_TOKEN)?;
+    if !enabled && worker_token.is_none() {
+        return Ok(None);
+    }
+    let Some(worker_token) = worker_token else {
+        anyhow::bail!(
+            "{TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_TOKEN}"
+        );
+    };
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_INTERVAL_SECONDS,
+        TRACE_BENCHMARK_REGISTRY_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
+        5,
+        86_400,
+    )?;
+    let submit_limit = parse_optional_scheduler_u32_env(
+        TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_SUBMIT_LIMIT,
+        TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_DEFAULT_LIMIT,
+        1,
+        TRACE_BENCHMARK_REGISTRY_OUTBOX_SUBMIT_MAX_LIMIT,
+    )?;
+    let confirm_limit = parse_optional_scheduler_u32_env(
+        TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_CONFIRM_LIMIT,
+        TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_DEFAULT_LIMIT,
+        1,
+        TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_MAX_LIMIT,
+    )?;
+    let purpose = optional_trimmed_env(TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_PURPOSE)?
+        .unwrap_or_else(|| TRACE_BENCHMARK_REGISTRY_SCHEDULER_DEFAULT_PURPOSE.to_string());
+    let purpose = validate_benchmark_registry_scheduler_purpose(&purpose)
+        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    Ok(Some(TraceBenchmarkRegistrySchedulerConfig {
+        worker_token: SecretString::from(worker_token),
+        interval: StdDuration::from_secs(interval_seconds),
+        submit_limit,
+        confirm_limit,
+        dry_run: env_truthy(TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_DRY_RUN),
         purpose,
     }))
 }
@@ -4972,6 +5062,51 @@ fn spawn_trace_vector_index_scheduler_task(
     });
 }
 
+fn spawn_trace_benchmark_registry_scheduler_task(
+    state: &Arc<AppState>,
+    config: Option<TraceBenchmarkRegistrySchedulerConfig>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    let state = state.clone();
+    tracing::info!(
+        interval_seconds = config.interval.as_secs(),
+        submit_limit = config.submit_limit,
+        confirm_limit = config.confirm_limit,
+        dry_run = config.dry_run,
+        "Trace Commons benchmark registry scheduler enabled"
+    );
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(config.interval).await;
+            match run_trace_benchmark_registry_scheduler_tick(state.clone(), &config).await {
+                Ok(summary) => {
+                    tracing::info!(
+                        submit_checked = summary.submit.checked,
+                        submitted = summary.submit.submitted,
+                        submit_failed = summary.submit.failed,
+                        confirm_checked = summary.confirm.checked,
+                        confirmed = summary.confirm.confirmed,
+                        confirm_failed = summary.confirm.failed,
+                        submit_pending = summary.submit.pending,
+                        confirm_pending = summary.confirm.pending,
+                        dry_run = summary.submit.dry_run || summary.confirm.dry_run,
+                        "Trace Commons benchmark registry scheduler tick completed"
+                    );
+                }
+                Err((status, Json(error))) => {
+                    tracing::warn!(
+                        status = %status,
+                        error_hash = %safe_display_error_hash(&error.error),
+                        "Trace Commons benchmark registry scheduler tick failed"
+                    );
+                }
+            }
+        }
+    });
+}
+
 async fn validate_trace_export_job_scheduler_config(
     state: &AppState,
     config: Option<&TraceExportJobSchedulerConfig>,
@@ -5018,6 +5153,42 @@ async fn validate_trace_vector_index_scheduler_config(
 fn trace_vector_index_scheduler_config_error(error: (StatusCode, Json<ApiError>)) -> anyhow::Error {
     anyhow::anyhow!(
         "invalid Trace Commons vector index scheduler configuration: status={}, error={}",
+        error.0,
+        error.1.0.error
+    )
+}
+
+async fn validate_trace_benchmark_registry_scheduler_config(
+    state: &AppState,
+    config: Option<&TraceBenchmarkRegistrySchedulerConfig>,
+) -> anyhow::Result<()> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
+        .map_err(trace_benchmark_registry_scheduler_config_error)?;
+    let auth = authenticate_with_tenant_access_grant(state, &headers)
+        .await
+        .map_err(trace_benchmark_registry_scheduler_config_error)?;
+    require_benchmarker(&auth).map_err(trace_benchmark_registry_scheduler_config_error)?;
+    if !config.dry_run {
+        anyhow::ensure!(
+            state.benchmark_registry_submitter.is_some(),
+            "invalid Trace Commons benchmark registry scheduler configuration: TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL is required"
+        );
+        anyhow::ensure!(
+            state.benchmark_registry_confirmer.is_some(),
+            "invalid Trace Commons benchmark registry scheduler configuration: TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_URL is required"
+        );
+    }
+    Ok(())
+}
+
+fn trace_benchmark_registry_scheduler_config_error(
+    error: (StatusCode, Json<ApiError>),
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "invalid Trace Commons benchmark registry scheduler configuration: status={}, error={}",
         error.0,
         error.1.0.error
     )
@@ -5918,6 +6089,11 @@ struct TraceCommonsConfigStatusResponse {
     vector_index_scheduler_interval_seconds: Option<u64>,
     vector_index_scheduler_limit: Option<usize>,
     vector_index_scheduler_dry_run: Option<bool>,
+    benchmark_registry_scheduler_configured: bool,
+    benchmark_registry_scheduler_interval_seconds: Option<u64>,
+    benchmark_registry_scheduler_submit_limit: Option<u32>,
+    benchmark_registry_scheduler_confirm_limit: Option<u32>,
+    benchmark_registry_scheduler_dry_run: Option<bool>,
     credit_cycle_worker_step_count: usize,
     credit_cycle_scheduler_default_limit: usize,
     credit_cycle_scheduler_max_limit: usize,
@@ -6165,6 +6341,23 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .map(|config| config.limit),
         vector_index_scheduler_dry_run: state
             .vector_index_scheduler
+            .as_ref()
+            .map(|config| config.dry_run),
+        benchmark_registry_scheduler_configured: state.benchmark_registry_scheduler.is_some(),
+        benchmark_registry_scheduler_interval_seconds: state
+            .benchmark_registry_scheduler
+            .as_ref()
+            .map(|config| config.interval.as_secs()),
+        benchmark_registry_scheduler_submit_limit: state
+            .benchmark_registry_scheduler
+            .as_ref()
+            .map(|config| config.submit_limit),
+        benchmark_registry_scheduler_confirm_limit: state
+            .benchmark_registry_scheduler
+            .as_ref()
+            .map(|config| config.confirm_limit),
+        benchmark_registry_scheduler_dry_run: state
+            .benchmark_registry_scheduler
             .as_ref()
             .map(|config| config.dry_run),
         credit_cycle_worker_step_count: TRACE_CREDIT_CYCLE_WORKER_STEP_COUNT,
@@ -18870,6 +19063,23 @@ fn validate_vector_index_scheduler_purpose(purpose: &str) -> ApiResult<String> {
     Ok(purpose)
 }
 
+fn validate_benchmark_registry_scheduler_purpose(purpose: &str) -> ApiResult<String> {
+    let purpose = purpose.trim().to_string();
+    if purpose.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "benchmark registry scheduler requires a non-empty purpose",
+        ));
+    }
+    if purpose.len() > 1024 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "benchmark registry scheduler purpose is too long",
+        ));
+    }
+    Ok(purpose)
+}
+
 async fn append_ranking_model_version_with_db_mirror(
     state: &AppState,
     tenant: &TenantAuth,
@@ -25253,6 +25463,34 @@ async fn run_trace_vector_index_scheduler_tick(
     )
     .await?;
     Ok(response)
+}
+
+async fn run_trace_benchmark_registry_scheduler_tick(
+    state: Arc<AppState>,
+    config: &TraceBenchmarkRegistrySchedulerConfig,
+) -> ApiResult<TraceBenchmarkRegistrySchedulerTickSummary> {
+    let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())?;
+    let Json(submit) = benchmark_registry_outbox_submit_worker_handler(
+        State(state.clone()),
+        headers.clone(),
+        Json(TraceBenchmarkRegistryOutboxSubmitWorkerRequest {
+            purpose: Some(config.purpose.clone()),
+            dry_run: config.dry_run,
+            limit: config.submit_limit,
+        }),
+    )
+    .await?;
+    let Json(confirm) = benchmark_registry_outbox_confirm_worker_handler(
+        State(state),
+        headers,
+        Json(TraceBenchmarkRegistryOutboxConfirmWorkerRequest {
+            purpose: Some(config.purpose.clone()),
+            dry_run: config.dry_run,
+            limit: config.confirm_limit,
+        }),
+    )
+    .await?;
+    Ok(TraceBenchmarkRegistrySchedulerTickSummary { submit, confirm })
 }
 
 async fn current_trace_export_job_or_claimed(
@@ -54516,6 +54754,7 @@ mod tests {
             require_external_vector_searcher: false,
             export_job_scheduler: None,
             vector_index_scheduler: None,
+            benchmark_registry_scheduler: None,
             ranking_calibration_max_age: None,
             ranking_require_calibration_dataset_registry: false,
             ranking_require_active_calibration_dataset: false,
@@ -58967,6 +59206,67 @@ mod tests {
         let object = value.as_object().expect("config status is object");
         assert!(!object.contains_key("vector_index_scheduler_token"));
         assert!(!object.contains_key("vector_index_scheduler_purpose"));
+    }
+
+    #[tokio::test]
+    async fn admin_config_status_reports_benchmark_registry_scheduler_without_token_or_purpose() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).benchmark_registry_scheduler =
+            Some(TraceBenchmarkRegistrySchedulerConfig {
+                worker_token: SecretString::from("config-status-benchmark-token".to_string()),
+                interval: StdDuration::from_secs(90),
+                submit_limit: 19,
+                confirm_limit: 23,
+                dry_run: true,
+                purpose: "do not expose raw benchmark scheduler note".to_string(),
+            });
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/config-status")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("config status response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body bytes");
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(
+            value["benchmark_registry_scheduler_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["benchmark_registry_scheduler_interval_seconds"],
+            serde_json::json!(90)
+        );
+        assert_eq!(
+            value["benchmark_registry_scheduler_submit_limit"],
+            serde_json::json!(19)
+        );
+        assert_eq!(
+            value["benchmark_registry_scheduler_confirm_limit"],
+            serde_json::json!(23)
+        );
+        assert_eq!(
+            value["benchmark_registry_scheduler_dry_run"],
+            serde_json::json!(true)
+        );
+        assert!(!body_text.contains("config-status-benchmark-token"));
+        assert!(!body_text.contains("do not expose raw benchmark scheduler note"));
+        let object = value.as_object().expect("config status is object");
+        assert!(!object.contains_key("benchmark_registry_scheduler_token"));
+        assert!(!object.contains_key("benchmark_registry_scheduler_purpose"));
     }
 
     #[tokio::test]
@@ -65014,6 +65314,66 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn benchmark_registry_scheduler_config_requires_benchmark_worker_auth_and_live_adapters()
+    {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let error = validate_trace_benchmark_registry_scheduler_config(
+            state.as_ref(),
+            Some(&TraceBenchmarkRegistrySchedulerConfig {
+                worker_token: SecretString::from("token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                submit_limit: 5,
+                confirm_limit: 5,
+                dry_run: false,
+                purpose: "scheduled benchmark registry outbox".to_string(),
+            }),
+        )
+        .await
+        .expect_err("contributor token must not start benchmark registry scheduler");
+
+        assert!(
+            error
+                .to_string()
+                .contains("reviewer, admin, or benchmark worker token required")
+        );
+
+        let missing_adapter = validate_trace_benchmark_registry_scheduler_config(
+            state.as_ref(),
+            Some(&TraceBenchmarkRegistrySchedulerConfig {
+                worker_token: SecretString::from("benchmark-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                submit_limit: 5,
+                confirm_limit: 5,
+                dry_run: false,
+                purpose: "scheduled benchmark registry outbox".to_string(),
+            }),
+        )
+        .await
+        .expect_err("live scheduler requires registry adapters");
+        assert!(
+            missing_adapter
+                .to_string()
+                .contains(TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL)
+        );
+
+        validate_trace_benchmark_registry_scheduler_config(
+            state.as_ref(),
+            Some(&TraceBenchmarkRegistrySchedulerConfig {
+                worker_token: SecretString::from("benchmark-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                submit_limit: 5,
+                confirm_limit: 5,
+                dry_run: true,
+                purpose: "scheduled benchmark registry outbox dry run".to_string(),
+            }),
+        )
+        .await
+        .expect("dry-run scheduler can start without live registry adapters");
+    }
+
     #[test]
     fn export_job_slice_keeps_safe_request_metadata_for_status_updates() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -69550,6 +69910,7 @@ mod tests {
             require_external_vector_searcher: false,
             export_job_scheduler: None,
             vector_index_scheduler: None,
+            benchmark_registry_scheduler: None,
             ranking_calibration_max_age: None,
             ranking_require_calibration_dataset_registry: false,
             ranking_require_active_calibration_dataset: false,
@@ -80520,6 +80881,73 @@ mod tests {
             StorageTraceBenchmarkRegistryOutboxStatus::Submitted
         );
         assert!(tenant_b_outbox[0].confirmed_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn benchmark_registry_scheduler_tick_submits_then_confirms_tenant_outbox() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let fake_submitter = FakeBenchmarkRegistrySubmitter::default();
+        let submit_calls = fake_submitter.calls.clone();
+        let fake_confirmer = FakeBenchmarkRegistryConfirmer::default();
+        let confirm_calls = fake_confirmer.calls.clone();
+        Arc::make_mut(&mut state).benchmark_registry_submitter = Some(Arc::new(fake_submitter));
+        Arc::make_mut(&mut state).benchmark_registry_confirmer = Some(Arc::new(fake_confirmer));
+
+        let benchmark_outbox_id = Uuid::new_v4();
+        upsert_benchmark_registry_outbox_item(
+            temp.path(),
+            "tenant-a",
+            &pending_benchmark_registry_outbox_item(benchmark_outbox_id),
+        )
+        .expect("benchmark registry outbox file writes");
+        let tenant_b_benchmark_outbox_id = Uuid::new_v4();
+        let mut tenant_b_item =
+            pending_benchmark_registry_outbox_item(tenant_b_benchmark_outbox_id);
+        tenant_b_item.tenant_id = "tenant-b".to_string();
+        tenant_b_item.tenant_storage_ref = tenant_storage_ref("tenant-b");
+        upsert_benchmark_registry_outbox_item(temp.path(), "tenant-b", &tenant_b_item)
+            .expect("tenant-b benchmark registry outbox file writes");
+
+        let summary = run_trace_benchmark_registry_scheduler_tick(
+            state,
+            &TraceBenchmarkRegistrySchedulerConfig {
+                worker_token: SecretString::from("benchmark-worker-token-a".to_string()),
+                interval: StdDuration::from_secs(60),
+                submit_limit: 10,
+                confirm_limit: 10,
+                dry_run: false,
+                purpose: "scheduled benchmark registry outbox".to_string(),
+            },
+        )
+        .await
+        .expect("benchmark registry scheduler tick runs through worker auth and handlers");
+
+        assert_eq!(summary.submit.checked, 1);
+        assert_eq!(summary.submit.submitted, 1);
+        assert_eq!(summary.confirm.checked, 1);
+        assert_eq!(summary.confirm.confirmed, 1);
+        assert_eq!(submit_calls.lock().expect("submit calls lock").len(), 1);
+        assert_eq!(confirm_calls.lock().expect("confirm calls lock").len(), 1);
+
+        let outbox = read_all_benchmark_registry_outbox_items(temp.path(), "tenant-a")
+            .expect("benchmark registry outbox reads");
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(
+            outbox[0].status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Confirmed
+        );
+        assert!(outbox[0].submitted_at.is_some());
+        assert!(outbox[0].confirmed_at.is_some());
+
+        let tenant_b_outbox = read_all_benchmark_registry_outbox_items(temp.path(), "tenant-b")
+            .expect("tenant-b benchmark registry outbox reads");
+        assert_eq!(tenant_b_outbox.len(), 1);
+        assert_eq!(
+            tenant_b_outbox[0].status,
+            StorageTraceBenchmarkRegistryOutboxStatus::Pending
+        );
+        assert!(tenant_b_outbox[0].external_receipt_ref.is_none());
     }
 
     #[tokio::test]
