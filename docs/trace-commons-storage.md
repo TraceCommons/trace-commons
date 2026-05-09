@@ -129,6 +129,8 @@ The dedicated `POST /v1/workers/vector-index` route now runs the same vector met
 
 Review-lease audit backfill preserves both the typed safe metadata and the semantic `Review` audit action, so DB audit projection round-trips file-backed `review_lease` rows instead of collapsing them into generic read events.
 
+Benchmark lifecycle audit projection preserves `benchmark_lifecycle_update` as its own audit kind and keeps the original registry/evaluation status reason while still using typed benchmark artifact export metadata for counts and source-list hashes.
+
 Submitted audit-event backfill enriches typed `Submission` metadata from the matching file submission record when available, preserving the stored status and privacy risk instead of falling back to `unknown`. Reconciliation also reports `db_audit_submission_metadata_mismatches` when submitted-audit metadata carries a stale privacy-risk projection for the DB submission row, and treats it as a promotion blocker.
 
 Export-job control rows preserve `trace_export_job_request.v1` metadata across

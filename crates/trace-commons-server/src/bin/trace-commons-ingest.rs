@@ -35855,7 +35855,7 @@ async fn persist_benchmark_lifecycle_artifact(
         StorageTraceAuditAction::BenchmarkConvert,
         StorageTraceAuditSafeMetadata::Export {
             artifact_kind: StorageTraceObjectArtifactKind::BenchmarkArtifact,
-            purpose_code: Some(artifact.purpose.clone()),
+            purpose_code: Some("benchmark_lifecycle_update".to_string()),
             item_count: artifact.item_count.min(u32::MAX as usize) as u32,
         },
     )
@@ -39700,7 +39700,7 @@ fn trace_commons_audit_event_from_storage(
             item_count,
         } => (
             None,
-            purpose_code.clone().or_else(|| event.reason.clone()),
+            event.reason.clone().or_else(|| purpose_code.clone()),
             Some(*item_count as usize),
         ),
         StorageTraceAuditSafeMetadata::Maintenance {
@@ -39970,6 +39970,15 @@ fn storage_audit_event_kind(
             purpose_code.as_str(),
             "ranker_training_candidates_export" | "ranker_training_pairs_export"
         )
+    {
+        return purpose_code.clone();
+    }
+    if let StorageTraceAuditAction::BenchmarkConvert = action
+        && let StorageTraceAuditSafeMetadata::Export {
+            purpose_code: Some(purpose_code),
+            ..
+        } = metadata
+        && purpose_code == "benchmark_lifecycle_update"
     {
         return purpose_code.clone();
     }
@@ -65118,6 +65127,110 @@ mod tests {
         assert_eq!(projected_event.kind, "review_lease");
         assert_eq!(projected_event.status, Some(TraceCorpusStatus::Quarantined));
         assert_eq!(projected_event.reason, audit_event.reason);
+    }
+
+    #[test]
+    fn storage_audit_projection_preserves_benchmark_conversion_kind() {
+        let conversion_id = Uuid::new_v4();
+        let source_list_hash = sha256_prefixed("benchmark conversion source list");
+        let storage_event = StorageTraceAuditEventRecord {
+            audit_event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            audit_sequence: 1,
+            actor_principal_ref: principal_storage_ref("review-token-a"),
+            actor_role: "reviewer".to_string(),
+            action: StorageTraceAuditAction::BenchmarkConvert,
+            reason: Some("purpose=registry_evaluator_contract".to_string()),
+            request_id: None,
+            submission_id: None,
+            object_ref_id: None,
+            export_manifest_id: Some(conversion_id),
+            decision_inputs_hash: Some(source_list_hash.clone()),
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: None,
+            metadata: StorageTraceAuditSafeMetadata::Export {
+                artifact_kind: StorageTraceObjectArtifactKind::BenchmarkArtifact,
+                purpose_code: Some("registry_evaluator_contract".to_string()),
+                item_count: 2,
+            },
+            occurred_at: Utc::now(),
+        };
+
+        let projected_event = trace_commons_audit_event_from_storage("tenant-a", storage_event)
+            .expect("storage audit projects");
+
+        assert_eq!(projected_event.kind, "benchmark_conversion");
+        assert_eq!(
+            projected_event.reason.as_deref(),
+            Some("purpose=registry_evaluator_contract")
+        );
+        assert_eq!(projected_event.export_id, Some(conversion_id));
+        assert_eq!(projected_event.export_count, Some(2));
+        assert_eq!(projected_event.decision_inputs_hash, Some(source_list_hash));
+    }
+
+    #[test]
+    fn audit_backfill_preserves_benchmark_lifecycle_update_projection() {
+        let conversion_id = Uuid::new_v4();
+        let source_list_hash = sha256_prefixed("benchmark lifecycle source list");
+        let audit_event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".to_string(),
+            submission_id: Uuid::nil(),
+            kind: "benchmark_lifecycle_update".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::BenchmarkWorker),
+            actor_principal_ref: Some(principal_storage_ref("benchmark-worker-token-a")),
+            reason: Some("registry_status=published;evaluation_status=passed".to_string()),
+            export_count: Some(3),
+            export_id: Some(conversion_id),
+            decision_inputs_hash: Some(source_list_hash),
+            previous_event_hash: None,
+            event_hash: None,
+        };
+
+        let (action, metadata) = audit_backfill_storage_projection(&audit_event);
+
+        assert_eq!(action, StorageTraceAuditAction::BenchmarkConvert);
+        assert_eq!(
+            metadata,
+            StorageTraceAuditSafeMetadata::Export {
+                artifact_kind: StorageTraceObjectArtifactKind::BenchmarkArtifact,
+                purpose_code: Some("benchmark_lifecycle_update".to_string()),
+                item_count: 3,
+            }
+        );
+        let storage_event = StorageTraceAuditEventRecord {
+            audit_event_id: audit_event.event_id,
+            tenant_id: audit_event.tenant_id.clone(),
+            audit_sequence: 1,
+            actor_principal_ref: audit_event.actor_principal_ref.clone().unwrap(),
+            actor_role: "benchmark_worker".to_string(),
+            action,
+            reason: audit_event.reason.clone(),
+            request_id: None,
+            submission_id: None,
+            object_ref_id: None,
+            export_manifest_id: audit_event.export_id,
+            decision_inputs_hash: audit_event.decision_inputs_hash.clone(),
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: None,
+            metadata,
+            occurred_at: audit_event.created_at,
+        };
+        let projected_event = trace_commons_audit_event_from_storage("tenant-a", storage_event)
+            .expect("storage audit projects");
+        assert_eq!(projected_event.kind, "benchmark_lifecycle_update");
+        assert_eq!(projected_event.reason, audit_event.reason);
+        assert_eq!(projected_event.export_id, Some(conversion_id));
+        assert_eq!(projected_event.export_count, Some(3));
+        assert_eq!(
+            projected_event.decision_inputs_hash,
+            audit_event.decision_inputs_hash
+        );
     }
 
     #[test]
