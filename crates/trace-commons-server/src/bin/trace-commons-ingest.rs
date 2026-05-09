@@ -33223,9 +33223,7 @@ fn dedupe_ranker_training_candidates_by_summary_hash(
 
 fn trace_candidate_summary_dedupe_key(canonical_summary_hash: &str) -> Option<String> {
     let canonical_summary_hash = canonical_summary_hash.trim();
-    if canonical_summary_hash.starts_with("sha256:")
-        && canonical_summary_hash.len() == "sha256:".len() + 64
-    {
+    if is_canonical_sha256_prefixed_hash(canonical_summary_hash) {
         Some(canonical_summary_hash.to_string())
     } else {
         None
@@ -48110,7 +48108,7 @@ fn benchmark_evaluation_worker_decision_from_external_response(
 }
 
 fn benchmark_candidate_passes_structural_evaluation(candidate: &TraceBenchmarkCandidate) -> bool {
-    candidate.canonical_summary_hash.starts_with("sha256:")
+    is_canonical_sha256_prefixed_hash(&candidate.canonical_summary_hash)
         && !candidate.canonical_summary.trim().is_empty()
         && candidate.event_count > 0
         && !candidate.task_success.trim().is_empty()
@@ -53844,6 +53842,47 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![first_trace.to_string(), second_trace.to_string()]
         );
+    }
+
+    #[test]
+    fn summary_dedupe_key_requires_canonical_sha256_digest() {
+        let canonical_hash = sha256_prefixed("summary-dedupe-key");
+        assert_eq!(
+            trace_candidate_summary_dedupe_key(&canonical_hash),
+            Some(canonical_hash)
+        );
+        assert!(trace_candidate_summary_dedupe_key("sha256:target").is_none());
+        assert!(
+            trace_candidate_summary_dedupe_key(&format!("sha256:{}", "g".repeat(64))).is_none()
+        );
+    }
+
+    #[test]
+    fn benchmark_candidate_structural_gate_requires_canonical_summary_hash() {
+        let mut candidate = TraceBenchmarkCandidate {
+            submission_id: Uuid::from_u128(1),
+            trace_id: Uuid::from_u128(2),
+            auth_principal_ref: principal_storage_ref("token-a"),
+            derived_id: Uuid::from_u128(3),
+            canonical_summary_hash: sha256_prefixed("benchmark-summary"),
+            canonical_summary: "benchmark summary".to_string(),
+            summary_model: "summary-model-v1".to_string(),
+            task_success: "success".to_string(),
+            event_count: 1,
+            tool_sequence: Vec::new(),
+            tool_categories: Vec::new(),
+            coverage_tags: Vec::new(),
+            novelty_score: 0.8,
+            duplicate_score: 0.1,
+            submission_score: 0.9,
+            consent_scopes: vec![ConsentScope::BenchmarkOnly],
+        };
+        assert!(benchmark_candidate_passes_structural_evaluation(&candidate));
+
+        candidate.canonical_summary_hash = format!("sha256:{}", "g".repeat(64));
+        assert!(!benchmark_candidate_passes_structural_evaluation(
+            &candidate
+        ));
     }
 
     #[test]
