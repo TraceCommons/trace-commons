@@ -72,7 +72,10 @@ are configured, managed EdDSA signed-token enforcement plus tenant access-grant
 enforcement are enabled for exact issuer principals, fresh central source-list
 approvals are required, a single NEAR credit contract is pinned and required,
 NEAR submit/confirm adapters are configured, and adapter bearer auth is required
-for both directions. Admin
+for both directions. The profile also requires
+`TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY=true`, which makes
+live settlement require a fresh green rollout-smoke preflight while keeping
+dry-runs and drills available. Admin
 config status returns safe missing-control names for that central issuer profile
 so operators can see which gate still needs configuration without exposing
 adapter URLs, bearer tokens, approval evidence, or account refs. The
@@ -80,13 +83,15 @@ credit-settlement drill returns the same safe missing-control names, and
 operational summary/metrics expose the missing-control count plus managed EdDSA
 and tenant-grant enforcement booleans for dashboards. Live settlement also
 re-checks the complete profile before writing settlement batches or NEAR outbox
-rows; dry-runs remain available for diagnosis.
+rows, then checks rollout-smoke readiness before any live settlement repair or
+write path; dry-runs remain available for diagnosis.
 The worker `POST /v1/workers/credit-cycle/run` route can run the production
 credit path in bounded steps for a single model/version:
 calibration, model promotion, prediction credit, settlement, then a NEAR outbox
 dry-run, explicit submit, or explicit confirmation poll. Live credit-cycle runs
 also fail before claiming work when the central issuer profile is required but
-incomplete, and scheduler preflight reports the same blocker as a skip reason.
+incomplete or rollout-smoke readiness is required but not green; scheduler
+preflight reports the same blockers as safe skip reasons.
 Settlement retries repair missing NEAR outbox rows
 from finalized batches, and revocation propagation can append deterministic
 negative ledger rows plus `reverse_credit_receipt` NEAR outbox calls for settled

@@ -577,12 +577,16 @@ can append `credit_settlement` rollout-smoke evidence directly. When
 reports `credit_settlement_central_issuer_profile_incomplete` until the same
 central issuance controls required at startup are configured, including managed
 EdDSA signed-token enforcement and tenant access-grant enforcement for exact
-issuer principals. Operational summary and metrics expose the same central
+issuer principals plus
+`TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY=true`.
+Operational summary and metrics expose the same central
 issuer profile as aggregate safe signals: required, ready,
 missing-control-count, managed-EdDSA enforcement, and tenant-grant enforcement.
 Live settlement re-checks the profile before writing settlement batches or NEAR
-outbox rows, while dry-run settlement and the drill stay available for
-diagnostics.
+outbox rows. When rollout-smoke readiness is required, live settlement then
+requires `rollout_smoke.ready: true` and rejects with safe status/count fields
+before any live repair or write path, while dry-run settlement and the drill
+stay available for diagnostics.
 Final settlement requests can include `issuer_approval_evidence_hash` to bind
 the batch to a central operator approval artifact. Set
 `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true` to reject live
@@ -767,6 +771,13 @@ the scheduler preflight returns
 `credit_settlement_central_issuer_profile_incomplete` as a safe skip reason
 instead of starting calibration, promotion, prediction-credit, or settlement
 side effects.
+Set `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY=true` before
+enabling live centralized issuance. It is part of the central issuer profile,
+and live settlement rejects until `GET /v1/admin/rollout-smoke/preflight` would
+report `rollout_smoke.ready: true`; dry-runs and drills remain usable for
+collecting the missing rehearsal evidence. The credit-cycle scheduler uses
+`credit_settlement_rollout_smoke_not_ready` as the corresponding safe skip
+reason before claiming work.
 Admins can inspect `GET /v1/admin/credit-risk-summary` before issuing credit to
 see tenant-scoped pending, held, and over-cap totals grouped by deterministic
 credit-account hash. The response is bounded by `limit` (default 100, max 500)
@@ -1759,7 +1770,9 @@ per-account settlement cap, an allowed settlement policy-version list, managed
 EdDSA signed-token enforcement plus tenant access-grant enforcement for exact
 issuer principals, required fresh source-list issuer approval, a pinned required
 NEAR credit contract, configured NEAR
-submit/confirm adapters, and bearer auth on both adapter directions before the
+submit/confirm adapters, bearer auth on both adapter directions, and the
+rollout-smoke live-settlement gate
+`TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY=true` before the
 service is considered ready for live non-transferable credit issuance.
 
 For unattended cron-style operation, utility workers can call
@@ -1801,6 +1814,9 @@ raw reason, and NEAR contract id. If central issuer approval is required, keep
 the scheduler in preflight/dry-run mode: source-list approvals are intentionally
 bound to a canonical dry-run source list, so live finalization should happen
 through the settlement route after approval is recorded.
+If rollout-smoke readiness is required, live scheduler runs also skip candidates
+with `credit_settlement_rollout_smoke_not_ready` until every required smoke
+check has fresh passing hash-only evidence.
 
 Trusted offline utility workers use a narrower bulk route for accepted traces:
 
