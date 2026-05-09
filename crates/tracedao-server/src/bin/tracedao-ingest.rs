@@ -34282,6 +34282,18 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             "restore_after_delete_supported",
             usize::from(response.object_store.restore_after_delete_supported),
         ),
+        (
+            "remote_object_deleter_required",
+            usize::from(response.object_store.remote_object_deleter_required),
+        ),
+        (
+            "remote_object_deleter_configured",
+            usize::from(response.object_store.remote_object_deleter_configured),
+        ),
+        (
+            "remote_object_deleter_ready",
+            usize::from(response.object_store.remote_object_deleter_ready),
+        ),
     ] {
         push_prometheus_gauge(
             &mut body,
@@ -56853,7 +56865,7 @@ impl TraceOperationalSummaryResponse {
     }
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Serialize)]
 struct TraceOperationalObjectStoreSummary {
     configured: bool,
     object_store_name: Option<String>,
@@ -56863,16 +56875,42 @@ struct TraceOperationalObjectStoreSummary {
     versioning_required: bool,
     object_versioning_supported: bool,
     restore_after_delete_supported: bool,
+    remote_object_deleter_required: bool,
+    remote_object_deleter_configured: bool,
+    remote_object_deleter_ready: bool,
+}
+
+impl Default for TraceOperationalObjectStoreSummary {
+    fn default() -> Self {
+        Self {
+            configured: false,
+            object_store_name: None,
+            io_enabled: false,
+            object_primary_eligible: false,
+            plaintext_compatibility_allowed: false,
+            versioning_required: false,
+            object_versioning_supported: false,
+            restore_after_delete_supported: false,
+            remote_object_deleter_required: false,
+            remote_object_deleter_configured: false,
+            remote_object_deleter_ready: true,
+        }
+    }
 }
 
 impl TraceOperationalObjectStoreSummary {
     fn from_state(state: &AppState) -> Self {
+        let remote_object_deleter_configured = state.remote_object_deleter.is_some();
         let Some(store) = state.artifact_store.as_ref() else {
             return Self {
                 versioning_required: state.require_object_store_versioning,
+                remote_object_deleter_configured,
+                remote_object_deleter_ready: true,
                 ..Self::default()
             };
         };
+        let remote_object_deleter_required =
+            store.object_store_name() == TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE;
         Self {
             configured: true,
             object_store_name: Some(store.object_store_name().to_string()),
@@ -56882,6 +56920,10 @@ impl TraceOperationalObjectStoreSummary {
             versioning_required: state.require_object_store_versioning,
             object_versioning_supported: store.object_versioning_supported(),
             restore_after_delete_supported: store.restore_after_delete_supported(),
+            remote_object_deleter_required,
+            remote_object_deleter_configured,
+            remote_object_deleter_ready: !remote_object_deleter_required
+                || remote_object_deleter_configured,
         }
     }
 }
@@ -57415,6 +57457,9 @@ struct TraceOperationalPromotionGateSummary {
     object_store_versioning_required: bool,
     object_store_versioning_supported: bool,
     object_store_restore_after_delete_supported: bool,
+    remote_object_deleter_required: bool,
+    remote_object_deleter_configured: bool,
+    remote_object_deleter_missing: bool,
 }
 
 struct TraceOperationalPromotionGateInputs<'a> {
@@ -57498,6 +57543,12 @@ impl TraceOperationalPromotionGateSummary {
             .artifact_store
             .as_ref()
             .is_some_and(|store| store.restore_after_delete_supported());
+        let remote_object_deleter_required = state.artifact_store.as_ref().is_some_and(|store| {
+            store.object_store_name() == TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE
+        });
+        let remote_object_deleter_configured = state.remote_object_deleter.is_some();
+        let remote_object_deleter_missing =
+            remote_object_deleter_required && !remote_object_deleter_configured;
         let object_primary_enabled = state.object_primary_submit_review
             || state.object_primary_replay_export
             || state.object_primary_derived_exports;
@@ -57658,6 +57709,9 @@ impl TraceOperationalPromotionGateSummary {
         }
         if object_store_versioning_required && !object_store_restore_after_delete_supported {
             blocking_gates.push("object_store_restore_required_unsupported".to_string());
+        }
+        if remote_object_deleter_missing {
+            blocking_gates.push("disabled_remote_object_deleter_missing".to_string());
         }
         if db_summary.db_available {
             match trace_corpus_rls_ready {
@@ -57902,6 +57956,9 @@ impl TraceOperationalPromotionGateSummary {
             object_store_versioning_required,
             object_store_versioning_supported,
             object_store_restore_after_delete_supported,
+            remote_object_deleter_required,
+            remote_object_deleter_configured,
+            remote_object_deleter_missing,
         }
     }
 }
@@ -75208,12 +75265,103 @@ mod tests {
             value["object_store"]["plaintext_compatibility_allowed"],
             serde_json::json!(false)
         );
+        assert_eq!(
+            value["object_store"]["remote_object_deleter_required"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["object_store"]["remote_object_deleter_configured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            value["object_store"]["remote_object_deleter_ready"],
+            serde_json::json!(false)
+        );
+        assert!(
+            value["promotion_gates"]["blocking_gates"]
+                .as_array()
+                .expect("blocking gates are an array")
+                .contains(&serde_json::json!("disabled_remote_object_deleter_missing"))
+        );
 
         let body_text = std::str::from_utf8(&body).expect("body is utf8");
         assert!(!body_text.contains("admin-token-a"));
         assert!(!body_text.contains("trace-commons-prod-container-secret"));
         assert!(!body_text.contains("azure-kms-key-ref-secret"));
         assert!(!body_text.contains("azure-managed-identity-secret"));
+    }
+
+    #[tokio::test]
+    async fn operational_summary_reports_disabled_remote_deleter_readiness_without_secrets() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("aws_s3"),
+            Some("trace-commons-prod-bucket-secret"),
+            Some("arn:aws:kms:us-west-2:123456789012:key/trace-commons-secret"),
+            Some("aws-iam-role:trace-commons-writer-secret"),
+        )
+        .expect("disabled remote config parses");
+        let artifact_store = ConfiguredTraceArtifactStore::remote_disabled(remote_config);
+        let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            None,
+            Some(artifact_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).remote_object_deleter =
+            Some(Arc::new(FakeRemoteObjectDeleter::default()));
+
+        let Json(operational) =
+            operational_summary_handler(State(state), auth_headers("admin-token-a"))
+                .await
+                .expect("admin can inspect operational summary");
+        let value = serde_json::to_value(&operational).expect("operational summary serializes");
+        assert_eq!(
+            value["object_store"]["remote_object_deleter_required"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["object_store"]["remote_object_deleter_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value["object_store"]["remote_object_deleter_ready"],
+            serde_json::json!(true)
+        );
+        assert!(
+            !operational
+                .promotion_gates
+                .blocking_gates
+                .contains(&"disabled_remote_object_deleter_missing".to_string())
+        );
+        let (metrics, _) = trace_operational_metrics_body(&operational);
+        let tenant_ref = tenant_storage_ref("tenant-a");
+        assert!(metrics.contains(&format!(
+            "tracedao_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"remote_object_deleter_required\"}} 1"
+        )));
+        assert!(metrics.contains(&format!(
+            "tracedao_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"remote_object_deleter_configured\"}} 1"
+        )));
+        assert!(metrics.contains(&format!(
+            "tracedao_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"remote_object_deleter_ready\"}} 1"
+        )));
+        for secret in [
+            "trace-commons-prod-bucket-secret",
+            "trace-commons-secret",
+            "trace-commons-writer-secret",
+            "admin-token-a",
+        ] {
+            assert!(!value.to_string().contains(secret));
+            assert!(!metrics.contains(secret));
+        }
     }
 
     #[tokio::test]
@@ -111743,6 +111891,9 @@ mod tests {
         assert!(body_text.contains(&format!(
             "tracedao_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"object_primary_object_store_io_disabled\"}} 1"
         )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_promotion_gate{{tenant_storage_ref=\"{tenant_ref}\",severity=\"blocking\",gate=\"disabled_remote_object_deleter_missing\"}} 1"
+        )));
         assert!(!body_text.contains("gate=\"object_primary_object_store_missing\""));
         assert!(!body_text.contains("gate=\"object_primary_object_store_not_eligible\""));
         assert!(body_text.contains(&format!(
@@ -111753,6 +111904,15 @@ mod tests {
         )));
         assert!(body_text.contains(&format!(
             "tracedao_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"object_primary_eligible\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"remote_object_deleter_required\"}} 1"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"remote_object_deleter_configured\"}} 0"
+        )));
+        assert!(body_text.contains(&format!(
+            "tracedao_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"remote_object_deleter_ready\"}} 0"
         )));
         assert!(body_text.contains(&format!(
             "tracedao_operational_object_store_alias{{tenant_storage_ref=\"{tenant_ref}\",object_store=\"{TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE}\"}} 1"
