@@ -93,9 +93,9 @@ mod gcs_integration {
     // -------------------------------------------------------------------------
 
     /// put → get round-trip against real fake-gcs-server HTTP surface.
-    #[test]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore]
-    fn gcs_emulator_put_get_round_trip() {
+    async fn gcs_emulator_put_get_round_trip() {
         let endpoint = match fake_endpoint() {
             Some(e) => e,
             None => {
@@ -157,9 +157,9 @@ mod gcs_integration {
     }
 
     /// invalidate → read confirms the invalidated_at field persists.
-    #[test]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore]
-    fn gcs_emulator_invalidate_persists_state() {
+    async fn gcs_emulator_invalidate_persists_state() {
         let endpoint = match fake_endpoint() {
             Some(e) => e,
             None => {
@@ -202,9 +202,9 @@ mod gcs_integration {
     }
 
     /// delete → Ok(true) then Ok(false).
-    #[test]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore]
-    fn gcs_emulator_delete_reports_hit_then_miss() {
+    async fn gcs_emulator_delete_reports_hit_then_miss() {
         let endpoint = match fake_endpoint() {
             Some(e) => e,
             None => {
@@ -254,9 +254,9 @@ mod gcs_integration {
     /// configuration. If versioning is not enabled on the emulator bucket this
     /// test will report Ok(false) on the restore call (no deleted generations
     /// visible in the list), which is still a well-defined non-error path.
-    #[test]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore]
-    fn gcs_emulator_restore_reports_hit_then_miss() {
+    async fn gcs_emulator_restore_reports_hit_then_miss() {
         let endpoint = match fake_endpoint() {
             Some(e) => e,
             None => {
@@ -320,9 +320,9 @@ mod gcs_integration {
     }
 
     /// supports_versioning() flag reflects the constructor used.
-    #[test]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore]
-    fn gcs_emulator_versioning_support_flag() {
+    async fn gcs_emulator_versioning_support_flag() {
         let endpoint = match fake_endpoint() {
             Some(e) => e,
             None => {
