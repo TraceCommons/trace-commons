@@ -3,9 +3,10 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 
 use anyhow::Context;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -31,6 +32,11 @@ pub const TRACE_UPLOAD_CLAIM_ISSUER_REQUIRE_TENANT_ACCESS_GRANTS_ENV: &str =
     "TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_REQUIRE_TENANT_ACCESS_GRANTS";
 const DEFAULT_BIND: &str = "127.0.0.1:3917";
 const DEFAULT_MAX_TTL_SECONDS: i64 = 300;
+const DEFAULT_SHUTDOWN_GRACE_SECONDS: u64 = 30;
+const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 10;
+const DEFAULT_MAX_REQUEST_BYTES: usize = 64 * 1024;
+const MINT_TEST_CLAIM_TENANT: &str = "trace-upload-claim-issuer-test-tenant";
+const MINT_TEST_CLAIM_PRINCIPAL: &str = "principal:trace-upload-claim-issuer-test";
 
 #[derive(Clone)]
 pub struct TraceUploadClaimIssuerConfig {
@@ -46,6 +52,9 @@ pub struct TraceUploadClaimIssuerConfig {
     pub workload_audience: Option<String>,
     pub tenant_access_grant_db: Option<Arc<dyn Database>>,
     pub require_tenant_access_grants: bool,
+    pub shutdown_grace_seconds: u64,
+    pub request_timeout_seconds: u64,
+    pub max_request_bytes: usize,
 }
 
 impl fmt::Debug for TraceUploadClaimIssuerConfig {
@@ -70,6 +79,9 @@ impl fmt::Debug for TraceUploadClaimIssuerConfig {
                 "require_tenant_access_grants",
                 &self.require_tenant_access_grants,
             )
+            .field("shutdown_grace_seconds", &self.shutdown_grace_seconds)
+            .field("request_timeout_seconds", &self.request_timeout_seconds)
+            .field("max_request_bytes", &self.max_request_bytes)
             .finish()
     }
 }
@@ -100,6 +112,33 @@ impl TraceUploadClaimIssuerConfig {
             })
             .transpose()?
             .unwrap_or(DEFAULT_MAX_TTL_SECONDS);
+        let shutdown_grace_seconds =
+            optional_env("TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_SHUTDOWN_GRACE_SECONDS")?
+                .map(|value| {
+                    value.parse::<u64>().context(
+                        "invalid TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_SHUTDOWN_GRACE_SECONDS",
+                    )
+                })
+                .transpose()?
+                .unwrap_or(DEFAULT_SHUTDOWN_GRACE_SECONDS);
+        let request_timeout_seconds =
+            optional_env("TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_REQUEST_TIMEOUT_SECONDS")?
+                .map(|value| {
+                    value.parse::<u64>().context(
+                        "invalid TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_REQUEST_TIMEOUT_SECONDS",
+                    )
+                })
+                .transpose()?
+                .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECONDS);
+        let max_request_bytes =
+            optional_env("TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_MAX_REQUEST_BYTES")?
+                .map(|value| {
+                    value
+                        .parse::<usize>()
+                        .context("invalid TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_MAX_REQUEST_BYTES")
+                })
+                .transpose()?
+                .unwrap_or(DEFAULT_MAX_REQUEST_BYTES);
 
         Ok(Self {
             bind,
@@ -114,6 +153,9 @@ impl TraceUploadClaimIssuerConfig {
             workload_audience: optional_env("TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_WORKLOAD_AUDIENCE")?,
             tenant_access_grant_db: None,
             require_tenant_access_grants: false,
+            shutdown_grace_seconds,
+            request_timeout_seconds,
+            max_request_bytes,
         })
     }
 
@@ -153,6 +195,7 @@ impl TraceUploadClaimIssuerConfig {
             workload_issuer: trim_optional(self.workload_issuer.clone()),
             workload_audience: trim_optional(self.workload_audience.clone()),
             signing_public_key_pem,
+            workload_public_key_pem,
             tenant_access_grant_db: self.tenant_access_grant_db.clone(),
             require_tenant_access_grants: self.require_tenant_access_grants,
         }))
@@ -196,8 +239,62 @@ struct TraceUploadClaimIssuerState {
     workload_issuer: Option<String>,
     workload_audience: Option<String>,
     signing_public_key_pem: String,
+    workload_public_key_pem: String,
     tenant_access_grant_db: Option<Arc<dyn Database>>,
     require_tenant_access_grants: bool,
+}
+
+impl TraceUploadClaimIssuerState {
+    fn run_health_checks(&self) -> serde_json::Value {
+        let mut checks = serde_json::Map::new();
+        let signing_ok = self.sign_health_probe().is_ok();
+        checks.insert(
+            "signing_key".to_string(),
+            serde_json::Value::String(if signing_ok { "ok".into() } else { "fail".into() }),
+        );
+        let workload_ok = self.workload_key_health().is_ok();
+        checks.insert(
+            "workload_public_key".to_string(),
+            serde_json::Value::String(if workload_ok { "ok".into() } else { "fail".into() }),
+        );
+        if self.require_tenant_access_grants {
+            let configured = self.tenant_access_grant_db.is_some();
+            checks.insert(
+                "tenant_access_grant_db".to_string(),
+                serde_json::Value::String(
+                    if configured { "configured" } else { "missing" }.into(),
+                ),
+            );
+        }
+        serde_json::Value::Object(checks)
+    }
+
+    fn sign_health_probe(&self) -> Result<(), &'static str> {
+        let claims = json!({
+            "iss": "health-check",
+            "aud": "health-check",
+            "exp": Utc::now().timestamp() + 60,
+            "probe": "sign-self-test",
+        });
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some(self.signing_kid.clone());
+        jsonwebtoken::encode(&header, &claims, &self.signing_key)
+            .map(|_| ())
+            .map_err(|_| "signing-self-test-failed")?;
+        // Also exercise that the published public key PEM still parses; this
+        // guards against operator drift between the inline private and public
+        // material without leaking either.
+        DecodingKey::from_ed_pem(self.signing_public_key_pem.as_bytes())
+            .map(|_| ())
+            .map_err(|_| "public-key-parse-failed")?;
+        Ok(())
+    }
+
+    fn workload_key_health(&self) -> Result<(), &'static str> {
+        DecodingKey::from_ed_pem(self.workload_public_key_pem.as_bytes())
+            .map(|_| ())
+            .map_err(|_| "workload-public-key-parse-failed")
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -304,6 +401,8 @@ impl IntoResponse for IssuerError {
 pub fn trace_upload_claim_issuer_router(
     config: TraceUploadClaimIssuerConfig,
 ) -> anyhow::Result<Router> {
+    let request_timeout = StdDuration::from_secs(config.request_timeout_seconds.max(1));
+    let max_request_bytes = config.max_request_bytes.max(1);
     let state = config.build_state()?;
     Ok(Router::new()
         .route("/health", get(health_handler))
@@ -312,24 +411,266 @@ pub fn trace_upload_claim_issuer_router(
             get(keyset_handler),
         )
         .route("/v1/trace-upload-claim", post(issue_claim_handler))
+        .layer(DefaultBodyLimit::max(max_request_bytes))
+        .layer(axum::middleware::from_fn(move |req, next| {
+            request_timeout_middleware(req, next, request_timeout)
+        }))
         .with_state(state))
+}
+
+async fn request_timeout_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+    timeout: StdDuration,
+) -> Response {
+    match tokio::time::timeout(timeout, next.run(req)).await {
+        Ok(response) => response,
+        Err(_) => (
+            StatusCode::REQUEST_TIMEOUT,
+            Json(json!({ "error": "request timed out" })),
+        )
+            .into_response(),
+    }
 }
 
 pub async fn serve_trace_upload_claim_issuer(
     config: TraceUploadClaimIssuerConfig,
 ) -> anyhow::Result<()> {
     let bind = config.bind;
+    let grace_secs = config.shutdown_grace_seconds;
     let router = trace_upload_claim_issuer_router(config)?;
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("failed to bind Trace Commons upload claim issuer on {bind}"))?;
-    axum::serve(listener, router)
+    serve_router_with_graceful_shutdown(listener, router, grace_secs, wait_for_shutdown_signal())
         .await
-        .context("Trace Commons upload claim issuer failed")
 }
 
-async fn health_handler() -> Json<serde_json::Value> {
-    Json(json!({ "status": "ok" }))
+async fn serve_router_with_graceful_shutdown(
+    listener: tokio::net::TcpListener,
+    router: Router,
+    shutdown_grace_seconds: u64,
+    signal: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
+    use std::future::IntoFuture;
+
+    let shutdown_grace = StdDuration::from_secs(shutdown_grace_seconds);
+    // Channel fires when the shutdown signal arrives. axum starts draining;
+    // the watchdog task starts the grace-window clock.
+    let (signal_tx, signal_rx) = tokio::sync::oneshot::channel::<()>();
+    let shutdown = async move {
+        signal.await;
+        tracing::info!(
+            graceful_shutdown_secs = shutdown_grace_seconds,
+            "upload-claim issuer shutdown signaled"
+        );
+        let _ = signal_tx.send(());
+    };
+
+    let serve_handle = tokio::spawn(
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown)
+            .into_future(),
+    );
+    let abort_handle = serve_handle.abort_handle();
+
+    // Watchdog: when the signal fires, wait up to `shutdown_grace` for the
+    // serve task to finish draining; if it doesn't, abort it.
+    let watchdog = tokio::spawn(async move {
+        if signal_rx.await.is_err() {
+            return;
+        }
+        tokio::time::sleep(shutdown_grace).await;
+        if !abort_handle.is_finished() {
+            tracing::warn!(
+                graceful_shutdown_secs = shutdown_grace_seconds,
+                "upload-claim issuer shutdown grace exceeded; dropping in-flight requests"
+            );
+            abort_handle.abort();
+        }
+    });
+
+    let result = serve_handle.await;
+    watchdog.abort();
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => {
+            Err(anyhow::Error::from(error)).context("Trace Commons upload claim issuer failed")
+        }
+        Err(error) if error.is_cancelled() => Ok(()),
+        Err(error) => Err(anyhow::Error::from(error))
+            .context("Trace Commons upload claim issuer task failed"),
+    }
+}
+
+/// Generated Ed25519 keypair material, PEM-encoded.
+pub struct GeneratedUploadClaimKeypair {
+    pub private_key_pem: String,
+    pub public_key_pem: String,
+    pub suggested_kid: String,
+}
+
+/// Generate a fresh Ed25519 keypair as PKCS#8 / SPKI PEM and a suggested kid
+/// (UUID v4). Output is not written to disk; the operator pipes it where they
+/// want.
+pub fn generate_upload_claim_keypair() -> anyhow::Result<GeneratedUploadClaimKeypair> {
+    use ring::rand::SystemRandom;
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+
+    let rng = SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng)
+        .map_err(|_| anyhow::anyhow!("Ed25519 keypair generation failed"))?;
+    let keypair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+        .map_err(|_| anyhow::anyhow!("generated PKCS#8 round-trip failed"))?;
+
+    let private_key_pem = pem_block("PRIVATE KEY", pkcs8.as_ref());
+    let public_spki = ed25519_public_spki(keypair.public_key().as_ref());
+    let public_key_pem = pem_block("PUBLIC KEY", &public_spki);
+
+    // Sanity-check that the generated material round-trips through the same
+    // helpers the server uses at startup.
+    EncodingKey::from_ed_pem(private_key_pem.as_bytes())
+        .context("generated private key failed validation")?;
+    DecodingKey::from_ed_pem(public_key_pem.as_bytes())
+        .context("generated public key failed validation")?;
+
+    Ok(GeneratedUploadClaimKeypair {
+        private_key_pem,
+        public_key_pem,
+        suggested_kid: Uuid::new_v4().to_string(),
+    })
+}
+
+fn ed25519_public_spki(public_key: &[u8]) -> Vec<u8> {
+    // SubjectPublicKeyInfo SEQUENCE { AlgorithmIdentifier id-Ed25519, BIT STRING public }
+    // Fixed DER prefix for Ed25519 SPKI (RFC 8410):
+    //   30 2a 30 05 06 03 2b 65 70 03 21 00 || 32-byte public key
+    let mut out = Vec::with_capacity(12 + public_key.len());
+    out.extend_from_slice(&[
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+    ]);
+    out.extend_from_slice(public_key);
+    out
+}
+
+fn pem_block(label: &str, der: &[u8]) -> String {
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut body = String::new();
+    for chunk in encoded.as_bytes().chunks(64) {
+        body.push_str(std::str::from_utf8(chunk).expect("base64 is ascii"));
+        body.push('\n');
+    }
+    format!("-----BEGIN {label}-----\n{body}-----END {label}-----\n")
+}
+
+/// Outcome of `--health-check` — operator-visible status with a hash-only
+/// reason on failure.
+pub enum UploadClaimIssuerHealthCheck {
+    Ok,
+    Fail(&'static str),
+}
+
+/// Load env config and verify keys without binding a listener. Used by
+/// `--health-check`.
+pub async fn run_upload_claim_issuer_health_check() -> UploadClaimIssuerHealthCheck {
+    let mut config = match TraceUploadClaimIssuerConfig::from_env() {
+        Ok(config) => config,
+        Err(_) => return UploadClaimIssuerHealthCheck::Fail("config-missing"),
+    };
+    if configure_tenant_access_grants_from_env(&mut config).await.is_err() {
+        return UploadClaimIssuerHealthCheck::Fail("tenant-grant-db-unavailable");
+    }
+    let state = match config.build_state() {
+        Ok(state) => state,
+        Err(_) => return UploadClaimIssuerHealthCheck::Fail("config-invalid"),
+    };
+    if state.sign_health_probe().is_err() {
+        return UploadClaimIssuerHealthCheck::Fail("signing-self-test-failed");
+    }
+    if state.workload_key_health().is_err() {
+        return UploadClaimIssuerHealthCheck::Fail("workload-public-key-parse-failed");
+    }
+    UploadClaimIssuerHealthCheck::Ok
+}
+
+/// Mint a test claim for a hardcoded principal/tenant. For deploy smoke checks
+/// only — must not be exposed as a production code path.
+pub fn mint_test_upload_claim() -> anyhow::Result<String> {
+    let config = TraceUploadClaimIssuerConfig::from_env()
+        .context("failed to read upload-claim issuer config from env")?;
+    let state = config.build_state()?;
+    let now = Utc::now();
+    let expires_at = now
+        .checked_add_signed(Duration::seconds(state.max_ttl_seconds))
+        .context("max_ttl_seconds overflow")?;
+    let claims = UploadClaimClaims {
+        iss: state.issuer.clone(),
+        aud: state.audience.clone(),
+        sub: MINT_TEST_CLAIM_PRINCIPAL.to_string(),
+        principal_ref: MINT_TEST_CLAIM_PRINCIPAL.to_string(),
+        tenant_id: MINT_TEST_CLAIM_TENANT.to_string(),
+        role: "contributor",
+        iat: now.timestamp(),
+        exp: expires_at.timestamp(),
+        jti: Uuid::new_v4().to_string(),
+        trace_id: None,
+        submission_id: None,
+        allowed_consent_scopes: Vec::new(),
+        allowed_uses: Vec::new(),
+    };
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.kid = Some(state.signing_kid.clone());
+    jsonwebtoken::encode(&header, &claims, &state.signing_key)
+        .context("failed to mint test upload claim")
+}
+
+async fn wait_for_shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut signal) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            let _ = signal.recv().await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+}
+
+async fn health_handler(
+    State(state): State<Arc<TraceUploadClaimIssuerState>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let checks = state.run_health_checks();
+    let healthy = checks
+        .as_object()
+        .map(|map| {
+            map.values().all(|value| {
+                matches!(value.as_str(), Some(label) if label == "ok" || label == "configured")
+            })
+        })
+        .unwrap_or(false);
+    if healthy {
+        (
+            StatusCode::OK,
+            Json(json!({ "status": "ok", "checks": checks })),
+        )
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "status": "degraded", "checks": checks })),
+        )
+    }
 }
 
 async fn keyset_handler(
@@ -826,6 +1167,9 @@ mod tests {
             workload_audience: Some("trace-claim-issuer".to_string()),
             tenant_access_grant_db: None,
             require_tenant_access_grants: false,
+            shutdown_grace_seconds: DEFAULT_SHUTDOWN_GRACE_SECONDS,
+            request_timeout_seconds: DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
         }
     }
 
@@ -1109,6 +1453,135 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn generate_keypair_produces_parseable_ed25519_material() {
+        let keypair = generate_upload_claim_keypair().expect("keygen succeeds");
+        assert!(keypair.private_key_pem.starts_with("-----BEGIN PRIVATE KEY-----"));
+        assert!(keypair.private_key_pem.contains("-----END PRIVATE KEY-----"));
+        assert!(keypair.public_key_pem.starts_with("-----BEGIN PUBLIC KEY-----"));
+        assert!(keypair.public_key_pem.contains("-----END PUBLIC KEY-----"));
+        assert!(Uuid::parse_str(&keypair.suggested_kid).is_ok());
+        // Round-trip through the same code path the server uses at startup.
+        EncodingKey::from_ed_pem(keypair.private_key_pem.as_bytes())
+            .expect("generated private key parses as EdDSA");
+        DecodingKey::from_ed_pem(keypair.public_key_pem.as_bytes())
+            .expect("generated public key parses as EdDSA");
+        // Sign and verify a round-trip to confirm public matches private.
+        let signing_key = EncodingKey::from_ed_pem(keypair.private_key_pem.as_bytes()).unwrap();
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some(keypair.suggested_kid.clone());
+        let token = jsonwebtoken::encode(
+            &header,
+            &json!({"sub": "probe", "exp": Utc::now().timestamp() + 60}),
+            &signing_key,
+        )
+        .expect("signs");
+        let verifying_key = DecodingKey::from_ed_pem(keypair.public_key_pem.as_bytes()).unwrap();
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.required_spec_claims.clear();
+        validation.validate_aud = false;
+        jsonwebtoken::decode::<serde_json::Value>(&token, &verifying_key, &validation)
+            .expect("generated keypair round-trips through JWT sign+verify");
+    }
+
+    #[test]
+    fn health_check_reports_signing_and_workload_status() {
+        let state = test_config().build_state().expect("state builds");
+        let checks = state.run_health_checks();
+        assert_eq!(checks["signing_key"], json!("ok"));
+        assert_eq!(checks["workload_public_key"], json!("ok"));
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_returns_503_when_workload_pem_is_malformed() {
+        let mut state = (*test_config().build_state().expect("state builds")).clone_for_test();
+        state.workload_public_key_pem =
+            "-----BEGIN PUBLIC KEY-----\nnot-base64\n-----END PUBLIC KEY-----\n".to_string();
+        let router = Router::new()
+            .route("/health", get(health_handler))
+            .with_state(Arc::new(state));
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "degraded");
+        assert_eq!(json["checks"]["workload_public_key"], "fail");
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_returns_200_when_keys_are_loadable() {
+        let router = trace_upload_claim_issuer_router(test_config()).expect("router builds");
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["checks"]["signing_key"], "ok");
+        assert_eq!(json["checks"]["workload_public_key"], "ok");
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_completes_within_grace_window() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let router = trace_upload_claim_issuer_router(test_config()).expect("router builds");
+        let (signal_tx, signal_rx) = tokio::sync::oneshot::channel::<()>();
+        let signal = async move {
+            let _ = signal_rx.await;
+        };
+        let serve = tokio::spawn(serve_router_with_graceful_shutdown(
+            listener, router, 2, signal,
+        ));
+        // Give the server a moment to start accepting.
+        tokio::time::sleep(StdDuration::from_millis(50)).await;
+        signal_tx.send(()).unwrap();
+        let outcome = tokio::time::timeout(StdDuration::from_secs(5), serve)
+            .await
+            .expect("serve returns within timeout")
+            .expect("task joins");
+        outcome.expect("serve returns Ok after graceful shutdown");
+    }
+
+    impl TraceUploadClaimIssuerState {
+        fn clone_for_test(&self) -> TraceUploadClaimIssuerState {
+            TraceUploadClaimIssuerState {
+                signing_key: EncodingKey::from_ed_pem(TEST_EDDSA_PRIVATE_KEY_PEM.as_bytes())
+                    .unwrap(),
+                signing_kid: self.signing_kid.clone(),
+                issuer: self.issuer.clone(),
+                audience: self.audience.clone(),
+                max_ttl_seconds: self.max_ttl_seconds,
+                workload_decoding_key: DecodingKey::from_ed_pem(
+                    WORKLOAD_EDDSA_PUBLIC_KEY_PEM.as_bytes(),
+                )
+                .unwrap(),
+                workload_issuer: self.workload_issuer.clone(),
+                workload_audience: self.workload_audience.clone(),
+                signing_public_key_pem: self.signing_public_key_pem.clone(),
+                workload_public_key_pem: self.workload_public_key_pem.clone(),
+                tenant_access_grant_db: self.tenant_access_grant_db.clone(),
+                require_tenant_access_grants: self.require_tenant_access_grants,
+            }
+        }
     }
 
     fn test_tenant_access_grant(

@@ -2759,6 +2759,7 @@ dependencies = [
  "jsonwebtoken",
  "rand 0.8.6",
  "reqwest",
+ "ring",
  "secrecy",
  "serde",
  "serde_json",
