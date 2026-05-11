@@ -33,6 +33,7 @@ use tracedao_server::db::{Database, TraceCorpusRlsDiagnostics};
 use tracedao_server::error::DatabaseError;
 use tracedao_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
 use tracedao_server::secrets::SecretsCrypto;
+use tracedao_server::trace_artifact_kek::KmsKeyWrapper as _;
 use tracedao_server::trace_artifact_store::{
     EncryptedTraceArtifactReceipt, FileRemoteTraceArtifactProvider,
     LocalEncryptedTraceArtifactStore, ServiceOwnedTraceArtifactStore, TraceArtifactKind,
@@ -162,6 +163,8 @@ const TRACE_COMMONS_REMOTE_OBJECT_STORE_FILE_SYSTEM_VERSIONING: &str =
     "TRACE_COMMONS_REMOTE_OBJECT_STORE_FILE_SYSTEM_VERSIONING";
 const TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING: &str =
     "TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING";
+const TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY: &str =
+    "TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY";
 const TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW";
 const TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT: &str =
@@ -1366,6 +1369,10 @@ impl ConfiguredTraceArtifactStore {
                 .context("failed to initialize Trace Commons KEK wrapper")?,
             "trace-commons-local-master-v1",
         );
+        check_kek_production_trust_boundary_gate(
+            env_truthy(TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY),
+            kek.is_production_trust_boundary(),
+        )?;
         let provider_config = TraceArtifactProviderConfig::service_owned_remote(
             TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE,
         )?;
@@ -4584,6 +4591,18 @@ fn env_truthy(key: &str) -> bool {
             "1" | "true" | "yes" | "on"
         )
     })
+}
+
+fn check_kek_production_trust_boundary_gate(
+    require: bool,
+    is_production_trust_boundary: bool,
+) -> anyhow::Result<()> {
+    if require && !is_production_trust_boundary {
+        anyhow::bail!(
+            "kek_production_trust_boundary_required: configured KEK does not provide a production trust boundary"
+        );
+    }
+    Ok(())
 }
 
 fn parse_trace_rollout_tenant_ids_from_env(key: &str) -> anyhow::Result<BTreeSet<String>> {
@@ -117541,5 +117560,28 @@ mod tests {
 
         assert_eq!(error.0, StatusCode::FORBIDDEN);
         assert_eq!(error.1.0.error, "invalid signed tenant token");
+    }
+
+    #[test]
+    fn kek_production_trust_boundary_gate_bails_when_required_and_not_satisfied() {
+        let result = check_kek_production_trust_boundary_gate(true, false);
+        let err = result.expect_err("gate must bail when require=true and is_production=false");
+        assert!(
+            err.to_string()
+                .contains("kek_production_trust_boundary_required"),
+            "error message must contain the safe control name"
+        );
+    }
+
+    #[test]
+    fn kek_production_trust_boundary_gate_passes_when_required_and_satisfied() {
+        check_kek_production_trust_boundary_gate(true, true)
+            .expect("gate must pass when require=true and is_production=true");
+    }
+
+    #[test]
+    fn kek_production_trust_boundary_gate_passes_when_not_required() {
+        check_kek_production_trust_boundary_gate(false, false)
+            .expect("gate must pass when require=false regardless of trust boundary");
     }
 }
