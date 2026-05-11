@@ -2399,6 +2399,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "bytes",
  "chrono",
  "deadpool-postgres",
  "dirs",

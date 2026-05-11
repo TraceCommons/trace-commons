@@ -1063,7 +1063,7 @@ fn decrypt_artifact_json<T: DeserializeOwned>(
     serde_json::from_slice(plaintext).context("failed to deserialize trace artifact")
 }
 
-fn verify_encrypted_artifact(
+pub(crate) fn verify_encrypted_artifact(
     artifact: &EncryptedTraceArtifact,
     expected_tenant_storage_ref: &str,
     expected_artifact_kind: &TraceArtifactKind,
@@ -1343,7 +1343,9 @@ fn validate_object_hash(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_file_remote_object_ref(object_ref: &TraceArtifactObjectRef) -> anyhow::Result<()> {
+pub(crate) fn validate_file_remote_object_ref(
+    object_ref: &TraceArtifactObjectRef,
+) -> anyhow::Result<()> {
     validate_non_empty_ref(
         "remote trace artifact object store",
         &object_ref.object_store,
