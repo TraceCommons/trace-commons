@@ -28,6 +28,9 @@ use tracedao_protocol::trace_contribution::{
     TraceValueScorecard, apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
     rescrub_trace_envelope, retention_policy_for_allowed_use, retention_policy_for_trace,
 };
+use tracedao_server::audit_chain::{
+    AUDIT_CHAIN_DRIFT_REJECTED_CLASS, audit_event_matches_writeback,
+};
 use tracedao_server::config::DatabaseConfig;
 use tracedao_server::db::{Database, TraceCorpusRlsDiagnostics};
 use tracedao_server::error::DatabaseError;
@@ -45745,11 +45748,15 @@ async fn read_envelope_for_replay_export(
         "trace body read source is not export eligible"
     );
     let body_read = read_envelope_body_for_replay_export(state, tenant, record).await?;
-    append_trace_content_read_audit(
+    let refs: &[Uuid] = match body_read.object_ref_id.as_ref() {
+        Some(id) => std::slice::from_ref(id),
+        None => &[],
+    };
+    append_trace_content_read_audit_per_source(
         state,
         tenant,
         record.submission_id,
-        body_read.object_ref_id,
+        refs,
         surface,
         purpose,
     )
@@ -45775,11 +45782,15 @@ async fn read_envelope_for_review_decision(
     let body_read =
         read_envelope_body_for_review_decision(state, tenant, record, allow_file_body_fallback)
             .await?;
-    append_trace_content_read_audit(
+    let refs: &[Uuid] = match body_read.object_ref_id.as_ref() {
+        Some(id) => std::slice::from_ref(id),
+        None => &[],
+    };
+    append_trace_content_read_audit_per_source(
         state,
         tenant,
         record.submission_id,
-        body_read.object_ref_id,
+        refs,
         "review_decision",
         purpose,
     )
@@ -45827,11 +45838,15 @@ async fn read_envelope_for_process_evaluation(
             object_ref_id: None,
         }
     };
-    append_trace_content_read_audit(
+    let refs: &[Uuid] = match body_read.object_ref_id.as_ref() {
+        Some(id) => std::slice::from_ref(id),
+        None => &[],
+    };
+    append_trace_content_read_audit_per_source(
         state,
         tenant,
         record.submission_id,
-        body_read.object_ref_id,
+        refs,
         "process_evaluation_worker",
         purpose,
     )
@@ -48376,10 +48391,119 @@ async fn append_audit_event_with_db_mirror(
         );
     }
     enforce_db_mirror_write_result(state, "audit event", mirror_result)?;
+    verify_mirrored_audit_event_after_file_append(state, tenant, &event).await?;
     Ok(())
 }
 
+async fn verify_mirrored_audit_event_after_file_append(
+    state: &AppState,
+    tenant: &TenantAuth,
+    event: &TraceCommonsAuditEvent,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    // Verification only applies when the file append already produced a
+    // canonical hash. The require_db_mirror_writes=true branch writes DB
+    // before file, so event.event_hash may be None there; skip in that case.
+    if event.event_hash.is_none() {
+        return Ok(());
+    }
+    let actual = db
+        .get_trace_audit_event_by_id(&tenant.tenant_id, event.event_id)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to re-read mirrored audit event {} for chain verification",
+                event.event_id
+            )
+        })?;
+    if let Err(drift) = audit_event_matches_writeback(
+        event.event_id,
+        event.event_hash.as_deref(),
+        event.previous_event_hash.as_deref(),
+        actual.as_ref(),
+    ) {
+        tracing::error!(
+            error_class = AUDIT_CHAIN_DRIFT_REJECTED_CLASS,
+            error_hash = %safe_display_error_hash(&anyhow::anyhow!(drift.to_string())),
+            event_id = %event.event_id,
+            "Trace Commons DB audit mirror hash chain verification failed"
+        );
+        return Err(anyhow::anyhow!(drift));
+    }
+    Ok(())
+}
+
+/// Backward-compatible shim. Prefer `append_trace_content_read_audit_per_source`
+/// when caller code can surface the list of `object_ref_id`s that were read.
+#[allow(dead_code)]
 async fn append_trace_content_read_audit(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+    object_ref_id: Option<Uuid>,
+    surface: &str,
+    purpose: Option<&str>,
+) -> anyhow::Result<()> {
+    let refs: &[Uuid] = match object_ref_id.as_ref() {
+        Some(id) => std::slice::from_ref(id),
+        None => &[],
+    };
+    append_trace_content_read_audit_per_source(state, tenant, submission_id, refs, surface, purpose)
+        .await
+}
+
+/// Per-source variant of the trace-content read audit helper.
+///
+/// Emits one audit row per `(submission_id, object_ref_id)` pair when
+/// `object_ref_ids` is non-empty. When `object_ref_ids` is empty the helper
+/// emits a single row with `object_ref_id = NULL` (the historical shape used
+/// by callers that do not yet know which stored sources were touched).
+///
+/// Each row is appended to the same per-tenant hash chain in sequence; the
+/// canonical file-format audit event is unchanged (it still encodes
+/// `submission_id` + surface/purpose in `reason` metadata), and the new
+/// per-source granularity is carried in the `trace_audit_events.object_ref_id`
+/// column.
+async fn append_trace_content_read_audit_per_source(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+    object_ref_ids: &[Uuid],
+    surface: &str,
+    purpose: Option<&str>,
+) -> anyhow::Result<()> {
+    if object_ref_ids.is_empty() {
+        return append_single_trace_content_read_audit_row(
+            state,
+            tenant,
+            submission_id,
+            None,
+            surface,
+            purpose,
+        )
+        .await;
+    }
+    let mut seen = BTreeSet::new();
+    for object_ref_id in object_ref_ids.iter().copied() {
+        if !seen.insert(object_ref_id) {
+            continue;
+        }
+        append_single_trace_content_read_audit_row(
+            state,
+            tenant,
+            submission_id,
+            Some(object_ref_id),
+            surface,
+            purpose,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn append_single_trace_content_read_audit_row(
     state: &AppState,
     tenant: &TenantAuth,
     submission_id: Uuid,
@@ -48429,6 +48553,7 @@ async fn append_trace_content_read_audit(
         );
     }
     enforce_db_mirror_write_result(state, "trace content read audit event", mirror_result)?;
+    verify_mirrored_audit_event_after_file_append(state, tenant, &event).await?;
     Ok(())
 }
 
@@ -48446,11 +48571,16 @@ async fn append_derived_source_read_audits(
         if !seen.insert(submission_id) {
             continue;
         }
-        append_trace_content_read_audit(
+        let object_ref = object_ref_ids.get(&submission_id).copied();
+        let refs: &[Uuid] = match object_ref.as_ref() {
+            Some(id) => std::slice::from_ref(id),
+            None => &[],
+        };
+        append_trace_content_read_audit_per_source(
             state,
             tenant,
             submission_id,
-            object_ref_ids.get(&submission_id).copied(),
+            refs,
             surface,
             purpose,
         )
@@ -51620,11 +51750,15 @@ async fn index_vector_metadata_from_db(
                 .context("failed to mirror trace vector payload object ref")?;
         }
         active_vector_entries.push(vector_entry);
-        append_trace_content_read_audit(
+        let refs: &[Uuid] = match body_read.object_ref_id.as_ref() {
+            Some(id) => std::slice::from_ref(id),
+            None => &[],
+        };
+        append_trace_content_read_audit_per_source(
             state,
             tenant,
             record.submission_id,
-            body_read.object_ref_id,
+            refs,
             "vector_index",
             Some(purpose),
         )
@@ -60856,6 +60990,66 @@ mod tests {
             .filter(|line| !line.is_empty())
             .map(|line| serde_json::from_str(line).context("failed to parse raw audit event"))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn trace_content_read_per_source_emits_one_row_per_object_ref() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let auth = test_reviewer_auth("tenant-a");
+        let submission_id = Uuid::new_v4();
+        let object_refs = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+
+        append_trace_content_read_audit_per_source(
+            state.as_ref(),
+            &auth,
+            submission_id,
+            &object_refs,
+            "replay_export",
+            Some("per-source coverage"),
+        )
+        .await
+        .expect("per-source variant writes rows");
+
+        let events =
+            read_raw_audit_events(temp.path(), "tenant-a").expect("audit events parse");
+        assert_eq!(events.len(), object_refs.len());
+        for event in &events {
+            assert_eq!(event.submission_id, submission_id);
+            assert_eq!(event.kind, "trace_content_read");
+            assert!(event.event_hash.is_some());
+            assert!(event.previous_event_hash.is_some());
+        }
+        // Each row must have a distinct event_hash and link to the prior row's hash.
+        let mut prev = "sha256:genesis".to_string();
+        for event in &events {
+            assert_eq!(event.previous_event_hash.as_deref(), Some(prev.as_str()));
+            prev = event.event_hash.clone().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn trace_content_read_per_source_empty_slice_emits_one_null_row() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let auth = test_reviewer_auth("tenant-a");
+        let submission_id = Uuid::new_v4();
+
+        append_trace_content_read_audit_per_source(
+            state.as_ref(),
+            &auth,
+            submission_id,
+            &[],
+            "review_decision",
+            None,
+        )
+        .await
+        .expect("empty slice falls back to a single row");
+
+        let events =
+            read_raw_audit_events(temp.path(), "tenant-a").expect("audit events parse");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].submission_id, submission_id);
     }
 
     #[test]
