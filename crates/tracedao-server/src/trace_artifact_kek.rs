@@ -19,16 +19,22 @@ pub struct KekContext {
 }
 
 impl KekContext {
-    /// Returns a deterministic hex-encoded SHA-256 hash of the canonical JSON
+    /// Returns a `sha256:`-prefixed SHA-256 hash of the canonical byte
     /// representation of this context. Used to bind wrapped DEKs to their context.
+    ///
+    /// The canonical form is a fixed newline-delimited key=value sequence built
+    /// with `format!` so the hash is stable regardless of `serde_json` map
+    /// ordering, feature flags, or future struct changes. Do not refactor to
+    /// dynamic map construction — stored `context_hash` values depend on this
+    /// exact serialization.
     pub fn canonical_hash(&self) -> String {
-        let canonical = serde_json::json!({
-            "schema": "trace_commons_kek_context.v1",
-            "tenant_storage_ref": self.tenant_storage_ref,
-            "artifact_kind": self.artifact_kind.as_path_segment(),
-        });
+        let canonical = format!(
+            "schema=trace_commons_kek_context.v1\ntenant_storage_ref={}\nartifact_kind={}",
+            self.tenant_storage_ref,
+            self.artifact_kind.as_path_segment(),
+        );
         let mut hasher = Sha256::new();
-        hasher.update(canonical.to_string().as_bytes());
+        hasher.update(canonical.as_bytes());
         format!("sha256:{:x}", hasher.finalize())
     }
 }

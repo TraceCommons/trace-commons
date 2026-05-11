@@ -147,6 +147,10 @@ pub enum TraceArtifactKind {
 }
 
 impl TraceArtifactKind {
+    /// Stable wire identifier for each variant. Used both for object-store key
+    /// paths and (since the KEK module landed) as a hash-stable binding in
+    /// `KekContext::canonical_hash`. Stored `context_hash` values depend on
+    /// these exact strings — do not rename without a migration.
     pub fn as_path_segment(&self) -> &'static str {
         match self {
             Self::ContributionEnvelope => "contribution_envelope",
