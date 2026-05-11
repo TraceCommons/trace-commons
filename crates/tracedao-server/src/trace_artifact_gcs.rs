@@ -349,6 +349,33 @@ pub mod prod_client {
                 bucket: bucket.into(),
             })
         }
+
+        /// Construct a GCS client pointed at a custom endpoint with no
+        /// authentication. Intended for local emulators such as
+        /// fake-gcs-server. The `storage_endpoint` override causes all
+        /// requests to go to the supplied URL instead of
+        /// `https://storage.googleapis.com`. The `anonymous()` call
+        /// removes the `NopeTokenSourceProvider` placeholder so requests
+        /// carry no `Authorization` header, which is required for
+        /// fake-gcs-server.
+        ///
+        /// This constructor is synchronous because it does not need to load
+        /// credentials from the environment.
+        pub fn try_new_with_endpoint(
+            bucket: impl Into<String>,
+            endpoint: impl Into<String>,
+        ) -> Result<Self> {
+            let config = ClientConfig {
+                storage_endpoint: endpoint.into(),
+                ..Default::default()
+            }
+            .anonymous();
+            let client = Client::new(config);
+            Ok(Self {
+                client,
+                bucket: bucket.into(),
+            })
+        }
     }
 
     /// Run an async future to completion from a sync context. Requires a

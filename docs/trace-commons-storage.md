@@ -1162,6 +1162,27 @@ Revocation propagation tests:
 
 Caller-level regression tests should drive the actual handlers or store facades that perform side effects, not only helper predicates. Mocks of DB/object/vector APIs must capture tenant id, actor principal, object ref id, and submission id for every call so missing propagation is visible.
 
+### Optional: fake-gcs-server for GCS integration tests
+
+To run the GCS provider integration test against a local emulator, bring up
+`fsouza/fake-gcs-server` and set `GCS_FAKE_ENDPOINT` before invoking cargo:
+
+```bash
+docker run --rm -p 4443:4443 fsouza/fake-gcs-server -scheme http -public-host localhost
+GCS_FAKE_ENDPOINT=http://localhost:4443 \
+cargo test -p tracedao-server --features gcs-client \
+  --test trace_artifact_gcs_integration -- --ignored
+```
+
+The test is marked `#[ignore]` so it does not run on default CI. When
+`GCS_FAKE_ENDPOINT` is absent the tests skip themselves with a printed reason
+rather than failing. The restore test requires the emulator bucket to have
+object versioning enabled; if it is not enabled the test skips the restore
+assertions and prints a note rather than failing. `ProdGcsObjectClient` is
+constructed via `try_new_with_endpoint`, which sets the `storage_endpoint`
+override and calls `.anonymous()` to strip the auth header — fake-gcs-server
+does not validate credentials.
+
 ## Implementation Notes
 
 When this plan becomes code:
