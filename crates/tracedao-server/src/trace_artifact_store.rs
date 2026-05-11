@@ -1148,7 +1148,13 @@ fn generate_dek() -> Zeroizing<[u8; 32]> {
 
 /// AES-256-GCM encrypt `plaintext` under `dek`, returning the
 /// `[nonce || aead_ciphertext_with_tag]` packed form used by v2 records.
-fn aead_encrypt_with_dek(dek: &Zeroizing<[u8; 32]>, plaintext: &[u8]) -> anyhow::Result<Vec<u8>> {
+///
+/// `pub(crate)` so the gate-service module can build matching test fixtures
+/// (it pairs with the same-visibility `aead_decrypt_with_dek` below).
+pub(crate) fn aead_encrypt_with_dek(
+    dek: &Zeroizing<[u8; 32]>,
+    plaintext: &[u8],
+) -> anyhow::Result<Vec<u8>> {
     use aes_gcm::aead::{Aead, AeadCore, OsRng};
     use aes_gcm::{Aes256Gcm, KeyInit};
     let cipher = Aes256Gcm::new_from_slice(dek.as_ref())
@@ -1165,7 +1171,15 @@ fn aead_encrypt_with_dek(dek: &Zeroizing<[u8; 32]>, plaintext: &[u8]) -> anyhow:
 
 /// AES-256-GCM decrypt the `[nonce || aead_ciphertext_with_tag]` packed form
 /// produced by `aead_encrypt_with_dek`.
-fn aead_decrypt_with_dek(dek: &Zeroizing<[u8; 32]>, encrypted: &[u8]) -> anyhow::Result<Vec<u8>> {
+///
+/// `pub(crate)` so the in-process gate service (`EnclaveGateService`) can
+/// reuse the same routine to recover plaintext from envelope ciphertext for
+/// scoring. Outside-crate callers must continue going through the existing
+/// `decrypt_artifact_json*` helpers, which also handle schema-version gating.
+pub(crate) fn aead_decrypt_with_dek(
+    dek: &Zeroizing<[u8; 32]>,
+    encrypted: &[u8],
+) -> anyhow::Result<Vec<u8>> {
     use aes_gcm::aead::Aead;
     use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
     const NONCE_LEN: usize = 12;

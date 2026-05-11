@@ -1,5 +1,9 @@
 [workspace]
-members = ["crates/tracedao-protocol", "crates/tracedao-server"]
+members = [
+    "crates/tracedao-gate-enclave",
+    "crates/tracedao-protocol",
+    "crates/tracedao-server",
+]
 resolver = "2"
 
 [workspace.package]
