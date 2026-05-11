@@ -1,8 +1,9 @@
 //! Key encryption key (KEK) trait and supporting types for trace artifact envelope encryption.
 //!
-//! This module defines the pluggable `KmsKeyWrapper` trait used to wrap and unwrap
-//! per-artifact data encryption keys (DEKs). Concrete implementations live in
-//! submodules; this file contains only the shared types and the trait contract.
+//! Defines the pluggable `KmsKeyWrapper` trait used to wrap and unwrap per-artifact
+//! data encryption keys (DEKs). The local-development implementation
+//! (`LocalMasterKeyWrapper`) is co-located here; production implementations
+//! (TEE-rooted, cloud KMS) will live in submodules.
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
@@ -134,7 +135,13 @@ impl KmsKeyWrapper for LocalMasterKeyWrapper {
             .crypto
             .encrypt(&plaintext)
             .map_err(|e| anyhow::anyhow!("KekWrapFailed: {e}"))?;
-        // Pack: [salt_len_u8 || salt || ciphertext]
+        // Pack: [salt_len_u8 || salt || ciphertext]. The u8 length prefix is
+        // sound only while SecretsCrypto::generate_salt stays <= 255 bytes
+        // (currently SALT_SIZE = 32 in secrets.rs); the assertion pins it.
+        debug_assert!(
+            salt.len() <= u8::MAX as usize,
+            "salt too long for u8 length prefix"
+        );
         let mut packed = Vec::with_capacity(1 + salt.len() + encrypted.len());
         packed.push(salt.len() as u8);
         packed.extend_from_slice(&salt);
