@@ -171,6 +171,8 @@ pub struct EncryptedTraceArtifact {
     pub receipt: EncryptedTraceArtifactReceipt,
     pub salt_base64: String,
     pub ciphertext_base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrapped_dek: Option<crate::trace_artifact_kek::WrappedDek>,
 }
 
 pub trait TraceArtifactStore: Send + Sync {
@@ -539,6 +541,7 @@ impl<P: RemoteTraceArtifactProvider> ServiceOwnedTraceArtifactStore<P> {
             receipt: legacy_receipt,
             salt_base64: base64::engine::general_purpose::STANDARD.encode(salt),
             ciphertext_base64: base64::engine::general_purpose::STANDARD.encode(ciphertext),
+            wrapped_dek: None,
         };
         let object_ref = TraceArtifactObjectRef {
             provider_kind: self.config.kind,
@@ -792,6 +795,7 @@ impl LocalEncryptedTraceArtifactStore {
             receipt: receipt.clone(),
             salt_base64: base64::engine::general_purpose::STANDARD.encode(salt),
             ciphertext_base64: base64::engine::general_purpose::STANDARD.encode(ciphertext),
+            wrapped_dek: None,
         };
         write_json_file(
             &self.artifact_path(&receipt.tenant_storage_ref, &receipt.object_key)?,
@@ -1060,6 +1064,16 @@ fn verify_encrypted_artifact(
         sha256_hex(&ciphertext) == expected_ciphertext_sha256,
         "trace artifact ciphertext hash mismatch"
     );
+    if let Some(wrapped_dek) = &artifact.wrapped_dek {
+        let context = crate::trace_artifact_kek::KekContext {
+            tenant_storage_ref: expected_tenant_storage_ref.to_string(),
+            artifact_kind: expected_artifact_kind.clone(),
+        };
+        anyhow::ensure!(
+            wrapped_dek.context_hash == context.canonical_hash(),
+            "KekContextMismatch: wrapped_dek context_hash does not match expected tenant and artifact kind"
+        );
+    }
     Ok(())
 }
 
