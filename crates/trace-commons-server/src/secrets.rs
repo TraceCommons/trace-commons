@@ -8,7 +8,7 @@ use hkdf::Hkdf;
 use secrecy::{ExposeSecret, SecretString};
 use sha2::Sha256;
 
-pub use crate::error::{DecryptedSecret, SecretError};
+pub use crate::error::{DecryptedBytes, DecryptedSecret, SecretError};
 
 const KEY_SIZE: usize = 32;
 const NONCE_SIZE: usize = 12;
@@ -69,6 +69,31 @@ impl SecretsCrypto {
             .decrypt(nonce, ciphertext)
             .map_err(|e| SecretError::DecryptionFailed(format!("Decryption failed: {e}")))?;
         DecryptedSecret::from_bytes(plaintext)
+    }
+
+    /// Decrypt an arbitrary-byte payload. Unlike `decrypt`, this does not
+    /// require the plaintext to be valid UTF-8, making it suitable for binary
+    /// payloads such as wrapped DEKs.
+    pub fn decrypt_bytes(
+        &self,
+        encrypted_value: &[u8],
+        salt: &[u8],
+    ) -> Result<DecryptedBytes, SecretError> {
+        if encrypted_value.len() < NONCE_SIZE + TAG_SIZE {
+            return Err(SecretError::DecryptionFailed(
+                "Encrypted value too short".to_string(),
+            ));
+        }
+
+        let derived_key = self.derive_key(salt)?;
+        let cipher = Aes256Gcm::new_from_slice(&derived_key)
+            .map_err(|e| SecretError::DecryptionFailed(format!("Failed to create cipher: {e}")))?;
+        let (nonce_bytes, ciphertext) = encrypted_value.split_at(NONCE_SIZE);
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|e| SecretError::DecryptionFailed(format!("Decryption failed: {e}")))?;
+        Ok(DecryptedBytes::new(plaintext))
     }
 
     fn derive_key(&self, salt: &[u8]) -> Result<[u8; KEY_SIZE], SecretError> {

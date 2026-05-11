@@ -2,6 +2,9 @@
 
 Date: 2026-05-11
 Status: Draft (pre-implementation)
+
+> **Update 2026-05-11:** Slice 2 (migration / backfill tooling) is deferred. There is no production data in the standalone trace-commons-server repo to migrate; building migration workers speculatively violates YAGNI. When a real deployment needs to move bytes between providers, the right shape is a one-off CLI against the actual data shape we observe — not generic worker routes invented blind. Slice 1A (GCS provider) and Slice 1B (KEK trait + local impl + production refusal) shipped; see commits `1c0eb7b` through `d092d19` on `feat/cloud-artifact-provider`.
+
 Owner: Trace Commons / Storage lane (Lane C in `docs/trace-commons-roadmap.md`)
 Roadmap item: "Replace service-local encrypted artifact storage with a service-owned object-store provider abstraction, KMS/key-ref strategy, tenant-hashed object keys, hash/decrypt verification, and migration/backfill tooling" (Phase 2, Lane C).
 
