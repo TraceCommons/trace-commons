@@ -12,9 +12,11 @@ use trace_commons_server::trace_corpus_storage::{
     TraceCreditAccountSettlementLineItem, TraceCreditEventType, TraceCreditEventWrite,
     TraceCreditHoldReason, TraceCreditHoldWrite, TraceCreditSettlementBatchStatus,
     TraceCreditSettlementBatchWrite, TraceCreditSettlementNearStatus, TraceCreditSettlementState,
-    TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportManifestItemWrite,
-    TraceExportManifestMirrorWrite, TraceExportManifestWrite, TraceNearCreditOutboxItemWrite,
-    TraceObjectArtifactKind, TraceObjectRefWrite, TraceRankingCalibrationDatasetStatus,
+    TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportAccessGrantStatus,
+    TraceExportAccessGrantWrite, TraceExportJobStatus, TraceExportJobStatusUpdate,
+    TraceExportJobWrite, TraceExportManifestItemWrite, TraceExportManifestMirrorWrite,
+    TraceExportManifestWrite, TraceNearCreditOutboxItemWrite, TraceObjectArtifactKind,
+    TraceObjectRefWrite, TraceRankingCalibrationDatasetStatus,
     TraceRankingCalibrationDatasetStatusUpdate, TraceRankingCalibrationDatasetWrite,
     TraceRankingCalibrationRunWrite, TraceRankingFeatureWrite, TraceRankingLabelOutcome,
     TraceRankingLabelSource, TraceRankingLabelWrite, TraceRankingModelStatus,
@@ -22,10 +24,12 @@ use trace_commons_server::trace_corpus_storage::{
     TraceRankingUtilityCategory, TraceRankingWorkerRunKind, TraceRankingWorkerRunStatus,
     TraceRankingWorkerRunWrite, TraceRetentionJobItemAction, TraceRetentionJobItemStatus,
     TraceRetentionJobItemWrite, TraceRetentionJobStatus, TraceRetentionJobWrite,
-    TraceSubmissionWrite, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
-    TraceTenantAccessGrantWrite, TraceTenantPolicyWrite, TraceTombstoneWrite,
-    TraceUtilityAttestationWrite, TraceVectorEntrySourceProjection, TraceVectorEntryStatus,
-    TraceVectorEntryWrite, TraceWorkerKind,
+    TraceRevocationPropagationAction, TraceRevocationPropagationItemStatus,
+    TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget, TraceSubmissionWrite,
+    TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus, TraceTenantAccessGrantWrite,
+    TraceTenantPolicyWrite, TraceTombstoneWrite, TraceUtilityAttestationWrite,
+    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
+    TraceWorkerKind,
 };
 use uuid::Uuid;
 
@@ -2373,6 +2377,920 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
         beta_account_near.status,
         TraceCreditSettlementNearStatus::Pending
     );
+
+    cleanup_tenant(&backend, &tenant_alpha).await;
+    cleanup_tenant(&backend, &tenant_beta).await;
+}
+
+fn sample_tenant_access_grant(
+    tenant_id: &str,
+    grant_id: Uuid,
+    principal_ref: &str,
+    issued_at: chrono::DateTime<Utc>,
+    expires_at: Option<chrono::DateTime<Utc>>,
+    marker: &str,
+) -> TraceTenantAccessGrantWrite {
+    let mut metadata = BTreeMap::new();
+    metadata.insert("marker".to_string(), marker.to_string());
+    TraceTenantAccessGrantWrite {
+        tenant_id: tenant_id.to_string(),
+        grant_id,
+        principal_ref: principal_ref.to_string(),
+        role: TraceTenantAccessGrantRole::RetentionWorker,
+        status: TraceTenantAccessGrantStatus::Active,
+        allowed_consent_scopes: vec!["training_allowed".to_string()],
+        allowed_uses: vec!["training".to_string()],
+        issuer: Some(format!("issuer:{marker}")),
+        audience: Some("trace-commons".to_string()),
+        subject: Some(principal_ref.to_string()),
+        issued_at,
+        expires_at,
+        revoked_at: None,
+        created_by_principal_ref: Some(format!("principal:{marker}-admin")),
+        revoked_by_principal_ref: None,
+        reason: Some(format!("grant {marker}")),
+        metadata,
+    }
+}
+
+#[tokio::test]
+async fn pg_store_list_active_grants_filters_expired_and_is_tenant_scoped() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_alpha = format!("pg-active-grants-alpha-{}", Uuid::new_v4());
+    let tenant_beta = format!("pg-active-grants-beta-{}", Uuid::new_v4());
+    let principal = "principal:shared-worker";
+
+    let now = Utc::now();
+    let issued_at = now - chrono::Duration::hours(2);
+    let expired_at = now - chrono::Duration::minutes(30);
+    let still_valid = now + chrono::Duration::hours(1);
+
+    let active_grant_id = Uuid::new_v4();
+    let expired_grant_id = Uuid::new_v4();
+
+    backend
+        .upsert_trace_tenant_access_grant(sample_tenant_access_grant(
+            &tenant_alpha,
+            active_grant_id,
+            principal,
+            issued_at,
+            Some(still_valid),
+            "alpha-active",
+        ))
+        .await
+        .expect("upsert alpha active grant");
+    backend
+        .upsert_trace_tenant_access_grant(sample_tenant_access_grant(
+            &tenant_alpha,
+            expired_grant_id,
+            principal,
+            issued_at,
+            Some(expired_at),
+            "alpha-expired",
+        ))
+        .await
+        .expect("upsert alpha expired grant");
+
+    let beta_grant_id = Uuid::new_v4();
+    backend
+        .upsert_trace_tenant_access_grant(sample_tenant_access_grant(
+            &tenant_beta,
+            beta_grant_id,
+            principal,
+            issued_at,
+            Some(still_valid),
+            "beta-active",
+        ))
+        .await
+        .expect("upsert beta active grant");
+
+    let alpha_active = backend
+        .list_active_trace_tenant_access_grants_for_principal(&tenant_alpha, principal, now)
+        .await
+        .expect("list alpha active grants");
+    assert_eq!(alpha_active.len(), 1, "only non-expired grant should match");
+    assert_eq!(alpha_active[0].grant_id, active_grant_id);
+    assert_eq!(
+        alpha_active[0].metadata.get("marker"),
+        Some(&"alpha-active".to_string())
+    );
+
+    let beta_active = backend
+        .list_active_trace_tenant_access_grants_for_principal(&tenant_beta, principal, now)
+        .await
+        .expect("list beta active grants");
+    assert_eq!(beta_active.len(), 1);
+    assert_eq!(beta_active[0].grant_id, beta_grant_id);
+    assert_eq!(beta_active[0].tenant_id, tenant_beta);
+
+    let other = backend
+        .list_active_trace_tenant_access_grants_for_principal(
+            &tenant_alpha,
+            "principal:unrelated",
+            now,
+        )
+        .await
+        .expect("list unrelated principal");
+    assert!(other.is_empty());
+
+    cleanup_tenant(&backend, &tenant_alpha).await;
+    cleanup_tenant(&backend, &tenant_beta).await;
+}
+
+#[tokio::test]
+async fn pg_store_update_trace_submission_status_drives_transitions_and_audit() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_id = format!("pg-submission-status-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+        .await
+        .expect("insert submission");
+
+    backend
+        .update_trace_submission_status(
+            &tenant_id,
+            submission_id,
+            TraceCorpusStatus::Quarantined,
+            "principal:reviewer",
+            Some("needs_review"),
+        )
+        .await
+        .expect("transition to quarantined");
+
+    let after_quarantine = backend
+        .get_trace_submission(&tenant_id, submission_id)
+        .await
+        .expect("get submission after quarantine")
+        .expect("submission exists");
+    assert_eq!(after_quarantine.status, TraceCorpusStatus::Quarantined);
+
+    backend
+        .update_trace_submission_status(
+            &tenant_id,
+            submission_id,
+            TraceCorpusStatus::Rejected,
+            "principal:reviewer",
+            Some("policy_violation"),
+        )
+        .await
+        .expect("transition to rejected");
+
+    let after_reject = backend
+        .get_trace_submission(&tenant_id, submission_id)
+        .await
+        .expect("get submission after rejection")
+        .expect("submission exists");
+    assert_eq!(after_reject.status, TraceCorpusStatus::Rejected);
+
+    // Each status update emits an audit row via the store; both transitions
+    // map to `Review` per audit_action_for_status, so we expect at least two
+    // such events in the recent audit feed.
+    let recent_audit = backend
+        .list_recent_trace_audit_events(&tenant_id, 10)
+        .await
+        .expect("list recent audit events");
+    let review_events: Vec<_> = recent_audit
+        .iter()
+        .filter(|event| {
+            event.submission_id == Some(submission_id)
+                && event.action == TraceAuditAction::Review
+        })
+        .collect();
+    assert!(
+        review_events.len() >= 2,
+        "expected at least two review audit events, got {recent_audit:?}"
+    );
+
+    // Tenant scoping: another tenant with the same submission_id is unaffected.
+    let other_tenant = format!("pg-submission-status-other-{}", Uuid::new_v4());
+    backend
+        .upsert_trace_submission(sample_submission(&other_tenant, submission_id))
+        .await
+        .expect("insert other-tenant submission with overlapping id");
+    let other = backend
+        .get_trace_submission(&other_tenant, submission_id)
+        .await
+        .expect("get other-tenant submission")
+        .expect("exists");
+    assert_eq!(
+        other.status,
+        TraceCorpusStatus::Accepted,
+        "status updates on tenant A must not leak to tenant B with the same submission id"
+    );
+
+    cleanup_tenant(&backend, &tenant_id).await;
+    cleanup_tenant(&backend, &other_tenant).await;
+}
+
+#[tokio::test]
+async fn pg_store_get_latest_active_trace_object_ref_skips_invalidated() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_alpha = format!("pg-latest-object-ref-alpha-{}", Uuid::new_v4());
+    let tenant_beta = format!("pg-latest-object-ref-beta-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+
+    for tenant_id in [&tenant_alpha, &tenant_beta] {
+        backend
+            .upsert_trace_submission(sample_submission(tenant_id, submission_id))
+            .await
+            .expect("insert submission for latest-object-ref test");
+    }
+
+    let first_ref_id = Uuid::new_v4();
+    backend
+        .append_trace_object_ref(TraceObjectRefWrite {
+            tenant_id: tenant_alpha.clone(),
+            object_ref_id: first_ref_id,
+            submission_id,
+            artifact_kind: TraceObjectArtifactKind::RescrubbedEnvelope,
+            object_store: "trace_commons_file_store".to_string(),
+            object_key: format!("{tenant_alpha}/canonical/first.json"),
+            content_sha256: "sha256:first-canonical".to_string(),
+            encryption_key_ref: format!("tenant:{tenant_alpha}"),
+            size_bytes: 64,
+            compression: None,
+            created_by_job_id: None,
+        })
+        .await
+        .expect("append first object ref");
+
+    // Invalidate the first ref so it is no longer active. The test assumes
+    // `get_latest_active_trace_object_ref` filters on `invalidated_at IS NULL`
+    // (matches current implementation).
+    backend
+        .invalidate_trace_submission_artifacts(
+            &tenant_alpha,
+            submission_id,
+            TraceDerivedStatus::Superseded,
+        )
+        .await
+        .expect("invalidate first ref");
+
+    let later_ref_id = Uuid::new_v4();
+    backend
+        .append_trace_object_ref(TraceObjectRefWrite {
+            tenant_id: tenant_alpha.clone(),
+            object_ref_id: later_ref_id,
+            submission_id,
+            artifact_kind: TraceObjectArtifactKind::RescrubbedEnvelope,
+            object_store: "trace_commons_file_store".to_string(),
+            object_key: format!("{tenant_alpha}/canonical/later.json"),
+            content_sha256: "sha256:later-canonical".to_string(),
+            encryption_key_ref: format!("tenant:{tenant_alpha}"),
+            size_bytes: 96,
+            compression: None,
+            created_by_job_id: None,
+        })
+        .await
+        .expect("append later object ref");
+
+    // Different artifact kind on the same submission must not be returned.
+    backend
+        .append_trace_object_ref(TraceObjectRefWrite {
+            tenant_id: tenant_alpha.clone(),
+            object_ref_id: Uuid::new_v4(),
+            submission_id,
+            artifact_kind: TraceObjectArtifactKind::BenchmarkArtifact,
+            object_store: "trace_commons_file_store".to_string(),
+            object_key: format!("{tenant_alpha}/benchmark/other.json"),
+            content_sha256: "sha256:benchmark-other".to_string(),
+            encryption_key_ref: format!("tenant:{tenant_alpha}"),
+            size_bytes: 128,
+            compression: None,
+            created_by_job_id: None,
+        })
+        .await
+        .expect("append unrelated artifact ref");
+
+    // Beta: an overlapping object_ref_id under a different tenant must not leak.
+    backend
+        .append_trace_object_ref(TraceObjectRefWrite {
+            tenant_id: tenant_beta.clone(),
+            object_ref_id: later_ref_id,
+            submission_id,
+            artifact_kind: TraceObjectArtifactKind::RescrubbedEnvelope,
+            object_store: "trace_commons_file_store".to_string(),
+            object_key: format!("{tenant_beta}/canonical/later.json"),
+            content_sha256: "sha256:beta-canonical".to_string(),
+            encryption_key_ref: format!("tenant:{tenant_beta}"),
+            size_bytes: 96,
+            compression: None,
+            created_by_job_id: None,
+        })
+        .await
+        .expect("append beta object ref with overlapping id");
+
+    let alpha_latest = backend
+        .get_latest_active_trace_object_ref(
+            &tenant_alpha,
+            submission_id,
+            TraceObjectArtifactKind::RescrubbedEnvelope,
+        )
+        .await
+        .expect("get latest alpha object ref")
+        .expect("a non-invalidated ref exists");
+    assert_eq!(alpha_latest.object_ref_id, later_ref_id);
+    assert_eq!(alpha_latest.tenant_id, tenant_alpha);
+    assert_eq!(alpha_latest.content_sha256, "sha256:later-canonical");
+
+    let beta_latest = backend
+        .get_latest_active_trace_object_ref(
+            &tenant_beta,
+            submission_id,
+            TraceObjectArtifactKind::RescrubbedEnvelope,
+        )
+        .await
+        .expect("get latest beta object ref")
+        .expect("beta ref exists");
+    assert_eq!(beta_latest.tenant_id, tenant_beta);
+    assert_eq!(beta_latest.content_sha256, "sha256:beta-canonical");
+
+    cleanup_tenant(&backend, &tenant_alpha).await;
+    cleanup_tenant(&backend, &tenant_beta).await;
+}
+
+#[tokio::test]
+async fn pg_store_list_recent_trace_audit_events_returns_limit_in_descending_order() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_id = format!("pg-recent-audit-{}", Uuid::new_v4());
+    let other_tenant = format!("pg-recent-audit-other-{}", Uuid::new_v4());
+
+    let submission_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+        .await
+        .expect("insert tenant submission");
+    backend
+        .upsert_trace_submission(sample_submission(&other_tenant, submission_id))
+        .await
+        .expect("insert other-tenant submission");
+
+    // Insert 12 audit events for the target tenant; with limit=10 we expect
+    // exactly 10 returned in audit_sequence DESC order (most recent first).
+    let total = 12usize;
+    let mut inserted_ids = Vec::with_capacity(total);
+    for idx in 0..total {
+        let audit_event_id = Uuid::new_v4();
+        inserted_ids.push(audit_event_id);
+        let mut counts = BTreeMap::new();
+        counts.insert(format!("step_{idx}"), 1);
+        backend
+            .append_trace_audit_event(TraceAuditEventWrite {
+                audit_event_id,
+                tenant_id: tenant_id.clone(),
+                actor_principal_ref: format!("principal:auditor-{idx}"),
+                actor_role: "auditor".to_string(),
+                action: TraceAuditAction::Retain,
+                reason: Some(format!("recent audit ordering test {idx}")),
+                request_id: Some(format!("req-{idx}")),
+                submission_id: Some(submission_id),
+                object_ref_id: None,
+                export_manifest_id: None,
+                decision_inputs_hash: Some(format!("sha256:decision-{idx}")),
+                previous_event_hash: None,
+                event_hash: Some(format!("sha256:event-{idx}")),
+                canonical_event_json: Some(format!("{{\"idx\":{idx}}}")),
+                metadata: TraceAuditSafeMetadata::Maintenance {
+                    surface: Some("maintenance".to_string()),
+                    purpose_hash: None,
+                    dry_run: true,
+                    action_counts: counts,
+                },
+            })
+            .await
+            .expect("append audit event");
+    }
+
+    backend
+        .append_trace_audit_event(TraceAuditEventWrite {
+            audit_event_id: Uuid::new_v4(),
+            tenant_id: other_tenant.clone(),
+            actor_principal_ref: "principal:other-tenant-auditor".to_string(),
+            actor_role: "auditor".to_string(),
+            action: TraceAuditAction::Retain,
+            reason: Some("other-tenant audit row".to_string()),
+            request_id: None,
+            submission_id: Some(submission_id),
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: Some("sha256:other-tenant-event".to_string()),
+            canonical_event_json: None,
+            metadata: TraceAuditSafeMetadata::Maintenance {
+                surface: Some("maintenance".to_string()),
+                purpose_hash: None,
+                dry_run: true,
+                action_counts: BTreeMap::new(),
+            },
+        })
+        .await
+        .expect("append other-tenant audit");
+
+    let recent = backend
+        .list_recent_trace_audit_events(&tenant_id, 10)
+        .await
+        .expect("list recent audit events with limit 10");
+    assert_eq!(recent.len(), 10, "limit must truncate to exactly 10");
+    assert!(
+        recent.iter().all(|event| event.tenant_id == tenant_id),
+        "recent audit events must be tenant-scoped"
+    );
+
+    // The most recent (last inserted) events must come first.
+    let returned_ids: Vec<Uuid> = recent.iter().map(|event| event.audit_event_id).collect();
+    let expected_first_ten: Vec<Uuid> =
+        inserted_ids.iter().rev().take(10).copied().collect();
+    assert_eq!(
+        returned_ids, expected_first_ten,
+        "list_recent_trace_audit_events must return rows in audit_sequence DESC order"
+    );
+
+    cleanup_tenant(&backend, &tenant_id).await;
+    cleanup_tenant(&backend, &other_tenant).await;
+}
+
+fn sample_export_access_grant(
+    tenant_id: &str,
+    export_job_id: Uuid,
+    grant_id: Uuid,
+    dataset_kind: &str,
+    requested_at: chrono::DateTime<Utc>,
+    expires_at: chrono::DateTime<Utc>,
+) -> TraceExportAccessGrantWrite {
+    TraceExportAccessGrantWrite {
+        tenant_id: tenant_id.to_string(),
+        export_job_id,
+        grant_id,
+        caller_principal_ref: "principal:export-caller".to_string(),
+        requested_dataset_kind: dataset_kind.to_string(),
+        purpose: format!("export grant for {dataset_kind}"),
+        max_item_cap: Some(100),
+        status: TraceExportAccessGrantStatus::Active,
+        requested_at,
+        expires_at,
+        metadata: BTreeMap::new(),
+    }
+}
+
+fn sample_export_job(
+    tenant_id: &str,
+    export_job_id: Uuid,
+    grant_id: Uuid,
+    dataset_kind: &str,
+    status: TraceExportJobStatus,
+    requested_at: chrono::DateTime<Utc>,
+    expires_at: chrono::DateTime<Utc>,
+) -> TraceExportJobWrite {
+    TraceExportJobWrite {
+        tenant_id: tenant_id.to_string(),
+        export_job_id,
+        grant_id,
+        caller_principal_ref: "principal:export-caller".to_string(),
+        requested_dataset_kind: dataset_kind.to_string(),
+        purpose: format!("export job for {dataset_kind}"),
+        max_item_cap: Some(100),
+        status,
+        requested_at,
+        started_at: None,
+        finished_at: None,
+        expires_at,
+        result_manifest_id: None,
+        item_count: None,
+        last_error: None,
+        metadata: BTreeMap::new(),
+    }
+}
+
+#[tokio::test]
+async fn pg_store_claim_next_trace_export_job_respects_dataset_filter_and_tenant_scope() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_alpha = format!("pg-claim-export-alpha-{}", Uuid::new_v4());
+    let tenant_beta = format!("pg-claim-export-beta-{}", Uuid::new_v4());
+
+    let now = Utc::now();
+    let expires = now + chrono::Duration::hours(1);
+
+    // Alpha: one ranker job (target) and one benchmark job (must be skipped).
+    let ranker_grant_id = Uuid::new_v4();
+    let ranker_job_id = Uuid::new_v4();
+    let benchmark_grant_id = Uuid::new_v4();
+    let benchmark_job_id = Uuid::new_v4();
+    backend
+        .upsert_trace_export_access_grant(sample_export_access_grant(
+            &tenant_alpha,
+            ranker_job_id,
+            ranker_grant_id,
+            "ranker_corpus",
+            now,
+            expires,
+        ))
+        .await
+        .expect("upsert alpha ranker grant");
+    backend
+        .upsert_trace_export_job(sample_export_job(
+            &tenant_alpha,
+            ranker_job_id,
+            ranker_grant_id,
+            "ranker_corpus",
+            TraceExportJobStatus::Queued,
+            now,
+            expires,
+        ))
+        .await
+        .expect("upsert alpha ranker queued job");
+
+    backend
+        .upsert_trace_export_access_grant(sample_export_access_grant(
+            &tenant_alpha,
+            benchmark_job_id,
+            benchmark_grant_id,
+            "benchmark_corpus",
+            now,
+            expires,
+        ))
+        .await
+        .expect("upsert alpha benchmark grant");
+    backend
+        .upsert_trace_export_job(sample_export_job(
+            &tenant_alpha,
+            benchmark_job_id,
+            benchmark_grant_id,
+            "benchmark_corpus",
+            TraceExportJobStatus::Queued,
+            now,
+            expires,
+        ))
+        .await
+        .expect("upsert alpha benchmark queued job");
+
+    // Beta: queued job whose export_job_id collides with alpha's ranker job.
+    let beta_grant_id = Uuid::new_v4();
+    backend
+        .upsert_trace_export_access_grant(sample_export_access_grant(
+            &tenant_beta,
+            ranker_job_id,
+            beta_grant_id,
+            "ranker_corpus",
+            now,
+            expires,
+        ))
+        .await
+        .expect("upsert beta grant with overlapping job id");
+    backend
+        .upsert_trace_export_job(sample_export_job(
+            &tenant_beta,
+            ranker_job_id,
+            beta_grant_id,
+            "ranker_corpus",
+            TraceExportJobStatus::Queued,
+            now,
+            expires,
+        ))
+        .await
+        .expect("upsert beta queued job with overlapping id");
+
+    let claimed = backend
+        .claim_next_trace_export_job(
+            &tenant_alpha,
+            Some("ranker_corpus"),
+            now,
+            "principal:export-worker",
+        )
+        .await
+        .expect("claim alpha ranker job")
+        .expect("a queued job exists");
+    assert_eq!(claimed.export_job_id, ranker_job_id);
+    assert_eq!(claimed.status, TraceExportJobStatus::Running);
+    assert_eq!(claimed.requested_dataset_kind, "ranker_corpus");
+    assert_eq!(claimed.tenant_id, tenant_alpha);
+
+    // Second call with the same filter: no remaining queued ranker job.
+    // Assumption: claim_next is one-shot and does not re-claim running jobs
+    // (matches the SQL, which filters on status='queued').
+    let second = backend
+        .claim_next_trace_export_job(
+            &tenant_alpha,
+            Some("ranker_corpus"),
+            now,
+            "principal:export-worker",
+        )
+        .await
+        .expect("second claim returns None when no queued jobs match");
+    assert!(second.is_none());
+
+    // The benchmark job is still queued and claimable.
+    let benchmark_claimed = backend
+        .claim_next_trace_export_job(
+            &tenant_alpha,
+            Some("benchmark_corpus"),
+            now,
+            "principal:export-worker",
+        )
+        .await
+        .expect("claim alpha benchmark job")
+        .expect("benchmark queued job exists");
+    assert_eq!(benchmark_claimed.export_job_id, benchmark_job_id);
+
+    // Beta's overlapping queued job must NOT have been claimed.
+    let beta_jobs = backend
+        .list_trace_export_jobs(&tenant_beta)
+        .await
+        .expect("list beta export jobs");
+    assert_eq!(beta_jobs.len(), 1);
+    assert_eq!(
+        beta_jobs[0].status,
+        TraceExportJobStatus::Queued,
+        "alpha's claim must not affect beta's job with the same id"
+    );
+
+    cleanup_tenant(&backend, &tenant_alpha).await;
+    cleanup_tenant(&backend, &tenant_beta).await;
+}
+
+#[tokio::test]
+async fn pg_store_retry_failed_trace_export_job_transitions_failed_to_queued() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_id = format!("pg-retry-export-{}", Uuid::new_v4());
+    let other_tenant = format!("pg-retry-export-other-{}", Uuid::new_v4());
+    let now = Utc::now();
+    let expires = now + chrono::Duration::hours(1);
+    let retry_at = now + chrono::Duration::minutes(1);
+
+    let grant_id = Uuid::new_v4();
+    let job_id = Uuid::new_v4();
+    backend
+        .upsert_trace_export_access_grant(sample_export_access_grant(
+            &tenant_id,
+            job_id,
+            grant_id,
+            "ranker_corpus",
+            now,
+            expires,
+        ))
+        .await
+        .expect("upsert retry grant");
+
+    let mut failed_job = sample_export_job(
+        &tenant_id,
+        job_id,
+        grant_id,
+        "ranker_corpus",
+        TraceExportJobStatus::Failed,
+        now,
+        expires,
+    );
+    failed_job.started_at = Some(now - chrono::Duration::minutes(5));
+    failed_job.finished_at = Some(now - chrono::Duration::minutes(4));
+    failed_job.last_error = Some("worker_timeout".to_string());
+    backend
+        .upsert_trace_export_job(failed_job)
+        .await
+        .expect("seed failed export job");
+
+    let retried = backend
+        .retry_failed_trace_export_job(
+            &tenant_id,
+            job_id,
+            retry_at,
+            TraceExportJobStatusUpdate {
+                status: TraceExportJobStatus::Queued,
+                started_at: None,
+                finished_at: None,
+                result_manifest_id: None,
+                item_count: None,
+                last_error: None,
+                metadata: BTreeMap::new(),
+            },
+        )
+        .await
+        .expect("retry failed job")
+        .expect("failed job exists and is retried");
+    assert_eq!(retried.status, TraceExportJobStatus::Queued);
+    assert!(retried.last_error.is_none());
+    assert!(retried.started_at.is_none());
+    assert!(retried.finished_at.is_none());
+
+    // Edge case: retrying again when the job is no longer in `failed` state
+    // (SQL filters on `status = 'failed'`); expect None.
+    let second_retry = backend
+        .retry_failed_trace_export_job(
+            &tenant_id,
+            job_id,
+            retry_at,
+            TraceExportJobStatusUpdate {
+                status: TraceExportJobStatus::Queued,
+                started_at: None,
+                finished_at: None,
+                result_manifest_id: None,
+                item_count: None,
+                last_error: None,
+                metadata: BTreeMap::new(),
+            },
+        )
+        .await
+        .expect("repeat retry call must succeed (returning None when not failed)");
+    assert!(
+        second_retry.is_none(),
+        "retry_failed_trace_export_job must refuse when job is no longer failed"
+    );
+
+    // Tenant scoping: a failed job with the same id under another tenant must
+    // not be touched by the retry above.
+    let other_grant_id = Uuid::new_v4();
+    backend
+        .upsert_trace_export_access_grant(sample_export_access_grant(
+            &other_tenant,
+            job_id,
+            other_grant_id,
+            "ranker_corpus",
+            now,
+            expires,
+        ))
+        .await
+        .expect("upsert other-tenant grant");
+    let mut other_failed_job = sample_export_job(
+        &other_tenant,
+        job_id,
+        other_grant_id,
+        "ranker_corpus",
+        TraceExportJobStatus::Failed,
+        now,
+        expires,
+    );
+    other_failed_job.last_error = Some("worker_timeout".to_string());
+    backend
+        .upsert_trace_export_job(other_failed_job)
+        .await
+        .expect("seed other-tenant failed job");
+    let other_jobs = backend
+        .list_trace_export_jobs(&other_tenant)
+        .await
+        .expect("list other-tenant jobs");
+    assert_eq!(other_jobs.len(), 1);
+    assert_eq!(
+        other_jobs[0].status,
+        TraceExportJobStatus::Failed,
+        "retry on tenant A must not leak to tenant B with the same job id"
+    );
+
+    cleanup_tenant(&backend, &tenant_id).await;
+    cleanup_tenant(&backend, &other_tenant).await;
+}
+
+#[tokio::test]
+async fn pg_store_list_due_trace_revocation_propagation_items_filters_by_next_attempt_at() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_alpha = format!("pg-revocation-due-alpha-{}", Uuid::new_v4());
+    let tenant_beta = format!("pg-revocation-due-beta-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    let trace_id = Uuid::new_v4();
+
+    for tenant_id in [&tenant_alpha, &tenant_beta] {
+        let mut submission = sample_submission(tenant_id, submission_id);
+        submission.trace_id = trace_id;
+        backend
+            .upsert_trace_submission(submission)
+            .await
+            .expect("insert source submission for revocation propagation");
+    }
+
+    let now = Utc::now();
+    let past_due_id = Uuid::new_v4();
+    let no_schedule_id = Uuid::new_v4();
+    let future_id = Uuid::new_v4();
+
+    backend
+        .upsert_trace_revocation_propagation_item(TraceRevocationPropagationItemWrite {
+            tenant_id: tenant_alpha.clone(),
+            propagation_item_id: past_due_id,
+            source_submission_id: submission_id,
+            target: TraceRevocationPropagationTarget::VectorEntry {
+                vector_entry_id: Uuid::new_v4(),
+            },
+            action: TraceRevocationPropagationAction::InvalidateVector,
+            status: TraceRevocationPropagationItemStatus::Pending,
+            idempotency_key: "alpha-past-due".to_string(),
+            reason: "past due".to_string(),
+            attempt_count: 0,
+            last_error: None,
+            next_attempt_at: Some(now - chrono::Duration::minutes(5)),
+            completed_at: None,
+            evidence_hash: None,
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("insert past-due propagation item");
+
+    // Unscheduled (NULL next_attempt_at) item — should also be returned.
+    backend
+        .upsert_trace_revocation_propagation_item(TraceRevocationPropagationItemWrite {
+            tenant_id: tenant_alpha.clone(),
+            propagation_item_id: no_schedule_id,
+            source_submission_id: submission_id,
+            target: TraceRevocationPropagationTarget::VectorEntry {
+                vector_entry_id: Uuid::new_v4(),
+            },
+            action: TraceRevocationPropagationAction::InvalidateVector,
+            status: TraceRevocationPropagationItemStatus::Failed,
+            idempotency_key: "alpha-no-schedule".to_string(),
+            reason: "no schedule".to_string(),
+            attempt_count: 1,
+            last_error: Some("transient".to_string()),
+            next_attempt_at: None,
+            completed_at: None,
+            evidence_hash: None,
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("insert no-schedule propagation item");
+
+    // Future-scheduled item — must NOT be returned.
+    backend
+        .upsert_trace_revocation_propagation_item(TraceRevocationPropagationItemWrite {
+            tenant_id: tenant_alpha.clone(),
+            propagation_item_id: future_id,
+            source_submission_id: submission_id,
+            target: TraceRevocationPropagationTarget::VectorEntry {
+                vector_entry_id: Uuid::new_v4(),
+            },
+            action: TraceRevocationPropagationAction::InvalidateVector,
+            status: TraceRevocationPropagationItemStatus::Pending,
+            idempotency_key: "alpha-future".to_string(),
+            reason: "future".to_string(),
+            attempt_count: 0,
+            last_error: None,
+            next_attempt_at: Some(now + chrono::Duration::hours(1)),
+            completed_at: None,
+            evidence_hash: None,
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("insert future propagation item");
+
+    // Beta tenant: a past-due item under a different tenant — must not leak.
+    backend
+        .upsert_trace_revocation_propagation_item(TraceRevocationPropagationItemWrite {
+            tenant_id: tenant_beta.clone(),
+            propagation_item_id: Uuid::new_v4(),
+            source_submission_id: submission_id,
+            target: TraceRevocationPropagationTarget::VectorEntry {
+                vector_entry_id: Uuid::new_v4(),
+            },
+            action: TraceRevocationPropagationAction::InvalidateVector,
+            status: TraceRevocationPropagationItemStatus::Pending,
+            idempotency_key: "beta-past-due".to_string(),
+            reason: "beta past due".to_string(),
+            attempt_count: 0,
+            last_error: None,
+            next_attempt_at: Some(now - chrono::Duration::minutes(5)),
+            completed_at: None,
+            evidence_hash: None,
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("insert beta propagation item");
+
+    let due = backend
+        .list_due_trace_revocation_propagation_items(&tenant_alpha, now, 10)
+        .await
+        .expect("list due alpha propagation items");
+    assert_eq!(due.len(), 2, "only past-due and unscheduled items are due");
+    assert!(due.iter().all(|item| item.tenant_id == tenant_alpha));
+    let due_ids: std::collections::HashSet<Uuid> =
+        due.iter().map(|item| item.propagation_item_id).collect();
+    assert!(due_ids.contains(&past_due_id));
+    assert!(due_ids.contains(&no_schedule_id));
+    assert!(!due_ids.contains(&future_id));
 
     cleanup_tenant(&backend, &tenant_alpha).await;
     cleanup_tenant(&backend, &tenant_beta).await;
