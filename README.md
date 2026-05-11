@@ -29,66 +29,54 @@ The roadmap is `docs/trace-commons-roadmap.md`; the storage contract is
 `docs/trace-commons-storage.md`; the envelope and threat model are
 `docs/trace-commons.md`.
 
-## Open Production Gaps
+## Open Work
 
-The main remaining work is production rollout hardening, not feature breadth.
-The biggest concrete gaps, in priority order:
+This repo has zero current users — see `docs/trace-commons-roadmap.md` for the
+full framing. The work below is grouped by whether it blocks a real
+deployment or just holds intrinsic value with no users.
 
-1. **KEK trust-model decision blocking cloud cutover.** The cloud object
-   backend has landed: a GCS provider implements `RemoteTraceArtifactProvider`
-   behind the `gcs-client` build feature, alias tracking and versioning gates
-   already exist, and `ServiceOwnedTraceArtifactStore` now wraps a pluggable
-   `KmsKeyWrapper` trait. Only the dev-only `LocalMasterKeyWrapper` is shipped
-   in-tree; production deployments fail closed at startup via
+### Blocks first real use
+
+1. **KEK trust-model decision and implementation.** The cloud object backend
+   has landed: a GCS provider implements `RemoteTraceArtifactProvider` behind
+   the `gcs-client` build feature, and `ServiceOwnedTraceArtifactStore` wraps
+   a pluggable `KmsKeyWrapper` trait. Only the dev-only `LocalMasterKeyWrapper`
+   is shipped; production deployments fail closed at startup via
    `TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY=true` until a real KEK
-   (TEE-rooted such as dstack / Confidential Space / Nitro Enclaves, or a cloud
-   KMS adapter) is selected. `/v1/admin/config-status` now reports safe
-   `object_store.{alias,provider,require_versioning,kek.*}` fields for that
-   readiness. The KEK trust-model decision lives in its own follow-up spec; the
-   current cloud-provider design is
+   (TEE-rooted via dstack / Confidential Space / Nitro Enclaves, or a cloud
+   KMS adapter) is selected. The KEK trust-model decision is its own
+   follow-up spec; the current cloud-provider design is
    [`docs/superpowers/specs/2026-05-11-cloud-trace-artifact-provider-design.md`](docs/superpowers/specs/2026-05-11-cloud-trace-artifact-provider-design.md).
-   Migration backfill from local/filesystem-remote to cloud is **deferred**:
-   no pilot data in this repo to migrate; the right shape is a one-off CLI
-   against the actual data shape when a deployment needs it, not generic
-   migration workers built blind.
-2. **`TenantCtx` propagation everywhere.** Envelope tenant fields are
-   attribution-only and most paths already fail closed on drift, but the
-   roadmap's "every ingest, review, export, worker, maintenance, and
-   contributor-status path" coverage is not yet complete.
-3. **PostgreSQL service-role smoke rehearsal.** RLS is forced and the
-   runtime-role hash can be pinned via
-   `TRACE_COMMONS_POSTGRES_RUNTIME_ROLE_SHA256`, but the full smoke suite has
-   not yet been rehearsed under the pinned non-owner service role. Until that
-   passes, RLS is a defense-in-depth guardrail rather than the active trust
-   boundary.
-4. **Per-tenant rollout of DB-primary and object-primary read flags.** Tenant
-   A canary coverage exists; broader tenant rollout is gated on reconciliation
-   parity remaining green.
-5. **Durable private vector and benchmark/ranker workers in production.** The
-   private embedder/searcher trait, vector worker, and benchmark/registry
-   outbox all exist; deployed adapters and broad rollout evidence do not.
 
-For the full slice list see the "Production Gap Queue" in
-`docs/trace-commons-roadmap.md`.
+2. **Complete the Ironclaw extraction.** Ironclaw should depend on the shared
+   `trace-commons-protocol` crate but doesn't yet. Until that wiring lands, this
+   server has no clients at all and most server-side polish is speculative.
 
-## Operator Promotion Checklist (Per Tenant)
+### Worth doing without users
 
-Keep every promotion tenant-scoped until reconciliation, rollback, and smoke
-evidence is green:
+Real correctness / security work that holds value with zero users — these
+tighten the trust model, not the deployment runbook.
 
-1. DB dual-write on; backfill complete.
-2. Active tenant access grants for exactly the principals and roles being
-   promoted.
-3. `/v1/admin/db-reconciliation-drill` returns clean (no `blocking_gaps`).
-4. Promote surface-specific DB reader flags before object-ref-required modes;
-   promote object-ref modes before object-primary modes.
-5. Object-store rehearsal: `/v1/admin/object-store-migration-drill` clean,
-   versioning required where applicable.
-6. Key rotation drill, rollback drill, audit-chain drill, revocation
-   propagation drill, retention dry-run drill, ranking-readiness drill — all
-   with fresh (≤24h) passed evidence in `/v1/admin/rollout-smoke/evidence`.
-7. Confirm `/v1/admin/rollout-smoke/preflight` shows zero missing required
-   checks.
+- **Auth-derived `TenantCtx` propagation** into every ingest / review /
+  export / worker / maintenance path. Most paths already fail closed on
+  drift; the remaining surface is a finite list of handlers.
+- **Privileged-action ABAC** for review override, destructive purge, and
+  tombstone changes. Tightens authorization away from static token roles.
+- **Production-grade audit append/read** with hash-chain verification,
+  per-source content-read rows, sampled reconciliation. Partial today.
+- **Private vector infrastructure** — replace the deterministic placeholder
+  with a real private embedder + search adapter over redacted projections.
+- **PostgreSQL `TraceCorpusStore` integration coverage** for remaining slices.
+- **Standalone upload-claim issuer hardening** — key rotation rehearsal,
+  deploy story, basic CLI on the existing Ed25519 MVP.
+
+### Deferred until there is a user
+
+Explicit non-goals while the repo has zero deployments — per-tenant rollout
+flags, smoke-evidence apparatus, operator runbooks, migration tooling between
+object-store backends, and the full Phase 6 cutover machinery. When a real
+deployment names its constraints, that work returns shaped to its needs. See
+the roadmap for the full deferred list.
 
 ## Binaries
 
