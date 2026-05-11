@@ -3583,6 +3583,33 @@ impl TraceCorpusStore for PgBackend {
         records
     }
 
+    async fn get_trace_audit_event_by_id(
+        &self,
+        tenant_id: &str,
+        audit_event_id: Uuid,
+    ) -> Result<Option<TraceAuditEventRecord>, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT
+                    tenant_id, audit_sequence, audit_event_id, actor_principal_ref, actor_role,
+                    action, reason, request_id, submission_id, object_ref_id, export_manifest_id,
+                    decision_inputs_hash, previous_event_hash, event_hash, canonical_event_json,
+                    metadata_json,
+                    occurred_at
+                 FROM trace_audit_events
+                 WHERE tenant_id = $1 AND audit_event_id = $2
+                 LIMIT 1",
+                &[&tenant_id, &audit_event_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row.as_ref().map(row_to_audit_event).transpose()?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
+    }
+
     async fn append_trace_credit_event(
         &self,
         credit_event: TraceCreditEventWrite,
