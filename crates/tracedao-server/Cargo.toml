@@ -22,6 +22,7 @@ hkdf = "0.12"
 jsonwebtoken = "9"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+ring = "0.17"
 secrecy = { version = "0.10", features = ["serde"] }
 zeroize = "1"
 serde = { version = "1", features = ["derive"] }
