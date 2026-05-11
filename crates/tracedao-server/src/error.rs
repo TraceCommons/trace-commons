@@ -61,6 +61,37 @@ impl DecryptedSecret {
     }
 }
 
+/// A decrypted raw-byte secret value. Used for binary payloads that are not
+/// valid UTF-8 (e.g., wrapped DEKs). Intentionally opaque in Debug output.
+pub struct DecryptedBytes {
+    bytes: Vec<u8>,
+}
+
+impl DecryptedBytes {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes }
+    }
+
+    /// Expose the raw decrypted bytes.
+    pub fn expose_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+}
+
+impl fmt::Debug for DecryptedBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DecryptedBytes([REDACTED, {} bytes])", self.len())
+    }
+}
+
 impl fmt::Debug for DecryptedSecret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "DecryptedSecret([REDACTED, {} bytes])", self.len())

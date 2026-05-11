@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 aes-gcm = "0.10"
 anyhow = "1"
+bytes = "1"
 async-trait = "0.1"
 axum = "0.8"
 base64 = "0.22"
@@ -22,6 +23,7 @@ jsonwebtoken = "9"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 secrecy = { version = "0.10", features = ["serde"] }
+zeroize = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -32,6 +34,14 @@ tracedao-protocol = { path = "../tracedao-protocol" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
+google-cloud-storage = { version = "0.24", optional = true }
+
+[features]
+default = []
+# Compile the production GCS client wrapping the `google-cloud-storage` crate
+# (uses Application Default Credentials). Off by default so hermetic CI builds
+# don't pull the GCS dependency tree.
+gcs-client = ["dep:google-cloud-storage"]
 
 [dev-dependencies]
 tempfile = "3"
