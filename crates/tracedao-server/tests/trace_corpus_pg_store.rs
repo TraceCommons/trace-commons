@@ -3311,6 +3311,7 @@ fn sample_gate_decision(submission_id: Uuid) -> TraceGateDecisionRow {
         embedding_evidence_hash: "sha256:fixture-evidence".to_string(),
         attestation_chain_hash: "sha256:fixture-attestation".to_string(),
         decided_at: Utc::now(),
+        vector_entry_id: Some(Uuid::new_v4()),
     }
 }
 
@@ -3334,6 +3335,7 @@ async fn pg_store_inserts_trace_gate_decision_under_tenant_scope() {
 
     let decision = sample_gate_decision(submission_id);
     let decision_id = decision.decision_id;
+    let expected_vector_entry_id = decision.vector_entry_id;
     backend
         .insert_trace_gate_decision(&tenant_alpha, decision.clone())
         .await
@@ -3357,7 +3359,82 @@ async fn pg_store_inserts_trace_gate_decision_under_tenant_scope() {
         .await
         .expect("same decision_id under different tenant must succeed");
 
-    let _ = decision_id;
+    // Read back the row for tenant_alpha and assert vector_entry_id
+    // round-trips (migration V24 nullable column).
+    {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("get readback connection");
+        let tx = client
+            .transaction()
+            .await
+            .expect("start readback transaction");
+        tx.execute(
+            "SELECT set_config('tracedao.trace_tenant_id', $1, true)",
+            &[&tenant_alpha],
+        )
+        .await
+        .expect("set tenant context for readback");
+        let row = tx
+            .query_one(
+                "SELECT vector_entry_id FROM trace_gate_decisions \
+                 WHERE tenant_id = $1 AND decision_id = $2",
+                &[&tenant_alpha, &decision_id],
+            )
+            .await
+            .expect("read back gate decision row");
+        tx.commit().await.expect("commit readback transaction");
+        let stored: Option<Uuid> = row.get("vector_entry_id");
+        assert_eq!(
+            stored, expected_vector_entry_id,
+            "vector_entry_id must round-trip through trace_gate_decisions"
+        );
+    }
+
+    // Also verify that a decision with vector_entry_id = None stores NULL
+    // cleanly.
+    let mut null_decision = sample_gate_decision(submission_id);
+    null_decision.decision_id = Uuid::new_v4();
+    null_decision.vector_entry_id = None;
+    let null_decision_id = null_decision.decision_id;
+    backend
+        .insert_trace_gate_decision(&tenant_alpha, null_decision)
+        .await
+        .expect("insert gate decision with null vector_entry_id");
+    {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("get null readback connection");
+        let tx = client
+            .transaction()
+            .await
+            .expect("start null readback transaction");
+        tx.execute(
+            "SELECT set_config('tracedao.trace_tenant_id', $1, true)",
+            &[&tenant_alpha],
+        )
+        .await
+        .expect("set tenant context for null readback");
+        let row = tx
+            .query_one(
+                "SELECT vector_entry_id FROM trace_gate_decisions \
+                 WHERE tenant_id = $1 AND decision_id = $2",
+                &[&tenant_alpha, &null_decision_id],
+            )
+            .await
+            .expect("read back null gate decision row");
+        tx.commit().await.expect("commit null readback transaction");
+        let stored: Option<Uuid> = row.get("vector_entry_id");
+        assert!(
+            stored.is_none(),
+            "NULL vector_entry_id must round-trip as None"
+        );
+    }
+
     cleanup_tenant(&backend, &tenant_alpha).await;
     cleanup_tenant(&backend, &tenant_beta).await;
 }

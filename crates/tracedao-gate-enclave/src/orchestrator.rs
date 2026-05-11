@@ -83,6 +83,16 @@ where
         &self.cfg
     }
 
+    /// Remove an entry from the orchestrator's vector index by `entry_id`.
+    ///
+    /// Returns `Ok(true)` if the entry was found and removed, `Ok(false)` if
+    /// no such entry existed (idempotent: already-absent is a satisfied
+    /// postcondition). Callers that only need "make sure it's gone" can safely
+    /// discard the bool.
+    pub fn delete_vector_entry(&self, entry_id: Uuid) -> anyhow::Result<bool> {
+        self.index.delete(entry_id)
+    }
+
     /// Evaluate `plaintext` under the orchestrator's gate policy.
     ///
     /// Steps:
