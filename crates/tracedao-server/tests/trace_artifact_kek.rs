@@ -17,7 +17,7 @@ fn local_master_key_wrapper_round_trips_dek() {
     };
     let wrapped = wrapper.wrap_dek(&dek, &ctx).unwrap();
     let recovered = wrapper.unwrap_dek(&wrapped, &ctx).unwrap();
-    assert_eq!(dek, recovered);
+    assert_eq!(dek, *recovered);
     assert_eq!(wrapped.wrapper_kind, "local_master_key");
     assert_eq!(wrapped.context_hash, ctx.canonical_hash());
     assert!(!wrapper.is_production_trust_boundary());

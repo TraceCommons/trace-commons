@@ -8,6 +8,7 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use crate::secrets::SecretsCrypto;
 use crate::trace_artifact_store::TraceArtifactKind;
@@ -81,7 +82,15 @@ pub trait KmsKeyWrapper: Send + Sync {
 
     /// Unwrap a previously wrapped DEK, verifying that `context` matches the
     /// hash recorded at wrap time.
-    fn unwrap_dek(&self, wrapped: &WrappedDek, context: &KekContext) -> anyhow::Result<[u8; 32]>;
+    ///
+    /// The returned key bytes are wrapped in `Zeroizing` so callers receive a
+    /// scrubbed-on-drop buffer by construction; callers MUST NOT copy the
+    /// raw bytes out into a long-lived plain `[u8; 32]`.
+    fn unwrap_dek(
+        &self,
+        wrapped: &WrappedDek,
+        context: &KekContext,
+    ) -> anyhow::Result<Zeroizing<[u8; 32]>>;
 
     /// Return observable status suitable for logging and health checks.
     fn safe_status(&self) -> KekWrapperStatus;
@@ -154,7 +163,11 @@ impl KmsKeyWrapper for LocalMasterKeyWrapper {
         })
     }
 
-    fn unwrap_dek(&self, wrapped: &WrappedDek, context: &KekContext) -> anyhow::Result<[u8; 32]> {
+    fn unwrap_dek(
+        &self,
+        wrapped: &WrappedDek,
+        context: &KekContext,
+    ) -> anyhow::Result<Zeroizing<[u8; 32]>> {
         anyhow::ensure!(
             wrapped.wrapper_kind == "local_master_key",
             "KekUnwrapFailed: wrapper kind mismatch"
@@ -189,7 +202,7 @@ impl KmsKeyWrapper for LocalMasterKeyWrapper {
             &bytes[..ctx_len] == expected_ctx.as_bytes(),
             "KekContextMismatch: inner context tag mismatch"
         );
-        let mut dek = [0u8; 32];
+        let mut dek = Zeroizing::new([0u8; 32]);
         dek.copy_from_slice(&bytes[ctx_len..]);
         Ok(dek)
     }
@@ -204,5 +217,64 @@ impl KmsKeyWrapper for LocalMasterKeyWrapper {
 
     fn is_production_trust_boundary(&self) -> bool {
         false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DstackKekWrapper (stub)
+// ---------------------------------------------------------------------------
+
+/// Stub `KmsKeyWrapper` for the dstack-resident enclave KEK service.
+///
+/// This implementation claims `is_production_trust_boundary = true` because the
+/// concrete dstack-rooted impl will satisfy that contract once the enclave
+/// binary lands. Today the wrap/unwrap entry points fail closed with a stable
+/// `DstackKekUnavailable` error class so an operator who configures the
+/// production-trust-boundary requirement gets a clear runtime signal that the
+/// dstack enclave has not been wired up yet, rather than a silent downgrade.
+pub struct DstackKekWrapper {
+    enclave_measurement_label: String,
+}
+
+impl DstackKekWrapper {
+    /// Construct a stub wrapper bound to the operator-supplied enclave
+    /// measurement label. The label is opaque to this stub — it exists only so
+    /// the wrapper's `safe_status.key_ref_hash` is stable across restarts.
+    pub fn new(enclave_measurement_label: impl Into<String>) -> Self {
+        Self {
+            enclave_measurement_label: enclave_measurement_label.into(),
+        }
+    }
+
+    fn key_ref_hash(&self) -> String {
+        let mut h = Sha256::new();
+        h.update(self.enclave_measurement_label.as_bytes());
+        format!("sha256:{:x}", h.finalize())
+    }
+}
+
+impl KmsKeyWrapper for DstackKekWrapper {
+    fn wrap_dek(&self, _dek: &[u8; 32], _context: &KekContext) -> anyhow::Result<WrappedDek> {
+        anyhow::bail!("DstackKekUnavailable: dstack enclave wrapping not yet implemented")
+    }
+
+    fn unwrap_dek(
+        &self,
+        _wrapped: &WrappedDek,
+        _context: &KekContext,
+    ) -> anyhow::Result<Zeroizing<[u8; 32]>> {
+        anyhow::bail!("DstackKekUnavailable: dstack enclave wrapping not yet implemented")
+    }
+
+    fn safe_status(&self) -> KekWrapperStatus {
+        KekWrapperStatus {
+            kind: "dstack_kek".into(),
+            key_ref_hash: self.key_ref_hash(),
+            is_production_trust_boundary: true,
+        }
+    }
+
+    fn is_production_trust_boundary(&self) -> bool {
+        true
     }
 }
