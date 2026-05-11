@@ -45556,6 +45556,7 @@ fn read_envelope_by_record(
             .with_context(|| format!("failed to parse trace object {}", path.display()))?
     };
     ensure_envelope_tenant_scope(&envelope, &record.tenant_id)?;
+    verify_envelope_tenant_drift(&envelope, &record.tenant_id)?;
     Ok(envelope)
 }
 
@@ -45591,6 +45592,111 @@ fn ensure_envelope_tenant_scope(
         );
     }
     Ok(())
+}
+
+/// Cross-check every server-owned tenant-bearing field on a fully-deserialized
+/// envelope against the auth-derived tenant.
+///
+/// Server-owned refs look like `tenant_sha256:<32 hex>` (see
+/// [`looks_like_server_tenant_storage_ref`]); client-supplied refs are left
+/// untouched because they are attribution only. The KEK context binding stops
+/// a tenant from lifting another tenant's ciphertext across the boundary, but
+/// it does not catch a deserialized envelope whose embedded server-owned
+/// tenant fields disagree with the authenticated tenant. This helper closes
+/// that gap.
+///
+/// Error class string is stable and part of the contract:
+/// `TenantDriftRejected: <field-class>`. Never include raw refs, contributor
+/// identity, or other operator-secret material in the message.
+fn verify_envelope_tenant_drift(
+    envelope: &TraceContributionEnvelope,
+    tenant_id: &str,
+) -> anyhow::Result<()> {
+    let expected = tenant_storage_ref(tenant_id);
+    if let Some(scope_ref) = envelope.contributor.tenant_scope_ref.as_deref()
+        && looks_like_server_tenant_storage_ref(scope_ref)
+        && scope_ref != expected
+    {
+        anyhow::bail!(
+            "TenantDriftRejected: contributor.tenant_scope_ref server tenant ref disagrees with authenticated tenant"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod envelope_tenant_drift_tests {
+    use super::*;
+    use trace_commons_protocol::llm::recording::TraceFile;
+    use trace_commons_protocol::trace_contribution::{
+        DeterministicTraceRedactor, RawTraceContribution, RecordedTraceContributionOptions,
+        TraceContributionEnvelope, TraceRedactor,
+    };
+
+    async fn fixture_envelope(scope_ref: Option<String>) -> TraceContributionEnvelope {
+        let trace = TraceFile {
+            model_name: "test-model".to_string(),
+            memory_snapshot: Vec::new(),
+            http_exchanges: Vec::new(),
+            steps: Vec::new(),
+        };
+        let raw = RawTraceContribution::from_recorded_trace(
+            &trace,
+            RecordedTraceContributionOptions {
+                tenant_scope_ref: scope_ref,
+                ..Default::default()
+            },
+        );
+        DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction succeeds for empty fixture")
+    }
+
+    #[tokio::test]
+    async fn drift_rejected_when_server_scope_disagrees_with_auth_tenant() {
+        let other_tenant_ref = tenant_storage_ref("other-tenant-id");
+        let envelope = fixture_envelope(Some(other_tenant_ref)).await;
+        let err = verify_envelope_tenant_drift(&envelope, "auth-tenant-id")
+            .expect_err("must reject mismatched server tenant scope ref");
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with("TenantDriftRejected:"),
+            "unexpected error class: {msg}"
+        );
+        assert!(
+            msg.contains("contributor.tenant_scope_ref"),
+            "error must name the field class: {msg}"
+        );
+        // Stability of error contract: no raw refs leak into the message.
+        assert!(
+            !msg.contains("tenant_sha256:"),
+            "error must not leak raw refs: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn client_supplied_scope_is_attribution_only_and_accepted() {
+        // A ref that does not match the server-owned format must be ignored.
+        let envelope = fixture_envelope(Some("client-attribution://acme".to_string())).await;
+        verify_envelope_tenant_drift(&envelope, "auth-tenant-id")
+            .expect("client-supplied attribution refs must be accepted");
+    }
+
+    #[tokio::test]
+    async fn missing_scope_ref_is_accepted() {
+        let envelope = fixture_envelope(None).await;
+        verify_envelope_tenant_drift(&envelope, "auth-tenant-id")
+            .expect("envelopes without scope refs must be accepted");
+    }
+
+    #[tokio::test]
+    async fn matching_server_scope_ref_is_accepted() {
+        let matching = tenant_storage_ref("auth-tenant-id");
+        let envelope = fixture_envelope(Some(matching)).await;
+        verify_envelope_tenant_drift(&envelope, "auth-tenant-id")
+            .expect("matching server tenant scope must be accepted");
+    }
 }
 
 fn bind_envelope_server_tenant_scope_for_storage(
@@ -45856,6 +45962,7 @@ fn read_envelope_from_object_ref(
         other => anyhow::bail!("unsupported trace object store: {other}"),
     };
     ensure_envelope_tenant_scope(&envelope, tenant_id)?;
+    verify_envelope_tenant_drift(&envelope, tenant_id)?;
     Ok(envelope)
 }
 
