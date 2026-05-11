@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 aes-gcm = "0.10"
 anyhow = "1"
+bytes = "1"
 async-trait = "0.1"
 axum = "0.8"
 base64 = "0.22"
