@@ -921,7 +921,7 @@ git commit -m "Migrate single object across providers with verification"
 
 - [ ] **Step 1: Add a store method** `update_object_ref_store_alias(tenant_id, object_ref_id, expected_from_alias, to_alias) -> bool`. Atomic UPDATE with a WHERE clause that checks the current alias; returns whether one row was updated.
 
-  ⚠️ Per `~/.claude/CLAUDE.md`: verify the new method compiles cleanly under **both** the postgres and libsql build configurations. Run `cargo check -p tracedao-server` against each feature configuration before committing.
+  This repo is postgres-only — no libsql build. A single `cargo check -p tracedao-server` is sufficient.
 
 - [ ] **Step 2: Contract test it** — same-id rows in two tenants, ensure tenant-A flip doesn't touch tenant-B.
 
