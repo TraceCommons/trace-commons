@@ -139,3 +139,36 @@ fn read_refuses_v1_envelope_with_injected_wrapped_dek() {
         "expected KekDowngradeRejected, got: {err}"
     );
 }
+
+#[test]
+fn read_refuses_envelope_with_unknown_schema_version() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let store = build_store(temp.path().to_path_buf());
+    let scope = TraceArtifactScope::new("tenant:sha256:alpha", "submission-alpha");
+    let payload = json!({"safe": true});
+    let receipt = store
+        .put_scoped_json(
+            &scope,
+            TraceArtifactKind::ContributionEnvelope,
+            "envelope-id",
+            &payload,
+        )
+        .expect("v2 artifact writes");
+
+    // Read on-disk, replace schema_version with an unrecognised future version.
+    let path = object_file_path(temp.path(), &receipt.object_ref);
+    let body = std::fs::read_to_string(&path).expect("read on-disk record");
+    let mut record: Value = serde_json::from_str(&body).expect("record parses");
+    record["artifact"]["schema_version"] =
+        Value::String("ironclaw.trace_artifact_ciphertext.v3".to_string());
+    std::fs::write(&path, serde_json::to_vec_pretty(&record).expect("reserialize"))
+        .expect("write tampered record");
+
+    let err = store
+        .read_scoped_artifact(&scope, &receipt.object_ref)
+        .expect_err("unknown schema_version must be refused");
+    assert!(
+        err.to_string().contains("KekDowngradeRejected"),
+        "expected KekDowngradeRejected: unknown schema_version, got: {err}"
+    );
+}

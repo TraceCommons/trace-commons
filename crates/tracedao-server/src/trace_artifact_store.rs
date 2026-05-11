@@ -15,6 +15,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 
+use zeroize::Zeroizing;
+
 use crate::secrets::SecretsCrypto;
 use crate::trace_artifact_kek::{KekContext, KmsKeyWrapper};
 
@@ -172,6 +174,9 @@ impl TraceArtifactKind {
 pub struct EncryptedTraceArtifact {
     pub schema_version: String,
     pub receipt: EncryptedTraceArtifactReceipt,
+    /// Legacy v1 KDF salt. For v2 envelopes, this is always the empty string —
+    /// readers MUST NOT use this field to detect schema version. Use
+    /// `schema_version` and `wrapped_dek` instead.
     pub salt_base64: String,
     pub ciphertext_base64: String,
     /// Wrapped per-object DEK for v2 envelopes. Authenticated by AES-GCM
@@ -837,6 +842,11 @@ impl LocalEncryptedTraceArtifactStore {
         receipt: &EncryptedTraceArtifactReceipt,
     ) -> anyhow::Result<T> {
         let artifact = self.read_artifact(expected_tenant_storage_ref, receipt)?;
+        if artifact.schema_version == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_V2 {
+            anyhow::bail!(
+                "LocalEncryptedTraceArtifactStore does not support v2 KEK-wrapped artifacts"
+            );
+        }
         decrypt_artifact_json(&self.crypto, &artifact)
     }
 
@@ -853,6 +863,11 @@ impl LocalEncryptedTraceArtifactStore {
             object_key,
             expected_ciphertext_sha256,
         )?;
+        if artifact.schema_version == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_V2 {
+            anyhow::bail!(
+                "LocalEncryptedTraceArtifactStore does not support v2 KEK-wrapped artifacts"
+            );
+        }
         decrypt_artifact_json(&self.crypto, &artifact)
     }
 
@@ -871,10 +886,6 @@ impl LocalEncryptedTraceArtifactStore {
             .with_context(|| format!("failed to read trace artifact {}", path.display()))?;
         let artifact: EncryptedTraceArtifact =
             serde_json::from_str(&body).context("failed to parse encrypted trace artifact")?;
-        anyhow::ensure!(
-            is_supported_schema_version(&artifact.schema_version),
-            "KekDowngradeRejected: unknown schema_version"
-        );
         anyhow::ensure!(
             artifact.receipt.tenant_storage_ref == expected_tenant_storage_ref,
             "encrypted trace artifact tenant mismatch"
@@ -916,10 +927,6 @@ impl LocalEncryptedTraceArtifactStore {
             .with_context(|| format!("failed to read trace artifact {}", path.display()))?;
         let artifact: EncryptedTraceArtifact =
             serde_json::from_str(&body).context("failed to parse encrypted trace artifact")?;
-        anyhow::ensure!(
-            is_supported_schema_version(&artifact.schema_version),
-            "KekDowngradeRejected: unknown schema_version"
-        );
         anyhow::ensure!(
             artifact.receipt.tenant_storage_ref == expected_tenant_storage_ref,
             "encrypted trace artifact tenant mismatch"
@@ -1067,10 +1074,6 @@ fn verify_encrypted_artifact(
         .strip_prefix("sha256:")
         .unwrap_or(expected_ciphertext_sha256);
     anyhow::ensure!(
-        is_supported_schema_version(&artifact.schema_version),
-        "KekDowngradeRejected: unknown schema_version"
-    );
-    anyhow::ensure!(
         artifact.receipt.tenant_storage_ref == expected_tenant_storage_ref,
         "encrypted trace artifact tenant mismatch"
     );
@@ -1095,13 +1098,6 @@ fn verify_encrypted_artifact(
     );
     verify_kek_binding(artifact, expected_tenant_storage_ref, expected_artifact_kind)?;
     Ok(())
-}
-
-fn is_supported_schema_version(version: &str) -> bool {
-    matches!(
-        version,
-        v if v == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_VERSION || v == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_V2
-    )
 }
 
 /// Shared schema-version / `wrapped_dek` shape gate.
@@ -1140,18 +1136,22 @@ fn verify_kek_binding(
 }
 
 /// Generate a fresh 256-bit per-object DEK using the OS RNG.
-fn generate_dek() -> [u8; 32] {
-    let mut dek = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut aes_gcm::aead::OsRng, &mut dek);
+///
+/// Returns a `Zeroizing` wrapper so the raw key bytes are cleared from the
+/// stack automatically on drop, reducing the window during which plaintext
+/// key material could appear in core dumps or stack traces.
+fn generate_dek() -> Zeroizing<[u8; 32]> {
+    let mut dek = Zeroizing::new([0u8; 32]);
+    rand::RngCore::fill_bytes(&mut aes_gcm::aead::OsRng, dek.as_mut());
     dek
 }
 
 /// AES-256-GCM encrypt `plaintext` under `dek`, returning the
 /// `[nonce || aead_ciphertext_with_tag]` packed form used by v2 records.
-fn aead_encrypt_with_dek(dek: &[u8; 32], plaintext: &[u8]) -> anyhow::Result<Vec<u8>> {
+fn aead_encrypt_with_dek(dek: &Zeroizing<[u8; 32]>, plaintext: &[u8]) -> anyhow::Result<Vec<u8>> {
     use aes_gcm::aead::{Aead, AeadCore, OsRng};
     use aes_gcm::{Aes256Gcm, KeyInit};
-    let cipher = Aes256Gcm::new_from_slice(dek)
+    let cipher = Aes256Gcm::new_from_slice(dek.as_ref())
         .map_err(|e| anyhow::anyhow!("KekDekEncryptFailed: cipher init: {e}"))?;
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     let ct = cipher
@@ -1165,7 +1165,7 @@ fn aead_encrypt_with_dek(dek: &[u8; 32], plaintext: &[u8]) -> anyhow::Result<Vec
 
 /// AES-256-GCM decrypt the `[nonce || aead_ciphertext_with_tag]` packed form
 /// produced by `aead_encrypt_with_dek`.
-fn aead_decrypt_with_dek(dek: &[u8; 32], encrypted: &[u8]) -> anyhow::Result<Vec<u8>> {
+fn aead_decrypt_with_dek(dek: &Zeroizing<[u8; 32]>, encrypted: &[u8]) -> anyhow::Result<Vec<u8>> {
     use aes_gcm::aead::Aead;
     use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
     const NONCE_LEN: usize = 12;
@@ -1174,7 +1174,7 @@ fn aead_decrypt_with_dek(dek: &[u8; 32], encrypted: &[u8]) -> anyhow::Result<Vec
         encrypted.len() >= NONCE_LEN + TAG_LEN,
         "KekDekDecryptFailed: ciphertext too short"
     );
-    let cipher = Aes256Gcm::new_from_slice(dek)
+    let cipher = Aes256Gcm::new_from_slice(dek.as_ref())
         .map_err(|e| anyhow::anyhow!("KekDekDecryptFailed: cipher init: {e}"))?;
     let (nonce_bytes, ct) = encrypted.split_at(NONCE_LEN);
     let nonce = Nonce::from_slice(nonce_bytes);
@@ -1208,9 +1208,10 @@ fn decrypt_artifact_json_with_kek<T: DeserializeOwned, K: KmsKeyWrapper>(
                 tenant_storage_ref: artifact.receipt.tenant_storage_ref.clone(),
                 artifact_kind: artifact_kind.clone(),
             };
-            let dek = kek
-                .unwrap_dek(wrapped, &ctx)
-                .context("KekUnwrapFailed: trace artifact DEK unwrap failed")?;
+            let dek = Zeroizing::new(
+                kek.unwrap_dek(wrapped, &ctx)
+                    .context("KekUnwrapFailed: trace artifact DEK unwrap failed")?,
+            );
             let ciphertext = base64::engine::general_purpose::STANDARD
                 .decode(artifact.ciphertext_base64.as_bytes())
                 .context("failed to decode trace artifact ciphertext")?;
