@@ -161,6 +161,9 @@ const TRACE_COMMONS_REMOTE_OBJECT_STORE_CREDENTIAL_REF: &str =
     "TRACE_COMMONS_REMOTE_OBJECT_STORE_CREDENTIAL_REF";
 const TRACE_COMMONS_REMOTE_OBJECT_STORE_FILE_SYSTEM_VERSIONING: &str =
     "TRACE_COMMONS_REMOTE_OBJECT_STORE_FILE_SYSTEM_VERSIONING";
+const TRACE_COMMONS_REMOTE_OBJECT_STORE_REGION: &str = "TRACE_COMMONS_REMOTE_OBJECT_STORE_REGION";
+const TRACE_COMMONS_REMOTE_OBJECT_STORE_ENDPOINT: &str =
+    "TRACE_COMMONS_REMOTE_OBJECT_STORE_ENDPOINT";
 const TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING: &str =
     "TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING";
 const TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY: &str =
@@ -1410,6 +1413,84 @@ impl ConfiguredTraceArtifactStore {
         })
     }
 
+    /// Build a GCS-backed service-owned artifact store. Async because the
+    /// production GCS client loads Application Default Credentials at
+    /// construction time. Gated on the `gcs-client` cargo feature; when the
+    /// feature is off, callers must route through `remote_disabled` instead,
+    /// which surfaces a clear "compiled without `gcs-client` feature" error.
+    #[cfg(feature = "gcs-client")]
+    async fn remote_gcs(
+        config: TraceRemoteObjectStoreConfig,
+        key: SecretString,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            config.provider == TraceRemoteObjectStoreProvider::Gcs,
+            "remote_gcs constructor requires provider=gcs"
+        );
+        anyhow::ensure!(
+            config.has_service_envelope_refs(),
+            "remote Trace Commons object store requires KMS and credential references"
+        );
+        let require_versioning = config.require_versioning;
+        let bucket = config.bucket.clone();
+        // Endpoint is captured into the config but the production
+        // `google-cloud-storage` client does not yet expose a base-URL override
+        // on this surface — Task 13 will plumb it through for fake-gcs-server.
+        let _endpoint = config.endpoint.clone();
+        // Region is label-only metadata, captured for audit visibility.
+        let _region = config.region.clone();
+
+        let kek_key = SecretString::new(key.expose_secret().to_string().into());
+        let crypto = SecretsCrypto::new(key)
+            .context("failed to initialize Trace Commons remote artifact encryption")?;
+        let kek = tracedao_server::trace_artifact_kek::LocalMasterKeyWrapper::new(
+            SecretsCrypto::new(kek_key)
+                .context("failed to initialize Trace Commons KEK wrapper")?,
+            "trace-commons-local-master-v1",
+        );
+        check_kek_production_trust_boundary_gate(
+            env_truthy(TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY),
+            kek.is_production_trust_boundary(),
+        )?;
+        let kek_status = kek.safe_status();
+        let provider_config = TraceArtifactProviderConfig::service_owned_remote(
+            TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE,
+        )?;
+        let client =
+            tracedao_server::trace_artifact_gcs::prod_client::ProdGcsObjectClient::try_new(
+                bucket.clone(),
+            )
+            .await?;
+        let provider = if require_versioning {
+            tracedao_server::trace_artifact_gcs::GcsRemoteTraceArtifactProvider::versioned(
+                client,
+                bucket,
+                TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE,
+            )
+        } else {
+            tracedao_server::trace_artifact_gcs::GcsRemoteTraceArtifactProvider::new(
+                client,
+                bucket,
+                TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE,
+            )
+        };
+        Ok(Self {
+            object_store_name: TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE.to_string(),
+            store: Arc::new(ServiceOwnedTraceArtifactStore::new(
+                provider_config,
+                crypto,
+                kek,
+                provider,
+            )),
+            object_io_enabled: true,
+            plaintext_compatibility_allowed: false,
+            object_versioning_supported: require_versioning,
+            restore_after_delete_supported: require_versioning,
+            provider_label: Some(config.provider.label()),
+            kek_status: Some(kek_status),
+        })
+    }
+
     fn object_store_name(&self) -> &str {
         &self.object_store_name
     }
@@ -1511,6 +1592,17 @@ struct TraceRemoteObjectStoreConfig {
     kms_key_id: String,
     credential_ref: String,
     file_system_versioning: bool,
+    /// Optional region label. Recorded for audit/observability only; the GCS
+    /// client does not require a region for construction. Never surfaced in
+    /// error messages — label-only.
+    region: Option<String>,
+    /// Optional endpoint override (e.g. fake-gcs-server for tests). The
+    /// production `google_cloud_storage` client used by Task 11 does not yet
+    /// expose a configurable base URL through this surface, so this value is
+    /// currently accepted but unused at construction time. Task 13 will wire
+    /// it through.
+    endpoint: Option<String>,
+    require_versioning: bool,
 }
 
 impl TraceRemoteObjectStoreConfig {
@@ -1519,6 +1611,8 @@ impl TraceRemoteObjectStoreConfig {
         let bucket = std::env::var(TRACE_COMMONS_REMOTE_OBJECT_STORE_BUCKET).ok();
         let kms_key_id = std::env::var(TRACE_COMMONS_REMOTE_OBJECT_STORE_KMS_KEY_ID).ok();
         let credential_ref = std::env::var(TRACE_COMMONS_REMOTE_OBJECT_STORE_CREDENTIAL_REF).ok();
+        let region = std::env::var(TRACE_COMMONS_REMOTE_OBJECT_STORE_REGION).ok();
+        let endpoint = std::env::var(TRACE_COMMONS_REMOTE_OBJECT_STORE_ENDPOINT).ok();
         let mut config = Self::from_parts(
             provider.as_deref(),
             bucket.as_deref(),
@@ -1527,6 +1621,15 @@ impl TraceRemoteObjectStoreConfig {
         )?;
         config.file_system_versioning =
             env_truthy(TRACE_COMMONS_REMOTE_OBJECT_STORE_FILE_SYSTEM_VERSIONING);
+        config.require_versioning = env_truthy(TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING);
+        config.region =
+            optional_remote_object_store_env(TRACE_COMMONS_REMOTE_OBJECT_STORE_REGION, region.as_deref())?
+                .map(str::to_string);
+        config.endpoint = optional_remote_object_store_env(
+            TRACE_COMMONS_REMOTE_OBJECT_STORE_ENDPOINT,
+            endpoint.as_deref(),
+        )?
+        .map(str::to_string);
         Ok(config)
     }
 
@@ -1554,13 +1657,37 @@ impl TraceRemoteObjectStoreConfig {
             kms_key_id: kms_key_id.to_string(),
             credential_ref: credential_ref.to_string(),
             file_system_versioning: false,
+            region: None,
+            endpoint: None,
+            require_versioning: false,
         })
+    }
+
+    #[cfg(test)]
+    fn with_region(mut self, region: impl Into<String>) -> Self {
+        self.region = Some(region.into());
+        self
+    }
+
+    #[cfg(test)]
+    fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = Some(endpoint.into());
+        self
+    }
+
+    #[cfg(test)]
+    fn with_require_versioning(mut self, require_versioning: bool) -> Self {
+        self.require_versioning = require_versioning;
+        self
     }
 
     #[cfg(test)]
     fn status_object_store_alias(&self) -> &'static str {
         match self.provider {
             TraceRemoteObjectStoreProvider::FileSystem => TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE,
+            TraceRemoteObjectStoreProvider::Gcs if cfg!(feature = "gcs-client") => {
+                TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE
+            }
             TraceRemoteObjectStoreProvider::AwsS3
             | TraceRemoteObjectStoreProvider::Gcs
             | TraceRemoteObjectStoreProvider::AzureBlob => {
@@ -1608,6 +1735,24 @@ fn required_remote_object_store_env<'a>(
     Ok(value)
 }
 
+fn optional_remote_object_store_env<'a>(
+    env_name: &'static str,
+    value: Option<&'a str>,
+) -> anyhow::Result<Option<&'a str>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        value.len() <= 2048,
+        "{env_name} is too long for Trace Commons remote object-store configuration"
+    );
+    anyhow::ensure!(
+        !value.bytes().any(|byte| byte.is_ascii_control()),
+        "{env_name} must not contain control characters"
+    );
+    Ok(Some(value))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TraceRemoteObjectStoreProvider {
     AwsS3,
@@ -1650,11 +1795,18 @@ impl DisabledRemoteTraceArtifactStore {
 
     fn disabled_error(&self) -> anyhow::Error {
         let provider = self.provider.label();
-        anyhow::anyhow!(
-            "remote Trace Commons object store provider is not enabled: \
-             TRACE_COMMONS_OBJECT_STORE=remote_service selected provider {provider}, \
-             but no production remote TraceArtifactStore adapter is compiled; refusing plaintext fallback"
-        )
+        match self.provider {
+            TraceRemoteObjectStoreProvider::Gcs => anyhow::anyhow!(
+                "remote Trace Commons object store provider is not enabled: \
+                 TRACE_COMMONS_OBJECT_STORE=remote_service selected provider {provider}, \
+                 but the gcs adapter requires the `gcs-client` build feature; refusing plaintext fallback"
+            ),
+            _ => anyhow::anyhow!(
+                "remote Trace Commons object store provider is not enabled: \
+                 TRACE_COMMONS_OBJECT_STORE=remote_service selected provider {provider}, \
+                 but no production remote TraceArtifactStore adapter is compiled; refusing plaintext fallback"
+            ),
+        }
     }
 }
 
@@ -2335,7 +2487,7 @@ impl AppState {
         }
         let submission_quota = parse_submission_quota_config_from_env()?;
         let legal_hold_retention_policy_ids = parse_legal_hold_retention_policy_ids_from_env()?;
-        let artifact_store = trace_artifact_store_from_env(&root)?;
+        let artifact_store = trace_artifact_store_from_env(&root).await?;
         let require_object_store_versioning =
             env_truthy(TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING);
         validate_required_object_store_versioning_config(
@@ -2994,7 +3146,7 @@ fn validate_db_read_cutover_guard_config(
     Ok(())
 }
 
-fn trace_artifact_store_from_env(
+async fn trace_artifact_store_from_env(
     default_root: &Path,
 ) -> anyhow::Result<Option<ConfiguredTraceArtifactStore>> {
     let object_store_mode = std::env::var("TRACE_COMMONS_OBJECT_STORE").ok();
@@ -3008,14 +3160,27 @@ fn trace_artifact_store_from_env(
     };
     if encrypted_store_kind == TraceEncryptedObjectStoreKind::ServiceRemote {
         let config = TraceRemoteObjectStoreConfig::from_env()?;
-        if config.provider == TraceRemoteObjectStoreProvider::FileSystem {
-            let key = key.context(
-                "TRACE_COMMONS_OBJECT_STORE=remote_service with provider=file_system requires TRACE_COMMONS_ARTIFACT_KEY_HEX",
-            )?;
-            return Ok(Some(ConfiguredTraceArtifactStore::remote_service(
-                config,
-                SecretString::from(key),
-            )?));
+        match config.provider {
+            TraceRemoteObjectStoreProvider::FileSystem => {
+                let key = key.context(
+                    "TRACE_COMMONS_OBJECT_STORE=remote_service with provider=file_system requires TRACE_COMMONS_ARTIFACT_KEY_HEX",
+                )?;
+                return Ok(Some(ConfiguredTraceArtifactStore::remote_service(
+                    config,
+                    SecretString::from(key),
+                )?));
+            }
+            #[cfg(feature = "gcs-client")]
+            TraceRemoteObjectStoreProvider::Gcs => {
+                let key = key.context(
+                    "TRACE_COMMONS_OBJECT_STORE=remote_service with provider=gcs requires TRACE_COMMONS_ARTIFACT_KEY_HEX",
+                )?;
+                return Ok(Some(
+                    ConfiguredTraceArtifactStore::remote_gcs(config, SecretString::from(key))
+                        .await?,
+                ));
+            }
+            _ => {}
         }
         return Ok(Some(ConfiguredTraceArtifactStore::remote_disabled(config)));
     }
@@ -65997,6 +66162,166 @@ mod tests {
             assert!(
                 !body_text.contains(forbidden_value),
                 "config status leaked remote value {forbidden_value}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_trace_object_store_config_captures_optional_region_and_endpoint() {
+        let base = TraceRemoteObjectStoreConfig::from_parts(
+            Some("gcs"),
+            Some("trace-commons-prod-bucket"),
+            Some("kms-key-ref"),
+            Some("credential-ref"),
+        )
+        .expect("gcs config parses");
+        assert_eq!(base.region, None);
+        assert_eq!(base.endpoint, None);
+        assert!(!base.require_versioning);
+
+        let configured = base
+            .clone()
+            .with_region("us-west1")
+            .with_endpoint("https://storage.googleapis.com")
+            .with_require_versioning(true);
+        assert_eq!(configured.region.as_deref(), Some("us-west1"));
+        assert_eq!(
+            configured.endpoint.as_deref(),
+            Some("https://storage.googleapis.com")
+        );
+        assert!(configured.require_versioning);
+    }
+
+    #[test]
+    fn remote_trace_object_store_config_optional_env_rejects_control_chars() {
+        let err = optional_remote_object_store_env(
+            TRACE_COMMONS_REMOTE_OBJECT_STORE_REGION,
+            Some("us-west1\nleaked-secret"),
+        )
+        .expect_err("control characters fail closed");
+        let message = err.to_string();
+        assert!(message.contains(TRACE_COMMONS_REMOTE_OBJECT_STORE_REGION));
+        assert!(message.contains("control"));
+        assert!(!message.contains("leaked-secret"));
+
+        let endpoint_err = optional_remote_object_store_env(
+            TRACE_COMMONS_REMOTE_OBJECT_STORE_ENDPOINT,
+            Some("https://endpoint\rleaked-endpoint-secret"),
+        )
+        .expect_err("control characters fail closed");
+        let endpoint_message = endpoint_err.to_string();
+        assert!(endpoint_message.contains(TRACE_COMMONS_REMOTE_OBJECT_STORE_ENDPOINT));
+        assert!(endpoint_message.contains("control"));
+        assert!(!endpoint_message.contains("leaked-endpoint-secret"));
+
+        let none = optional_remote_object_store_env(
+            TRACE_COMMONS_REMOTE_OBJECT_STORE_REGION,
+            Some("   "),
+        )
+        .expect("blank optional value is treated as unset");
+        assert!(none.is_none());
+    }
+
+    #[cfg(not(feature = "gcs-client"))]
+    #[test]
+    fn remote_disabled_gcs_error_names_required_build_feature() {
+        let config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("gcs"),
+            Some("trace-commons-prod-bucket"),
+            Some("kms-key-ref"),
+            Some("credential-ref"),
+        )
+        .expect("gcs config parses");
+        let store = ConfiguredTraceArtifactStore::remote_disabled(config);
+
+        let error = store
+            .put_json(
+                "tenant-hash",
+                TraceArtifactKind::ContributionEnvelope,
+                "submission-id",
+                &serde_json::json!({ "redacted": true }),
+            )
+            .expect_err("disabled gcs store refuses writes");
+        let message = error.to_string();
+        assert!(message.contains("remote Trace Commons object store provider is not enabled"));
+        assert!(message.contains("gcs-client"));
+    }
+
+    #[cfg(feature = "gcs-client")]
+    #[tokio::test]
+    async fn admin_config_status_reports_gcs_provider_when_feature_enabled() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        // Build a gcs-provider config and route through remote_disabled so the
+        // test does not require live Application Default Credentials. The
+        // disabled path still records the safe `gcs` provider label, which is
+        // what the config-status surface reports.
+        let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("gcs"),
+            Some("trace-commons-prod-bucket-secret"),
+            Some("projects/prod/locations/global/keyRings/traces/cryptoKeys/envelope-secret"),
+            Some("secret-manager://trace-commons/remote-writer-secret"),
+        )
+        .expect("gcs config parses")
+        .with_region("us-west1")
+        .with_endpoint("https://endpoint-secret-fake-gcs")
+        .with_require_versioning(true);
+        // Confirm the gcs path will land on the real-store alias when the
+        // feature is on.
+        assert_eq!(
+            remote_config.status_object_store_alias(),
+            TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE
+        );
+
+        let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            None,
+            Some(ConfiguredTraceArtifactStore::remote_disabled(remote_config)),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/config-status")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("admin response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("status json parses");
+        let object_store = value["object_store"]
+            .as_object()
+            .expect("object_store present");
+        assert_eq!(object_store["provider"], serde_json::json!("gcs"));
+
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        for forbidden_value in [
+            "trace-commons-prod-bucket-secret",
+            "envelope-secret",
+            "remote-writer-secret",
+            "endpoint-secret-fake-gcs",
+            "us-west1",
+        ] {
+            assert!(
+                !body_text.contains(forbidden_value),
+                "config status leaked gcs value {forbidden_value}"
             );
         }
     }
