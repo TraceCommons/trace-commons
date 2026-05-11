@@ -8938,6 +8938,23 @@ async fn put_tenant_policy_handler(
 ) -> ApiResult<Json<TraceTenantPolicyResponse>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_admin(&tenant)?;
+    let target_scopes: BTreeSet<ConsentScope> =
+        request.allowed_consent_scopes.iter().copied().collect();
+    let target_uses: BTreeSet<TraceAllowedUse> =
+        request.allowed_uses.iter().copied().collect();
+    let privileged_policy = tenant_privileged_action_policy_for_request(
+        state.as_ref(),
+        &tenant,
+        "tenant policy mutation",
+    )
+    .await?;
+    ensure_action_target_matches_privileged_action_policy_abac(
+        &target_scopes,
+        &target_uses,
+        &tenant,
+        privileged_policy.as_ref(),
+        "tenant policy mutation",
+    )?;
     let db = trace_tenant_policy_db(state.as_ref())?;
     let policy_version = request.policy_version.trim();
     if policy_version.is_empty() {
@@ -9042,6 +9059,23 @@ async fn create_tenant_access_grant_handler(
 ) -> ApiResult<Json<TraceTenantAccessGrantResponse>> {
     let tenant = authenticate(state.as_ref(), &headers)?;
     require_admin(&tenant)?;
+    let target_scopes: BTreeSet<ConsentScope> =
+        request.allowed_consent_scopes.iter().copied().collect();
+    let target_uses: BTreeSet<TraceAllowedUse> =
+        request.allowed_uses.iter().copied().collect();
+    let privileged_policy = tenant_privileged_action_policy_for_request(
+        state.as_ref(),
+        &tenant,
+        "tenant access grant creation",
+    )
+    .await?;
+    ensure_action_target_matches_privileged_action_policy_abac(
+        &target_scopes,
+        &target_uses,
+        &tenant,
+        privileged_policy.as_ref(),
+        "tenant access grant creation",
+    )?;
     let db = trace_tenant_access_grants_db(state.as_ref())?;
     let principal_ref = request.principal_ref.trim();
     if principal_ref.is_empty() {
@@ -9130,6 +9164,27 @@ async fn revoke_tenant_access_grant_handler(
         .into_iter()
         .find(|grant| grant.grant_id == grant_id)
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace tenant access grant not found"))?;
+    let target_scopes: BTreeSet<ConsentScope> = parse_storage_policy_values(
+        &existing.allowed_consent_scopes,
+        "grant.allowed_consent_scopes",
+    )
+    .map_err(internal_error)?;
+    let target_uses: BTreeSet<TraceAllowedUse> =
+        parse_storage_policy_values(&existing.allowed_uses, "grant.allowed_uses")
+            .map_err(internal_error)?;
+    let privileged_policy = tenant_privileged_action_policy_for_request(
+        state.as_ref(),
+        &tenant,
+        "tenant access grant revocation",
+    )
+    .await?;
+    ensure_action_target_matches_privileged_action_policy_abac(
+        &target_scopes,
+        &target_uses,
+        &tenant,
+        privileged_policy.as_ref(),
+        "tenant access grant revocation",
+    )?;
     let record = db
         .upsert_trace_tenant_access_grant(StorageTraceTenantAccessGrantWrite {
             tenant_id: existing.tenant_id,
@@ -40623,6 +40678,69 @@ fn ensure_record_matches_privileged_action_policy_abac(
         StatusCode::FORBIDDEN,
         "trace privileged action is not allowed for this tenant source",
     ))
+}
+
+/// ABAC subset check for privileged actions whose *target* (not an existing
+/// record) carries the consent-scope / allowed-use surface. Used by grant and
+/// tenant-policy mutation handlers where the action defines new scopes/uses
+/// directly. Every entry in `target_scopes` / `target_uses` must be contained
+/// in both the tenant signed-claim allowlists (when those allowlists are
+/// non-empty) and the privileged-action policy allowlists (when present). An
+/// empty tenant allowlist means unrestricted, matching
+/// `enforce_scoped_token_requested_scope` semantics; an empty policy allowlist
+/// means the policy does not restrict that dimension.
+fn ensure_action_target_matches_privileged_action_policy_abac(
+    target_scopes: &BTreeSet<ConsentScope>,
+    target_uses: &BTreeSet<TraceAllowedUse>,
+    tenant: &TenantAuth,
+    privileged_policy: Option<&TenantSubmissionPolicy>,
+    action_surface: &str,
+) -> ApiResult<()> {
+    if !target_subset_of_allowlist(target_scopes, &tenant.allowed_consent_scopes)
+        || !target_subset_of_use_allowlist(target_uses, &tenant.allowed_uses)
+    {
+        tracing::warn!(
+            tenant_id = %tenant.tenant_id,
+            surface = action_surface,
+            "Trace Commons signed-claim ABAC rejected privileged action target"
+        );
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "trace privileged action target exceeds tenant signed-claim scope",
+        ));
+    }
+
+    if let Some(policy) = privileged_policy {
+        if !target_subset_of_allowlist(target_scopes, &policy.allowed_consent_scopes)
+            || !target_subset_of_use_allowlist(target_uses, &policy.allowed_uses)
+        {
+            tracing::warn!(
+                tenant_id = %tenant.tenant_id,
+                surface = action_surface,
+                "Trace Commons tenant policy rejected privileged action target"
+            );
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "trace privileged action target exceeds tenant policy scope",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn target_subset_of_allowlist(
+    target: &BTreeSet<ConsentScope>,
+    allowlist: &BTreeSet<ConsentScope>,
+) -> bool {
+    allowlist.is_empty() || target.iter().all(|scope| allowlist.contains(scope))
+}
+
+fn target_subset_of_use_allowlist(
+    target: &BTreeSet<TraceAllowedUse>,
+    allowlist: &BTreeSet<TraceAllowedUse>,
+) -> bool {
+    allowlist.is_empty() || target.iter().all(|allowed_use| allowlist.contains(allowed_use))
 }
 
 fn trace_revocation_reason_for_request(
@@ -118386,5 +118504,135 @@ mod tests {
     fn kek_production_trust_boundary_gate_passes_when_not_required() {
         check_kek_production_trust_boundary_gate(false, false)
             .expect("gate must pass when require=false regardless of trust boundary");
+    }
+
+    fn synthetic_admin_auth(
+        allowed_scopes: BTreeSet<ConsentScope>,
+        allowed_uses: BTreeSet<TraceAllowedUse>,
+    ) -> TenantAuth {
+        TenantAuth {
+            tenant_id: "tenant-privileged-abac".to_string(),
+            role: TokenRole::Admin,
+            principal_ref: "principal-privileged-abac".to_string(),
+            expires_at: None,
+            auth_method: TraceAuthMethod::SignedClaim,
+            signed_claim_issuer: None,
+            signed_claim_audiences: BTreeSet::new(),
+            signed_claim_subject: None,
+            allowed_consent_scopes: allowed_scopes,
+            allowed_uses,
+        }
+    }
+
+    #[test]
+    fn target_abac_allows_admin_with_full_scopes_to_write_policy() {
+        let admin = synthetic_admin_auth(BTreeSet::new(), BTreeSet::new());
+        let target_scopes = BTreeSet::from([
+            ConsentScope::DebuggingEvaluation,
+            ConsentScope::ModelTraining,
+        ]);
+        let target_uses = BTreeSet::from([
+            TraceAllowedUse::Debugging,
+            TraceAllowedUse::Evaluation,
+        ]);
+        ensure_action_target_matches_privileged_action_policy_abac(
+            &target_scopes,
+            &target_uses,
+            &admin,
+            None,
+            "tenant policy mutation",
+        )
+        .expect("unrestricted admin must be allowed to write any policy");
+    }
+
+    #[test]
+    fn target_abac_rejects_admin_policy_write_exceeding_signed_claim() {
+        let admin = synthetic_admin_auth(
+            BTreeSet::from([ConsentScope::DebuggingEvaluation]),
+            BTreeSet::from([TraceAllowedUse::Debugging]),
+        );
+        let target_scopes = BTreeSet::from([
+            ConsentScope::DebuggingEvaluation,
+            ConsentScope::ModelTraining,
+        ]);
+        let target_uses = BTreeSet::from([TraceAllowedUse::Debugging]);
+        let err = ensure_action_target_matches_privileged_action_policy_abac(
+            &target_scopes,
+            &target_uses,
+            &admin,
+            None,
+            "tenant policy mutation",
+        )
+        .expect_err("scope escalation must be refused");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert!(
+            err.1.error.contains("signed-claim scope"),
+            "error must name the privileged-action ABAC class: {}",
+            err.1.error
+        );
+    }
+
+    #[test]
+    fn target_abac_rejects_grant_creation_exceeding_signed_claim() {
+        let admin = synthetic_admin_auth(
+            BTreeSet::from([ConsentScope::DebuggingEvaluation]),
+            BTreeSet::from([TraceAllowedUse::Debugging]),
+        );
+        let target_scopes = BTreeSet::from([ConsentScope::ModelTraining]);
+        let target_uses = BTreeSet::from([TraceAllowedUse::Debugging]);
+        let err = ensure_action_target_matches_privileged_action_policy_abac(
+            &target_scopes,
+            &target_uses,
+            &admin,
+            None,
+            "tenant access grant creation",
+        )
+        .expect_err("admin must not grant a scope they do not hold");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert!(err.1.error.contains("signed-claim scope"));
+    }
+
+    #[test]
+    fn target_abac_rejects_grant_revocation_when_admin_lacks_scope() {
+        let admin = synthetic_admin_auth(
+            BTreeSet::from([ConsentScope::DebuggingEvaluation]),
+            BTreeSet::from([TraceAllowedUse::Debugging]),
+        );
+        let existing_grant_scopes = BTreeSet::from([
+            ConsentScope::DebuggingEvaluation,
+            ConsentScope::ModelTraining,
+        ]);
+        let existing_grant_uses = BTreeSet::from([TraceAllowedUse::Debugging]);
+        let err = ensure_action_target_matches_privileged_action_policy_abac(
+            &existing_grant_scopes,
+            &existing_grant_uses,
+            &admin,
+            None,
+            "tenant access grant revocation",
+        )
+        .expect_err("limited admin must not revoke a grant covering scopes their token lacks");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert!(err.1.error.contains("signed-claim scope"));
+    }
+
+    #[test]
+    fn target_abac_rejects_policy_write_exceeding_tenant_policy() {
+        let admin = synthetic_admin_auth(BTreeSet::new(), BTreeSet::new());
+        let tenant_policy = TenantSubmissionPolicy {
+            allowed_consent_scopes: BTreeSet::from([ConsentScope::DebuggingEvaluation]),
+            allowed_uses: BTreeSet::from([TraceAllowedUse::Debugging]),
+        };
+        let target_scopes = BTreeSet::from([ConsentScope::ModelTraining]);
+        let target_uses = BTreeSet::from([TraceAllowedUse::Debugging]);
+        let err = ensure_action_target_matches_privileged_action_policy_abac(
+            &target_scopes,
+            &target_uses,
+            &admin,
+            Some(&tenant_policy),
+            "tenant policy mutation",
+        )
+        .expect_err("admin cannot write a policy broader than the existing tenant policy");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert!(err.1.error.contains("policy scope"));
     }
 }
