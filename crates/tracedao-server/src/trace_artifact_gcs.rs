@@ -109,9 +109,12 @@ impl GcsObjectClient for InMemoryGcsObjectClient {
 /// artifact. Object-key partitioning mirrors the filesystem-remote provider:
 /// `{object_store_alias}/{tenant_storage_ref_hash}/{artifact_kind}/{object_key}`.
 ///
-/// Task 9 implements `put_encrypted_artifact` + `read_encrypted_artifact` only.
-/// The remaining trait methods bail with a Task-10 marker so call sites that
-/// reach them fail-closed rather than silently succeeding.
+/// Task 9 implemented `put_encrypted_artifact` + `read_encrypted_artifact`;
+/// Task 10 adds `invalidate_encrypted_artifact` (read-modify-write),
+/// `delete_encrypted_artifact`, `restore_deleted_encrypted_artifact`, and a
+/// `supports_versioning()` accessor that the startup gate
+/// (`TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING`) consults to refuse
+/// production boot when the GCS bucket does not have object versioning enabled.
 pub struct GcsRemoteTraceArtifactProvider<C> {
     client: C,
     /// Bucket label, stored for prod call sites that will need it once the
@@ -119,7 +122,6 @@ pub struct GcsRemoteTraceArtifactProvider<C> {
     #[allow(dead_code)]
     bucket: String,
     object_store_alias: String,
-    #[allow(dead_code)]
     require_versioning: bool,
 }
 
@@ -148,6 +150,14 @@ impl<C: GcsObjectClient> GcsRemoteTraceArtifactProvider<C> {
             object_store_alias: object_store_alias.into(),
             require_versioning: true,
         }
+    }
+
+    /// Whether this provider was constructed with the versioning gate enabled.
+    /// Startup (`TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING`) reads this to
+    /// refuse production boot when the bucket-level versioning policy is not
+    /// confirmed. Mirrors `FileRemoteTraceArtifactProvider::versioned_deletes`.
+    pub fn supports_versioning(&self) -> bool {
+        self.require_versioning
     }
 
     fn object_key(&self, object_ref: &TraceArtifactObjectRef) -> String {
@@ -231,25 +241,54 @@ impl<C: GcsObjectClient> RemoteTraceArtifactProvider for GcsRemoteTraceArtifactP
 
     fn invalidate_encrypted_artifact(
         &self,
-        _object_ref: &TraceArtifactObjectRef,
-        _reason: TraceArtifactInvalidationReason,
-        _invalidated_at: DateTime<Utc>,
+        object_ref: &TraceArtifactObjectRef,
+        reason: TraceArtifactInvalidationReason,
+        invalidated_at: DateTime<Utc>,
     ) -> anyhow::Result<()> {
-        anyhow::bail!("GcsInvalidateFailed: not yet implemented (Task 10)")
+        validate_file_remote_object_ref(object_ref)?;
+        let key = self.object_key(object_ref);
+        let fetch = self
+            .client
+            .get_object(&key)
+            .map_err(|err| anyhow::anyhow!("GcsGetFailed: {err}"))?;
+        let mut record: GcsRecord = serde_json::from_slice(&fetch.body)
+            .map_err(|err| anyhow::anyhow!("GcsGetFailed: parse record: {err}"))?;
+        anyhow::ensure!(
+            record.object_ref == *object_ref,
+            "GcsGetFailed: remote trace artifact object ref mismatch"
+        );
+        record.invalidated_at = Some(invalidated_at);
+        record.invalidation_reason = Some(reason);
+        let body = serde_json::to_vec(&record)
+            .map_err(|err| anyhow::anyhow!("GcsInvalidateFailed: serialize record: {err}"))?;
+        self.client
+            .put_object(&key, Bytes::from(body), BTreeMap::new())
+            .map_err(|err| anyhow::anyhow!("GcsInvalidateFailed: {err}"))
     }
 
     fn delete_encrypted_artifact(
         &self,
-        _object_ref: &TraceArtifactObjectRef,
+        object_ref: &TraceArtifactObjectRef,
         _deleted_at: DateTime<Utc>,
     ) -> anyhow::Result<bool> {
-        anyhow::bail!("GcsDeleteFailed: not yet implemented (Task 10)")
+        validate_file_remote_object_ref(object_ref)?;
+        let key = self.object_key(object_ref);
+        // Bucket-level GCS object versioning + lifecycle policies handle the
+        // `deleted_at` timestamp in production; the in-memory client tracks
+        // hit/miss only.
+        self.client
+            .delete_object(&key)
+            .map_err(|err| anyhow::anyhow!("GcsDeleteFailed: {err}"))
     }
 
     fn restore_deleted_encrypted_artifact(
         &self,
-        _object_ref: &TraceArtifactObjectRef,
+        object_ref: &TraceArtifactObjectRef,
     ) -> anyhow::Result<bool> {
-        anyhow::bail!("GcsRestoreFailed: not yet implemented (Task 10)")
+        validate_file_remote_object_ref(object_ref)?;
+        let key = self.object_key(object_ref);
+        self.client
+            .restore_deleted_object(&key)
+            .map_err(|err| anyhow::anyhow!("GcsRestoreFailed: {err}"))
     }
 }
