@@ -4,9 +4,11 @@
 //! per-artifact data encryption keys (DEKs). Concrete implementations live in
 //! submodules; this file contains only the shared types and the trait contract.
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::secrets::SecretsCrypto;
 use crate::trace_artifact_store::TraceArtifactKind;
 
 /// Stable context used to bind a DEK wrap/unwrap operation to a specific
@@ -86,4 +88,114 @@ pub trait KmsKeyWrapper: Send + Sync {
     /// Returns `true` if this wrapper enforces a production-grade trust boundary
     /// (e.g., a real KMS rather than a local test key).
     fn is_production_trust_boundary(&self) -> bool;
+}
+
+// ---------------------------------------------------------------------------
+// LocalMasterKeyWrapper
+// ---------------------------------------------------------------------------
+
+/// A `KmsKeyWrapper` implementation backed by a local `SecretsCrypto` master key.
+///
+/// This implementation is intended for local development and testing only. It
+/// does NOT provide a production-grade trust boundary — use a real KMS
+/// (e.g., GCP KMS) for production deployments.
+///
+/// Wrap format: `packed = [salt_len_u8 || salt || aes_gcm_ciphertext]`
+/// The AES-GCM plaintext is `context_hash_bytes || dek_bytes`, giving inner
+/// integrity binding between the context and the DEK.
+pub struct LocalMasterKeyWrapper {
+    crypto: SecretsCrypto,
+    key_ref_label: String,
+}
+
+impl LocalMasterKeyWrapper {
+    pub fn new(crypto: SecretsCrypto, key_ref_label: impl Into<String>) -> Self {
+        Self {
+            crypto,
+            key_ref_label: key_ref_label.into(),
+        }
+    }
+
+    fn key_ref_hash(&self) -> String {
+        let mut h = Sha256::new();
+        h.update(self.key_ref_label.as_bytes());
+        format!("sha256:{:x}", h.finalize())
+    }
+}
+
+impl KmsKeyWrapper for LocalMasterKeyWrapper {
+    fn wrap_dek(&self, dek: &[u8; 32], context: &KekContext) -> anyhow::Result<WrappedDek> {
+        let context_hash = context.canonical_hash();
+        // Inner plaintext: context_hash_bytes || dek, providing integrity binding.
+        let mut plaintext = Vec::with_capacity(context_hash.len() + 32);
+        plaintext.extend_from_slice(context_hash.as_bytes());
+        plaintext.extend_from_slice(dek);
+        let (encrypted, salt) = self
+            .crypto
+            .encrypt(&plaintext)
+            .map_err(|e| anyhow::anyhow!("KekWrapFailed: {e}"))?;
+        // Pack: [salt_len_u8 || salt || ciphertext]
+        let mut packed = Vec::with_capacity(1 + salt.len() + encrypted.len());
+        packed.push(salt.len() as u8);
+        packed.extend_from_slice(&salt);
+        packed.extend_from_slice(&encrypted);
+        Ok(WrappedDek {
+            wrapper_kind: "local_master_key".into(),
+            key_ref_hash: self.key_ref_hash(),
+            ciphertext_base64: STANDARD.encode(&packed),
+            context_hash,
+        })
+    }
+
+    fn unwrap_dek(&self, wrapped: &WrappedDek, context: &KekContext) -> anyhow::Result<[u8; 32]> {
+        anyhow::ensure!(
+            wrapped.wrapper_kind == "local_master_key",
+            "KekUnwrapFailed: wrapper kind mismatch"
+        );
+        let expected_ctx = context.canonical_hash();
+        anyhow::ensure!(
+            wrapped.context_hash == expected_ctx,
+            "KekContextMismatch: outer context_hash mismatch"
+        );
+        let packed = STANDARD
+            .decode(&wrapped.ciphertext_base64)
+            .map_err(|_| anyhow::anyhow!("KekUnwrapFailed: base64 decode error"))?;
+        anyhow::ensure!(packed.len() > 1, "KekUnwrapFailed: ciphertext too short");
+        let salt_len = packed[0] as usize;
+        anyhow::ensure!(
+            packed.len() > 1 + salt_len,
+            "KekUnwrapFailed: encoded salt length exceeds buffer"
+        );
+        let salt = &packed[1..1 + salt_len];
+        let encrypted = &packed[1 + salt_len..];
+        let decrypted = self
+            .crypto
+            .decrypt_bytes(encrypted, salt)
+            .map_err(|e| anyhow::anyhow!("KekUnwrapFailed: {e}"))?;
+        let bytes = decrypted.expose_bytes();
+        let ctx_len = expected_ctx.len();
+        anyhow::ensure!(
+            bytes.len() == ctx_len + 32,
+            "KekUnwrapFailed: decrypted length mismatch"
+        );
+        anyhow::ensure!(
+            &bytes[..ctx_len] == expected_ctx.as_bytes(),
+            "KekContextMismatch: inner context tag mismatch"
+        );
+        let mut dek = [0u8; 32];
+        dek.copy_from_slice(&bytes[ctx_len..]);
+        Ok(dek)
+    }
+
+    fn safe_status(&self) -> KekWrapperStatus {
+        KekWrapperStatus {
+            kind: "local_master_key".into(),
+            key_ref_hash: self.key_ref_hash(),
+            is_production_trust_boundary: false,
+        }
+    }
+
+    fn is_production_trust_boundary(&self) -> bool {
+        false
+    }
 }
