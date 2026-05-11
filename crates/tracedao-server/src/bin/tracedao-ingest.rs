@@ -33,7 +33,7 @@ use tracedao_server::db::{Database, TraceCorpusRlsDiagnostics};
 use tracedao_server::error::DatabaseError;
 use tracedao_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
 use tracedao_server::secrets::SecretsCrypto;
-use tracedao_server::trace_artifact_kek::KmsKeyWrapper as _;
+use tracedao_server::trace_artifact_kek::{KekWrapperStatus, KmsKeyWrapper as _};
 use tracedao_server::trace_artifact_store::{
     EncryptedTraceArtifactReceipt, FileRemoteTraceArtifactProvider,
     LocalEncryptedTraceArtifactStore, ServiceOwnedTraceArtifactStore, TraceArtifactKind,
@@ -1312,6 +1312,12 @@ struct ConfiguredTraceArtifactStore {
     plaintext_compatibility_allowed: bool,
     object_versioning_supported: bool,
     restore_after_delete_supported: bool,
+    /// Safe provider label (e.g. "gcs", "file_system", "local_encrypted").
+    /// `None` for legacy/untyped stores.
+    provider_label: Option<&'static str>,
+    /// Observable KEK status, safe to surface in config-status. `None` for
+    /// stores that do not use a per-envelope KEK wrapper.
+    kek_status: Option<KekWrapperStatus>,
 }
 
 impl ConfiguredTraceArtifactStore {
@@ -1323,6 +1329,8 @@ impl ConfiguredTraceArtifactStore {
             plaintext_compatibility_allowed: true,
             object_versioning_supported: false,
             restore_after_delete_supported: false,
+            provider_label: None,
+            kek_status: None,
         }
     }
 
@@ -1332,6 +1340,7 @@ impl ConfiguredTraceArtifactStore {
     }
 
     fn remote_disabled(config: TraceRemoteObjectStoreConfig) -> Self {
+        let provider_label = Some(config.provider.label());
         Self {
             object_store_name: TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE.to_string(),
             store: Arc::new(DisabledRemoteTraceArtifactStore::new(config)),
@@ -1339,6 +1348,8 @@ impl ConfiguredTraceArtifactStore {
             plaintext_compatibility_allowed: false,
             object_versioning_supported: false,
             restore_after_delete_supported: false,
+            provider_label,
+            kek_status: None,
         }
     }
 
@@ -1373,6 +1384,7 @@ impl ConfiguredTraceArtifactStore {
             env_truthy(TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY),
             kek.is_production_trust_boundary(),
         )?;
+        let kek_status = kek.safe_status();
         let provider_config = TraceArtifactProviderConfig::service_owned_remote(
             TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE,
         )?;
@@ -1393,6 +1405,8 @@ impl ConfiguredTraceArtifactStore {
             plaintext_compatibility_allowed: false,
             object_versioning_supported: file_system_versioning,
             restore_after_delete_supported: file_system_versioning,
+            provider_label: Some(config.provider.label()),
+            kek_status: Some(kek_status),
         })
     }
 
@@ -1419,6 +1433,14 @@ impl ConfiguredTraceArtifactStore {
     fn object_primary_eligible(&self) -> bool {
         self.object_io_enabled()
             && is_enabled_object_primary_trace_object_store(Some(self.object_store_name()))
+    }
+
+    fn provider_label(&self) -> Option<&'static str> {
+        self.provider_label
+    }
+
+    fn kek_status(&self) -> Option<&KekWrapperStatus> {
+        self.kek_status.as_ref()
     }
 
     fn put_json<T: Serialize>(
@@ -7958,6 +7980,22 @@ impl TraceCommonsRlsConfigStatus {
     }
 }
 
+/// Safe operator-visible status for the configured object store.
+/// Contains only label strings, hashes, and booleans — never bucket names,
+/// ARNs, URLs, credential refs, or other operator-secret material.
+#[derive(Debug, Serialize)]
+struct TraceCommonsObjectStoreConfigStatus {
+    /// Safe alias for the configured store (e.g. "trace_commons_service_owned_remote").
+    alias: String,
+    /// Provider label (e.g. "gcs", "file_system", "local_encrypted").
+    provider: String,
+    /// Whether object-store versioning is required by this deployment.
+    require_versioning: bool,
+    /// Safe KEK wrapper status. `None` if no envelope KEK is configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kek: Option<KekWrapperStatus>,
+}
+
 #[derive(Debug, Serialize)]
 struct TraceCommonsConfigStatusResponse {
     schema_version: &'static str,
@@ -8158,6 +8196,9 @@ struct TraceCommonsConfigStatusResponse {
     artifact_object_store_versioning_supported: bool,
     artifact_object_store_restore_after_delete_supported: bool,
     object_primary_object_store_eligible: bool,
+    /// Safe operator-visible object-store sub-object with provider + KEK fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    object_store: Option<TraceCommonsObjectStoreConfigStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     trace_corpus_rls: Option<TraceCommonsRlsConfigStatus>,
 }
@@ -8655,6 +8696,20 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .artifact_store
             .as_ref()
             .is_some_and(|store| store.object_primary_eligible()),
+        object_store: state.artifact_store.as_ref().map(|store| {
+            // Derive a safe provider label: use the typed label when known,
+            // otherwise fall back to the store name as a label-only string.
+            let provider = store
+                .provider_label()
+                .unwrap_or("local_encrypted")
+                .to_string();
+            TraceCommonsObjectStoreConfigStatus {
+                alias: store.object_store_name().to_string(),
+                provider,
+                require_versioning: state.require_object_store_versioning,
+                kek: store.kek_status().cloned(),
+            }
+        }),
         trace_corpus_rls: None,
     }
 }
@@ -65914,9 +65969,27 @@ mod tests {
             );
         }
 
+        // The object_store sub-object should surface the safe provider label
+        // but must not contain any of the raw secret values.
+        let object_store = value["object_store"]
+            .as_object()
+            .expect("object_store is present");
+        assert_eq!(
+            object_store["alias"],
+            serde_json::json!(TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE)
+        );
+        // "aws_s3" is a safe provider label — it is intentionally surfaced.
+        assert_eq!(object_store["provider"], serde_json::json!("aws_s3"));
+        // No kek for a disabled store.
+        assert!(
+            object_store.get("kek").is_none(),
+            "remote_disabled store must not expose a kek"
+        );
+
         let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        // Only the raw operator-secret values are forbidden; the provider
+        // label "aws_s3" is safe and is now present in object_store.provider.
         for forbidden_value in [
-            "aws_s3",
             "trace-commons-prod-bucket-secret",
             "trace-commons-secret",
             "trace-commons-writer-secret",
@@ -65926,6 +65999,110 @@ mod tests {
                 "config status leaked remote value {forbidden_value}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn admin_config_status_reports_object_store_kek_fields_without_raw_key_material() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        // Build a remote_service store with provider=file_system so the KEK
+        // wrapper is wired in. kms-key-ref and credential-ref are intentionally
+        // label-like sentinel values that must not appear verbatim in the response.
+        let key = tracedao_server::secrets::keychain::generate_master_key_hex();
+        let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+            Some("file_system"),
+            Some(temp.path().to_str().expect("utf8 temp path")),
+            Some("kms-key-sentinel-ref"),
+            Some("credential-sentinel-ref"),
+        )
+        .expect("remote config parses");
+        let artifact_store =
+            ConfiguredTraceArtifactStore::remote_service(remote_config, SecretString::from(key))
+                .expect("remote service store builds");
+        let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            None,
+            Some(artifact_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/config-status")
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("admin response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("status json parses");
+
+        // object_store sub-object must be present for a configured store.
+        let object_store = value["object_store"]
+            .as_object()
+            .expect("object_store is present and is an object");
+
+        // alias is a label string — no bucket paths or secrets.
+        assert_eq!(
+            object_store["alias"],
+            serde_json::json!(TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE)
+        );
+        // provider is a safe label string.
+        assert_eq!(object_store["provider"], serde_json::json!("file_system"));
+        // require_versioning is a boolean.
+        assert_eq!(object_store["require_versioning"], serde_json::json!(false));
+
+        // kek sub-object must be present for remote_service stores.
+        let kek = object_store["kek"]
+            .as_object()
+            .expect("object_store.kek is present");
+        assert_eq!(kek["kind"], serde_json::json!("local_master_key"));
+        // key_ref_hash must be a sha256:-prefixed hash string.
+        let key_ref_hash = kek["key_ref_hash"]
+            .as_str()
+            .expect("key_ref_hash is a string");
+        assert!(
+            key_ref_hash.starts_with("sha256:"),
+            "key_ref_hash must be a sha256-prefixed hash, got: {key_ref_hash}"
+        );
+        assert_eq!(kek["is_production_trust_boundary"], serde_json::json!(false));
+
+        // Hash-only / label-only discipline: raw key refs and sentinel values
+        // must not appear anywhere in the response body.
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(
+            !body_text.contains("kms-key-sentinel-ref"),
+            "config-status leaked raw kms key ref"
+        );
+        assert!(
+            !body_text.contains("credential-sentinel-ref"),
+            "config-status leaked raw credential ref"
+        );
+        assert!(
+            !body_text.contains("trace-commons-local-master-v1"),
+            "config-status leaked raw key_ref_label"
+        );
+        // temp path (bucket) must not appear.
+        assert!(
+            !body_text.contains(temp.path().to_string_lossy().as_ref()),
+            "config-status leaked bucket/path value"
+        );
     }
 
     #[tokio::test]
