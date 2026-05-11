@@ -1354,8 +1354,18 @@ impl ConfiguredTraceArtifactStore {
         );
         let root = config.file_system_root()?;
         let file_system_versioning = config.file_system_versioning;
+        // Transitional default KEK wiring: derive a second `SecretsCrypto`
+        // from the same master key for the local master-key wrapper until
+        // production wrapper selection lands in the config-status surface
+        // (Task 12).
+        let kek_key = SecretString::new(key.expose_secret().to_string().into());
         let crypto = SecretsCrypto::new(key)
             .context("failed to initialize Trace Commons remote artifact encryption")?;
+        let kek = tracedao_server::trace_artifact_kek::LocalMasterKeyWrapper::new(
+            SecretsCrypto::new(kek_key)
+                .context("failed to initialize Trace Commons KEK wrapper")?,
+            "trace-commons-local-master-v1",
+        );
         let provider_config = TraceArtifactProviderConfig::service_owned_remote(
             TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE,
         )?;
@@ -1369,6 +1379,7 @@ impl ConfiguredTraceArtifactStore {
             store: Arc::new(ServiceOwnedTraceArtifactStore::new(
                 provider_config,
                 crypto,
+                kek,
                 provider,
             )),
             object_io_enabled: true,

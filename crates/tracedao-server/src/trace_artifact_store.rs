@@ -16,8 +16,11 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 
 use crate::secrets::SecretsCrypto;
+use crate::trace_artifact_kek::{KekContext, KmsKeyWrapper};
 
 pub const TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_VERSION: &str = "ironclaw.trace_artifact_ciphertext.v1";
+/// Envelope schema version for KEK-wrapped per-object DEK records.
+pub const TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_V2: &str = "ironclaw.trace_artifact_ciphertext.v2";
 
 static TRACE_ARTIFACT_WRITE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -487,17 +490,24 @@ impl RemoteTraceArtifactProvider for FileRemoteTraceArtifactProvider {
 
 const TRACE_ARTIFACT_STORE_LEGACY_SUBMISSION_STORAGE_REF: &str = "trace-artifact-store-legacy";
 
-pub struct ServiceOwnedTraceArtifactStore<P> {
+pub struct ServiceOwnedTraceArtifactStore<P, K> {
     config: TraceArtifactProviderConfig,
     crypto: SecretsCrypto,
+    kek: K,
     provider: P,
 }
 
-impl<P: RemoteTraceArtifactProvider> ServiceOwnedTraceArtifactStore<P> {
-    pub fn new(config: TraceArtifactProviderConfig, crypto: SecretsCrypto, provider: P) -> Self {
+impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> ServiceOwnedTraceArtifactStore<P, K> {
+    pub fn new(
+        config: TraceArtifactProviderConfig,
+        crypto: SecretsCrypto,
+        kek: K,
+        provider: P,
+    ) -> Self {
         Self {
             config,
             crypto,
+            kek,
             provider,
         }
     }
@@ -525,10 +535,19 @@ impl<P: RemoteTraceArtifactProvider> ServiceOwnedTraceArtifactStore<P> {
         validate_non_empty_ref("trace artifact object id", object_id)?;
         serde_json::from_slice::<serde_json::Value>(serialized_json)
             .context("failed to parse serialized trace artifact")?;
-        let (ciphertext, salt) = self
-            .crypto
-            .encrypt(serialized_json)
-            .context("failed to encrypt trace artifact")?;
+        // v2 envelope: wrap a freshly generated DEK with the configured KEK
+        // and AES-256-GCM-encrypt the plaintext directly under that DEK.
+        let dek = generate_dek();
+        let kek_ctx = KekContext {
+            tenant_storage_ref: scope.tenant_storage_ref.clone(),
+            artifact_kind: artifact_kind.clone(),
+        };
+        let wrapped = self
+            .kek
+            .wrap_dek(&dek, &kek_ctx)
+            .context("KekWrapFailed: trace artifact DEK wrap failed")?;
+        let ciphertext = aead_encrypt_with_dek(&dek, serialized_json)
+            .context("failed to encrypt trace artifact under per-object DEK")?;
         let ciphertext_sha256 = sha256_hex(&ciphertext);
         let object_key = remote_artifact_object_key(&self.config, scope, &artifact_kind, object_id);
         let encrypted_at = Utc::now();
@@ -540,11 +559,14 @@ impl<P: RemoteTraceArtifactProvider> ServiceOwnedTraceArtifactStore<P> {
             encrypted_at,
         };
         let artifact = EncryptedTraceArtifact {
-            schema_version: TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_VERSION.to_string(),
+            schema_version: TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_V2.to_string(),
             receipt: legacy_receipt,
-            salt_base64: base64::engine::general_purpose::STANDARD.encode(salt),
+            // v2 records use the wrapped DEK + AES-GCM nonce embedded in the
+            // ciphertext. The legacy `salt_base64` field is kept as an empty
+            // string for serde compatibility with the v1 schema shape.
+            salt_base64: String::new(),
             ciphertext_base64: base64::engine::general_purpose::STANDARD.encode(ciphertext),
-            wrapped_dek: None,
+            wrapped_dek: Some(wrapped),
         };
         let object_ref = TraceArtifactObjectRef {
             provider_kind: self.config.kind,
@@ -595,7 +617,7 @@ impl<P: RemoteTraceArtifactProvider> ServiceOwnedTraceArtifactStore<P> {
         object_ref: &TraceArtifactObjectRef,
     ) -> anyhow::Result<T> {
         let artifact = self.read_scoped_artifact(expected_scope, object_ref)?;
-        decrypt_artifact_json(&self.crypto, &artifact)
+        decrypt_artifact_json_with_kek(&self.crypto, &self.kek, &artifact, &object_ref.artifact_kind)
     }
 
     pub fn invalidate_scoped_artifact(
@@ -650,7 +672,9 @@ impl<P: RemoteTraceArtifactProvider> ServiceOwnedTraceArtifactStore<P> {
     }
 }
 
-impl<P: RemoteTraceArtifactProvider> TraceArtifactStore for ServiceOwnedTraceArtifactStore<P> {
+impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> TraceArtifactStore
+    for ServiceOwnedTraceArtifactStore<P, K>
+{
     fn put_serialized_json(
         &self,
         tenant_storage_ref: &str,
@@ -696,7 +720,7 @@ impl<P: RemoteTraceArtifactProvider> TraceArtifactStore for ServiceOwnedTraceArt
     ) -> anyhow::Result<serde_json::Value> {
         let artifact =
             TraceArtifactStore::read_artifact(self, expected_tenant_storage_ref, receipt)?;
-        decrypt_artifact_json(&self.crypto, &artifact)
+        decrypt_artifact_json_with_kek(&self.crypto, &self.kek, &artifact, &receipt.artifact_kind)
     }
 
     fn read_json_by_object_key(
@@ -848,8 +872,8 @@ impl LocalEncryptedTraceArtifactStore {
         let artifact: EncryptedTraceArtifact =
             serde_json::from_str(&body).context("failed to parse encrypted trace artifact")?;
         anyhow::ensure!(
-            artifact.schema_version == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_VERSION,
-            "unsupported encrypted trace artifact schema version"
+            is_supported_schema_version(&artifact.schema_version),
+            "KekDowngradeRejected: unknown schema_version"
         );
         anyhow::ensure!(
             artifact.receipt.tenant_storage_ref == expected_tenant_storage_ref,
@@ -874,6 +898,7 @@ impl LocalEncryptedTraceArtifactStore {
             sha256_hex(&ciphertext) == expected_ciphertext_sha256,
             "trace artifact ciphertext hash mismatch"
         );
+        verify_kek_binding(&artifact, expected_tenant_storage_ref, &expected_artifact_kind)?;
         Ok(artifact)
     }
 
@@ -892,8 +917,8 @@ impl LocalEncryptedTraceArtifactStore {
         let artifact: EncryptedTraceArtifact =
             serde_json::from_str(&body).context("failed to parse encrypted trace artifact")?;
         anyhow::ensure!(
-            artifact.schema_version == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_VERSION,
-            "unsupported encrypted trace artifact schema version"
+            is_supported_schema_version(&artifact.schema_version),
+            "KekDowngradeRejected: unknown schema_version"
         );
         anyhow::ensure!(
             artifact.receipt.tenant_storage_ref == expected_tenant_storage_ref,
@@ -910,6 +935,7 @@ impl LocalEncryptedTraceArtifactStore {
             sha256_hex(&ciphertext) == receipt.ciphertext_sha256,
             "trace artifact ciphertext hash mismatch"
         );
+        verify_kek_binding(&artifact, expected_tenant_storage_ref, &receipt.artifact_kind)?;
         Ok(artifact)
     }
 
@@ -1041,8 +1067,8 @@ fn verify_encrypted_artifact(
         .strip_prefix("sha256:")
         .unwrap_or(expected_ciphertext_sha256);
     anyhow::ensure!(
-        artifact.schema_version == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_VERSION,
-        "unsupported encrypted trace artifact schema version"
+        is_supported_schema_version(&artifact.schema_version),
+        "KekDowngradeRejected: unknown schema_version"
     );
     anyhow::ensure!(
         artifact.receipt.tenant_storage_ref == expected_tenant_storage_ref,
@@ -1067,17 +1093,132 @@ fn verify_encrypted_artifact(
         sha256_hex(&ciphertext) == expected_ciphertext_sha256,
         "trace artifact ciphertext hash mismatch"
     );
-    if let Some(wrapped_dek) = &artifact.wrapped_dek {
-        let context = crate::trace_artifact_kek::KekContext {
-            tenant_storage_ref: expected_tenant_storage_ref.to_string(),
-            artifact_kind: expected_artifact_kind.clone(),
-        };
-        anyhow::ensure!(
-            wrapped_dek.context_hash == context.canonical_hash(),
-            "KekContextMismatch: wrapped_dek context_hash does not match expected tenant and artifact kind"
-        );
-    }
+    verify_kek_binding(artifact, expected_tenant_storage_ref, expected_artifact_kind)?;
     Ok(())
+}
+
+fn is_supported_schema_version(version: &str) -> bool {
+    matches!(
+        version,
+        v if v == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_VERSION || v == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_V2
+    )
+}
+
+/// Shared schema-version / `wrapped_dek` shape gate.
+///
+/// Refuses any cross-shape envelope to prevent a v1-reader from being used as
+/// a downgrade oracle for v2 records (and vice versa).
+fn verify_kek_binding(
+    artifact: &EncryptedTraceArtifact,
+    tenant_storage_ref: &str,
+    artifact_kind: &TraceArtifactKind,
+) -> anyhow::Result<()> {
+    match artifact.schema_version.as_str() {
+        v if v == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_VERSION => {
+            anyhow::ensure!(
+                artifact.wrapped_dek.is_none(),
+                "KekDowngradeRejected: v1 record carries wrapped_dek"
+            );
+            Ok(())
+        }
+        v if v == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_V2 => {
+            let wrapped = artifact.wrapped_dek.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("KekDowngradeRejected: v2 record missing wrapped_dek")
+            })?;
+            let ctx = KekContext {
+                tenant_storage_ref: tenant_storage_ref.to_string(),
+                artifact_kind: artifact_kind.clone(),
+            };
+            anyhow::ensure!(
+                wrapped.context_hash == ctx.canonical_hash(),
+                "KekContextMismatch: wrapped_dek context_hash does not match expected tenant and artifact kind"
+            );
+            Ok(())
+        }
+        _ => anyhow::bail!("KekDowngradeRejected: unknown schema_version"),
+    }
+}
+
+/// Generate a fresh 256-bit per-object DEK using the OS RNG.
+fn generate_dek() -> [u8; 32] {
+    let mut dek = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut aes_gcm::aead::OsRng, &mut dek);
+    dek
+}
+
+/// AES-256-GCM encrypt `plaintext` under `dek`, returning the
+/// `[nonce || aead_ciphertext_with_tag]` packed form used by v2 records.
+fn aead_encrypt_with_dek(dek: &[u8; 32], plaintext: &[u8]) -> anyhow::Result<Vec<u8>> {
+    use aes_gcm::aead::{Aead, AeadCore, OsRng};
+    use aes_gcm::{Aes256Gcm, KeyInit};
+    let cipher = Aes256Gcm::new_from_slice(dek)
+        .map_err(|e| anyhow::anyhow!("KekDekEncryptFailed: cipher init: {e}"))?;
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let ct = cipher
+        .encrypt(&nonce, plaintext)
+        .map_err(|e| anyhow::anyhow!("KekDekEncryptFailed: {e}"))?;
+    let mut out = Vec::with_capacity(nonce.len() + ct.len());
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ct);
+    Ok(out)
+}
+
+/// AES-256-GCM decrypt the `[nonce || aead_ciphertext_with_tag]` packed form
+/// produced by `aead_encrypt_with_dek`.
+fn aead_decrypt_with_dek(dek: &[u8; 32], encrypted: &[u8]) -> anyhow::Result<Vec<u8>> {
+    use aes_gcm::aead::Aead;
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+    const NONCE_LEN: usize = 12;
+    const TAG_LEN: usize = 16;
+    anyhow::ensure!(
+        encrypted.len() >= NONCE_LEN + TAG_LEN,
+        "KekDekDecryptFailed: ciphertext too short"
+    );
+    let cipher = Aes256Gcm::new_from_slice(dek)
+        .map_err(|e| anyhow::anyhow!("KekDekDecryptFailed: cipher init: {e}"))?;
+    let (nonce_bytes, ct) = encrypted.split_at(NONCE_LEN);
+    let nonce = Nonce::from_slice(nonce_bytes);
+    cipher
+        .decrypt(nonce, ct)
+        .map_err(|e| anyhow::anyhow!("KekDekDecryptFailed: {e}"))
+}
+
+/// Decrypt an artifact JSON payload, branching on schema version. v1 uses the
+/// legacy `SecretsCrypto` reader path; v2 unwraps the per-object DEK through
+/// the configured `KmsKeyWrapper` and AES-256-GCM-decrypts the ciphertext.
+fn decrypt_artifact_json_with_kek<T: DeserializeOwned, K: KmsKeyWrapper>(
+    crypto: &SecretsCrypto,
+    kek: &K,
+    artifact: &EncryptedTraceArtifact,
+    artifact_kind: &TraceArtifactKind,
+) -> anyhow::Result<T> {
+    match artifact.schema_version.as_str() {
+        v if v == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_VERSION => {
+            anyhow::ensure!(
+                artifact.wrapped_dek.is_none(),
+                "KekDowngradeRejected: v1 record carries wrapped_dek"
+            );
+            decrypt_artifact_json(crypto, artifact)
+        }
+        v if v == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_V2 => {
+            let wrapped = artifact.wrapped_dek.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("KekDowngradeRejected: v2 record missing wrapped_dek")
+            })?;
+            let ctx = KekContext {
+                tenant_storage_ref: artifact.receipt.tenant_storage_ref.clone(),
+                artifact_kind: artifact_kind.clone(),
+            };
+            let dek = kek
+                .unwrap_dek(wrapped, &ctx)
+                .context("KekUnwrapFailed: trace artifact DEK unwrap failed")?;
+            let ciphertext = base64::engine::general_purpose::STANDARD
+                .decode(artifact.ciphertext_base64.as_bytes())
+                .context("failed to decode trace artifact ciphertext")?;
+            let plaintext = aead_decrypt_with_dek(&dek, &ciphertext)?;
+            serde_json::from_slice(&plaintext).context("failed to deserialize trace artifact")
+        }
+        _ => anyhow::bail!("KekDowngradeRejected: unknown schema_version"),
+    }
 }
 
 fn validate_remote_object_ref(
@@ -1500,14 +1641,26 @@ mod tests {
         LocalEncryptedTraceArtifactStore::new(temp.path(), crypto)
     }
 
-    fn test_remote_store() -> ServiceOwnedTraceArtifactStore<InMemoryRemoteTraceArtifactProvider> {
+    fn test_kek(key_hex: &str) -> crate::trace_artifact_kek::LocalMasterKeyWrapper {
+        let crypto =
+            SecretsCrypto::new(SecretString::from(key_hex.to_string())).expect("kek crypto");
+        crate::trace_artifact_kek::LocalMasterKeyWrapper::new(crypto, "trace-commons-test-kek-v1")
+    }
+
+    fn test_remote_store() -> ServiceOwnedTraceArtifactStore<
+        InMemoryRemoteTraceArtifactProvider,
+        crate::trace_artifact_kek::LocalMasterKeyWrapper,
+    > {
         let key = crate::secrets::keychain::generate_master_key_hex();
-        let crypto = SecretsCrypto::new(SecretString::from(key)).expect("test crypto");
+        let crypto =
+            SecretsCrypto::new(SecretString::from(key.clone())).expect("test crypto");
+        let kek = test_kek(&key);
         let config = TraceArtifactProviderConfig::service_owned_remote("trace-commons-prod")
             .expect("remote provider config");
         ServiceOwnedTraceArtifactStore::new(
             config,
             crypto,
+            kek,
             InMemoryRemoteTraceArtifactProvider::default(),
         )
     }
@@ -1635,12 +1788,15 @@ mod tests {
     #[test]
     fn service_owned_remote_store_binds_refs_to_tenant_and_submission() {
         let key = crate::secrets::keychain::generate_master_key_hex();
-        let crypto = SecretsCrypto::new(SecretString::from(key)).expect("test crypto");
+        let crypto =
+            SecretsCrypto::new(SecretString::from(key.clone())).expect("test crypto");
+        let kek = test_kek(&key);
         let config = TraceArtifactProviderConfig::service_owned_remote("trace-commons-prod")
             .expect("remote provider config");
         let store = ServiceOwnedTraceArtifactStore::new(
             config,
             crypto,
+            kek,
             InMemoryRemoteTraceArtifactProvider::default(),
         );
         let scope = TraceArtifactScope::new("tenant:sha256:alpha", "submission-alpha");
@@ -1694,12 +1850,15 @@ mod tests {
     #[test]
     fn service_owned_remote_store_returns_invalidate_and_delete_receipts() {
         let key = crate::secrets::keychain::generate_master_key_hex();
-        let crypto = SecretsCrypto::new(SecretString::from(key)).expect("test crypto");
+        let crypto =
+            SecretsCrypto::new(SecretString::from(key.clone())).expect("test crypto");
+        let kek = test_kek(&key);
         let config = TraceArtifactProviderConfig::service_owned_remote("trace-commons-prod")
             .expect("remote provider config");
         let store = ServiceOwnedTraceArtifactStore::new(
             config,
             crypto,
+            kek,
             InMemoryRemoteTraceArtifactProvider::default(),
         );
         let scope = TraceArtifactScope::new("tenant:sha256:alpha", "submission-alpha");
@@ -1753,6 +1912,7 @@ mod tests {
         let store = ServiceOwnedTraceArtifactStore::new(
             config.clone(),
             SecretsCrypto::new(SecretString::from(key.clone())).expect("test crypto"),
+            test_kek(&key),
             FileRemoteTraceArtifactProvider::new(temp.path()),
         );
         let scope = TraceArtifactScope::new("tenant:sha256:alpha", "submission-alpha");
@@ -1768,7 +1928,8 @@ mod tests {
 
         let reopened = ServiceOwnedTraceArtifactStore::new(
             config,
-            SecretsCrypto::new(SecretString::from(key)).expect("test crypto"),
+            SecretsCrypto::new(SecretString::from(key.clone())).expect("test crypto"),
+            test_kek(&key),
             FileRemoteTraceArtifactProvider::new(temp.path()),
         );
         let value: serde_json::Value = reopened
@@ -1807,7 +1968,8 @@ mod tests {
         let provider = FileRemoteTraceArtifactProvider::new(temp.path());
         let store = ServiceOwnedTraceArtifactStore::new(
             config,
-            SecretsCrypto::new(SecretString::from(key)).expect("test crypto"),
+            SecretsCrypto::new(SecretString::from(key.clone())).expect("test crypto"),
+            test_kek(&key),
             provider.clone(),
         );
         let scope = TraceArtifactScope::new("tenant:sha256:alpha", "submission-alpha");
@@ -1845,7 +2007,8 @@ mod tests {
             .expect("remote provider config");
         let store = ServiceOwnedTraceArtifactStore::new(
             config,
-            SecretsCrypto::new(SecretString::from(key)).expect("test crypto"),
+            SecretsCrypto::new(SecretString::from(key.clone())).expect("test crypto"),
+            test_kek(&key),
             FileRemoteTraceArtifactProvider::new(temp.path()),
         );
         let scope = TraceArtifactScope::new("tenant:sha256:alpha", "submission-alpha");
@@ -1891,7 +2054,8 @@ mod tests {
         let provider = FileRemoteTraceArtifactProvider::new(temp.path());
         let store = ServiceOwnedTraceArtifactStore::new(
             config,
-            SecretsCrypto::new(SecretString::from(key)).expect("test crypto"),
+            SecretsCrypto::new(SecretString::from(key.clone())).expect("test crypto"),
+            test_kek(&key),
             provider.clone(),
         );
         let scope = TraceArtifactScope::new("tenant:sha256:alpha", "submission-alpha");
@@ -1950,6 +2114,7 @@ mod tests {
         let store = ServiceOwnedTraceArtifactStore::new(
             config.clone(),
             SecretsCrypto::new(SecretString::from(key.clone())).expect("test crypto"),
+            test_kek(&key),
             FileRemoteTraceArtifactProvider::versioned(temp.path()),
         );
         let scope = TraceArtifactScope::new("tenant:sha256:alpha", "submission-alpha");
@@ -1972,7 +2137,8 @@ mod tests {
 
         let reopened = ServiceOwnedTraceArtifactStore::new(
             config,
-            SecretsCrypto::new(SecretString::from(key)).expect("test crypto"),
+            SecretsCrypto::new(SecretString::from(key.clone())).expect("test crypto"),
+            test_kek(&key),
             FileRemoteTraceArtifactProvider::versioned(temp.path()),
         );
         assert!(
