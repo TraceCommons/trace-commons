@@ -171,6 +171,9 @@ pub struct EncryptedTraceArtifact {
     pub receipt: EncryptedTraceArtifactReceipt,
     pub salt_base64: String,
     pub ciphertext_base64: String,
+    /// Wrapped per-object DEK for v2 envelopes. Authenticated by AES-GCM
+    /// inside the wrapper plus the KekContext binding (`context_hash`) — not
+    /// by `receipt.ciphertext_sha256`. Legacy v1 records leave this `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrapped_dek: Option<crate::trace_artifact_kek::WrappedDek>,
 }

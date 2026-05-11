@@ -428,9 +428,14 @@ impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> ServiceOwnedTraceArtifact
   4. AES-256-GCM encrypt the serialized JSON with the **raw DEK** (same nonce-prefix format `SecretsCrypto` produces — extract the encrypt helper if needed; OK to call `Aes256Gcm` directly with a random nonce).
   5. Set `schema_version = "v2"`, populate `wrapped_dek`.
 
-- [ ] **Step 3: Update `read_*` paths** to branch on `wrapped_dek`:
-  - `Some(w)` → `kek.unwrap_dek(&w, &ctx)`, then AES-256-GCM-decrypt with the DEK.
-  - `None` → existing `crypto.decrypt(ciphertext, salt)` path (unchanged).
+- [ ] **Step 3: Update `read_*` paths** to branch on `wrapped_dek`, gated by schema version:
+  - `schema_version == "v2"` → require `wrapped_dek.is_some()` and call `kek.unwrap_dek(&w, &ctx)`, then AES-256-GCM-decrypt with the DEK. A v2 record with `wrapped_dek = None` is a downgrade attempt — refuse with a stable `KekDowngradeRejected` class.
+  - `schema_version == "v1"` → require `wrapped_dek.is_none()` and use the legacy `crypto.decrypt(ciphertext, salt)` path. A v1 record with `wrapped_dek = Some(...)` is malformed; refuse.
+  - Anything else → refuse.
+
+  Rationale: the Task 4 reviewer flagged that a pure "if `Some`, check; if `None`, skip" rule is a downgrade primitive — an attacker who edits the on-disk envelope could strip the field and revert to the legacy KDF. Binding the field requirement to `schema_version` makes `wrapped_dek = None` unrepresentable for migrated tenants.
+
+- [ ] **Step 3a: Extract a shared `verify_kek_binding` helper** so `verify_encrypted_artifact` and `LocalEncryptedTraceArtifactStore`'s inline verification (lines ~852–871 and ~896–907) both apply the same KEK context-hash check. Without this, the local store becomes a downgrade oracle: write a v2 record via the local store, read it back, observe that the KEK binding was never checked. Helper signature: `fn verify_kek_binding(artifact: &EncryptedTraceArtifact, tenant_storage_ref: &str, artifact_kind: &TraceArtifactKind) -> anyhow::Result<()>`.
 
 - [ ] **Step 4: Find all callers** of `ServiceOwnedTraceArtifactStore::new` and update construction sites to pass a `KmsKeyWrapper`.
 
