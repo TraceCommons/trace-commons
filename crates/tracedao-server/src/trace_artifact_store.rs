@@ -147,7 +147,7 @@ pub enum TraceArtifactKind {
 }
 
 impl TraceArtifactKind {
-    fn as_path_segment(&self) -> &'static str {
+    pub fn as_path_segment(&self) -> &'static str {
         match self {
             Self::ContributionEnvelope => "contribution_envelope",
             Self::ReplayExportManifest => "replay_export_manifest",
