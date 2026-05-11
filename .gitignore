@@ -2,3 +2,6 @@
 /.env
 /.env.*
 !/.env.example
+
+# Local git worktrees for parallel feature work
+.worktrees/
