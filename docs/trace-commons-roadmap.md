@@ -51,22 +51,38 @@ What it does not have:
 These are the only items that need to land before someone could actually
 deploy this for real. Everything else is polish.
 
-### 1. KEK strategy and implementation
+### 1. The dstack enclave (KEK + private vector + perplexity gate)
 
-The single architecturally load-bearing decision. Trace Commons already
-operates with a constrained-operator threat model (hash-only audit, central
-issuer fail-closed, no plaintext fallback). The KEK choice decides whether the
-operator can read user content at all.
+The architecturally load-bearing slice. Trace Commons operates with a
+constrained-operator threat model — hash-only audit, central-issuer fail-
+closed, no plaintext fallback. A real KEK plus a real private-vector gate
+both live inside that same trust boundary, and the platform decision is
+settled: **dstack, single attested enclave, GPU-resident.**
 
-Candidates: TEE-rooted (dstack / Confidential Space / Nitro Enclaves), cloud
-KMS (GCP Cloud KMS or AWS KMS), or hybrid (cloud KMS releases a sealing key
-only to attested code). The TEE direction is the most consistent with the rest
-of the system; cloud KMS is the smaller lift.
+The enclave holds:
 
-Needs a dedicated spec at `docs/superpowers/specs/<date>-trace-kek-strategy-design.md`
-followed by a concrete `KmsKeyWrapper` impl that returns
-`is_production_trust_boundary() = true`. Without this, the GCS build cannot
-start in production.
+- The KEK unsealing key, implementing `KmsKeyWrapper` with
+  `is_production_trust_boundary() = true`. Today's production startup gate
+  (`TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY=true`) becomes
+  satisfiable.
+- A configured base model running prefill-only perplexity scoring, gating
+  credit on a single perplexity floor plus a tail-logprob metric.
+- A local embedder (BGE-large / gte-large class, matryoshka-friendly) for
+  redacted-trace embeddings.
+- A private vector index (`usearch` or `instant-distance` in enclave RAM
+  with sealed snapshots) for novelty and dedup queries.
+
+The enclave emits a new `novelty_utility` credit event kind, parallel to the
+existing `ranking_utility`. Events are stamped with `gate_version`; pre-
+settlement events under a rolled-back gate version are reversible via the
+existing revocation-propagation path. After settlement, credit stays.
+
+Strategy brief: `docs/superpowers/specs/2026-05-11-trace-kek-strategy-design.md`.
+Full design: `docs/superpowers/specs/2026-05-11-private-vector-system-design.md`.
+
+Until the dstack workload ships, the build refuses production startup and
+the `vector_worker_*` routes serve only the deterministic similarity
+placeholder.
 
 ### 2. Complete the Ironclaw extraction
 
@@ -103,14 +119,6 @@ Hash-chain verification across audit rows, per-source content-read rows,
 reason enforcement, sampled reconciliation. The plumbing exists; the
 chain-verification + reconciliation pieces are partial. Integrity work, not
 rollout work.
-
-### Private vector infrastructure
-
-Replace the deterministic vector similarity placeholder with a private
-embedder + private search adapter that reads only approved redacted
-projections, writes tenant-scoped vector metadata, and invalidates on
-revocation/retention. Trait surface exists; the concrete impls do not.
-Genuinely novel; aligns with the privacy-first design ethos.
 
 ### PostgreSQL `TraceCorpusStore` coverage
 
