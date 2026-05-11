@@ -1208,10 +1208,9 @@ fn decrypt_artifact_json_with_kek<T: DeserializeOwned, K: KmsKeyWrapper>(
                 tenant_storage_ref: artifact.receipt.tenant_storage_ref.clone(),
                 artifact_kind: artifact_kind.clone(),
             };
-            let dek = Zeroizing::new(
-                kek.unwrap_dek(wrapped, &ctx)
-                    .context("KekUnwrapFailed: trace artifact DEK unwrap failed")?,
-            );
+            let dek = kek
+                .unwrap_dek(wrapped, &ctx)
+                .context("KekUnwrapFailed: trace artifact DEK unwrap failed")?;
             let ciphertext = base64::engine::general_purpose::STANDARD
                 .decode(artifact.ciphertext_base64.as_bytes())
                 .context("failed to decode trace artifact ciphertext")?;
