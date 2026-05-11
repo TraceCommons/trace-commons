@@ -34,13 +34,23 @@ The roadmap is `docs/trace-commons-roadmap.md`; the storage contract is
 The main remaining work is production rollout hardening, not feature breadth.
 The biggest concrete gaps, in priority order:
 
-1. **Cloud object-store provider + KMS envelope encryption.** The
-   `RemoteTraceArtifactProvider` trait, alias tracking, versioning gate, and
-   migration drill all exist. AWS S3 + AWS KMS are not yet implemented;
-   `aws_s3` / `gcs` / `azure_blob` provider names parse but resolve to a
-   fail-closed disabled adapter. Migration backfill from local/filesystem-remote
-   to cloud is the second half of this slice. Design draft:
-   [`docs/superpowers/specs/2026-05-11-s3-trace-artifact-provider-design.md`](docs/superpowers/specs/2026-05-11-s3-trace-artifact-provider-design.md).
+1. **KEK trust-model decision blocking cloud cutover.** The cloud object
+   backend has landed: a GCS provider implements `RemoteTraceArtifactProvider`
+   behind the `gcs-client` build feature, alias tracking and versioning gates
+   already exist, and `ServiceOwnedTraceArtifactStore` now wraps a pluggable
+   `KmsKeyWrapper` trait. Only the dev-only `LocalMasterKeyWrapper` is shipped
+   in-tree; production deployments fail closed at startup via
+   `TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY=true` until a real KEK
+   (TEE-rooted such as dstack / Confidential Space / Nitro Enclaves, or a cloud
+   KMS adapter) is selected. `/v1/admin/config-status` now reports safe
+   `object_store.{alias,provider,require_versioning,kek.*}` fields for that
+   readiness. The KEK trust-model decision lives in its own follow-up spec; the
+   current cloud-provider design is
+   [`docs/superpowers/specs/2026-05-11-cloud-trace-artifact-provider-design.md`](docs/superpowers/specs/2026-05-11-cloud-trace-artifact-provider-design.md).
+   Migration backfill from local/filesystem-remote to cloud is **deferred**:
+   no pilot data in this repo to migrate; the right shape is a one-off CLI
+   against the actual data shape when a deployment needs it, not generic
+   migration workers built blind.
 2. **`TenantCtx` propagation everywhere.** Envelope tenant fields are
    attribution-only and most paths already fail closed on drift, but the
    roadmap's "every ingest, review, export, worker, maintenance, and
@@ -94,8 +104,8 @@ evidence is green:
   first migration.
 - `docs`: Trace Commons design (`trace-commons.md`), storage contract
   (`trace-commons-storage.md`), and roadmap (`trace-commons-roadmap.md`).
-- `docs/superpowers/specs`: per-slice design specs (e.g. the S3 provider
-  spec linked above).
+- `docs/superpowers/specs`: per-slice design specs (e.g. the cloud trace
+  artifact provider spec linked above).
 
 ## Local Development
 

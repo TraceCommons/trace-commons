@@ -28,7 +28,8 @@ These are the next independent production slices that can be staffed in parallel
 ### Ingestion Storage
 
 - [ ] Promote DB/object-primary submit, review, replay, benchmark, and ranker paths from pilot flags to per-tenant rollout flags after reconciliation parity is green. Initial tenant allowlist gates now wrap DB contributor/reviewer/replay/audit/tenant-policy reads, object-ref-required modes, and object-primary submit/replay/derived flags; DB contributor credit/status, DB reviewer metadata, DB replay-export selection, DB tenant-policy, DB audit-read, object-primary submit/review, object-primary replay export, and benchmark/ranker derived export caller tests cover tenant A canary rollout while tenant B remains on file fallback.
-- [ ] Replace service-local encrypted artifact storage with a service-owned object-store provider abstraction, KMS/key-ref strategy, tenant-hashed object keys, hash/decrypt verification, and migration/backfill tooling. The local encrypted store now implements a `TraceArtifactStore` provider trait for serialized JSON write/read/delete conformance; remote object/KMS providers and migration tooling remain.
+- [ ] Replace service-local encrypted artifact storage with a service-owned object-store provider abstraction, KMS/key-ref strategy, tenant-hashed object keys, and hash/decrypt verification. The local encrypted store implements the `TraceArtifactStore` provider trait for serialized JSON write/read/delete conformance; a production GCS provider implements `RemoteTraceArtifactProvider` behind the `gcs-client` build feature over a pluggable `KmsKeyWrapper` trait, with `LocalMasterKeyWrapper` shipped as a dev-only impl and `TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY=true` failing closed until a real KEK lands. `/v1/admin/config-status` reports safe `object_store.{alias,provider,require_versioning,kek.*}` readiness fields.
+- [ ] KEK trust-model decision (TEE-rooted such as dstack / Confidential Space / Nitro Enclaves, vs cloud KMS) lives in its own follow-up spec; cutover to GCS in production requires that spec to land first. Migration/backfill tooling from local/filesystem-remote to cloud is **deferred**: there is no pilot data in this repo to migrate, so the right shape is a one-off CLI against the actual data shape when a real deployment needs it rather than speculative migration workers.
 - [ ] Add PostgreSQL integration coverage covering the `TraceCorpusStore` slices for submissions, object refs, derived records, vectors, audit, credit, retention jobs, export manifests/items, policies, and tombstones. Retention job/item facade scope, tenant-policy update/scope behavior, review-lease claim/release/audit behavior, raw RLS visibility, and export-manifest mirror rollback atomicity now have PostgreSQL coverage.
 
 ### Review and Governance
@@ -165,7 +166,7 @@ Exit criteria:
 
 ### Phase 2: Service-Owned Object Storage
 
-Status: not production-complete.
+Status: GCS provider landed behind the `gcs-client` build feature; `KmsKeyWrapper` trait surface in place with a dev-only `LocalMasterKeyWrapper`; real KEK trust-model decision (TEE vs cloud KMS) deferred to a separate spec, and production startup fails closed via `TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY=true` until that lands. Migration/backfill tooling deferred until a real deployment needs to move bytes.
 
 Scope:
 
@@ -355,7 +356,7 @@ These lanes can proceed in parallel as long as their write scopes stay disjoint 
 The highest-value next work is:
 
 1. Finish DB-read parity and reconciliation so reviewer, analytics, replay, audit, and contributor surfaces can graduate from optional flags with confidence.
-2. Introduce service-owned encrypted object storage and route remaining review/export body reads through object refs.
+2. Introduce service-owned encrypted object storage and route remaining review/export body reads through object refs. A GCS provider is now landed behind the `gcs-client` build feature with a pluggable `KmsKeyWrapper` trait (dev-only `LocalMasterKeyWrapper` shipped); the next blocker is the KEK trust-model spec (TEE vs cloud KMS) before production cutover.
 3. Add tenant policy/RLS hardening before broadening reviewer/admin/export access.
 4. Harden retention/revocation propagation with production operator adapters, including required external worker-cache invalidation and remote object-deleter deployment for cloud stores.
 5. Build the private vector worker and benchmark conversion workers only after object-primary reads and worker authorization are in place.
