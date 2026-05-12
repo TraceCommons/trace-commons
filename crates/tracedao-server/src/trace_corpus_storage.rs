@@ -1731,6 +1731,11 @@ pub struct TraceGateDecisionRow {
     pub embedding_evidence_hash: String,
     pub attestation_chain_hash: String,
     pub decided_at: DateTime<Utc>,
+    /// The UUID the orchestrator assigned to the inserted vector index entry.
+    /// `Some` only when both gates passed and an entry was inserted (migration
+    /// V24 adds the nullable column). `None` for pass-fail decisions and for
+    /// deterministic/legacy service rows that never touch a real index.
+    pub vector_entry_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

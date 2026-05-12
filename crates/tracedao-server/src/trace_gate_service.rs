@@ -59,6 +59,12 @@ pub struct GateDecision {
     pub novelty_passed: bool,
     pub embedding_evidence_hash: String,
     pub attestation_chain_hash: String,
+    /// `Some(id)` when both gates passed and the service inserted the
+    /// embedding into the vector index; `None` otherwise. The operator needs
+    /// this id to call `invalidate_vector_entry` later (e.g. from the
+    /// revocation worker). It is stored in `trace_gate_decisions` via a
+    /// nullable `vector_entry_id` column (migration V24).
+    pub vector_entry_id: Option<Uuid>,
 }
 
 /// Observable status of a `TraceGateService`, safe for logs / health surfaces.
@@ -197,6 +203,9 @@ fn build_deterministic_decision(
         novelty_passed: true,
         embedding_evidence_hash,
         attestation_chain_hash,
+        // Deterministic services do not actually insert into a vector index,
+        // so there is no entry id to surface.
+        vector_entry_id: None,
     }
 }
 
@@ -485,6 +494,7 @@ where
             novelty_passed: decision.novelty_passed,
             embedding_evidence_hash: decision.embedding_evidence_hash,
             attestation_chain_hash: decision.attestation_chain_hash,
+            vector_entry_id: decision.inserted_entry_id,
         })
     }
 
@@ -493,16 +503,11 @@ where
         _tenant_ctx: &TenantCtx,
         vector_entry_id: Uuid,
     ) -> anyhow::Result<()> {
-        // Best-effort propagation into the orchestrator's vector index. The
-        // orchestrator field is private to this module; expose deletion
-        // through a thin accessor by adding a helper on the orchestrator.
-        // For now we treat this as a no-op when the index doesn't know the
-        // id — matching `MockVectorIndex::delete` semantics.
-        let _ = vector_entry_id;
-        // The orchestrator owns the index; we don't have a direct handle
-        // from the service layer. The orchestrator does not currently expose
-        // index access, so we surface a clean no-op here. The dstack
-        // implementation will route this call into the enclave's index.
+        // Route deletion through the orchestrator into the underlying index.
+        // `delete` returns Ok(true) for a hit and Ok(false) for a miss; both
+        // satisfy the "make sure it's gone" postcondition, so we discard the
+        // bool.
+        let _ = self.orchestrator.delete_vector_entry(vector_entry_id)?;
         Ok(())
     }
 
@@ -642,5 +647,74 @@ mod enclave_gate_service_tests {
         let svc = EnclaveGateService::mock_with_decryptor(decryptor);
         svc.invalidate_vector_entry(&TenantCtx::new("tenant-a"), Uuid::new_v4())
             .expect("invalidate should succeed");
+    }
+
+    #[test]
+    fn enclave_gate_service_invalidate_unknown_entry_is_idempotent() {
+        // Calling invalidate with a UUID that was never inserted must succeed
+        // (Ok(false) from the index is a satisfied postcondition: "it's gone").
+        let decryptor = fixture_decryptor();
+        let svc = EnclaveGateService::mock_with_decryptor(decryptor);
+        let random_id = Uuid::new_v4();
+        svc.invalidate_vector_entry(&TenantCtx::new("tenant-a"), random_id)
+            .expect("invalidate of unknown entry must succeed (idempotent)");
+    }
+
+    #[test]
+    fn enclave_gate_service_delete_after_insert_restores_novelty() {
+        // 1. Evaluate a fresh plaintext — both gates pass, entry is inserted.
+        // 2. Call invalidate_vector_entry with the returned entry id.
+        // 3. Evaluate the SAME plaintext again — the index is empty again so
+        //    novelty score should be at maximum (the prior entry was deleted).
+        //
+        // Note: we do NOT do an intermediate evaluation between steps 1 and 2
+        // because with novelty_floor = 0 every evaluation passes and inserts
+        // its own entry. We insert exactly once, delete exactly that entry,
+        // then verify the index is empty again.
+        let decryptor = fixture_decryptor();
+        let svc = EnclaveGateService::mock_with_decryptor(Arc::clone(&decryptor));
+
+        let tenant = TenantCtx::new("tenant-del-test");
+        let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), &tenant.tenant_id);
+        let ciphertext =
+            aead_encrypt_with_dek(&dek, b"delete-restore-novelty-plaintext")
+                .expect("encrypt fixture");
+
+        // First evaluation — entry should be inserted and entry_id surfaced.
+        let first = svc
+            .evaluate_trace(
+                &tenant,
+                &ciphertext,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+            )
+            .expect("first evaluate_trace must succeed");
+        assert!(
+            first.perplexity_passed && first.novelty_passed,
+            "first evaluation must pass both gates"
+        );
+        let entry_id = first
+            .vector_entry_id
+            .expect("first evaluation must surface the inserted entry_id");
+
+        // Delete the entry before any further evaluations can add more entries.
+        svc.invalidate_vector_entry(&tenant, entry_id)
+            .expect("invalidate_vector_entry must succeed");
+
+        // Second evaluation after deletion — index is empty again for this
+        // tenant, so novelty is restored to maximum (1_000_000 micros).
+        let second = svc
+            .evaluate_trace(
+                &tenant,
+                &ciphertext,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+            )
+            .expect("second evaluate_trace after deletion must succeed");
+        assert!(
+            second.novelty_score_micros >= 900_000,
+            "novelty must be high again after deletion, got {}",
+            second.novelty_score_micros
+        );
     }
 }
