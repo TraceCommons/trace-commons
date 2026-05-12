@@ -9,6 +9,44 @@ repository.workspace = true
 [dependencies]
 anyhow = "1"
 sha2 = "0.10"
+tracing = "0.1"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
+# Optional candle stack — enabled by the `local-gpu-models` feature. Pulled
+# in only when the gate-service binary is built for a GPU host with a staged
+# base model. Hermetic CI builds (default features) do not see these deps.
+candle-core = { version = "0.10.2", optional = true }
+candle-nn = { version = "0.10.2", optional = true }
+candle-transformers = { version = "0.10.2", optional = true }
+tokenizers = { version = "0.21.4", optional = true, default-features = false, features = ["onig"] }
+hf-hub = { version = "0.4.3", optional = true }
+serde = { version = "1", optional = true, features = ["derive"] }
+serde_json = { version = "1", optional = true }
+
+[features]
+default = []
+# Compile the candle-backed `CandlePerplexityScorer`. Off by default; turning
+# this on pulls in the candle + tokenizers + hf-hub dependency stack. Use the
+# `local-gpu-models-cuda` add-on feature to compile with CUDA support on hosts
+# that have a CUDA toolchain installed. Without it, the build still compiles
+# cleanly but CUDA forward passes are unavailable at runtime.
+local-gpu-models = [
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+    "dep:tokenizers",
+    "dep:hf-hub",
+    "dep:serde",
+    "dep:serde_json",
+]
+local-gpu-models-cuda = [
+    "local-gpu-models",
+    "candle-core/cuda",
+    "candle-nn/cuda",
+    "candle-transformers/cuda",
+]
+
 [dev-dependencies]
+# Only used by the `#[ignore]`d candle integration test under the
+# `local-gpu-models` feature. Default-feature builds don't pull tokio.
+tokio = { version = "1", features = ["rt", "macros"] }

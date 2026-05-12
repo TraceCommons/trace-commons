@@ -185,6 +185,27 @@ const TRACE_COMMONS_GATE_SERVICE_ENCLAVE_ENDPOINT: &str =
 const TRACE_COMMONS_GATE_SERVICE_ATTESTATION_VERIFIER_LABEL: &str =
     "TRACE_COMMONS_GATE_SERVICE_ATTESTATION_VERIFIER_LABEL";
 const TRACE_COMMONS_GATE_SERVICE_MASTER_KEY: &str = "TRACE_COMMONS_GATE_SERVICE_MASTER_KEY";
+// Candle-backed perplexity scorer (Phase A2). Read only when
+// `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu` AND the `local-gpu-models`
+// feature is compiled in; otherwise these constants are dead and the binary
+// rejects the `enclave_local_gpu` gate-service value at startup.
+#[allow(dead_code)]
+const TRACE_COMMONS_PERPLEXITY_MODEL_ID: &str = "TRACE_COMMONS_PERPLEXITY_MODEL_ID";
+#[allow(dead_code)]
+const TRACE_COMMONS_PERPLEXITY_MODEL_PATH: &str = "TRACE_COMMONS_PERPLEXITY_MODEL_PATH";
+#[allow(dead_code)]
+const TRACE_COMMONS_PERPLEXITY_DEVICE: &str = "TRACE_COMMONS_PERPLEXITY_DEVICE";
+#[allow(dead_code)]
+const TRACE_COMMONS_PERPLEXITY_MAX_TOKENS: &str = "TRACE_COMMONS_PERPLEXITY_MAX_TOKENS";
+#[allow(dead_code)]
+const TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF: &str =
+    "TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF";
+#[allow(dead_code)]
+const TRACE_COMMONS_PERPLEXITY_DEFAULT_MODEL_ID: &str = "meta-llama/Llama-3.1-8B-Instruct";
+#[allow(dead_code)]
+const TRACE_COMMONS_PERPLEXITY_DEFAULT_MAX_TOKENS: usize = 16_384;
+#[allow(dead_code)]
+const TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF: f32 = -8.0;
 const TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF: &str =
     "trace gate worker requires an active contribution envelope object ref";
 const TRACE_COMMONS_KEK_PROVIDER: &str = "TRACE_COMMONS_KEK_PROVIDER";
@@ -2936,7 +2957,7 @@ impl AppState {
             ranking_min_pairwise_accuracy_micros,
             ranking_max_labeler_issue_rate_micros,
             ranking_min_labeler_reliability_label_count,
-            gate_service: build_trace_gate_service_from_env()?,
+            gate_service: build_trace_gate_service_from_env().await?,
         })
     }
 }
@@ -4000,6 +4021,17 @@ fn parse_trace_vector_search_timeout_from_env() -> anyhow::Result<StdDuration> {
 ///   embedder / vector-index pipeline plus a `LocalMasterKeyWrapper` keyed by
 ///   `TRACE_COMMONS_GATE_SERVICE_MASTER_KEY`. Used to exercise the
 ///   ciphertext + wrapped-DEK plumbing end-to-end.
+/// - `"enclave_local_gpu"` (only available when the `local-gpu-models` cargo
+///   feature is compiled in): `EnclaveGateService` wired with the
+///   candle-backed `CandlePerplexityScorer` + `MockEmbedder` + `MockVectorIndex`.
+///   Reads `TRACE_COMMONS_PERPLEXITY_MODEL_PATH` (required),
+///   `TRACE_COMMONS_PERPLEXITY_MODEL_ID`, `TRACE_COMMONS_PERPLEXITY_DEVICE`,
+///   `TRACE_COMMONS_PERPLEXITY_MAX_TOKENS`,
+///   `TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF`, and the same
+///   `TRACE_COMMONS_GATE_SERVICE_MASTER_KEY` as `enclave_mock`. The candle
+///   forward pass itself is hardware-untested in this repo's CI; A3 / A4 will
+///   swap the mock embedder and mock vector index for production
+///   implementations.
 /// - `"dstack"`: fail-closed `DstackGateService` stub. Operator-supplied
 ///   `TRACE_COMMONS_GATE_SERVICE_ENCLAVE_ENDPOINT` and
 ///   `TRACE_COMMONS_GATE_SERVICE_ATTESTATION_VERIFIER_LABEL` are accepted but
@@ -4007,7 +4039,7 @@ fn parse_trace_vector_search_timeout_from_env() -> anyhow::Result<StdDuration> {
 ///   the dstack client lands.
 ///
 /// Any other value fails startup with a hash-only "GateServiceUnknown" label.
-fn build_trace_gate_service_from_env() -> anyhow::Result<Arc<dyn TraceGateService>> {
+async fn build_trace_gate_service_from_env() -> anyhow::Result<Arc<dyn TraceGateService>> {
     let raw = std::env::var(TRACE_COMMONS_GATE_SERVICE).unwrap_or_default();
     let kind = raw.trim();
     match kind {
@@ -4030,6 +4062,14 @@ fn build_trace_gate_service_from_env() -> anyhow::Result<Arc<dyn TraceGateServic
             ));
             Ok(Arc::new(EnclaveGateService::mock_with_decryptor(wrapper)))
         }
+        #[cfg(feature = "local-gpu-models")]
+        "enclave_local_gpu" => build_enclave_local_gpu_gate_service_from_env().await,
+        #[cfg(not(feature = "local-gpu-models"))]
+        "enclave_local_gpu" => {
+            anyhow::bail!(
+                "{TRACE_COMMONS_GATE_SERVICE}=\"enclave_local_gpu\" requires the trace-commons-server `local-gpu-models` cargo feature; rebuild with --features local-gpu-models"
+            );
+        }
         "dstack" => {
             let endpoint =
                 std::env::var(TRACE_COMMONS_GATE_SERVICE_ENCLAVE_ENDPOINT).unwrap_or_default();
@@ -4045,6 +4085,85 @@ fn build_trace_gate_service_from_env() -> anyhow::Result<Arc<dyn TraceGateServic
             anyhow::bail!("GateServiceUnknown: sha256:{:x}", h.finalize())
         }
     }
+}
+
+/// Build the `enclave_local_gpu` gate service: candle-backed perplexity
+/// scorer + mock embedder + mock vector index. Returns a fail-closed error if
+/// the model path is unset or the candle loader rejects the staged checkpoint.
+///
+/// The candle forward path is hardware-untested in this repo's CI; first
+/// production deployment must verify a non-zero perplexity on a known input
+/// before the gate is allowed to drive credit emission.
+#[cfg(feature = "local-gpu-models")]
+async fn build_enclave_local_gpu_gate_service_from_env(
+) -> anyhow::Result<Arc<dyn TraceGateService>> {
+    use trace_commons_gate_enclave::perplexity_candle::{
+        CandleDeviceKind, CandlePerplexityScorer,
+    };
+    use trace_commons_gate_enclave::{
+        EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig, MockEmbedder, MockVectorIndex,
+    };
+
+    let master_key = std::env::var(TRACE_COMMONS_GATE_SERVICE_MASTER_KEY).with_context(|| {
+        format!(
+            "{TRACE_COMMONS_GATE_SERVICE_MASTER_KEY} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_local_gpu\""
+        )
+    })?;
+    let crypto = SecretsCrypto::new(SecretString::from(master_key))
+        .context("failed to initialize gate-service KEK wrapper")?;
+    let wrapper: Arc<dyn KmsKeyWrapper> = Arc::new(LocalMasterKeyWrapper::new(
+        crypto,
+        "trace-commons-gate-enclave-local-gpu-v1",
+    ));
+
+    let model_path = std::env::var(TRACE_COMMONS_PERPLEXITY_MODEL_PATH).with_context(|| {
+        format!(
+            "{TRACE_COMMONS_PERPLEXITY_MODEL_PATH} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_local_gpu\""
+        )
+    })?;
+    let model_id = std::env::var(TRACE_COMMONS_PERPLEXITY_MODEL_ID)
+        .unwrap_or_else(|_| TRACE_COMMONS_PERPLEXITY_DEFAULT_MODEL_ID.to_string());
+    let device_raw = std::env::var(TRACE_COMMONS_PERPLEXITY_DEVICE)
+        .unwrap_or_else(|_| "cuda".to_string());
+    let device = CandleDeviceKind::from_env_str(&device_raw).with_context(|| {
+        format!("{TRACE_COMMONS_PERPLEXITY_DEVICE} must be one of: cuda, cuda:N, metal, cpu")
+    })?;
+    let max_tokens = match std::env::var(TRACE_COMMONS_PERPLEXITY_MAX_TOKENS) {
+        Ok(raw) => raw.trim().parse::<usize>().with_context(|| {
+            format!("{TRACE_COMMONS_PERPLEXITY_MAX_TOKENS} must be a positive integer")
+        })?,
+        Err(_) => TRACE_COMMONS_PERPLEXITY_DEFAULT_MAX_TOKENS,
+    };
+    anyhow::ensure!(
+        max_tokens > 0,
+        "{TRACE_COMMONS_PERPLEXITY_MAX_TOKENS} must be greater than zero"
+    );
+    let tail_cutoff = match std::env::var(TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF) {
+        Ok(raw) => raw.trim().parse::<f32>().with_context(|| {
+            format!(
+                "{TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF} must be a floating-point number"
+            )
+        })?,
+        Err(_) => TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF,
+    };
+    anyhow::ensure!(
+        tail_cutoff.is_finite(),
+        "{TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF} must be finite"
+    );
+
+    let scorer =
+        CandlePerplexityScorer::try_new(model_id, &model_path, device, tail_cutoff, max_tokens)
+            .await
+            .context("CandlePerplexityScorerInitFailed")?;
+
+    let cfg = EnclaveGateOrchestratorConfig::mock_default();
+    let orchestrator =
+        EnclaveGateOrchestrator::new(scorer, MockEmbedder::new(), MockVectorIndex::new(), cfg);
+    Ok(Arc::new(EnclaveGateService::new(
+        orchestrator,
+        wrapper,
+        "enclave_local_gpu",
+    )))
 }
 
 fn parse_trace_near_credit_outbox_scheduler_config_from_env()
