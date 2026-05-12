@@ -51,40 +51,76 @@ What it does not have:
 These are the only items that need to land before someone could actually
 deploy this for real. Everything else is polish.
 
-### 1. The dstack enclave (KEK + private vector + perplexity gate)
+### 1. Phase A — real gate service on regular hardware with cloud KMS
 
-The architecturally load-bearing slice. Trace Commons operates with a
-constrained-operator threat model — hash-only audit, central-issuer fail-
-closed, no plaintext fallback. A real KEK plus a real private-vector gate
-both live inside that same trust boundary, and the platform decision is
-settled: **dstack, single attested enclave, GPU-resident.**
+The pilot-readiness slice. Trace Commons aspires to an operator-constrained
+threat model, but the dstack-GPU operational story isn't settled yet and
+gating the pilot on it costs months. Phase A ships a real working gate
+service on regular GPU hardware with **cloud KMS as the KEK**, accepting
+that the operator and cloud provider can read user content via KMS
+`Decrypt`. Phase B (below) does the trust upgrade once dstack is ready.
 
-The enclave holds:
+The current standalone foundation (PRs #9–#12) already has:
 
-- The KEK unsealing key, implementing `KmsKeyWrapper` with
-  `is_production_trust_boundary() = true`. Today's production startup gate
-  (`TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY=true`) becomes
-  satisfiable.
-- A configured base model running prefill-only perplexity scoring, gating
-  credit on a single perplexity floor plus a tail-logprob metric.
-- A local embedder (BGE-large / gte-large class, matryoshka-friendly) for
-  redacted-trace embeddings.
-- A private vector index (`usearch` or `instant-distance` in enclave RAM
-  with sealed snapshots) for novelty and dedup queries.
+- `KmsKeyWrapper` trait, `LocalMasterKeyWrapper` (dev), `DstackKekWrapper`
+  (stub that bails on calls)
+- `TraceGateService` trait, `InMemoryGateService`, `EnclaveGateService`
+  composing mock perplexity / embedder / vector-index from
+  `trace-commons-gate-enclave`
+- `POST /v1/workers/gate/evaluate` worker route writing
+  `trace_gate_decisions` rows
+- Migration V23 (gate decision table + novelty_utility event kind) and
+  V24 (vector_entry_id column)
 
-The enclave emits a new `novelty_utility` credit event kind, parallel to the
-existing `ranking_utility`. Events are stamped with `gate_version`; pre-
-settlement events under a rolled-back gate version are reversible via the
-existing revocation-propagation path. After settlement, credit stays.
+What Phase A adds:
 
-Strategy brief: `docs/superpowers/specs/2026-05-11-trace-kek-strategy-design.md`.
-Full design: `docs/superpowers/specs/2026-05-11-private-vector-system-design.md`.
+- **`CloudKmsKeyWrapper`** — `KmsKeyWrapper` impl wrapping per-object DEKs
+  through GCP Cloud KMS (AWS KMS adapter parallel if needed). Returns
+  `is_production_trust_boundary() = true` by convention; the trust model
+  is operator-trusted. Satisfies the existing
+  `TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY` startup gate.
+- **Real `PerplexityScorer`** — loads a configured base model (Llama-3.1-8B
+  class or similar), runs prefill, computes per-token logprobs, aggregates
+  to the perplexity + tail metric. Inference library choice (candle / mistralrs /
+  ort / Python sidecar) needs its own short decision spec before
+  implementation.
+- **Real `Embedder`** — BGE-large / gte-large class, matryoshka variants
+  preferred. Same inference path as the perplexity model.
+- **Real `VectorIndex`** — `usearch` with on-disk persistence. No sealed
+  snapshots in Phase A; regular at-rest disk encryption only.
+- **`novelty_utility` credit-event emission** — wires the gate-pass path
+  through the central-issuer ABAC + audit-row hashing pipeline (the
+  previous implementer correctly flagged this as non-trivial and
+  deferred it).
+- **Revocation worker hook** — calls `invalidate_vector_entry` after a
+  submission is revoked. Needs the propagation-failure audit-row shape
+  specified first.
 
-Until the dstack workload ships, the build refuses production startup and
-the `vector_worker_*` routes serve only the deterministic similarity
-placeholder.
+Strategy brief: `docs/superpowers/specs/2026-05-11-trace-kek-strategy-design.md`
+(updated 2026-05-12 with the chosen-path note).
+Full design: `docs/superpowers/specs/2026-05-11-private-vector-system-design.md`
+(applies to Phase A with the enclave-resident framing relaxed; the same
+components run on regular hardware).
 
-### 2. Complete the Ironclaw extraction
+### 2. Phase B — dstack migration
+
+Once dstack-GPU operational tooling is settled and the pilot has produced
+real operational learning, do the trust-model upgrade:
+
+- New `KmsKeyWrapper` impl that replaces the cloud-KMS-rooted unseal with
+  a dstack-attested unseal (path B1 or C from the strategy brief).
+- Re-wrap every existing DEK under the new wrapper. The wrap format
+  already carries `wrapper_kind`, so v2 envelopes are forward-compatible —
+  one batch pass over `trace_credit_ledger.gate_version_hash`-stamped
+  vector entries.
+- Move the gate-service binary inside the attested enclave; add
+  attestation token verification at its API boundary.
+- No schema, envelope-format, or trait changes.
+
+Estimated migration cost: ~2 weeks of integration work, assuming dstack-GPU
+attestation primitives have stabilized.
+
+### 3. Complete the Ironclaw extraction
 
 `README.md` and earlier-extraction notes both flag that Ironclaw should depend
 on the shared `trace-commons-protocol` crate. Until that wiring lands, this server

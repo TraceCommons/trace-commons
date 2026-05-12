@@ -1,11 +1,27 @@
 # Private Vector System — Design
 
-Date: 2026-05-11
-Status: Draft (pre-implementation)
+Date: 2026-05-11 (initial), 2026-05-12 (rephased)
+Status: Phase A in-progress (cloud-KMS-backed on regular hardware); Phase B (dstack migration) deferred.
 Owner: Trace Commons / Datasets + Auth-Keying lanes
 Predecessors:
 - `2026-05-11-cloud-trace-artifact-provider-design.md` (shipped `KmsKeyWrapper` trait + GCS backend)
-- `2026-05-11-trace-kek-strategy-design.md` (framed the KEK platform choice — superseded by this spec for the dstack decision)
+- `2026-05-11-trace-kek-strategy-design.md` (chose cloud KMS for pilot, dstack-based KEK for the post-pilot trust upgrade)
+
+> **Update 2026-05-12 — rephased.** The original spec assumed everything
+> ran inside a single dstack-attested enclave. After scoping the
+> dstack-GPU operational story against the pilot timeline, the work
+> splits into two phases. Phase A builds the **same components on
+> regular GPU hardware** (real perplexity model, real embedder, real
+> usearch-backed vector index, no sealed snapshots, no in-process
+> attestation) with cloud KMS as the KEK. Phase B does the trust
+> upgrade — move the binary inside an attested dstack enclave, swap KEK
+> impl, re-wrap DEKs. The trait surface, schema, envelope format, and
+> gate-decision row shape are unchanged across the two phases — only
+> the binary's hosting and the KEK impl differ. Sections below that
+> describe enclave-resident specifics (sealed snapshots, in-enclave
+> attestation, in-enclave key derivation) apply to Phase B only;
+> Phase A treats those as future work and runs the same components
+> as ordinary services.
 
 ## Goal
 
