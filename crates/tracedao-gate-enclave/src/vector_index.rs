@@ -39,7 +39,11 @@ pub trait VectorIndex: Send + Sync {
 
     /// Remove an entry from the index. Returns `Ok(true)` if removed,
     /// `Ok(false)` if no such entry existed.
-    fn delete(&self, entry_id: Uuid) -> anyhow::Result<bool>;
+    ///
+    /// `tenant_storage_ref` is required so per-tenant implementations (e.g.
+    /// `UsearchVectorIndex`, which keeps one file per tenant) can route the
+    /// deletion to the right shard without doing a global scan.
+    fn delete(&self, tenant_storage_ref: &str, entry_id: Uuid) -> anyhow::Result<bool>;
 }
 
 /// In-memory `MockVectorIndex` for tests and local development.
@@ -104,15 +108,12 @@ impl VectorIndex for MockVectorIndex {
         Ok(out)
     }
 
-    fn delete(&self, entry_id: Uuid) -> anyhow::Result<bool> {
+    fn delete(&self, tenant_storage_ref: &str, entry_id: Uuid) -> anyhow::Result<bool> {
         let mut g = self.entries.lock().expect("MockVectorIndex mutex poisoned");
-        let mut removed = false;
-        for (_, inner) in g.iter_mut() {
-            if inner.remove(&entry_id).is_some() {
-                removed = true;
-            }
+        match g.get_mut(tenant_storage_ref) {
+            Some(inner) => Ok(inner.remove(&entry_id).is_some()),
+            None => Ok(false),
         }
-        Ok(removed)
     }
 }
 
@@ -150,7 +151,18 @@ mod tests {
         let idx = MockVectorIndex::new();
         let id = Uuid::new_v4();
         idx.insert(id, "tenant", &vec![1.0, 0.0]).unwrap();
-        assert!(idx.delete(id).unwrap());
-        assert!(!idx.delete(id).unwrap());
+        assert!(idx.delete("tenant", id).unwrap());
+        assert!(!idx.delete("tenant", id).unwrap());
+    }
+
+    #[test]
+    fn delete_is_scoped_to_tenant() {
+        let idx = MockVectorIndex::new();
+        let id = Uuid::new_v4();
+        idx.insert(id, "tenant_a", &vec![1.0, 0.0]).unwrap();
+        // Wrong tenant → no hit, no deletion.
+        assert!(!idx.delete("tenant_b", id).unwrap());
+        // Right tenant → hit.
+        assert!(idx.delete("tenant_a", id).unwrap());
     }
 }
