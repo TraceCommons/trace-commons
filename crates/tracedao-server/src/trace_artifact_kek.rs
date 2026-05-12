@@ -500,3 +500,94 @@ impl CloudKmsClient for InMemoryCloudKmsClient {
         &self.key_ref
     }
 }
+
+// ---------------------------------------------------------------------------
+// GcpCloudKmsClient (feature-gated)
+// ---------------------------------------------------------------------------
+
+/// Production `CloudKmsClient` backed by `google_cloud_kms`. Only compiled
+/// when the `gcp-kms` cargo feature is enabled so default builds stay
+/// hermetic. Credentials follow Application Default Credentials (ADC).
+///
+/// `KekContext::canonical_hash()` bytes are passed through as
+/// `additional_authenticated_data` on every Encrypt/Decrypt call, matching
+/// GCP Cloud KMS's AAD semantics and giving the same cross-object DEK
+/// substitution defense the rest of the wrapper relies on.
+///
+/// Async-to-sync bridge mirrors `trace_artifact_gcs::prod_client::ProdGcsObjectClient`:
+/// `tokio::task::block_in_place(|| Handle::current().block_on(...))`. The
+/// server binaries run on `tokio::main` with the default multi-thread
+/// scheduler so this is safe.
+#[cfg(feature = "gcp-kms")]
+pub mod gcp {
+    use anyhow::{Context, Result};
+    use google_cloud_kms::client::{Client, ClientConfig};
+    use google_cloud_kms::grpc::kms::v1::{DecryptRequest, EncryptRequest};
+    use tokio::runtime::Handle;
+    use tokio::task::block_in_place;
+    use zeroize::Zeroizing;
+
+    use super::CloudKmsClient;
+
+    /// Production GCP Cloud KMS client. Constructed with the resource name of
+    /// the wrapping key (e.g.
+    /// `projects/<P>/locations/<L>/keyRings/<R>/cryptoKeys/<K>`).
+    pub struct GcpCloudKmsClient {
+        client: Client,
+        key_name: String,
+    }
+
+    impl GcpCloudKmsClient {
+        /// Construct a production client using Application Default Credentials.
+        /// Must be awaited from within a tokio runtime.
+        pub async fn try_new(key_name: impl Into<String>) -> Result<Self> {
+            let config = ClientConfig::default()
+                .with_auth()
+                .await
+                .context("GcpKmsClientInit: failed to load Application Default Credentials")?;
+            let client = Client::new(config)
+                .await
+                .context("GcpKmsClientInit: failed to construct KMS client")?;
+            Ok(Self {
+                client,
+                key_name: key_name.into(),
+            })
+        }
+    }
+
+    fn run_blocking<F: std::future::Future>(fut: F) -> F::Output {
+        block_in_place(|| Handle::current().block_on(fut))
+    }
+
+    impl CloudKmsClient for GcpCloudKmsClient {
+        fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+            let request = EncryptRequest {
+                name: self.key_name.clone(),
+                plaintext: plaintext.to_vec(),
+                additional_authenticated_data: aad.to_vec(),
+                plaintext_crc32c: None,
+                additional_authenticated_data_crc32c: None,
+            };
+            let response = run_blocking(self.client.encrypt(request, None))
+                .map_err(|status| anyhow::anyhow!("GcpKmsEncryptFailed: {}", status.code()))?;
+            Ok(response.ciphertext)
+        }
+
+        fn decrypt(&self, ciphertext: &[u8], aad: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+            let request = DecryptRequest {
+                name: self.key_name.clone(),
+                ciphertext: ciphertext.to_vec(),
+                additional_authenticated_data: aad.to_vec(),
+                ciphertext_crc32c: None,
+                additional_authenticated_data_crc32c: None,
+            };
+            let response = run_blocking(self.client.decrypt(request, None))
+                .map_err(|status| anyhow::anyhow!("GcpKmsDecryptFailed: {}", status.code()))?;
+            Ok(Zeroizing::new(response.plaintext))
+        }
+
+        fn key_ref(&self) -> &str {
+            &self.key_name
+        }
+    }
+}

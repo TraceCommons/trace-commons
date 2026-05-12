@@ -4848,20 +4848,34 @@ async fn build_selected_kek_wrapper_async(
     let provider = KekProviderSelection::from_env()?;
     match provider {
         KekProviderSelection::GcpCloudKms => {
-            // Phase A1 lands the trait shape and the in-memory test client; the
-            // production GCP adapter is gated on operator approval of the
-            // `google-cloud-kms` dependency (per CLAUDE.md dependency policy).
-            // Until that lands, fail closed at startup so operators get a clear
-            // signal rather than a silent downgrade.
-            let _ = std::env::var(TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME).context(
+            let key_name = std::env::var(TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME).context(
                 "TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME must be set for gcp_cloud_kms provider",
             )?;
-            anyhow::bail!(
-                "KekProviderUnavailable: gcp_cloud_kms wrapper not compiled (google-cloud-kms dependency pending approval)"
-            )
+            build_gcp_cloud_kms_provider(key_name).await
         }
         other => build_sync_provider(other, kek_key),
     }
+}
+
+#[cfg(feature = "gcp-kms")]
+async fn build_gcp_cloud_kms_provider(
+    key_name: String,
+) -> anyhow::Result<Box<dyn tracedao_server::trace_artifact_kek::KmsKeyWrapper + Send + Sync>> {
+    let client = tracedao_server::trace_artifact_kek::gcp::GcpCloudKmsClient::try_new(key_name)
+        .await
+        .context("GCP Cloud KMS client init failed")?;
+    Ok(Box::new(
+        tracedao_server::trace_artifact_kek::CloudKmsKeyWrapper::new(client, "gcp_cloud_kms"),
+    ))
+}
+
+#[cfg(not(feature = "gcp-kms"))]
+async fn build_gcp_cloud_kms_provider(
+    _key_name: String,
+) -> anyhow::Result<Box<dyn tracedao_server::trace_artifact_kek::KmsKeyWrapper + Send + Sync>> {
+    anyhow::bail!(
+        "KekProviderUnavailable: gcp_cloud_kms wrapper requires the gcp-kms cargo feature"
+    )
 }
 
 fn build_sync_provider(
