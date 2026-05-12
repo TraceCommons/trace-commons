@@ -48,6 +48,13 @@ gcs-client = ["dep:google-cloud-storage"]
 # Compile the production GCP Cloud KMS client for the CloudKmsKeyWrapper adapter.
 # Off by default so hermetic CI builds don't pull the KMS dependency tree.
 gcp-kms = ["dep:google-cloud-kms"]
+# Pulls in the candle-backed `CandlePerplexityScorer` in `tracedao-gate-enclave`
+# and enables the `enclave_local_gpu` arm of `TRACE_COMMONS_GATE_SERVICE` in the
+# `tracedao-ingest` binary. Off by default so hermetic CI builds and dev hosts
+# without candle / tokenizers / hf-hub installed continue to compile cleanly.
+# Phase A2 wires this with a `CandlePerplexityScorer` + `MockEmbedder` +
+# `MockVectorIndex`; A3 / A4 swap the latter two for real implementations.
+local-gpu-models = ["tracedao-gate-enclave/local-gpu-models"]
 
 [dev-dependencies]
 tempfile = "3"
