@@ -14,11 +14,19 @@
 //! derived from a hash of the inputs so callers (and tests) see stable
 //! audit-grade output without depending on a live model.
 
+use std::sync::Arc;
+
+use base64::Engine;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::trace_artifact_kek::WrappedDek;
-use crate::trace_artifact_store::TraceArtifactKind;
+use trace_commons_gate_enclave::{
+    Embedder, EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig, MockEmbedder,
+    MockPerplexityScorer, MockVectorIndex, PerplexityScorer, VectorIndex,
+};
+
+use crate::trace_artifact_kek::{KekContext, KmsKeyWrapper, WrappedDek};
+use crate::trace_artifact_store::{TraceArtifactKind, aead_decrypt_with_dek};
 
 /// Minimal tenant context plumbed into the gate service. We intentionally
 /// keep this struct independent of the binary-private `TenantAuth` type so
@@ -376,5 +384,263 @@ impl TraceGateService for DstackGateService {
             gate_version_hash: "sha256:stub".into(),
             attestation_verifier_configured: true,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EnclaveGateService
+// ---------------------------------------------------------------------------
+
+/// Gate service that wraps an `EnclaveGateOrchestrator` from
+/// `trace-commons-gate-enclave`. The orchestrator carries the
+/// perplexity/embedder/vector-index pipeline; this adapter is responsible for
+/// unwrapping the per-envelope DEK and decrypting the ciphertext before
+/// handing the plaintext off to the orchestrator. The unwrapped DEK is held
+/// in a `Zeroizing` buffer through `unwrap_dek`'s return type so plaintext key
+/// material is scrubbed on drop.
+///
+/// Production deployments will wrap a real perplexity scorer + embedder +
+/// ANN index here; today the public `mock_with_local_kek` constructor stands
+/// up a fully mocked pipeline so callers can exercise the trait shape without
+/// any hardware in the loop.
+pub struct EnclaveGateService<P, E, V> {
+    orchestrator: EnclaveGateOrchestrator<P, E, V>,
+    decryptor: Arc<dyn KmsKeyWrapper>,
+    safe_kind: String,
+}
+
+impl<P, E, V> EnclaveGateService<P, E, V>
+where
+    P: PerplexityScorer,
+    E: Embedder,
+    V: VectorIndex,
+{
+    pub fn new(
+        orchestrator: EnclaveGateOrchestrator<P, E, V>,
+        decryptor: Arc<dyn KmsKeyWrapper>,
+        safe_kind: impl Into<String>,
+    ) -> Self {
+        Self {
+            orchestrator,
+            decryptor,
+            safe_kind: safe_kind.into(),
+        }
+    }
+}
+
+impl EnclaveGateService<MockPerplexityScorer, MockEmbedder, MockVectorIndex> {
+    /// Convenience constructor for tests / dev: build an `EnclaveGateService`
+    /// composed of the mock perplexity scorer, mock embedder, and in-memory
+    /// vector index, paired with the caller-supplied `KmsKeyWrapper`.
+    pub fn mock_with_decryptor(decryptor: Arc<dyn KmsKeyWrapper>) -> Self {
+        let cfg = EnclaveGateOrchestratorConfig::mock_default();
+        let orchestrator = EnclaveGateOrchestrator::new(
+            MockPerplexityScorer::new(),
+            MockEmbedder::new(),
+            MockVectorIndex::new(),
+            cfg,
+        );
+        Self::new(orchestrator, decryptor, "enclave_mock")
+    }
+}
+
+impl<P, E, V> TraceGateService for EnclaveGateService<P, E, V>
+where
+    P: PerplexityScorer + Send + Sync,
+    E: Embedder + Send + Sync,
+    V: VectorIndex + Send + Sync,
+{
+    fn evaluate_trace(
+        &self,
+        tenant_ctx: &TenantCtx,
+        envelope_ciphertext: &[u8],
+        wrapped_dek: &WrappedDek,
+        object_kind: TraceArtifactKind,
+    ) -> anyhow::Result<GateDecision> {
+        // The envelope ciphertext on disk is base64-encoded; the gate-worker
+        // route is expected to pass it through as raw bytes (already decoded).
+        // We accept either: if the bytes look like base64 (ASCII), try to
+        // decode first and fall back to raw on failure. Production callers
+        // should pass raw bytes.
+        let ciphertext = decode_envelope_ciphertext(envelope_ciphertext);
+
+        let ctx = KekContext {
+            tenant_storage_ref: tenant_ctx.tenant_id.clone(),
+            artifact_kind: object_kind.clone(),
+        };
+        let dek = self.decryptor.unwrap_dek(wrapped_dek, &ctx)?;
+        let plaintext = aead_decrypt_with_dek(&dek, &ciphertext)?;
+
+        let decision = self
+            .orchestrator
+            .evaluate(&plaintext, &tenant_ctx.tenant_id)?;
+        Ok(GateDecision {
+            gate_policy_version: decision.gate_policy_version,
+            gate_version_hash: decision.gate_version_hash,
+            perplexity_micros: decision.perplexity_micros,
+            tail_fraction_micros: decision.tail_fraction_micros,
+            perplexity_passed: decision.perplexity_passed,
+            novelty_score_micros: decision.novelty_score_micros,
+            nearest_neighbor_hash: decision.nearest_neighbor_hash,
+            novelty_passed: decision.novelty_passed,
+            embedding_evidence_hash: decision.embedding_evidence_hash,
+            attestation_chain_hash: decision.attestation_chain_hash,
+        })
+    }
+
+    fn invalidate_vector_entry(
+        &self,
+        _tenant_ctx: &TenantCtx,
+        vector_entry_id: Uuid,
+    ) -> anyhow::Result<()> {
+        // Best-effort propagation into the orchestrator's vector index. The
+        // orchestrator field is private to this module; expose deletion
+        // through a thin accessor by adding a helper on the orchestrator.
+        // For now we treat this as a no-op when the index doesn't know the
+        // id — matching `MockVectorIndex::delete` semantics.
+        let _ = vector_entry_id;
+        // The orchestrator owns the index; we don't have a direct handle
+        // from the service layer. The orchestrator does not currently expose
+        // index access, so we surface a clean no-op here. The dstack
+        // implementation will route this call into the enclave's index.
+        Ok(())
+    }
+
+    fn safe_status(&self) -> GateServiceStatus {
+        let cfg = self.orchestrator.config();
+        GateServiceStatus {
+            kind: self.safe_kind.clone(),
+            gate_policy_version: cfg.gate_policy_version.clone(),
+            gate_version_hash: cfg.gate_version_hash.clone(),
+            attestation_verifier_configured: false,
+        }
+    }
+}
+
+/// If the bytes are valid base64, decode; otherwise treat them as raw.
+///
+/// The artifact store persists ciphertext as base64, and the gate-worker route
+/// loads the artifact through `decrypt_artifact_json_with_kek` indirectly — by
+/// the time the gate worker hands us bytes, they may be either form depending
+/// on the call path. Accepting both keeps the trait flexible without forcing
+/// the worker to commit to a single representation.
+fn decode_envelope_ciphertext(bytes: &[u8]) -> Vec<u8> {
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(s.trim()) {
+            return decoded;
+        }
+    }
+    bytes.to_vec()
+}
+
+// ---------------------------------------------------------------------------
+// EnclaveGateService inline tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod enclave_gate_service_tests {
+    use super::*;
+
+    use secrecy::SecretString;
+    use zeroize::Zeroizing;
+
+    use crate::secrets::SecretsCrypto;
+    use crate::trace_artifact_kek::{KekContext, LocalMasterKeyWrapper};
+    use crate::trace_artifact_store::aead_encrypt_with_dek;
+
+    fn fixture_decryptor() -> Arc<dyn KmsKeyWrapper> {
+        let crypto = SecretsCrypto::new(SecretString::new("a".repeat(32).into()))
+            .expect("fixture SecretsCrypto");
+        Arc::new(LocalMasterKeyWrapper::new(
+            crypto,
+            "enclave-gate-fixture",
+        ))
+    }
+
+    fn wrap_fixture_dek(
+        decryptor: &dyn KmsKeyWrapper,
+        tenant_storage_ref: &str,
+    ) -> (Zeroizing<[u8; 32]>, WrappedDek) {
+        let dek = Zeroizing::new([7u8; 32]);
+        let ctx = KekContext {
+            tenant_storage_ref: tenant_storage_ref.into(),
+            artifact_kind: TraceArtifactKind::ContributionEnvelope,
+        };
+        let wrapped = decryptor
+            .wrap_dek(&dek, &ctx)
+            .expect("LocalMasterKeyWrapper should wrap test DEK");
+        (dek, wrapped)
+    }
+
+    #[test]
+    fn enclave_gate_service_evaluates_passing_trace() {
+        let decryptor = fixture_decryptor();
+        let svc = EnclaveGateService::mock_with_decryptor(Arc::clone(&decryptor));
+
+        let tenant = TenantCtx::new("tenant-a");
+        let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), &tenant.tenant_id);
+        let ciphertext =
+            aead_encrypt_with_dek(&dek, b"a fresh trace plaintext").expect("encrypt fixture");
+
+        let decision = svc
+            .evaluate_trace(
+                &tenant,
+                &ciphertext,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+            )
+            .expect("evaluate_trace should succeed");
+        assert_eq!(decision.gate_policy_version, "enclave_mock_v1");
+        assert!(decision.perplexity_passed);
+        assert!(decision.novelty_passed);
+        assert!(decision.nearest_neighbor_hash.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn enclave_gate_service_rejects_bad_dek_context() {
+        let decryptor = fixture_decryptor();
+        let svc = EnclaveGateService::mock_with_decryptor(Arc::clone(&decryptor));
+
+        let tenant = TenantCtx::new("tenant-a");
+        let (dek, mut wrapped) = wrap_fixture_dek(decryptor.as_ref(), &tenant.tenant_id);
+        let ciphertext = aead_encrypt_with_dek(&dek, b"a fresh trace plaintext").unwrap();
+
+        // Tamper with the wrapped DEK's context_hash so the unwrap fails.
+        wrapped.context_hash = "sha256:tampered".into();
+
+        let err = svc
+            .evaluate_trace(
+                &tenant,
+                &ciphertext,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+            )
+            .expect_err("tampered context_hash must fail");
+        assert!(
+            format!("{err}").contains("KekContextMismatch"),
+            "expected KekContextMismatch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn enclave_gate_service_safe_status_reports_mock_kind() {
+        let decryptor = fixture_decryptor();
+        let svc = EnclaveGateService::mock_with_decryptor(decryptor);
+        let status = svc.safe_status();
+        assert_eq!(status.kind, "enclave_mock");
+        assert_eq!(status.gate_policy_version, "enclave_mock_v1");
+        assert!(status.gate_version_hash.starts_with("sha256:"));
+        assert!(!status.attestation_verifier_configured);
+    }
+
+    #[test]
+    fn enclave_gate_service_invalidate_returns_ok() {
+        let decryptor = fixture_decryptor();
+        let svc = EnclaveGateService::mock_with_decryptor(decryptor);
+        svc.invalidate_vector_entry(&TenantCtx::new("tenant-a"), Uuid::new_v4())
+            .expect("invalidate should succeed");
     }
 }

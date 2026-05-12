@@ -1714,6 +1714,25 @@ pub struct TraceRevocationPropagationItemRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Audit row written by `TraceGateService` for every evaluated trace.
+/// Maps 1:1 to the `trace_gate_decisions` columns introduced in V23.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceGateDecisionRow {
+    pub decision_id: Uuid,
+    pub submission_id: Uuid,
+    pub gate_policy_version: String,
+    pub gate_version_hash: String,
+    pub perplexity_micros: i64,
+    pub tail_fraction_micros: i64,
+    pub perplexity_passed: bool,
+    pub novelty_score_micros: i64,
+    pub nearest_neighbor_hash: String,
+    pub novelty_passed: bool,
+    pub embedding_evidence_hash: String,
+    pub attestation_chain_hash: String,
+    pub decided_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TraceArtifactInvalidationCounts {
     pub object_refs_invalidated: u64,
@@ -2193,4 +2212,14 @@ pub trait TraceCorpusStore: Send + Sync {
         object_store: &str,
         object_key: &str,
     ) -> Result<u64, DatabaseError>;
+
+    /// Append a hash-only `trace_gate_decisions` audit row for a single
+    /// `TraceGateService::evaluate_trace` call. Implementations MUST scope
+    /// the insert by `tenant_id` (the V23 table has forced RLS bound to
+    /// `trace_current_tenant_id()`).
+    async fn insert_trace_gate_decision(
+        &self,
+        tenant_id: &str,
+        decision: TraceGateDecisionRow,
+    ) -> Result<(), DatabaseError>;
 }
