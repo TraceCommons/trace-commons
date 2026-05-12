@@ -500,14 +500,18 @@ where
 
     fn invalidate_vector_entry(
         &self,
-        _tenant_ctx: &TenantCtx,
+        tenant_ctx: &TenantCtx,
         vector_entry_id: Uuid,
     ) -> anyhow::Result<()> {
         // Route deletion through the orchestrator into the underlying index.
-        // `delete` returns Ok(true) for a hit and Ok(false) for a miss; both
-        // satisfy the "make sure it's gone" postcondition, so we discard the
-        // bool.
-        let _ = self.orchestrator.delete_vector_entry(vector_entry_id)?;
+        // The tenant_storage_ref is required so per-tenant implementations
+        // (e.g. UsearchVectorIndex) can route the deletion to the right shard
+        // without doing a global scan. `delete` returns Ok(true) for a hit and
+        // Ok(false) for a miss; both satisfy the "make sure it's gone"
+        // postcondition, so we discard the bool.
+        let _ = self
+            .orchestrator
+            .delete_vector_entry(&tenant_ctx.tenant_id, vector_entry_id)?;
         Ok(())
     }
 

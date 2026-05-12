@@ -206,6 +206,38 @@ const TRACE_COMMONS_PERPLEXITY_DEFAULT_MODEL_ID: &str = "meta-llama/Llama-3.1-8B
 const TRACE_COMMONS_PERPLEXITY_DEFAULT_MAX_TOKENS: usize = 16_384;
 #[allow(dead_code)]
 const TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF: f32 = -8.0;
+// usearch-backed vector index (Phase A4). Read only when
+// `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu` AND the `local-gpu-models`
+// feature is compiled in.
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_ROOT: &str = "TRACE_COMMONS_VECTOR_INDEX_ROOT";
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_DIM: &str = "TRACE_COMMONS_VECTOR_INDEX_DIM";
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN: &str = "TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN";
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY: &str = "TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY";
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_HNSW_M: &str = "TRACE_COMMONS_VECTOR_INDEX_HNSW_M";
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION: &str =
+    "TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION";
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH: &str = "TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH";
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_ROOT: &str = "/var/lib/trace-commons-vector-index";
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_DIM: usize = 1024;
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_MAX_OPEN: usize = 32;
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_FLUSH_EVERY: usize = 32;
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_HNSW_M: usize = 16;
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_CONSTRUCTION: usize = 200;
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_SEARCH: usize = 50;
 const TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF: &str =
     "trace gate worker requires an active contribution envelope object ref";
 const TRACE_COMMONS_KEK_PROVIDER: &str = "TRACE_COMMONS_KEK_PROVIDER";
@@ -4101,7 +4133,7 @@ async fn build_enclave_local_gpu_gate_service_from_env(
         CandleDeviceKind, CandlePerplexityScorer,
     };
     use trace_commons_gate_enclave::{
-        EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig, MockEmbedder, MockVectorIndex,
+        EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig, MockEmbedder, UsearchVectorIndex,
     };
 
     let master_key = std::env::var(TRACE_COMMONS_GATE_SERVICE_MASTER_KEY).with_context(|| {
@@ -4156,14 +4188,74 @@ async fn build_enclave_local_gpu_gate_service_from_env(
             .await
             .context("CandlePerplexityScorerInitFailed")?;
 
+    let vector_index_root = std::env::var(TRACE_COMMONS_VECTOR_INDEX_ROOT)
+        .unwrap_or_else(|_| TRACE_COMMONS_VECTOR_INDEX_DEFAULT_ROOT.to_string());
+    let vector_index_dim = parse_usize_env(
+        TRACE_COMMONS_VECTOR_INDEX_DIM,
+        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_DIM,
+    )?;
+    let vector_index_max_open = parse_usize_env(
+        TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN,
+        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_MAX_OPEN,
+    )?;
+    let vector_index_flush_every = parse_usize_env(
+        TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY,
+        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_FLUSH_EVERY,
+    )?;
+    let vector_index_hnsw_m = parse_usize_env(
+        TRACE_COMMONS_VECTOR_INDEX_HNSW_M,
+        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_HNSW_M,
+    )?;
+    let vector_index_ef_construction = parse_usize_env(
+        TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION,
+        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_CONSTRUCTION,
+    )?;
+    let vector_index_ef_search = parse_usize_env(
+        TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH,
+        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_SEARCH,
+    )?;
+    let vector_index = UsearchVectorIndex::try_new(
+        &vector_index_root,
+        vector_index_dim,
+        vector_index_hnsw_m,
+        vector_index_ef_construction,
+        vector_index_ef_search,
+        vector_index_max_open,
+        vector_index_flush_every,
+    )
+    .with_context(|| {
+        format!(
+            "failed to initialize UsearchVectorIndex (root={vector_index_root}, dim={vector_index_dim})"
+        )
+    })?;
+
     let cfg = EnclaveGateOrchestratorConfig::mock_default();
     let orchestrator =
-        EnclaveGateOrchestrator::new(scorer, MockEmbedder::new(), MockVectorIndex::new(), cfg);
+        EnclaveGateOrchestrator::new(scorer, MockEmbedder::new(), vector_index, cfg);
     Ok(Arc::new(EnclaveGateService::new(
         orchestrator,
         wrapper,
         "enclave_local_gpu",
     )))
+}
+
+/// Parse `T = usize` from an env var with a default fallback. Trim + strict
+/// integer parse; empty / unset → default; malformed → fail-closed.
+#[cfg(feature = "local-gpu-models")]
+fn parse_usize_env(var: &'static str, default: usize) -> anyhow::Result<usize> {
+    match std::env::var(var) {
+        Ok(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                Ok(default)
+            } else {
+                trimmed
+                    .parse::<usize>()
+                    .with_context(|| format!("{var} must be a non-negative integer"))
+            }
+        }
+        Err(_) => Ok(default),
+    }
 }
 
 fn parse_trace_near_credit_outbox_scheduler_config_from_env()

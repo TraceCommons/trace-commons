@@ -22,6 +22,9 @@ tokenizers = { version = "0.21.4", optional = true, default-features = false, fe
 hf-hub = { version = "0.4.3", optional = true }
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
+# Phase A4: usearch HNSW vector index + lru-bounded per-tenant handle cache.
+usearch = { version = "2.25.2", optional = true }
+lru = { version = "0.18.0", optional = true }
 
 [features]
 default = []
@@ -38,6 +41,8 @@ local-gpu-models = [
     "dep:hf-hub",
     "dep:serde",
     "dep:serde_json",
+    "dep:usearch",
+    "dep:lru",
 ]
 local-gpu-models-cuda = [
     "local-gpu-models",
@@ -50,3 +55,6 @@ local-gpu-models-cuda = [
 # Only used by the `#[ignore]`d candle integration test under the
 # `local-gpu-models` feature. Default-feature builds don't pull tokio.
 tokio = { version = "1", features = ["rt", "macros"] }
+# Used by the `UsearchVectorIndex` unit tests (under `local-gpu-models`) to
+# provision a real on-disk root directory per test.
+tempfile = "3"
