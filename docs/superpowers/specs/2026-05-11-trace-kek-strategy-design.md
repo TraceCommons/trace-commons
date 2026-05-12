@@ -1,11 +1,29 @@
 # Trace Commons KEK Strategy — Design Brief
 
-Date: 2026-05-11
-Status: Draft — decision pending platform choice
+Date: 2026-05-11 (initial), 2026-05-12 (path chosen)
+Status: **Chosen path: A (cloud KMS) for pilot; B1 or C (dstack-based) for the trust upgrade after pilot.**
 Owner: Trace Commons / Auth + Keying lane
 Predecessor: `2026-05-11-cloud-trace-artifact-provider-design.md` (shipped the
 `KmsKeyWrapper` trait surface + `LocalMasterKeyWrapper` dev impl + production
 refusal gate)
+
+> **Update 2026-05-12:** After scoping the dstack-resident gate work
+> against the available hardware timeline, the pragmatic decision is to
+> ship a real pilot on path **A (cloud KMS, GCP first)** with real models
+> on regular GPUs, and migrate to a dstack-based KEK + in-enclave gate
+> service as a follow-up (paths B1 or C from the framework below). This
+> regresses the trust model versus the original "operator-constrained
+> from day one" goal: under cloud KMS the operator (and the cloud
+> provider) can read every contributor's trace via KMS Decrypt. The
+> pilot must be operated by an actor whose visibility into trace
+> content is acceptable, and contributor-facing language must be honest
+> that TEE-rooted privacy is a planned upgrade, not a current property.
+> Migration cost when dstack is ready: one re-wrap pass over every DEK
+> (the wrap format already includes `wrapper_kind` so v2 envelopes are
+> forward-compatible) plus a swap of the binary's hosting location.
+> No schema, envelope-format, or trait changes. The framework and
+> options below stay as-is for the eventual upgrade; the chosen-path
+> note above governs near-term decisions.
 
 ## What this document is
 
