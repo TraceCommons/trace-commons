@@ -32,25 +32,48 @@ The roadmap is `docs/trace-commons-roadmap.md`; the storage contract is
 ## Open Work
 
 This repo has zero current users — see `docs/trace-commons-roadmap.md` for the
-full framing. The work below is grouped by whether it blocks a real
-deployment or just holds intrinsic value with no users.
+full framing. As of 2026-05-12 the work is phased: Phase A is the
+pilot-readiness slice (real gate service on regular GPU hardware with cloud
+KMS as the KEK, accepting an operator-trusted model); Phase B is the trust
+upgrade to a dstack-attested enclave, deferred until pilot operational
+learning is in hand. The KEK trust-model regression is intentional and
+documented — contributor-facing language must be honest that TEE-rooted
+privacy is a planned upgrade, not a current property.
 
-### Blocks first real use
+### Phase A — blocks pilot
 
-1. **KEK trust-model decision and implementation.** The cloud object backend
-   has landed: a GCS provider implements `RemoteTraceArtifactProvider` behind
-   the `gcs-client` build feature, and `ServiceOwnedTraceArtifactStore` wraps
-   a pluggable `KmsKeyWrapper` trait. Only the dev-only `LocalMasterKeyWrapper`
-   is shipped; production deployments fail closed at startup via
-   `TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY=true` until a real KEK
-   (TEE-rooted via dstack / Confidential Space / Nitro Enclaves, or a cloud
-   KMS adapter) is selected. The KEK trust-model decision is its own
-   follow-up spec; the current cloud-provider design is
-   [`docs/superpowers/specs/2026-05-11-cloud-trace-artifact-provider-design.md`](docs/superpowers/specs/2026-05-11-cloud-trace-artifact-provider-design.md).
+1. **Real gate service on regular GPU hardware.** The trait surface
+   (`TraceGateService`, `KmsKeyWrapper`) is shipped (PRs #9–#12). Mock
+   perplexity / embedder / vector-index impls exist in
+   `tracedao-gate-enclave`. What's still needed:
+   - `CloudKmsKeyWrapper` (GCP KMS first) wrapping per-object DEKs. Satisfies
+     the existing `TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY`
+     startup gate by convention.
+   - Real `PerplexityScorer` (Llama-class via candle / mistralrs / ort —
+     decision spec needed first).
+   - Real `Embedder` (BGE-large / gte-large, matryoshka variants).
+   - Real `VectorIndex` (usearch with on-disk persistence; no sealing).
+   - `novelty_utility` credit-event emission through the existing
+     central-issuer ABAC + audit-hashing pipeline.
+   - Revocation worker hook calling `invalidate_vector_entry`.
+
+   See `docs/superpowers/specs/2026-05-11-trace-kek-strategy-design.md`
+   (chosen-path note) and
+   `docs/superpowers/specs/2026-05-11-private-vector-system-design.md`
+   (rephased).
 
 2. **Complete the Ironclaw extraction.** Ironclaw should depend on the shared
    `tracedao-protocol` crate but doesn't yet. Until that wiring lands, this
    server has no clients at all and most server-side polish is speculative.
+
+### Phase B — trust upgrade (after pilot)
+
+Move the gate-service binary inside an attested dstack enclave. Swap
+`CloudKmsKeyWrapper` for `DstackKekWrapper`. Re-wrap every DEK under the
+new wrapper (one batch pass; v2 envelope format already supports it via
+the `wrapper_kind` field). No schema, envelope-format, or trait changes —
+roughly 2 weeks of integration work assuming dstack-GPU primitives have
+stabilized by then.
 
 ### Worth doing without users
 

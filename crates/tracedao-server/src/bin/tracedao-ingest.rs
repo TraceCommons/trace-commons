@@ -187,6 +187,9 @@ const TRACE_COMMONS_GATE_SERVICE_ATTESTATION_VERIFIER_LABEL: &str =
 const TRACE_COMMONS_GATE_SERVICE_MASTER_KEY: &str = "TRACE_COMMONS_GATE_SERVICE_MASTER_KEY";
 const TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF: &str =
     "trace gate worker requires an active contribution envelope object ref";
+const TRACE_COMMONS_KEK_PROVIDER: &str = "TRACE_COMMONS_KEK_PROVIDER";
+#[allow(dead_code)]
+const TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME: &str = "TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME";
 const TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW";
 const TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT: &str =
@@ -1398,11 +1401,7 @@ impl ConfiguredTraceArtifactStore {
         let kek_key = SecretString::new(key.expose_secret().to_string().into());
         let crypto = SecretsCrypto::new(key)
             .context("failed to initialize Trace Commons remote artifact encryption")?;
-        let kek = tracedao_server::trace_artifact_kek::LocalMasterKeyWrapper::new(
-            SecretsCrypto::new(kek_key)
-                .context("failed to initialize Trace Commons KEK wrapper")?,
-            "trace-commons-local-master-v1",
-        );
+        let kek = build_selected_kek_wrapper_sync(kek_key)?;
         check_kek_production_trust_boundary_gate(
             env_truthy(TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY),
             kek.is_production_trust_boundary(),
@@ -1463,11 +1462,7 @@ impl ConfiguredTraceArtifactStore {
         let kek_key = SecretString::new(key.expose_secret().to_string().into());
         let crypto = SecretsCrypto::new(key)
             .context("failed to initialize Trace Commons remote artifact encryption")?;
-        let kek = tracedao_server::trace_artifact_kek::LocalMasterKeyWrapper::new(
-            SecretsCrypto::new(kek_key)
-                .context("failed to initialize Trace Commons KEK wrapper")?,
-            "trace-commons-local-master-v1",
-        );
+        let kek = build_selected_kek_wrapper_async(kek_key).await?;
         check_kek_production_trust_boundary_gate(
             env_truthy(TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY),
             kek.is_production_trust_boundary(),
@@ -4883,6 +4878,120 @@ fn check_kek_production_trust_boundary_gate(
         );
     }
     Ok(())
+}
+
+/// Stable identifier for the operator-selected KEK provider. The trailing
+/// string is read verbatim from `TRACE_COMMONS_KEK_PROVIDER`; an empty/unset
+/// value selects `LocalMasterKey` for backward compatibility.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KekProviderSelection {
+    LocalMasterKey,
+    Dstack,
+    GcpCloudKms,
+}
+
+impl KekProviderSelection {
+    /// Hash the unknown provider label so the error message stays
+    /// label-only and never leaks an operator-supplied secret in plaintext.
+    fn from_env_value(value: &str) -> anyhow::Result<Self> {
+        match value.trim() {
+            "" | "local_master_key" => Ok(Self::LocalMasterKey),
+            "dstack" => Ok(Self::Dstack),
+            "gcp_cloud_kms" => Ok(Self::GcpCloudKms),
+            other => {
+                let mut h = sha2::Sha256::new();
+                sha2::Digest::update(&mut h, other.as_bytes());
+                let hash = format!("sha256:{:x}", sha2::Digest::finalize(h));
+                anyhow::bail!(
+                    "KekProviderUnknown: TRACE_COMMONS_KEK_PROVIDER value not recognized (label_hash={hash})"
+                )
+            }
+        }
+    }
+
+    fn from_env() -> anyhow::Result<Self> {
+        let raw = std::env::var(TRACE_COMMONS_KEK_PROVIDER).unwrap_or_default();
+        Self::from_env_value(&raw)
+    }
+}
+
+/// Build the operator-selected KEK wrapper for synchronous construction
+/// paths. Returns a boxed trait object so `ServiceOwnedTraceArtifactStore`'s
+/// generic `K: KmsKeyWrapper` parameter is unified across providers
+/// (`Box<dyn KmsKeyWrapper>` satisfies the bound via a blanket impl in
+/// `trace_artifact_kek`). Synchronous wrappers (local / dstack stub) are
+/// built directly; the GCP adapter is async and not selectable through this
+/// helper — use `build_selected_kek_wrapper_async` from an async context.
+fn build_selected_kek_wrapper_sync(
+    kek_key: secrecy::SecretString,
+) -> anyhow::Result<Box<dyn tracedao_server::trace_artifact_kek::KmsKeyWrapper + Send + Sync>> {
+    let provider = KekProviderSelection::from_env()?;
+    build_sync_provider(provider, kek_key)
+}
+
+/// Async variant: routes to `build_sync_provider` for non-GCP wrappers and
+/// constructs the GCP adapter (when enabled) in-place.
+#[allow(dead_code)]
+async fn build_selected_kek_wrapper_async(
+    kek_key: secrecy::SecretString,
+) -> anyhow::Result<Box<dyn tracedao_server::trace_artifact_kek::KmsKeyWrapper + Send + Sync>> {
+    let provider = KekProviderSelection::from_env()?;
+    match provider {
+        KekProviderSelection::GcpCloudKms => {
+            let key_name = std::env::var(TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME).context(
+                "TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME must be set for gcp_cloud_kms provider",
+            )?;
+            build_gcp_cloud_kms_provider(key_name).await
+        }
+        other => build_sync_provider(other, kek_key),
+    }
+}
+
+#[cfg(feature = "gcp-kms")]
+async fn build_gcp_cloud_kms_provider(
+    key_name: String,
+) -> anyhow::Result<Box<dyn tracedao_server::trace_artifact_kek::KmsKeyWrapper + Send + Sync>> {
+    let client = tracedao_server::trace_artifact_kek::gcp::GcpCloudKmsClient::try_new(key_name)
+        .await
+        .context("GCP Cloud KMS client init failed")?;
+    Ok(Box::new(
+        tracedao_server::trace_artifact_kek::CloudKmsKeyWrapper::new(client, "gcp_cloud_kms"),
+    ))
+}
+
+#[cfg(not(feature = "gcp-kms"))]
+async fn build_gcp_cloud_kms_provider(
+    _key_name: String,
+) -> anyhow::Result<Box<dyn tracedao_server::trace_artifact_kek::KmsKeyWrapper + Send + Sync>> {
+    anyhow::bail!(
+        "KekProviderUnavailable: gcp_cloud_kms wrapper requires the gcp-kms cargo feature"
+    )
+}
+
+fn build_sync_provider(
+    provider: KekProviderSelection,
+    kek_key: secrecy::SecretString,
+) -> anyhow::Result<Box<dyn tracedao_server::trace_artifact_kek::KmsKeyWrapper + Send + Sync>> {
+    match provider {
+        KekProviderSelection::LocalMasterKey => {
+            let crypto = tracedao_server::secrets::SecretsCrypto::new(kek_key)
+                .context("failed to initialize Trace Commons KEK wrapper")?;
+            Ok(Box::new(
+                tracedao_server::trace_artifact_kek::LocalMasterKeyWrapper::new(
+                    crypto,
+                    "trace-commons-local-master-v1",
+                ),
+            ))
+        }
+        KekProviderSelection::Dstack => Ok(Box::new(
+            tracedao_server::trace_artifact_kek::DstackKekWrapper::new(
+                "trace-commons-dstack-enclave-v1",
+            ),
+        )),
+        KekProviderSelection::GcpCloudKms => anyhow::bail!(
+            "KekProviderUnavailable: gcp_cloud_kms requires async construction; use build_selected_kek_wrapper_async"
+        ),
+    }
 }
 
 fn parse_trace_rollout_tenant_ids_from_env(key: &str) -> anyhow::Result<BTreeSet<String>> {
@@ -118771,6 +118880,74 @@ mod tests {
     fn kek_production_trust_boundary_gate_passes_when_not_required() {
         check_kek_production_trust_boundary_gate(false, false)
             .expect("gate must pass when require=false regardless of trust boundary");
+    }
+
+    #[test]
+    fn kek_provider_selection_parses_known_labels() {
+        use super::KekProviderSelection;
+        assert_eq!(
+            KekProviderSelection::from_env_value("").unwrap(),
+            KekProviderSelection::LocalMasterKey
+        );
+        assert_eq!(
+            KekProviderSelection::from_env_value("local_master_key").unwrap(),
+            KekProviderSelection::LocalMasterKey
+        );
+        assert_eq!(
+            KekProviderSelection::from_env_value("dstack").unwrap(),
+            KekProviderSelection::Dstack
+        );
+        assert_eq!(
+            KekProviderSelection::from_env_value("gcp_cloud_kms").unwrap(),
+            KekProviderSelection::GcpCloudKms
+        );
+    }
+
+    #[test]
+    fn kek_provider_selection_rejects_unknown_label_with_hash_only_error() {
+        use super::KekProviderSelection;
+        let err = KekProviderSelection::from_env_value("attacker-supplied-secret")
+            .expect_err("unknown provider must bail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("KekProviderUnknown"),
+            "expected KekProviderUnknown error class: {rendered}"
+        );
+        assert!(
+            !rendered.contains("attacker-supplied-secret"),
+            "unknown label must not appear in error message: {rendered}"
+        );
+        assert!(
+            rendered.contains("label_hash=sha256:"),
+            "error must include label_hash: {rendered}"
+        );
+    }
+
+    #[test]
+    fn build_selected_kek_wrapper_sync_dispatches_by_env() {
+        use super::{KekProviderSelection, build_sync_provider};
+        use secrecy::SecretString;
+        let key = SecretString::new("a".repeat(32).into());
+        let local = build_sync_provider(KekProviderSelection::LocalMasterKey, key.clone())
+            .expect("local master key wrapper builds");
+        assert_eq!(local.safe_status().kind, "local_master_key");
+        assert!(!local.is_production_trust_boundary());
+
+        let dstack = build_sync_provider(KekProviderSelection::Dstack, key.clone())
+            .expect("dstack stub wrapper builds");
+        assert_eq!(dstack.safe_status().kind, "dstack_kek");
+        assert!(dstack.is_production_trust_boundary());
+
+        // Sync path explicitly refuses gcp_cloud_kms because that adapter
+        // requires async construction. Build through the async helper instead.
+        let err = match build_sync_provider(KekProviderSelection::GcpCloudKms, key) {
+            Ok(_) => panic!("sync path must refuse gcp_cloud_kms"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("KekProviderUnavailable"),
+            "expected KekProviderUnavailable: {err}"
+        );
     }
 
     fn synthetic_admin_auth(
