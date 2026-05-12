@@ -39116,6 +39116,12 @@ struct TraceGateEvaluateWorkerResponse {
     gate_version_hash: String,
     perplexity_passed: bool,
     novelty_passed: bool,
+    /// UUID of the inserted vector index entry. `Some` only when both gates
+    /// passed and the embedding was inserted into the gate service's vector
+    /// index. Operators who need to call `invalidate_vector_entry` later
+    /// (e.g. from the revocation worker) should persist this value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vector_entry_id: Option<Uuid>,
 }
 
 /// Worker route that scores a single submission through the configured
@@ -39231,6 +39237,7 @@ async fn gate_evaluate_worker_handler(
         embedding_evidence_hash: decision.embedding_evidence_hash.clone(),
         attestation_chain_hash: decision.attestation_chain_hash.clone(),
         decided_at: Utc::now(),
+        vector_entry_id: decision.vector_entry_id,
     };
     db.insert_trace_gate_decision(&tenant.tenant_id, row)
         .await
@@ -39244,6 +39251,7 @@ async fn gate_evaluate_worker_handler(
         gate_version_hash: decision.gate_version_hash,
         perplexity_passed: decision.perplexity_passed,
         novelty_passed: decision.novelty_passed,
+        vector_entry_id: decision.vector_entry_id,
     }))
 }
 

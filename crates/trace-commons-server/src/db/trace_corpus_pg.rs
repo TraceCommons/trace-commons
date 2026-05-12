@@ -5158,8 +5158,8 @@ impl TraceCorpusStore for PgBackend {
                  gate_version_hash, perplexity_micros, tail_fraction_micros,
                  perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
                  novelty_passed, embedding_evidence_hash, attestation_chain_hash,
-                 decided_at
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+                 decided_at, vector_entry_id
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
             &[
                 &tenant_id,
                 &decision.decision_id,
@@ -5175,6 +5175,7 @@ impl TraceCorpusStore for PgBackend {
                 &decision.embedding_evidence_hash,
                 &decision.attestation_chain_hash,
                 &decision.decided_at,
+                &decision.vector_entry_id,
             ],
         )
         .await
