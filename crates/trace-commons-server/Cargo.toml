@@ -36,6 +36,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 google-cloud-storage = { version = "0.24", optional = true }
+google-cloud-kms = { version = "0.6", optional = true }
 
 [features]
 default = []
@@ -43,6 +44,9 @@ default = []
 # (uses Application Default Credentials). Off by default so hermetic CI builds
 # don't pull the GCS dependency tree.
 gcs-client = ["dep:google-cloud-storage"]
+# Compile the production GCP Cloud KMS client for the CloudKmsKeyWrapper adapter.
+# Off by default so hermetic CI builds don't pull the KMS dependency tree.
+gcp-kms = ["dep:google-cloud-kms"]
 
 [dev-dependencies]
 tempfile = "3"

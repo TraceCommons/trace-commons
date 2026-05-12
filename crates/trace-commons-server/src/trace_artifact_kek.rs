@@ -5,6 +5,10 @@
 //! (`LocalMasterKeyWrapper`) is co-located here; production implementations
 //! (TEE-rooted, cloud KMS) will live in submodules.
 
+use aes_gcm::{
+    Aes256Gcm, KeyInit, Nonce,
+    aead::{Aead, AeadCore, OsRng, Payload},
+};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -98,6 +102,33 @@ pub trait KmsKeyWrapper: Send + Sync {
     /// Returns `true` if this wrapper enforces a production-grade trust boundary
     /// (e.g., a real KMS rather than a local test key).
     fn is_production_trust_boundary(&self) -> bool;
+}
+
+/// Blanket impl so a `Box<dyn KmsKeyWrapper>` (or any boxed wrapper) satisfies
+/// the trait bound on the generic `K: KmsKeyWrapper` used by
+/// `ServiceOwnedTraceArtifactStore`. This lets the bin select among multiple
+/// concrete wrapper types at runtime via `TRACE_COMMONS_KEK_PROVIDER` without
+/// duplicating the store construction path per wrapper type.
+impl<K: KmsKeyWrapper + ?Sized> KmsKeyWrapper for Box<K> {
+    fn wrap_dek(&self, dek: &[u8; 32], context: &KekContext) -> anyhow::Result<WrappedDek> {
+        (**self).wrap_dek(dek, context)
+    }
+
+    fn unwrap_dek(
+        &self,
+        wrapped: &WrappedDek,
+        context: &KekContext,
+    ) -> anyhow::Result<Zeroizing<[u8; 32]>> {
+        (**self).unwrap_dek(wrapped, context)
+    }
+
+    fn safe_status(&self) -> KekWrapperStatus {
+        (**self).safe_status()
+    }
+
+    fn is_production_trust_boundary(&self) -> bool {
+        (**self).is_production_trust_boundary()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -276,5 +307,287 @@ impl KmsKeyWrapper for DstackKekWrapper {
 
     fn is_production_trust_boundary(&self) -> bool {
         true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CloudKmsKeyWrapper
+// ---------------------------------------------------------------------------
+
+/// Pluggable cloud-vendor KMS client used by `CloudKmsKeyWrapper`.
+///
+/// The trait abstracts over GCP Cloud KMS, AWS KMS, Azure Key Vault, etc., so
+/// the wrapper can be tested hermetically against `InMemoryCloudKmsClient` and
+/// swapped to a real vendor adapter without touching the wrapper logic.
+///
+/// The AAD bytes are the canonical KEK-context hash; cloud KMS encrypt/decrypt
+/// must bind them as Additional Authenticated Data so cross-context DEK
+/// substitution fails closed at the vendor layer. For GCP Cloud KMS this maps
+/// to the `additionalAuthenticatedData` field on `Encrypt` / `Decrypt`.
+pub trait CloudKmsClient: Send + Sync {
+    /// Encrypt `plaintext` under the configured cloud KMS key, binding `aad`
+    /// as additional authenticated data.
+    fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> anyhow::Result<Vec<u8>>;
+
+    /// Decrypt `ciphertext` under the configured cloud KMS key, requiring the
+    /// same `aad` used at encrypt time. The returned plaintext is wrapped in
+    /// `Zeroizing` so it is scrubbed on drop.
+    fn decrypt(&self, ciphertext: &[u8], aad: &[u8]) -> anyhow::Result<Zeroizing<Vec<u8>>>;
+
+    /// Stable opaque identifier for the configured KMS key. Returned verbatim
+    /// from the vendor — never logged raw; the wrapper hashes it before
+    /// exposing it through `safe_status`.
+    fn key_ref(&self) -> &str;
+}
+
+/// `KmsKeyWrapper` impl backed by a cloud-vendor KMS service.
+///
+/// By convention, `is_production_trust_boundary()` returns `true` for this
+/// wrapper. The cloud KMS is operator-trusted, not operator-constrained — the
+/// operator and the cloud provider can read every wrapped DEK by calling the
+/// KMS `Decrypt` API. The "production trust boundary" gate in this codebase
+/// distinguishes "real KMS with key-access auditing" from "local master key in
+/// process memory"; a TEE-attested KEK (Phase B) is a strictly stronger trust
+/// boundary that will be modeled via a separate wrapper. See
+/// `docs/superpowers/specs/2026-05-11-trace-kek-strategy-design.md`.
+pub struct CloudKmsKeyWrapper<C> {
+    client: C,
+    key_ref_hash: String,
+    wrapper_kind: String,
+}
+
+impl<C: CloudKmsClient> CloudKmsKeyWrapper<C> {
+    /// Construct a wrapper around the supplied cloud KMS client. `wrapper_kind`
+    /// is the stable string written into `WrappedDek::wrapper_kind` (e.g.
+    /// `"gcp_cloud_kms"`), and is verified on unwrap.
+    pub fn new(client: C, wrapper_kind: impl Into<String>) -> Self {
+        let key_ref_hash = hash_label(client.key_ref());
+        Self {
+            client,
+            key_ref_hash,
+            wrapper_kind: wrapper_kind.into(),
+        }
+    }
+}
+
+fn hash_label(label: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(label.as_bytes());
+    format!("sha256:{:x}", h.finalize())
+}
+
+impl<C: CloudKmsClient> KmsKeyWrapper for CloudKmsKeyWrapper<C> {
+    fn wrap_dek(&self, dek: &[u8; 32], context: &KekContext) -> anyhow::Result<WrappedDek> {
+        let context_hash = context.canonical_hash();
+        let aad = context_hash.as_bytes();
+        let ciphertext = self
+            .client
+            .encrypt(dek.as_slice(), aad)
+            .map_err(|e| anyhow::anyhow!("KekWrapFailed: {e}"))?;
+        Ok(WrappedDek {
+            wrapper_kind: self.wrapper_kind.clone(),
+            key_ref_hash: self.key_ref_hash.clone(),
+            ciphertext_base64: STANDARD.encode(&ciphertext),
+            context_hash,
+        })
+    }
+
+    fn unwrap_dek(
+        &self,
+        wrapped: &WrappedDek,
+        context: &KekContext,
+    ) -> anyhow::Result<Zeroizing<[u8; 32]>> {
+        anyhow::ensure!(
+            wrapped.wrapper_kind == self.wrapper_kind,
+            "KekUnwrapFailed: wrapper kind mismatch"
+        );
+        let expected_ctx = context.canonical_hash();
+        anyhow::ensure!(
+            wrapped.context_hash == expected_ctx,
+            "KekContextMismatch: outer context_hash mismatch"
+        );
+        let ciphertext = STANDARD
+            .decode(&wrapped.ciphertext_base64)
+            .map_err(|_| anyhow::anyhow!("KekUnwrapFailed: base64 decode error"))?;
+        let plaintext = self
+            .client
+            .decrypt(&ciphertext, expected_ctx.as_bytes())
+            .map_err(|e| anyhow::anyhow!("KekUnwrapFailed: {e}"))?;
+        anyhow::ensure!(
+            plaintext.len() == 32,
+            "KekUnwrapFailed: dek length mismatch"
+        );
+        let mut dek = Zeroizing::new([0u8; 32]);
+        dek.copy_from_slice(plaintext.as_slice());
+        Ok(dek)
+    }
+
+    fn safe_status(&self) -> KekWrapperStatus {
+        KekWrapperStatus {
+            kind: self.wrapper_kind.clone(),
+            key_ref_hash: self.key_ref_hash.clone(),
+            is_production_trust_boundary: true,
+        }
+    }
+
+    fn is_production_trust_boundary(&self) -> bool {
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// InMemoryCloudKmsClient
+// ---------------------------------------------------------------------------
+
+/// Hermetic `CloudKmsClient` for unit tests.
+///
+/// Encrypts the plaintext under a caller-supplied 256-bit master key using
+/// AES-256-GCM with the caller-supplied AAD bound as Additional Authenticated
+/// Data, matching the AAD semantics of real cloud KMS (e.g. GCP Cloud KMS's
+/// `additionalAuthenticatedData` field). The wire format is
+/// `nonce || ciphertext_with_tag`.
+///
+/// Not for production use — there is no key isolation. Intended only to
+/// exercise `CloudKmsKeyWrapper` round-trip and AAD-binding semantics in tests.
+pub struct InMemoryCloudKmsClient {
+    master_key: [u8; 32],
+    key_ref: String,
+}
+
+impl InMemoryCloudKmsClient {
+    /// Construct an in-memory client with the supplied 32-byte master key and
+    /// a stable `key_ref` label. The label is hashed by `CloudKmsKeyWrapper`
+    /// before being exposed through `safe_status`.
+    pub fn new_with_master(master_key: [u8; 32], key_ref: impl Into<String>) -> Self {
+        Self {
+            master_key,
+            key_ref: key_ref.into(),
+        }
+    }
+}
+
+impl CloudKmsClient for InMemoryCloudKmsClient {
+    fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> anyhow::Result<Vec<u8>> {
+        let cipher = Aes256Gcm::new_from_slice(&self.master_key)
+            .map_err(|e| anyhow::anyhow!("InMemoryCloudKms: cipher init failed: {e}"))?;
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let ciphertext = cipher
+            .encrypt(&nonce, Payload { msg: plaintext, aad })
+            .map_err(|e| anyhow::anyhow!("InMemoryCloudKms: encrypt failed: {e}"))?;
+        let mut out = Vec::with_capacity(nonce.len() + ciphertext.len());
+        out.extend_from_slice(&nonce);
+        out.extend_from_slice(&ciphertext);
+        Ok(out)
+    }
+
+    fn decrypt(&self, ciphertext: &[u8], aad: &[u8]) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+        const NONCE_SIZE: usize = 12;
+        anyhow::ensure!(
+            ciphertext.len() > NONCE_SIZE,
+            "InMemoryCloudKms: ciphertext too short"
+        );
+        let (nonce_bytes, body) = ciphertext.split_at(NONCE_SIZE);
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let cipher = Aes256Gcm::new_from_slice(&self.master_key)
+            .map_err(|e| anyhow::anyhow!("InMemoryCloudKms: cipher init failed: {e}"))?;
+        let plaintext = cipher
+            .decrypt(nonce, Payload { msg: body, aad })
+            .map_err(|e| anyhow::anyhow!("InMemoryCloudKms: decrypt failed: {e}"))?;
+        Ok(Zeroizing::new(plaintext))
+    }
+
+    fn key_ref(&self) -> &str {
+        &self.key_ref
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GcpCloudKmsClient (feature-gated)
+// ---------------------------------------------------------------------------
+
+/// Production `CloudKmsClient` backed by `google_cloud_kms`. Only compiled
+/// when the `gcp-kms` cargo feature is enabled so default builds stay
+/// hermetic. Credentials follow Application Default Credentials (ADC).
+///
+/// `KekContext::canonical_hash()` bytes are passed through as
+/// `additional_authenticated_data` on every Encrypt/Decrypt call, matching
+/// GCP Cloud KMS's AAD semantics and giving the same cross-object DEK
+/// substitution defense the rest of the wrapper relies on.
+///
+/// Async-to-sync bridge mirrors `trace_artifact_gcs::prod_client::ProdGcsObjectClient`:
+/// `tokio::task::block_in_place(|| Handle::current().block_on(...))`. The
+/// server binaries run on `tokio::main` with the default multi-thread
+/// scheduler so this is safe.
+#[cfg(feature = "gcp-kms")]
+pub mod gcp {
+    use anyhow::{Context, Result};
+    use google_cloud_kms::client::{Client, ClientConfig};
+    use google_cloud_kms::grpc::kms::v1::{DecryptRequest, EncryptRequest};
+    use tokio::runtime::Handle;
+    use tokio::task::block_in_place;
+    use zeroize::Zeroizing;
+
+    use super::CloudKmsClient;
+
+    /// Production GCP Cloud KMS client. Constructed with the resource name of
+    /// the wrapping key (e.g.
+    /// `projects/<P>/locations/<L>/keyRings/<R>/cryptoKeys/<K>`).
+    pub struct GcpCloudKmsClient {
+        client: Client,
+        key_name: String,
+    }
+
+    impl GcpCloudKmsClient {
+        /// Construct a production client using Application Default Credentials.
+        /// Must be awaited from within a tokio runtime.
+        pub async fn try_new(key_name: impl Into<String>) -> Result<Self> {
+            let config = ClientConfig::default()
+                .with_auth()
+                .await
+                .context("GcpKmsClientInit: failed to load Application Default Credentials")?;
+            let client = Client::new(config)
+                .await
+                .context("GcpKmsClientInit: failed to construct KMS client")?;
+            Ok(Self {
+                client,
+                key_name: key_name.into(),
+            })
+        }
+    }
+
+    fn run_blocking<F: std::future::Future>(fut: F) -> F::Output {
+        block_in_place(|| Handle::current().block_on(fut))
+    }
+
+    impl CloudKmsClient for GcpCloudKmsClient {
+        fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+            let request = EncryptRequest {
+                name: self.key_name.clone(),
+                plaintext: plaintext.to_vec(),
+                additional_authenticated_data: aad.to_vec(),
+                plaintext_crc32c: None,
+                additional_authenticated_data_crc32c: None,
+            };
+            let response = run_blocking(self.client.encrypt(request, None))
+                .map_err(|status| anyhow::anyhow!("GcpKmsEncryptFailed: {}", status.code()))?;
+            Ok(response.ciphertext)
+        }
+
+        fn decrypt(&self, ciphertext: &[u8], aad: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+            let request = DecryptRequest {
+                name: self.key_name.clone(),
+                ciphertext: ciphertext.to_vec(),
+                additional_authenticated_data: aad.to_vec(),
+                ciphertext_crc32c: None,
+                additional_authenticated_data_crc32c: None,
+            };
+            let response = run_blocking(self.client.decrypt(request, None))
+                .map_err(|status| anyhow::anyhow!("GcpKmsDecryptFailed: {}", status.code()))?;
+            Ok(Zeroizing::new(response.plaintext))
+        }
+
+        fn key_ref(&self) -> &str {
+            &self.key_name
+        }
     }
 }
