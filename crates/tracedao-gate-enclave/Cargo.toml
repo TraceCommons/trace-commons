@@ -23,6 +23,16 @@ hf-hub = { version = "0.4.3", optional = true }
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
 
+# Optional fastembed stack — enabled by the `local-gpu-models` feature
+# (shared with the candle perplexity scorer). Pulls in ONNX Runtime via
+# `ort` for sentence-embedding inference. Default model is
+# BAAI/bge-large-en-v1.5.
+fastembed = { version = "5.13.4", optional = true }
+# tokio is used by `FastEmbedTextEmbedder::try_new` to spawn the blocking
+# ONNX model load off the async executor. The dev-dependency entry below
+# keeps integration tests working without enabling the feature.
+tokio = { version = "1", optional = true, features = ["rt"] }
+
 [features]
 default = []
 # Compile the candle-backed `CandlePerplexityScorer`. Off by default; turning
@@ -38,6 +48,8 @@ local-gpu-models = [
     "dep:hf-hub",
     "dep:serde",
     "dep:serde_json",
+    "dep:fastembed",
+    "dep:tokio",
 ]
 local-gpu-models-cuda = [
     "local-gpu-models",

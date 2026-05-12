@@ -206,6 +206,23 @@ const TRACE_COMMONS_PERPLEXITY_DEFAULT_MODEL_ID: &str = "meta-llama/Llama-3.1-8B
 const TRACE_COMMONS_PERPLEXITY_DEFAULT_MAX_TOKENS: usize = 16_384;
 #[allow(dead_code)]
 const TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF: f32 = -8.0;
+// fastembed embedder (Phase A3). Read only when
+// `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu` AND the `local-gpu-models`
+// feature is compiled in.
+#[allow(dead_code)]
+const TRACE_COMMONS_EMBEDDER_MODEL_ID: &str = "TRACE_COMMONS_EMBEDDER_MODEL_ID";
+#[allow(dead_code)]
+const TRACE_COMMONS_EMBEDDER_CACHE_DIR: &str = "TRACE_COMMONS_EMBEDDER_CACHE_DIR";
+#[allow(dead_code)]
+const TRACE_COMMONS_EMBEDDER_MAX_TOKENS: &str = "TRACE_COMMONS_EMBEDDER_MAX_TOKENS";
+#[allow(dead_code)]
+const TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM: &str = "TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM";
+#[allow(dead_code)]
+const TRACE_COMMONS_EMBEDDER_DEFAULT_MODEL_ID: &str = "BAAI/bge-large-en-v1.5";
+#[allow(dead_code)]
+const TRACE_COMMONS_EMBEDDER_DEFAULT_CACHE_DIR: &str = "/var/cache/tracedao-embedder";
+#[allow(dead_code)]
+const TRACE_COMMONS_EMBEDDER_DEFAULT_MAX_TOKENS: usize = 512;
 const TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF: &str =
     "trace gate worker requires an active contribution envelope object ref";
 const TRACE_COMMONS_KEK_PROVIDER: &str = "TRACE_COMMONS_KEK_PROVIDER";
@@ -4023,15 +4040,18 @@ fn parse_trace_vector_search_timeout_from_env() -> anyhow::Result<StdDuration> {
 ///   ciphertext + wrapped-DEK plumbing end-to-end.
 /// - `"enclave_local_gpu"` (only available when the `local-gpu-models` cargo
 ///   feature is compiled in): `EnclaveGateService` wired with the
-///   candle-backed `CandlePerplexityScorer` + `MockEmbedder` + `MockVectorIndex`.
-///   Reads `TRACE_COMMONS_PERPLEXITY_MODEL_PATH` (required),
-///   `TRACE_COMMONS_PERPLEXITY_MODEL_ID`, `TRACE_COMMONS_PERPLEXITY_DEVICE`,
-///   `TRACE_COMMONS_PERPLEXITY_MAX_TOKENS`,
-///   `TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF`, and the same
+///   candle-backed `CandlePerplexityScorer` + `FastEmbedTextEmbedder` +
+///   `MockVectorIndex`. Reads `TRACE_COMMONS_PERPLEXITY_MODEL_PATH`
+///   (required), `TRACE_COMMONS_PERPLEXITY_MODEL_ID`,
+///   `TRACE_COMMONS_PERPLEXITY_DEVICE`, `TRACE_COMMONS_PERPLEXITY_MAX_TOKENS`,
+///   `TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF`,
+///   `TRACE_COMMONS_EMBEDDER_MODEL_ID`, `TRACE_COMMONS_EMBEDDER_CACHE_DIR`,
+///   `TRACE_COMMONS_EMBEDDER_MAX_TOKENS`,
+///   `TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM`, and the same
 ///   `TRACE_COMMONS_GATE_SERVICE_MASTER_KEY` as `enclave_mock`. The candle
-///   forward pass itself is hardware-untested in this repo's CI; A3 / A4 will
-///   swap the mock embedder and mock vector index for production
-///   implementations.
+///   forward pass and fastembed inference are hardware-untested in this
+///   repo's CI; A4 will swap the mock vector index for the production
+///   implementation.
 /// - `"dstack"`: fail-closed `DstackGateService` stub. Operator-supplied
 ///   `TRACE_COMMONS_GATE_SERVICE_ENCLAVE_ENDPOINT` and
 ///   `TRACE_COMMONS_GATE_SERVICE_ATTESTATION_VERIFIER_LABEL` are accepted but
@@ -4088,20 +4108,24 @@ async fn build_trace_gate_service_from_env() -> anyhow::Result<Arc<dyn TraceGate
 }
 
 /// Build the `enclave_local_gpu` gate service: candle-backed perplexity
-/// scorer + mock embedder + mock vector index. Returns a fail-closed error if
-/// the model path is unset or the candle loader rejects the staged checkpoint.
+/// scorer + fastembed-rs embedder + mock vector index. Returns a fail-closed
+/// error if the perplexity model path is unset, the candle loader rejects
+/// the staged checkpoint, or fastembed cannot load its ONNX model from the
+/// configured cache directory.
 ///
-/// The candle forward path is hardware-untested in this repo's CI; first
-/// production deployment must verify a non-zero perplexity on a known input
-/// before the gate is allowed to drive credit emission.
+/// The candle forward path and fastembed inference are hardware-untested in
+/// this repo's CI; first production deployment must verify a non-zero
+/// perplexity on a known input and a unit-normalized embedding before the
+/// gate is allowed to drive credit emission.
 #[cfg(feature = "local-gpu-models")]
 async fn build_enclave_local_gpu_gate_service_from_env(
 ) -> anyhow::Result<Arc<dyn TraceGateService>> {
+    use tracedao_gate_enclave::embedder_fastembed::FastEmbedTextEmbedder;
     use tracedao_gate_enclave::perplexity_candle::{
         CandleDeviceKind, CandlePerplexityScorer,
     };
     use tracedao_gate_enclave::{
-        EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig, MockEmbedder, MockVectorIndex,
+        EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig, MockVectorIndex,
     };
 
     let master_key = std::env::var(TRACE_COMMONS_GATE_SERVICE_MASTER_KEY).with_context(|| {
@@ -4156,9 +4180,57 @@ async fn build_enclave_local_gpu_gate_service_from_env(
             .await
             .context("CandlePerplexityScorerInitFailed")?;
 
+    // fastembed-rs embedder (Phase A3). Loads the configured sentence
+    // embedder once at startup; same H100 hosts both this and the candle
+    // perplexity scorer. Runtime correctness of inference is
+    // hardware-dependent and must be validated on first deploy.
+    let embedder_model_id = std::env::var(TRACE_COMMONS_EMBEDDER_MODEL_ID)
+        .unwrap_or_else(|_| TRACE_COMMONS_EMBEDDER_DEFAULT_MODEL_ID.to_string());
+    let embedder_cache_dir = std::env::var(TRACE_COMMONS_EMBEDDER_CACHE_DIR)
+        .unwrap_or_else(|_| TRACE_COMMONS_EMBEDDER_DEFAULT_CACHE_DIR.to_string());
+    let embedder_max_tokens = match std::env::var(TRACE_COMMONS_EMBEDDER_MAX_TOKENS) {
+        Ok(raw) => raw.trim().parse::<usize>().with_context(|| {
+            format!("{TRACE_COMMONS_EMBEDDER_MAX_TOKENS} must be a positive integer")
+        })?,
+        Err(_) => TRACE_COMMONS_EMBEDDER_DEFAULT_MAX_TOKENS,
+    };
+    anyhow::ensure!(
+        embedder_max_tokens > 0,
+        "{TRACE_COMMONS_EMBEDDER_MAX_TOKENS} must be greater than zero"
+    );
+    let embedder_matryoshka_dim = match std::env::var(TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM) {
+        Ok(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.parse::<usize>().with_context(|| {
+                    format!(
+                        "{TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM} must be a positive integer"
+                    )
+                })?)
+            }
+        }
+        Err(_) => None,
+    };
+    if let Some(d) = embedder_matryoshka_dim {
+        anyhow::ensure!(
+            d > 0,
+            "{TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM} must be greater than zero"
+        );
+    }
+    let embedder = FastEmbedTextEmbedder::try_new(
+        embedder_model_id,
+        &embedder_cache_dir,
+        embedder_matryoshka_dim,
+        embedder_max_tokens,
+    )
+    .await
+    .context("FastEmbedTextEmbedderInitFailed")?;
+
     let cfg = EnclaveGateOrchestratorConfig::mock_default();
     let orchestrator =
-        EnclaveGateOrchestrator::new(scorer, MockEmbedder::new(), MockVectorIndex::new(), cfg);
+        EnclaveGateOrchestrator::new(scorer, embedder, MockVectorIndex::new(), cfg);
     Ok(Arc::new(EnclaveGateService::new(
         orchestrator,
         wrapper,
