@@ -12,6 +12,7 @@
 //! to its own audit-row shape.
 
 pub mod embedder;
+pub mod embedder_fastembed;
 pub mod orchestrator;
 pub mod perplexity;
 pub mod perplexity_candle;
