@@ -14,6 +14,7 @@
 pub mod embedder;
 pub mod orchestrator;
 pub mod perplexity;
+pub mod perplexity_candle;
 pub mod vector_index;
 
 pub use embedder::{Embedder, MockEmbedder};
