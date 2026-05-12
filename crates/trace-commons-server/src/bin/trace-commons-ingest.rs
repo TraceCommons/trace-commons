@@ -8,6 +8,7 @@ use std::time::Duration as StdDuration;
 
 use anyhow::Context;
 use axum::extract::{DefaultBodyLimit, Query};
+use base64::Engine as _;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
@@ -36,11 +37,17 @@ use trace_commons_server::db::{Database, TraceCorpusRlsDiagnostics};
 use trace_commons_server::error::DatabaseError;
 use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
 use trace_commons_server::secrets::SecretsCrypto;
-use trace_commons_server::trace_artifact_kek::{KekWrapperStatus, KmsKeyWrapper as _};
+use trace_commons_server::trace_artifact_kek::{
+    KekWrapperStatus, KmsKeyWrapper, LocalMasterKeyWrapper,
+};
 use trace_commons_server::trace_artifact_store::{
     EncryptedTraceArtifactReceipt, FileRemoteTraceArtifactProvider,
     LocalEncryptedTraceArtifactStore, ServiceOwnedTraceArtifactStore, TraceArtifactKind,
     TraceArtifactProviderConfig, TraceArtifactStore,
+};
+use trace_commons_server::trace_gate_service::{
+    DstackGateService, EnclaveGateService, GateServiceStatus, InMemoryGateService,
+    TenantCtx as GateTenantCtx, TraceGateService,
 };
 use trace_commons_server::trace_corpus_storage::{
     TraceArtifactInvalidationCounts as StorageTraceArtifactInvalidationCounts,
@@ -81,6 +88,7 @@ use trace_commons_server::trace_corpus_storage::{
     TraceExportManifestMirrorWrite as StorageTraceExportManifestMirrorWrite,
     TraceExportManifestRecord as StorageTraceExportManifestRecord,
     TraceExportManifestWrite as StorageTraceExportManifestWrite,
+    TraceGateDecisionRow as StorageTraceGateDecisionRow,
     TraceNearCreditOutboxItemRecord as StorageTraceNearCreditOutboxItemRecord,
     TraceNearCreditOutboxItemWrite as StorageTraceNearCreditOutboxItemWrite,
     TraceObjectArtifactKind as StorageTraceObjectArtifactKind,
@@ -171,6 +179,14 @@ const TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING: &str =
     "TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING";
 const TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY: &str =
     "TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY";
+const TRACE_COMMONS_GATE_SERVICE: &str = "TRACE_COMMONS_GATE_SERVICE";
+const TRACE_COMMONS_GATE_SERVICE_ENCLAVE_ENDPOINT: &str =
+    "TRACE_COMMONS_GATE_SERVICE_ENCLAVE_ENDPOINT";
+const TRACE_COMMONS_GATE_SERVICE_ATTESTATION_VERIFIER_LABEL: &str =
+    "TRACE_COMMONS_GATE_SERVICE_ATTESTATION_VERIFIER_LABEL";
+const TRACE_COMMONS_GATE_SERVICE_MASTER_KEY: &str = "TRACE_COMMONS_GATE_SERVICE_MASTER_KEY";
+const TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF: &str =
+    "trace gate worker requires an active contribution envelope object ref";
 const TRACE_COMMONS_KEK_PROVIDER: &str = "TRACE_COMMONS_KEK_PROVIDER";
 #[allow(dead_code)]
 const TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME: &str = "TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME";
@@ -857,6 +873,7 @@ struct AppState {
     ranking_min_pairwise_accuracy_micros: i64,
     ranking_max_labeler_issue_rate_micros: Option<i64>,
     ranking_min_labeler_reliability_label_count: Option<usize>,
+    gate_service: Arc<dyn TraceGateService>,
 }
 
 #[derive(Clone)]
@@ -1520,6 +1537,20 @@ impl ConfiguredTraceArtifactStore {
 
     fn kek_status(&self) -> Option<&KekWrapperStatus> {
         self.kek_status.as_ref()
+    }
+
+    /// Read the raw encrypted artifact (ciphertext + wrapped DEK if v2)
+    /// associated with `receipt`. Callers that need plaintext should use
+    /// `get_json` / `get_json_by_object_key`; this accessor is used by the
+    /// gate-evaluation worker, which hands the ciphertext + wrapped DEK
+    /// straight to the gate service without ever materializing plaintext.
+    fn read_encrypted_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<trace_commons_server::trace_artifact_store::EncryptedTraceArtifact> {
+        self.store
+            .read_artifact(expected_tenant_storage_ref, receipt)
     }
 
     fn put_json<T: Serialize>(
@@ -2905,6 +2936,7 @@ impl AppState {
             ranking_min_pairwise_accuracy_micros,
             ranking_max_labeler_issue_rate_micros,
             ranking_min_labeler_reliability_label_count,
+            gate_service: build_trace_gate_service_from_env()?,
         })
     }
 }
@@ -3955,6 +3987,64 @@ fn parse_trace_vector_search_timeout_from_env() -> anyhow::Result<StdDuration> {
         "{TRACE_COMMONS_VECTOR_SEARCH_TIMEOUT_MS} must be between 1 and 120000"
     );
     Ok(StdDuration::from_millis(timeout_ms))
+}
+
+/// Build the `Arc<dyn TraceGateService>` carried on `AppState`.
+///
+/// Selected at startup via `TRACE_COMMONS_GATE_SERVICE`:
+///
+/// - unset / `""` / `"in_memory"` (default for dev): `InMemoryGateService`
+///   stamped with `gate_policy_version = "in_memory_default"` so decision rows
+///   are clearly tagged.
+/// - `"enclave_mock"`: `EnclaveGateService` wired with the mock perplexity /
+///   embedder / vector-index pipeline plus a `LocalMasterKeyWrapper` keyed by
+///   `TRACE_COMMONS_GATE_SERVICE_MASTER_KEY`. Used to exercise the
+///   ciphertext + wrapped-DEK plumbing end-to-end.
+/// - `"dstack"`: fail-closed `DstackGateService` stub. Operator-supplied
+///   `TRACE_COMMONS_GATE_SERVICE_ENCLAVE_ENDPOINT` and
+///   `TRACE_COMMONS_GATE_SERVICE_ATTESTATION_VERIFIER_LABEL` are accepted but
+///   only surfaced as labels — every `evaluate_trace` call still bails until
+///   the dstack client lands.
+///
+/// Any other value fails startup with a hash-only "GateServiceUnknown" label.
+fn build_trace_gate_service_from_env() -> anyhow::Result<Arc<dyn TraceGateService>> {
+    let raw = std::env::var(TRACE_COMMONS_GATE_SERVICE).unwrap_or_default();
+    let kind = raw.trim();
+    match kind {
+        "" | "in_memory" => Ok(Arc::new(InMemoryGateService::new(
+            "in_memory_default",
+            "sha256:in_memory_default",
+        ))),
+        "enclave_mock" => {
+            let master_key = std::env::var(TRACE_COMMONS_GATE_SERVICE_MASTER_KEY)
+                .with_context(|| {
+                    format!(
+                        "{TRACE_COMMONS_GATE_SERVICE_MASTER_KEY} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_mock\""
+                    )
+                })?;
+            let crypto = SecretsCrypto::new(SecretString::from(master_key))
+                .context("failed to initialize gate-service KEK wrapper")?;
+            let wrapper: Arc<dyn KmsKeyWrapper> = Arc::new(LocalMasterKeyWrapper::new(
+                crypto,
+                "trace-commons-gate-enclave-mock-v1",
+            ));
+            Ok(Arc::new(EnclaveGateService::mock_with_decryptor(wrapper)))
+        }
+        "dstack" => {
+            let endpoint =
+                std::env::var(TRACE_COMMONS_GATE_SERVICE_ENCLAVE_ENDPOINT).unwrap_or_default();
+            let verifier_label =
+                std::env::var(TRACE_COMMONS_GATE_SERVICE_ATTESTATION_VERIFIER_LABEL)
+                    .unwrap_or_default();
+            Ok(Arc::new(DstackGateService::new(endpoint, verifier_label)))
+        }
+        other => {
+            // Hash-only label avoids leaking misconfigured operator-set values.
+            let mut h = Sha256::new();
+            h.update(other.as_bytes());
+            anyhow::bail!("GateServiceUnknown: sha256:{:x}", h.finalize())
+        }
+    }
 }
 
 fn parse_trace_near_credit_outbox_scheduler_config_from_env()
@@ -5291,6 +5381,7 @@ fn app(state: Arc<AppState>) -> Router {
             post(revocation_propagation_worker_handler),
         )
         .route("/v1/workers/vector-index", post(vector_index_handler))
+        .route("/v1/workers/gate/evaluate", post(gate_evaluate_worker_handler))
         .route("/v1/workers/utility-credit", post(utility_credit_handler))
         .route(
             "/v1/workers/utility-attestations",
@@ -8478,6 +8569,28 @@ struct TraceCommonsConfigStatusResponse {
     object_store: Option<TraceCommonsObjectStoreConfigStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     trace_corpus_rls: Option<TraceCommonsRlsConfigStatus>,
+    /// Hash-only / label-only safe projection of the configured
+    /// `TraceGateService`. Mirrors `TraceGateService::safe_status()`.
+    gate_service: TraceCommonsGateServiceConfigStatus,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceCommonsGateServiceConfigStatus {
+    kind: String,
+    gate_policy_version: String,
+    gate_version_hash: String,
+    attestation_verifier_configured: bool,
+}
+
+impl From<GateServiceStatus> for TraceCommonsGateServiceConfigStatus {
+    fn from(status: GateServiceStatus) -> Self {
+        Self {
+            kind: status.kind,
+            gate_policy_version: status.gate_policy_version,
+            gate_version_hash: status.gate_version_hash,
+            attestation_verifier_configured: status.attestation_verifier_configured,
+        }
+    }
 }
 
 fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigStatusResponse {
@@ -8988,6 +9101,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             }
         }),
         trace_corpus_rls: None,
+        gate_service: state.gate_service.safe_status().into(),
     }
 }
 
@@ -38988,6 +39102,151 @@ struct TraceVectorIndexResponse {
     pending_after_count: usize,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceGateEvaluateWorkerRequest {
+    submission_id: Uuid,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceGateEvaluateWorkerResponse {
+    tenant_id: String,
+    submission_id: Uuid,
+    decision_id: Uuid,
+    gate_policy_version: String,
+    gate_version_hash: String,
+    perplexity_passed: bool,
+    novelty_passed: bool,
+}
+
+/// Worker route that scores a single submission through the configured
+/// `TraceGateService` and writes a `trace_gate_decisions` audit row.
+///
+/// Scope: standalone callsite. Not yet wired into the orchestrator —
+/// future deployments will trigger it post-ingest or post-review. The
+/// vector-worker bearer-token gate is reused because the gate evaluation
+/// is the upstream step of the same indexing pipeline.
+async fn gate_evaluate_worker_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TraceGateEvaluateWorkerRequest>,
+) -> ApiResult<Json<TraceGateEvaluateWorkerResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_vector_operator(&tenant)?;
+
+    let db = state.db_mirror.as_ref().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace gate worker requires a configured DB mirror",
+        )
+    })?;
+    let _submission = db
+        .get_trace_submission(&tenant.tenant_id, body.submission_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "trace submission not found"))?;
+
+    let object_ref = db
+        .get_latest_active_trace_object_ref(
+            &tenant.tenant_id,
+            body.submission_id,
+            StorageTraceObjectArtifactKind::SubmittedEnvelope,
+        )
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| {
+            api_error(StatusCode::NOT_FOUND, TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF)
+        })?;
+
+    let artifact_store = state.artifact_store.as_ref().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace gate worker requires a configured artifact store",
+        )
+    })?;
+    if !is_encrypted_trace_object_store(&object_ref.object_store) {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace gate worker requires an encrypted trace object store",
+        ));
+    }
+    if artifact_store.object_store_name() != object_ref.object_store {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            TRACE_OBJECT_REF_STORE_MISMATCH,
+        ));
+    }
+    let receipt = EncryptedTraceArtifactReceipt {
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        artifact_kind: TraceArtifactKind::ContributionEnvelope,
+        object_key: object_ref.object_key.clone(),
+        ciphertext_sha256: object_ref
+            .content_sha256
+            .strip_prefix("sha256:")
+            .unwrap_or(&object_ref.content_sha256)
+            .to_string(),
+        encrypted_at: object_ref.created_at,
+    };
+    let artifact = artifact_store
+        .read_encrypted_artifact(&tenant_storage_ref(&tenant.tenant_id), &receipt)
+        .map_err(internal_error)?;
+    let ciphertext = base64::engine::general_purpose::STANDARD
+        .decode(artifact.ciphertext_base64.as_bytes())
+        .map_err(internal_error)?;
+    let wrapped_dek = artifact.wrapped_dek.clone().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace gate worker requires a v2 KEK-wrapped envelope",
+        )
+    })?;
+
+    let tenant_ctx = GateTenantCtx::new(tenant.tenant_id.clone());
+    let decision = match state.gate_service.evaluate_trace(
+        &tenant_ctx,
+        &ciphertext,
+        &wrapped_dek,
+        TraceArtifactKind::ContributionEnvelope,
+    ) {
+        Ok(decision) => decision,
+        Err(err) => {
+            let msg = format!("{err}");
+            if msg.contains("DstackGateServiceUnavailable") {
+                return Err(api_error(StatusCode::SERVICE_UNAVAILABLE, msg));
+            }
+            return Err(internal_error(err));
+        }
+    };
+
+    let decision_id = Uuid::new_v4();
+    let row = StorageTraceGateDecisionRow {
+        decision_id,
+        submission_id: body.submission_id,
+        gate_policy_version: decision.gate_policy_version.clone(),
+        gate_version_hash: decision.gate_version_hash.clone(),
+        perplexity_micros: i64::try_from(decision.perplexity_micros).unwrap_or(i64::MAX),
+        tail_fraction_micros: i64::try_from(decision.tail_fraction_micros).unwrap_or(i64::MAX),
+        perplexity_passed: decision.perplexity_passed,
+        novelty_score_micros: i64::try_from(decision.novelty_score_micros).unwrap_or(i64::MAX),
+        nearest_neighbor_hash: decision.nearest_neighbor_hash.clone(),
+        novelty_passed: decision.novelty_passed,
+        embedding_evidence_hash: decision.embedding_evidence_hash.clone(),
+        attestation_chain_hash: decision.attestation_chain_hash.clone(),
+        decided_at: Utc::now(),
+    };
+    db.insert_trace_gate_decision(&tenant.tenant_id, row)
+        .await
+        .map_err(internal_error)?;
+
+    Ok(Json(TraceGateEvaluateWorkerResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        submission_id: body.submission_id,
+        decision_id,
+        gate_policy_version: decision.gate_policy_version,
+        gate_version_hash: decision.gate_version_hash,
+        perplexity_passed: decision.perplexity_passed,
+        novelty_passed: decision.novelty_passed,
+    }))
+}
+
 async fn vector_index_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -61092,6 +61351,10 @@ mod tests {
                 DEFAULT_TRACE_RANKING_MIN_PAIRWISE_ACCURACY_MICROS,
             ranking_max_labeler_issue_rate_micros: None,
             ranking_min_labeler_reliability_label_count: None,
+            gate_service: Arc::new(InMemoryGateService::new(
+                "in_memory_default",
+                "sha256:in_memory_default",
+            )),
         })
     }
 
@@ -80530,6 +80793,10 @@ mod tests {
                 DEFAULT_TRACE_RANKING_MIN_PAIRWISE_ACCURACY_MICROS,
             ranking_max_labeler_issue_rate_micros: None,
             ranking_min_labeler_reliability_label_count: None,
+            gate_service: Arc::new(InMemoryGateService::new(
+                "in_memory_default",
+                "sha256:in_memory_default",
+            )),
         });
 
         let mut envelope = sample_envelope().await;
@@ -118811,5 +119078,280 @@ mod tests {
         .expect_err("admin cannot write a policy broader than the existing tenant policy");
         assert_eq!(err.0, StatusCode::FORBIDDEN);
         assert!(err.1.error.contains("policy scope"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Gate-evaluation worker route (POST /v1/workers/gate/evaluate)
+    // -----------------------------------------------------------------------
+
+    /// Build a service-owned-remote artifact store whose backing provider is a
+    /// fresh on-disk directory + a local-master KEK. This is the only
+    /// configured artifact store shape that produces v2 (KEK-wrapped) artifacts
+    /// the gate worker is allowed to read; the file-system provider keeps the
+    /// fixture self-contained without standing up a real remote.
+    fn fixture_gate_worker_artifact_store(
+        artifact_root: &Path,
+    ) -> (ConfiguredTraceArtifactStore, String) {
+        let object_store = TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE.to_string();
+        let key = trace_commons_server::secrets::keychain::generate_master_key_hex();
+        let crypto =
+            SecretsCrypto::new(SecretString::from(key.clone())).expect("fixture crypto");
+        let kek_crypto = SecretsCrypto::new(SecretString::from(key)).expect("fixture kek crypto");
+        let kek = LocalMasterKeyWrapper::new(kek_crypto, "trace-commons-gate-worker-test-v1");
+        let provider_config =
+            TraceArtifactProviderConfig::service_owned_remote(object_store.clone())
+                .expect("provider config");
+        let provider = FileRemoteTraceArtifactProvider::new(artifact_root.to_path_buf());
+        let store = Arc::new(ServiceOwnedTraceArtifactStore::new(
+            provider_config,
+            crypto,
+            kek,
+            provider,
+        ));
+        let configured = ConfiguredTraceArtifactStore::new(object_store.clone(), store);
+        (configured, object_store)
+    }
+
+    /// Seed: insert a submission row, write a v2 KEK-wrapped envelope into the
+    /// configured artifact store, then register an active object ref pointing
+    /// at it. Returns the submission_id for downstream worker calls.
+    async fn seed_gate_worker_fixture(
+        backend: &trace_commons_server::db::postgres::PgBackend,
+        state: &AppState,
+        tenant_id: &str,
+    ) -> Uuid {
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        backend
+            .upsert_trace_submission(StorageTraceSubmissionWrite {
+                tenant_id: tenant_id.to_string(),
+                submission_id,
+                trace_id,
+                auth_principal_ref: principal_storage_ref("gate-worker-token"),
+                contributor_pseudonym: Some("gate-worker-pseudonym".to_string()),
+                submitted_tenant_scope_ref: Some(tenant_storage_ref(tenant_id)),
+                schema_version: "trace_contribution.v1".to_string(),
+                consent_policy_version: "trace-consent-v1".to_string(),
+                consent_scopes: vec!["debugging_evaluation".to_string()],
+                allowed_uses: vec!["evaluation".to_string()],
+                retention_policy_id: "retention-debugging-evaluation-v1".to_string(),
+                status: StorageTraceCorpusStatus::Accepted,
+                privacy_risk: "low".to_string(),
+                redaction_pipeline_version: "test-redactor-v1".to_string(),
+                redaction_counts: BTreeMap::from([("email".to_string(), 0)]),
+                redaction_hash: sha256_prefixed(&format!("{tenant_id}:{submission_id}")),
+                canonical_summary_hash: Some("sha256:gate-worker-fixture".to_string()),
+                submission_score: None,
+                credit_points_pending: None,
+                credit_points_final: None,
+                expires_at: None,
+            })
+            .await
+            .expect("seed submission writes");
+
+        let artifact_store = state
+            .artifact_store
+            .as_ref()
+            .expect("seed requires configured artifact store");
+        let plaintext =
+            serde_json::to_vec(&serde_json::json!({"safe": true})).expect("plaintext serializes");
+        let receipt = artifact_store
+            .store
+            .put_serialized_json(
+                &tenant_storage_ref(tenant_id),
+                TraceArtifactKind::ContributionEnvelope,
+                &submission_id.to_string(),
+                &plaintext,
+            )
+            .expect("v2 artifact write");
+
+        backend
+            .append_trace_object_ref(StorageTraceObjectRefWrite {
+                object_ref_id: Uuid::new_v4(),
+                tenant_id: tenant_id.to_string(),
+                submission_id,
+                artifact_kind: StorageTraceObjectArtifactKind::SubmittedEnvelope,
+                object_store: artifact_store.object_store_name().to_string(),
+                object_key: receipt.object_key.clone(),
+                content_sha256: format!("sha256:{}", receipt.ciphertext_sha256),
+                encryption_key_ref: format!("tenant:{}", tenant_storage_ref(tenant_id)),
+                size_bytes: plaintext.len() as i64,
+                compression: None,
+                created_by_job_id: None,
+            })
+            .await
+            .expect("active object ref writes");
+
+        submission_id
+    }
+
+    #[tokio::test]
+    async fn gate_evaluate_worker_route_writes_in_memory_decision_row() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let (artifact_store, _object_store_name) =
+            fixture_gate_worker_artifact_store(artifact_temp.path());
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            Some(artifact_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+        // InMemoryGateService is already the default for test_state*. Keep an
+        // explicit assignment so the route under test never depends on the
+        // default drifting.
+        Arc::make_mut(&mut state).gate_service = Arc::new(InMemoryGateService::new(
+            "in_memory_default",
+            "sha256:in_memory_default",
+        ));
+
+        let submission_id = seed_gate_worker_fixture(backend.as_ref(), state.as_ref(), "tenant-a").await;
+
+        let Json(response) = gate_evaluate_worker_handler(
+            State(state.clone()),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceGateEvaluateWorkerRequest { submission_id }),
+        )
+        .await
+        .expect("gate evaluate route succeeds with in-memory gate service");
+
+        assert_eq!(response.tenant_id, "tenant-a");
+        assert_eq!(response.submission_id, submission_id);
+        assert_eq!(response.gate_policy_version, "in_memory_default");
+        assert_eq!(response.gate_version_hash, "sha256:in_memory_default");
+        assert!(response.perplexity_passed);
+        assert!(response.novelty_passed);
+
+        // Verify the audit row landed in trace_gate_decisions under tenant-a.
+        let client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("raw pool client");
+        let tenant_a = "tenant-a".to_string();
+        client
+            .execute("SELECT set_config('trace.tenant_id', $1, true)", &[&tenant_a])
+            .await
+            .expect("set tenant context");
+        let rows = client
+            .query(
+                "SELECT submission_id, gate_policy_version, perplexity_passed, novelty_passed
+                 FROM trace_gate_decisions WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_a, &submission_id],
+            )
+            .await
+            .expect("gate decision row reads back");
+        assert_eq!(rows.len(), 1, "exactly one gate decision row written");
+        let stored_submission_id: Uuid = rows[0].get(0);
+        let stored_policy: String = rows[0].get(1);
+        let stored_perplexity_passed: bool = rows[0].get(2);
+        let stored_novelty_passed: bool = rows[0].get(3);
+        assert_eq!(stored_submission_id, submission_id);
+        assert_eq!(stored_policy, "in_memory_default");
+        assert!(stored_perplexity_passed);
+        assert!(stored_novelty_passed);
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn gate_evaluate_worker_route_returns_503_when_dstack_service_is_stubbed() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let (artifact_store, _object_store_name) =
+            fixture_gate_worker_artifact_store(artifact_temp.path());
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            Some(artifact_store),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).gate_service = Arc::new(DstackGateService::new(
+            "https://dstack.invalid.test/gate",
+            "fixture-attestation-verifier",
+        ));
+
+        let submission_id = seed_gate_worker_fixture(backend.as_ref(), state.as_ref(), "tenant-a").await;
+
+        let err = gate_evaluate_worker_handler(
+            State(state.clone()),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceGateEvaluateWorkerRequest { submission_id }),
+        )
+        .await
+        .expect_err("dstack stub must fail closed");
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            err.1.error.contains("DstackGateServiceUnavailable"),
+            "expected DstackGateServiceUnavailable label, got: {}",
+            err.1.error
+        );
+
+        // No row must be written on failure.
+        let client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("raw pool client");
+        let tenant_a = "tenant-a".to_string();
+        client
+            .execute("SELECT set_config('trace.tenant_id', $1, true)", &[&tenant_a])
+            .await
+            .expect("set tenant context");
+        let rows = client
+            .query(
+                "SELECT 1 FROM trace_gate_decisions WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_a, &submission_id],
+            )
+            .await
+            .expect("gate decision rows query");
+        assert!(rows.is_empty(), "no gate decision row written on dstack failure");
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn gate_evaluate_worker_route_rejects_non_vector_worker_tokens() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+
+        let err = gate_evaluate_worker_handler(
+            State(state),
+            auth_headers("review-token-a"),
+            Json(TraceGateEvaluateWorkerRequest {
+                submission_id: Uuid::new_v4(),
+            }),
+        )
+        .await
+        .expect_err("reviewer token must not reach gate evaluate worker");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
     }
 }
