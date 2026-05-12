@@ -17,6 +17,8 @@ pub mod orchestrator;
 pub mod perplexity;
 pub mod perplexity_candle;
 pub mod vector_index;
+#[cfg(feature = "local-gpu-models")]
+pub mod vector_index_usearch;
 
 pub use embedder::{Embedder, MockEmbedder};
 pub use orchestrator::{
@@ -24,3 +26,5 @@ pub use orchestrator::{
 };
 pub use perplexity::{MockPerplexityScorer, PerplexityResult, PerplexityScorer};
 pub use vector_index::{MockVectorIndex, NearestNeighbor, VectorIndex};
+#[cfg(feature = "local-gpu-models")]
+pub use vector_index_usearch::UsearchVectorIndex;

@@ -223,6 +223,38 @@ const TRACE_COMMONS_EMBEDDER_DEFAULT_MODEL_ID: &str = "BAAI/bge-large-en-v1.5";
 const TRACE_COMMONS_EMBEDDER_DEFAULT_CACHE_DIR: &str = "/var/cache/tracedao-embedder";
 #[allow(dead_code)]
 const TRACE_COMMONS_EMBEDDER_DEFAULT_MAX_TOKENS: usize = 512;
+// usearch-backed vector index (Phase A4). Read only when
+// `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu` AND the `local-gpu-models`
+// feature is compiled in.
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_ROOT: &str = "TRACE_COMMONS_VECTOR_INDEX_ROOT";
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_DIM: &str = "TRACE_COMMONS_VECTOR_INDEX_DIM";
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN: &str = "TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN";
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY: &str = "TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY";
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_HNSW_M: &str = "TRACE_COMMONS_VECTOR_INDEX_HNSW_M";
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION: &str =
+    "TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION";
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH: &str = "TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH";
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_ROOT: &str = "/var/lib/tracedao-vector-index";
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_DIM: usize = 1024;
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_MAX_OPEN: usize = 32;
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_FLUSH_EVERY: usize = 32;
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_HNSW_M: usize = 16;
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_CONSTRUCTION: usize = 200;
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_SEARCH: usize = 50;
 const TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF: &str =
     "trace gate worker requires an active contribution envelope object ref";
 const TRACE_COMMONS_KEK_PROVIDER: &str = "TRACE_COMMONS_KEK_PROVIDER";
@@ -4124,9 +4156,8 @@ async fn build_enclave_local_gpu_gate_service_from_env(
     use tracedao_gate_enclave::perplexity_candle::{
         CandleDeviceKind, CandlePerplexityScorer,
     };
-    use tracedao_gate_enclave::{
-        EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig, MockVectorIndex,
-    };
+    use tracedao_gate_enclave::vector_index_usearch::UsearchVectorIndex;
+    use tracedao_gate_enclave::{EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig};
 
     let master_key = std::env::var(TRACE_COMMONS_GATE_SERVICE_MASTER_KEY).with_context(|| {
         format!(
@@ -4182,8 +4213,7 @@ async fn build_enclave_local_gpu_gate_service_from_env(
 
     // fastembed-rs embedder (Phase A3). Loads the configured sentence
     // embedder once at startup; same H100 hosts both this and the candle
-    // perplexity scorer. Runtime correctness of inference is
-    // hardware-dependent and must be validated on first deploy.
+    // perplexity scorer.
     let embedder_model_id = std::env::var(TRACE_COMMONS_EMBEDDER_MODEL_ID)
         .unwrap_or_else(|_| TRACE_COMMONS_EMBEDDER_DEFAULT_MODEL_ID.to_string());
     let embedder_cache_dir = std::env::var(TRACE_COMMONS_EMBEDDER_CACHE_DIR)
@@ -4228,14 +4258,75 @@ async fn build_enclave_local_gpu_gate_service_from_env(
     .await
     .context("FastEmbedTextEmbedderInitFailed")?;
 
+    // usearch-backed vector index (Phase A4). Disk-backed, per-tenant.
+    let vector_index_root = std::env::var(TRACE_COMMONS_VECTOR_INDEX_ROOT)
+        .unwrap_or_else(|_| TRACE_COMMONS_VECTOR_INDEX_DEFAULT_ROOT.to_string());
+    let vector_index_dim = parse_usize_env(
+        TRACE_COMMONS_VECTOR_INDEX_DIM,
+        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_DIM,
+    )?;
+    let vector_index_max_open = parse_usize_env(
+        TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN,
+        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_MAX_OPEN,
+    )?;
+    let vector_index_flush_every = parse_usize_env(
+        TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY,
+        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_FLUSH_EVERY,
+    )?;
+    let vector_index_hnsw_m = parse_usize_env(
+        TRACE_COMMONS_VECTOR_INDEX_HNSW_M,
+        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_HNSW_M,
+    )?;
+    let vector_index_ef_construction = parse_usize_env(
+        TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION,
+        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_CONSTRUCTION,
+    )?;
+    let vector_index_ef_search = parse_usize_env(
+        TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH,
+        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_SEARCH,
+    )?;
+    let vector_index = UsearchVectorIndex::try_new(
+        &vector_index_root,
+        vector_index_dim,
+        vector_index_hnsw_m,
+        vector_index_ef_construction,
+        vector_index_ef_search,
+        vector_index_max_open,
+        vector_index_flush_every,
+    )
+    .with_context(|| {
+        format!(
+            "failed to initialize UsearchVectorIndex (root={vector_index_root}, dim={vector_index_dim})"
+        )
+    })?;
+
     let cfg = EnclaveGateOrchestratorConfig::mock_default();
     let orchestrator =
-        EnclaveGateOrchestrator::new(scorer, embedder, MockVectorIndex::new(), cfg);
+        EnclaveGateOrchestrator::new(scorer, embedder, vector_index, cfg);
     Ok(Arc::new(EnclaveGateService::new(
         orchestrator,
         wrapper,
         "enclave_local_gpu",
     )))
+}
+
+/// Parse `T = usize` from an env var with a default fallback. Trim + strict
+/// integer parse; empty / unset → default; malformed → fail-closed.
+#[cfg(feature = "local-gpu-models")]
+fn parse_usize_env(var: &'static str, default: usize) -> anyhow::Result<usize> {
+    match std::env::var(var) {
+        Ok(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                Ok(default)
+            } else {
+                trimmed
+                    .parse::<usize>()
+                    .with_context(|| format!("{var} must be a non-negative integer"))
+            }
+        }
+        Err(_) => Ok(default),
+    }
 }
 
 fn parse_trace_near_credit_outbox_scheduler_config_from_env()
