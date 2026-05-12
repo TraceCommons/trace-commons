@@ -29,7 +29,7 @@ use tracedao_server::trace_corpus_storage::{
     TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus, TraceTenantAccessGrantWrite,
     TraceTenantPolicyWrite, TraceTombstoneWrite, TraceUtilityAttestationWrite,
     TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-    TraceWorkerKind,
+    TraceGateDecisionRow, TraceWorkerKind,
 };
 use uuid::Uuid;
 
@@ -3292,6 +3292,72 @@ async fn pg_store_list_due_trace_revocation_propagation_items_filters_by_next_at
     assert!(due_ids.contains(&no_schedule_id));
     assert!(!due_ids.contains(&future_id));
 
+    cleanup_tenant(&backend, &tenant_alpha).await;
+    cleanup_tenant(&backend, &tenant_beta).await;
+}
+
+fn sample_gate_decision(submission_id: Uuid) -> TraceGateDecisionRow {
+    TraceGateDecisionRow {
+        decision_id: Uuid::new_v4(),
+        submission_id,
+        gate_policy_version: "enclave_mock_v1".to_string(),
+        gate_version_hash: "sha256:enclave_mock_v1".to_string(),
+        perplexity_micros: 1_500_000,
+        tail_fraction_micros: 750_000,
+        perplexity_passed: true,
+        novelty_score_micros: 900_000,
+        nearest_neighbor_hash: "sha256:fixture-neighbor".to_string(),
+        novelty_passed: true,
+        embedding_evidence_hash: "sha256:fixture-evidence".to_string(),
+        attestation_chain_hash: "sha256:fixture-attestation".to_string(),
+        decided_at: Utc::now(),
+    }
+}
+
+#[tokio::test]
+async fn pg_store_inserts_trace_gate_decision_under_tenant_scope() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_alpha = format!("pg-gate-alpha-{}", Uuid::new_v4());
+    let tenant_beta = format!("pg-gate-beta-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+
+    for tenant_id in [&tenant_alpha, &tenant_beta] {
+        backend
+            .upsert_trace_submission(sample_submission(tenant_id, submission_id))
+            .await
+            .expect("insert scoped submission");
+    }
+
+    let decision = sample_gate_decision(submission_id);
+    let decision_id = decision.decision_id;
+    backend
+        .insert_trace_gate_decision(&tenant_alpha, decision.clone())
+        .await
+        .expect("insert alpha gate decision");
+
+    // A second insert with the same decision_id under the same tenant must
+    // hit the (tenant_id, decision_id) PK and fail.
+    let dup_err = backend
+        .insert_trace_gate_decision(&tenant_alpha, decision.clone())
+        .await
+        .expect_err("duplicate gate decision_id must violate PK");
+    assert!(
+        matches!(dup_err, DatabaseError::Postgres(_)),
+        "expected Postgres error on duplicate, got {dup_err:?}"
+    );
+
+    // The same decision_id under a DIFFERENT tenant is a distinct PK and
+    // must succeed.
+    backend
+        .insert_trace_gate_decision(&tenant_beta, decision)
+        .await
+        .expect("same decision_id under different tenant must succeed");
+
+    let _ = decision_id;
     cleanup_tenant(&backend, &tenant_alpha).await;
     cleanup_tenant(&backend, &tenant_beta).await;
 }

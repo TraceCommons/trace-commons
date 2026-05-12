@@ -13,6 +13,7 @@ use crate::db::trace_corpus_common::{
 use crate::error::DatabaseError;
 use crate::trace_corpus_storage::{
     TenantScopedTraceObjectRef, TraceArtifactInvalidationCounts, TraceAuditEventRecord,
+    TraceGateDecisionRow,
     TraceAuditEventWrite, TraceAuditSafeMetadata, TraceBenchmarkRegistryOutboxItemRecord,
     TraceBenchmarkRegistryOutboxItemWrite, TraceBenchmarkRegistryOutboxStatus, TraceCorpusStatus,
     TraceCorpusStore, TraceCreditEventRecord, TraceCreditEventType, TraceCreditEventWrite,
@@ -5142,5 +5143,43 @@ impl TraceCorpusStore for PgBackend {
             .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(deleted)
+    }
+
+    async fn insert_trace_gate_decision(
+        &self,
+        tenant_id: &str,
+        decision: TraceGateDecisionRow,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "INSERT INTO trace_gate_decisions (
+                 tenant_id, decision_id, submission_id, gate_policy_version,
+                 gate_version_hash, perplexity_micros, tail_fraction_micros,
+                 perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
+                 novelty_passed, embedding_evidence_hash, attestation_chain_hash,
+                 decided_at
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+            &[
+                &tenant_id,
+                &decision.decision_id,
+                &decision.submission_id,
+                &decision.gate_policy_version,
+                &decision.gate_version_hash,
+                &decision.perplexity_micros,
+                &decision.tail_fraction_micros,
+                &decision.perplexity_passed,
+                &decision.novelty_score_micros,
+                &decision.nearest_neighbor_hash,
+                &decision.novelty_passed,
+                &decision.embedding_evidence_hash,
+                &decision.attestation_chain_hash,
+                &decision.decided_at,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
     }
 }
