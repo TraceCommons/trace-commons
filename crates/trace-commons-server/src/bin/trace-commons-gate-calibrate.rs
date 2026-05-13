@@ -103,11 +103,27 @@ enum HardwareTier {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    init_tracing();
     let cli = Cli::parse();
     match cli.cmd.unwrap_or(Cmd::Calibrate) {
         Cmd::Calibrate => run_calibrate().await,
         Cmd::BakeOff(args) => run_bakeoff(args).await,
     }
+}
+
+/// Install a default tracing subscriber so the bake-off's `tracing::info!`
+/// markers are visible without the operator having to set `RUST_LOG`. The
+/// default is `info` for the bake-off modules; `RUST_LOG`, if set, fully
+/// overrides. `try_init` is used so a parent process that already installed
+/// a subscriber (e.g. an integration test harness) wins.
+fn init_tracing() {
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| {
+        "info,trace_commons_gate_calibrate=info,trace_commons_server=info".into()
+    });
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .try_init();
 }
 
 // ---------------------------------------------------------------------------
@@ -384,55 +400,127 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
         );
     }
 
+    // Reject the real-scorer path up front when the build feature is off,
+    // so we don't half-execute and write a misleading partial report.
+    #[cfg(not(feature = "local-gpu-models"))]
+    if !args.mock_scorer {
+        anyhow::bail!(
+            "BakeoffRealScorerRequiresFeature: rebuild with \
+             --features local-gpu-models, or pass --mock-scorer for \
+             dry runs"
+        );
+    }
+
     let device_kind: run_candidate_eval::DeviceKind = args.hardware.into();
+    let total = manifest.candidates.len();
+    tracing::info!(
+        candidate_count = total,
+        corpus_sha256 = %corpus_sha,
+        manifest_sha256 = %manifest_sha,
+        hardware = ?args.hardware,
+        mock_scorer = args.mock_scorer,
+        "bakeoff_start"
+    );
+
     let mut results: Vec<bakeoff_report::CandidateResult> = Vec::new();
-    if args.mock_scorer {
-        let scorer = trace_commons_gate_enclave::perplexity::MockPerplexityScorer::new();
-        for c in &manifest.candidates {
-            if skip.contains(&c.id) {
-                tracing::info!(candidate_id = %c.id, "bakeoff_skip_candidate");
-                continue;
-            }
-            tracing::info!(candidate_id = %c.id, "bakeoff_load_candidate");
-            let result = run_candidate_eval::run_candidate_eval(
-                &scorer,
-                c,
-                &corpus,
-                args.determinism_repeat_runs,
-                device_kind,
-            )
-            .await?;
-            results.push(result);
+
+    // Helper: persist an incremental partial-report snapshot after each
+    // candidate completes (success or failure). Keeps `winner_id = None`
+    // and `partial = true` until the final write at end of run.
+    let snapshot = |results: &[bakeoff_report::CandidateResult]| -> bakeoff_report::Report {
+        bakeoff_report::Report {
+            generated_at: chrono::Utc::now().to_rfc3339(),
+            corpus_sha256: corpus_sha.clone(),
+            manifest_sha256: manifest_sha.clone(),
+            candidates: results.to_vec(),
+            winner_id: None,
+            decision_rule_version: 1,
+            mock_scorer: args.mock_scorer,
+            ctx_max_tokens: 4096,
+            determinism_gate_value: bakeoff_report::DETERMINISM_GATE,
+            partial: true,
         }
+    };
+
+    // Shared mock scorer for the --mock-scorer path; built lazily so the
+    // real-scorer arm doesn't pay for it.
+    let mock_scorer = if args.mock_scorer {
+        Some(trace_commons_gate_enclave::perplexity::MockPerplexityScorer::new())
     } else {
-        #[cfg(feature = "local-gpu-models")]
-        {
-            use anyhow::Context as _;
-            use trace_commons_gate_enclave::perplexity_candle::{
-                CandleDeviceKind, CandlePerplexityScorer,
-            };
-            // Map the operator-facing HardwareTier to candle's device enum.
-            // A10 / H100 both route to CUDA device 0 — the bake-off loads
-            // one candidate at a time, so multi-GPU sharding is out of
-            // scope. The Cpu arm is unreachable here because the
-            // BakeoffCpuRequiresMockScorer guard above already bailed.
-            let candle_device = match args.hardware {
-                HardwareTier::A10 | HardwareTier::H100 => CandleDeviceKind::Cuda(0),
-                HardwareTier::Cpu => unreachable!(
-                    "BakeoffCpuRequiresMockScorer guard should have refused this path"
-                ),
-            };
-            // The tail-logprob cutoff matches the established calibrate
-            // default; see TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF.
-            const TAIL_LOGPROB_CUTOFF: f32 = -8.0;
-            for c in &manifest.candidates {
-                if skip.contains(&c.id) {
-                    tracing::info!(candidate_id = %c.id, "bakeoff_skip_candidate");
-                    continue;
+        None
+    };
+
+    for (i, c) in manifest.candidates.iter().enumerate() {
+        if skip.contains(&c.id) {
+            tracing::info!(candidate_id = %c.id, "bakeoff_skip_candidate");
+            continue;
+        }
+
+        tracing::info!(
+            candidate_id = %c.id,
+            candidate_index = i,
+            total,
+            "bakeoff_candidate_load_start"
+        );
+        let load_start = std::time::Instant::now();
+
+        // Each candidate's load + eval runs inside a closure-y block that
+        // returns Result<CandidateResult, (error_class, anyhow::Error)>.
+        // A failure here turns into a placeholder row + a tracing::warn,
+        // not a propagated `?`. The point of this whole change is to keep
+        // already-scored candidates in the report when a later one falls
+        // over during load.
+        let result: Result<bakeoff_report::CandidateResult, (&'static str, anyhow::Error)> = 'eval: {
+            if let Some(scorer) = mock_scorer.as_ref() {
+                tracing::info!(
+                    candidate_id = %c.id,
+                    load_elapsed_seconds = load_start.elapsed().as_secs_f64(),
+                    "bakeoff_candidate_load_done"
+                );
+                let score_start = std::time::Instant::now();
+                match run_candidate_eval::run_candidate_eval(
+                    scorer,
+                    c,
+                    &corpus,
+                    args.determinism_repeat_runs,
+                    device_kind,
+                )
+                .await
+                {
+                    Ok(r) => {
+                        tracing::info!(
+                            candidate_id = %c.id,
+                            score_elapsed_seconds = score_start.elapsed().as_secs_f64(),
+                            auc = r.discrimination_auc,
+                            throughput_tps = r.throughput_tps,
+                            "bakeoff_candidate_done"
+                        );
+                        break 'eval Ok(r);
+                    }
+                    Err(e) => break 'eval Err(("RunCandidateEvalFailed", e)),
                 }
-                tracing::info!(candidate_id = %c.id, "bakeoff_load_candidate");
+            }
+
+            #[cfg(feature = "local-gpu-models")]
+            {
+                use trace_commons_gate_enclave::perplexity_candle::{
+                    CandleDeviceKind, CandlePerplexityScorer,
+                };
+                // Map operator-facing HardwareTier to candle's device enum.
+                // A10 / H100 both route to CUDA device 0; the Cpu arm is
+                // unreachable because the BakeoffCpuRequiresMockScorer
+                // guard above bailed.
+                let candle_device = match args.hardware {
+                    HardwareTier::A10 | HardwareTier::H100 => CandleDeviceKind::Cuda(0),
+                    HardwareTier::Cpu => unreachable!(
+                        "BakeoffCpuRequiresMockScorer guard should have refused this path"
+                    ),
+                };
+                // Matches TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF
+                // from the calibrate path.
+                const TAIL_LOGPROB_CUTOFF: f32 = -8.0;
                 let max_tokens = run_candidate_eval::ctx_for(&c.arch);
-                let scorer = CandlePerplexityScorer::try_new(
+                let scorer = match CandlePerplexityScorer::try_new(
                     c.id.clone(),
                     c.path.clone(),
                     candle_device,
@@ -440,30 +528,92 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
                     max_tokens,
                 )
                 .await
-                .with_context(|| {
-                    format!("CandlePerplexityScorerLoadFailed candidate_id={}", c.id)
-                })?;
-                let result = run_candidate_eval::run_candidate_eval(
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        break 'eval Err(("CandlePerplexityScorerLoadFailed", e));
+                    }
+                };
+                tracing::info!(
+                    candidate_id = %c.id,
+                    load_elapsed_seconds = load_start.elapsed().as_secs_f64(),
+                    "bakeoff_candidate_load_done"
+                );
+                let score_start = std::time::Instant::now();
+                match run_candidate_eval::run_candidate_eval(
                     &scorer,
                     c,
                     &corpus,
                     args.determinism_repeat_runs,
                     device_kind,
                 )
-                .await?;
-                results.push(result);
+                .await
+                {
+                    Ok(r) => {
+                        tracing::info!(
+                            candidate_id = %c.id,
+                            score_elapsed_seconds = score_start.elapsed().as_secs_f64(),
+                            auc = r.discrimination_auc,
+                            throughput_tps = r.throughput_tps,
+                            "bakeoff_candidate_done"
+                        );
+                        break 'eval Ok(r);
+                    }
+                    Err(e) => break 'eval Err(("RunCandidateEvalFailed", e)),
+                }
             }
-        }
-        #[cfg(not(feature = "local-gpu-models"))]
-        {
-            anyhow::bail!(
-                "BakeoffRealScorerRequiresFeature: rebuild with \
-                 --features local-gpu-models, or pass --mock-scorer for \
-                 dry runs"
+
+            // No feature, no mock scorer: the early-return at top of
+            // run_bakeoff already bailed; reaching here is impossible but
+            // the compiler can't prove it for the `local-gpu-models = off`
+            // build, so synthesize a fail-closed branch.
+            #[cfg(not(feature = "local-gpu-models"))]
+            {
+                break 'eval Err((
+                    "BakeoffRealScorerRequiresFeature",
+                    anyhow::anyhow!("real scorer path reached without local-gpu-models feature"),
+                ));
+            }
+        };
+
+        let candidate_result = match result {
+            Ok(r) => r,
+            Err((class, e)) => {
+                tracing::warn!(
+                    candidate_id = %c.id,
+                    err = %hash_err(&e),
+                    error_class = class,
+                    "bakeoff_candidate_failed"
+                );
+                bakeoff_report::CandidateResult::failed(
+                    c.id.clone(),
+                    run_candidate_eval::map_license(&c.license),
+                    c.params_b.unwrap_or(0),
+                    c.release_date_unix.unwrap_or(0),
+                    class,
+                )
+            }
+        };
+
+        results.push(candidate_result);
+
+        // Incremental snapshot after every candidate (success or failure).
+        // Atomic-rename so a process kill mid-write cannot leave a half-
+        // written report.json on disk.
+        let partial_report = snapshot(&results);
+        if let Err(e) = bakeoff_report::write_report_atomic(&partial_report, &args.report_out) {
+            tracing::warn!(
+                err = %hash_err(&e),
+                error_class = "BakeoffIncrementalWriteFailed",
+                "incremental report write failed; continuing"
             );
         }
     }
 
+    // Final write: compute winner and flip partial=false. `pick_winner`
+    // already excludes any candidate with `passed_determinism_gate = false`,
+    // which covers every failed-load row (they're constructed with that
+    // flag false), so failed candidates never win.
     let winner_id = bakeoff_report::pick_winner(&results).map(|w| w.id.clone());
     let report = bakeoff_report::Report {
         generated_at: chrono::Utc::now().to_rfc3339(),
@@ -475,11 +625,25 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
         mock_scorer: args.mock_scorer,
         ctx_max_tokens: 4096,
         determinism_gate_value: bakeoff_report::DETERMINISM_GATE,
+        partial: false,
     };
 
-    bakeoff_report::write_report(&report, &args.report_out)?;
-    tracing::info!(winner = ?report.winner_id, "bakeoff_complete");
+    bakeoff_report::write_report_atomic(&report, &args.report_out)?;
+    tracing::info!(
+        winner_id = ?report.winner_id,
+        written_to = %args.report_out.display(),
+        "bakeoff_complete"
+    );
     Ok(())
+}
+
+/// Stable hash of an `anyhow::Error` so warn lines don't carry raw error
+/// text that might include operator-secret material (file paths, etc).
+fn hash_err(e: &anyhow::Error) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(format!("{e:?}").as_bytes());
+    format!("sha256:{:x}", h.finalize())
 }
 
 /// Streaming sha256 of a file. 64 KiB read buffer; output is the canonical

@@ -3,7 +3,7 @@
 // This module is intentionally committed before the bake-off runs: the winner
 // must be chosen by formula rather than by inspection, and reviewers need to
 // audit the rule independently of the numbers it will eventually see. Keep
-// behavior strictly pure — no I/O outside `write_report`.
+// behavior strictly pure — no I/O outside `write_report_atomic`.
 
 use std::cmp::Ordering;
 use std::path::Path;
@@ -66,6 +66,45 @@ pub struct CandidateResult {
     /// Release date of the underlying model weights, unix seconds.
     /// Sourced from the manifest. Third tiebreaker (newer wins).
     pub release_date_unix: i64,
+    /// Class name of the error that aborted load / eval, if any. Hash-only
+    /// / label-only by construction — never carries raw error message text,
+    /// because real candle errors can include filesystem paths or other
+    /// operator-secret material. Failed candidates appear in the report with
+    /// zeroed numeric fields and `passed_determinism_gate = false`, which
+    /// already disqualifies them from `pick_winner`; this field exists so
+    /// the operator can see *which* candidates fell over without having to
+    /// re-derive it from the logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_or_eval_error: Option<String>,
+}
+
+impl CandidateResult {
+    /// Construct a placeholder result for a candidate that failed to load
+    /// or evaluate. All numeric fields zero and `passed_determinism_gate =
+    /// false`, so the row never wins. `error_class` is a stable label such
+    /// as `"CandlePerplexityScorerLoadFailed"` — never raw error text.
+    pub fn failed(
+        id: String,
+        license: License,
+        params_b: u32,
+        release_date_unix: i64,
+        error_class: &str,
+    ) -> Self {
+        Self {
+            id,
+            discrimination_auc: 0.0,
+            paraphrase_delta: 0.0,
+            tail_fraction_range: 0.0,
+            determinism_stddev: 0.0,
+            throughput_tps: 0.0,
+            peak_vram_mib: 0,
+            license,
+            params_b,
+            passed_determinism_gate: false,
+            release_date_unix,
+            load_or_eval_error: Some(error_class.to_string()),
+        }
+    }
 }
 
 /// Weighted score per the spec:
@@ -160,6 +199,14 @@ pub struct Report {
     pub mock_scorer: bool,
     pub ctx_max_tokens: u32,
     pub determinism_gate_value: f64,
+    /// Mid-run incremental snapshot marker. `true` when the report was
+    /// written between candidates while the loop was still running (no
+    /// `winner_id` is computed yet). The final write at the end of the loop
+    /// flips this to `false`. Consumers can use it to tell "this is the
+    /// authoritative report" from "this is a partial mid-run dump that may
+    /// not have a winner yet."
+    #[serde(default)]
+    pub partial: bool,
 }
 
 /// Render the report as a markdown document. The output is intentionally
@@ -203,6 +250,23 @@ pub fn render_markdown(report: &Report) -> String {
             c.passed_determinism_gate,
         ));
     }
+
+    let failed: Vec<&CandidateResult> = report
+        .candidates
+        .iter()
+        .filter(|c| c.load_or_eval_error.is_some())
+        .collect();
+    if !failed.is_empty() {
+        out.push_str("\n## Failed candidates\n\n");
+        out.push_str("| candidate | error_class |\n");
+        out.push_str("| --- | --- |\n");
+        for c in failed {
+            // load_or_eval_error is Some by construction (filter above);
+            // unwrap_or for paranoia.
+            let cls = c.load_or_eval_error.as_deref().unwrap_or("Unknown");
+            out.push_str(&format!("| {} | {} |\n", c.id, cls));
+        }
+    }
     out
 }
 
@@ -211,13 +275,34 @@ pub fn render_markdown(report: &Report) -> String {
 /// failures to write the companion file are propagated so partial state is
 /// visible. SHA companion is intentionally deferred — not on the critical
 /// path for this slice.
-pub fn write_report(report: &Report, json_out: &Path) -> anyhow::Result<()> {
-    let json = serde_json::to_vec_pretty(report)?;
-    std::fs::write(json_out, &json)?;
-    if json_out.extension().and_then(|s| s.to_str()) == Some("json") {
-        let md_path = json_out.with_extension("md");
+/// Atomic-rename report writer used by the bake-off loop. Writes JSON to
+/// `<dest>.tmp`, fsyncs, then renames over `dest`, so a process kill mid-
+/// write cannot leave a half-written `report.json` on disk. The markdown
+/// companion is written non-atomically (best-effort) because consumers grep
+/// the JSON file for "is the run still going" — the markdown is for humans
+/// and a transient half-write is acceptable.
+pub fn write_report_atomic(report: &Report, dest: &Path) -> anyhow::Result<()> {
+    use std::io::Write;
+    let tmp = dest.with_extension("json.tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        let json = serde_json::to_vec_pretty(report)?;
+        f.write_all(&json)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, dest)?;
+    if dest.extension().and_then(|s| s.to_str()) == Some("json") {
+        let md_path = dest.with_extension("md");
         let md = render_markdown(report);
-        std::fs::write(md_path, md)?;
+        // Best-effort: a markdown write failure mid-loop should not abort
+        // the next candidate. Surface as a warn.
+        if let Err(e) = std::fs::write(&md_path, md) {
+            tracing::warn!(
+                error_class = "BakeoffMarkdownWriteFailed",
+                err = %e,
+                "incremental markdown write failed; continuing"
+            );
+        }
     }
     Ok(())
 }

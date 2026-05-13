@@ -100,7 +100,7 @@ pub fn peak_vram_mib(device: DeviceKind) -> anyhow::Result<u64> {
 /// Map manifest license enum to report license enum. Distinct types because
 /// the manifest is `serde(rename_all="...")` deserialize-only and the report
 /// is the public JSON-stable shape.
-fn map_license(lic: &CandidateLicense) -> License {
+pub fn map_license(lic: &CandidateLicense) -> License {
     match lic {
         CandidateLicense::Apache2 => License::Apache2,
         CandidateLicense::Mit => License::Mit,
@@ -181,7 +181,10 @@ pub async fn run_candidate_eval(
     tracing::info!(
         candidate_id = %candidate.id,
         ctx_max_tokens = ctx_for(&candidate.arch),
-        "run_candidate_eval start"
+        novel_count = corpus.novel.len(),
+        duplicate_count = corpus.duplicate.len(),
+        paraphrase_count = corpus.paraphrase.len(),
+        "candidate_eval_start"
     );
 
     // ---- 1. Score every slice; collect per-entry triples. ---------------
@@ -197,6 +200,9 @@ pub async fn run_candidate_eval(
 
     let start = Instant::now();
 
+    let novel_slice_start = Instant::now();
+    let novel_scored_before = novel_perp.len();
+    let novel_failures_before = failures;
     for (i, text) in corpus.novel.iter().enumerate() {
         attempts += 1;
         match score_one(scorer, text) {
@@ -217,6 +223,18 @@ pub async fn run_candidate_eval(
             }
         }
     }
+    tracing::info!(
+        candidate_id = %candidate.id,
+        slice = "novel",
+        scored = novel_perp.len() - novel_scored_before,
+        failed = failures - novel_failures_before,
+        elapsed_seconds = novel_slice_start.elapsed().as_secs_f64(),
+        "candidate_slice_done"
+    );
+
+    let duplicate_slice_start = Instant::now();
+    let dup_scored_before = dup_perp.len();
+    let dup_failures_before = failures;
     for (i, text) in corpus.duplicate.iter().enumerate() {
         attempts += 1;
         match score_one(scorer, text) {
@@ -237,6 +255,18 @@ pub async fn run_candidate_eval(
             }
         }
     }
+    tracing::info!(
+        candidate_id = %candidate.id,
+        slice = "duplicate",
+        scored = dup_perp.len() - dup_scored_before,
+        failed = failures - dup_failures_before,
+        elapsed_seconds = duplicate_slice_start.elapsed().as_secs_f64(),
+        "candidate_slice_done"
+    );
+
+    let paraphrase_slice_start = Instant::now();
+    let para_scored_before = para_pairs.len();
+    let para_failures_before = failures;
     for (i, pair) in corpus.paraphrase.iter().enumerate() {
         attempts += 2;
         let orig = score_one(scorer, &pair.original);
@@ -274,6 +304,15 @@ pub async fn run_candidate_eval(
         }
     }
 
+    tracing::info!(
+        candidate_id = %candidate.id,
+        slice = "paraphrase",
+        scored = para_pairs.len() - para_scored_before,
+        failed = failures - para_failures_before,
+        elapsed_seconds = paraphrase_slice_start.elapsed().as_secs_f64(),
+        "candidate_slice_done"
+    );
+
     let elapsed = start.elapsed();
     let elapsed_seconds = elapsed.as_secs_f64().max(1e-9); // avoid /0 in synthetic tests
     let tokens_per_second = total_tokens as f64 / elapsed_seconds;
@@ -297,6 +336,12 @@ pub async fn run_candidate_eval(
 
     // ---- 3. Determinism replay. -----------------------------------------
     let sample_n = DETERMINISM_SAMPLE_SIZE.min(corpus.novel.len());
+    tracing::info!(
+        candidate_id = %candidate.id,
+        entries = sample_n,
+        repeat_runs,
+        "determinism_replay_start"
+    );
     let mut runs: Vec<Vec<f64>> = Vec::with_capacity(repeat_runs as usize);
     for _ in 0..repeat_runs {
         let mut row: Vec<f64> = Vec::with_capacity(sample_n);
@@ -317,6 +362,12 @@ pub async fn run_candidate_eval(
     }
     let det_stddev = determinism_stddev(&runs);
     let passed_det_gate = det_stddev < DETERMINISM_GATE;
+    tracing::info!(
+        candidate_id = %candidate.id,
+        stddev = det_stddev,
+        passed = passed_det_gate,
+        "determinism_replay_done"
+    );
 
     // ---- 4. VRAM. -------------------------------------------------------
     let peak_vram = peak_vram_mib(device_kind)?;
@@ -367,6 +418,7 @@ pub async fn run_candidate_eval(
         params_b,
         passed_determinism_gate: passed_det_gate,
         release_date_unix,
+        load_or_eval_error: None,
     })
 }
 
