@@ -1,0 +1,38 @@
+{
+  "generated_at": "2026-05-13T16:27:11.402543847+00:00",
+  "corpus_sha256": "sha256:8acb0be339b2da278986c389700884b23a92dafc85e41c6549d963b550938660",
+  "manifest_sha256": "sha256:6870f59aec03472180ae86c569933bade4a7b1abe9105d4dfd5587921e0814bf",
+  "candidates": [
+    {
+      "id": "llama-3.1-8b-instruct",
+      "discrimination_auc": 0.10545555555555555,
+      "paraphrase_delta": 0.1317868975112849,
+      "tail_fraction_range": 0.11369750000000002,
+      "determinism_stddev": 1.1102230246251565e-16,
+      "throughput_tps": 99.82567833016232,
+      "peak_vram_mib": 16623,
+      "license": "llama-community",
+      "params_b": 8,
+      "passed_determinism_gate": true,
+      "release_date_unix": 1721692800
+    },
+    {
+      "id": "qwen3-8b-base",
+      "discrimination_auc": 0.7199555555555556,
+      "paraphrase_delta": 0.19655053959755558,
+      "tail_fraction_range": 0.11131749999999996,
+      "determinism_stddev": 4.831690603168681e-13,
+      "throughput_tps": 93.25323964389212,
+      "peak_vram_mib": 16911,
+      "license": "Apache-2.0",
+      "params_b": 8,
+      "passed_determinism_gate": true,
+      "release_date_unix": 1745884800
+    }
+  ],
+  "winner_id": "qwen3-8b-base",
+  "decision_rule_version": 1,
+  "mock_scorer": false,
+  "ctx_max_tokens": 4096,
+  "determinism_gate_value": 0.00001
+}
