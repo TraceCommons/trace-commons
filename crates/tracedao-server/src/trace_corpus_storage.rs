@@ -1291,6 +1291,27 @@ pub enum TraceAuditSafeMetadata {
         conflict_key_hash: String,
         reason_hash: String,
     },
+    /// Phase A6: a revocation-propagation worker attempt failed. Hash-only:
+    /// the `propagation_item_id` and `source_submission_id` are server-issued
+    /// UUIDs (no tenant policy state), `error_class` is a stable label
+    /// (e.g. `"VectorInvalidationFailed"`), `error_hash` is the SHA-256 hex of
+    /// the raw error text, and `attempt_count` is the attempt that just
+    /// failed. `is_terminal` is true when `attempt_count` has reached the
+    /// configured retry cap (`TRACE_COMMONS_REVOCATION_PROPAGATION_MAX_ATTEMPTS`)
+    /// and the item will not be re-claimed without operator intervention.
+    /// Phase A6 emits this only on the `VectorEntry` path; the other
+    /// propagation target kinds will adopt the same shape in a separate
+    /// mechanical follow-up.
+    RevocationPropagationFailure {
+        propagation_item_id: Uuid,
+        source_submission_id: Uuid,
+        target_kind: TraceRevocationPropagationTargetKind,
+        action: TraceRevocationPropagationAction,
+        error_class: String,
+        error_hash: String,
+        attempt_count: u32,
+        is_terminal: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
