@@ -35,6 +35,11 @@ pub struct Candidate {
     pub license: CandidateLicense,
     #[serde(default)]
     pub params_b: Option<u32>,
+    /// Release date of the candidate weights, unix seconds. Optional in the
+    /// manifest. Falls back to 0 (with a warn log) and is used only as the
+    /// third tiebreaker in the decision rule.
+    #[serde(default)]
+    pub release_date_unix: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
