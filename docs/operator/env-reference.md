@@ -57,8 +57,8 @@ procedure.
 
 | Var | R? | Default | Description |
 |---|---|---|---|
-| `TRACE_COMMONS_PERPLEXITY_MODEL_ID` | optional | `meta-llama/Llama-3.1-8B-Instruct` | HF repo id. Recorded in the gate version hash. |
-| `TRACE_COMMONS_PERPLEXITY_MODEL_PATH` | R | (none) | Local directory with HF release layout (`config.json`, `tokenizer.json`, `model.safetensors`*). |
+| `TRACE_COMMONS_PERPLEXITY_MODEL_ID` | optional | `meta-llama/Llama-3.1-8B-Instruct` | HF repo id. Recorded in the gate version hash. The default is the **incumbent** baseline pending the A2.1 model bake-off (see `docs/operator/calibration.md` § Phase 0); the empirical winner replaces it. |
+| `TRACE_COMMONS_PERPLEXITY_MODEL_PATH` | R | (none) | Local directory with HF release layout (`config.json`, `tokenizer.json`, `model.safetensors`*). Set to the path of the bake-off winner after Phase 0 completes. |
 | `TRACE_COMMONS_PERPLEXITY_DEVICE` | optional | `cuda` | One of `cuda`, `cuda:N`, `metal`, `cpu`. |
 | `TRACE_COMMONS_PERPLEXITY_MAX_TOKENS` | optional | `16384` | Context window cap. |
 | `TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF` | optional | `-8.0` | Negative log-probability threshold for the tail fraction. |
