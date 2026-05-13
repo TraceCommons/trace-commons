@@ -80,6 +80,10 @@ gate.
 - A2.2: candle arch dispatch + Gemma 4 support + Qwen3 QK-Norm fix —
   pending re-run; arch-dispatch code merged, awaiting bake-off rerun
   per spec rollout A2.2b–f
+- A2.3: mistralrs backend migration + Qwen 3.6 support — code merged
+  (mistralrs git-pinned to `2d4ba4f`); per-arch candle dispatch
+  replaced by mistralrs auto-detection; pending the 4-way bake-off
+  re-run on Lambda H100 (A2.3c) and the env-var default flip (A2.3e)
 - A3: real `Embedder` (fastembed + BGE-large-en-v1.5) — done
 - A4: real `VectorIndex` (usearch with on-disk persistence) — done
 - A5: `novelty_utility` credit-event emission — done
