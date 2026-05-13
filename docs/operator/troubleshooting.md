@@ -3,6 +3,50 @@
 Common failure modes by symptom. Each entry follows the pattern:
 observed behavior → hash-only log signature → root cause → fix.
 
+## Build fails: `__isoc23_strtoll` / `_strtol` / `_strtoul` / `_strtoull` undefined
+
+**Symptom:** `cargo build --release --features local-gpu-models-cuda`
+fails at the final link step on Ubuntu 22.04 (or older glibc) with
+`rust-lld: error: undefined symbol: __isoc23_strtoll` and siblings.
+**Root cause:** `ort` 2.0.0-rc.12's pre-built ONNX Runtime binary
+(downloaded into `~/.cache/ort.pyke.io/`) references glibc 2.38 aliases.
+Ubuntu 22.04 has glibc 2.35.
+**Fix:** Either deploy on Ubuntu 24.04, or apply the C2X shim from
+`deployment.md` ("Build host preflight" → "ONNX Runtime prebuilt binary
+requires glibc 2.38+").
+
+## Build fails: `avx512fp16` attribute unknown
+
+**Symptom:** `cargo build` fails compiling `numkong` with a C++ error
+about an unrecognized `__attribute__((target("avx512fp16")))`.
+**Root cause:** Default gcc on Ubuntu 22.04 is gcc-11, which predates
+the avx512fp16 attribute.
+**Fix:** Install gcc-12+ and route the default `cc` to it (see
+`deployment.md` → "Build host preflight" → "Compiler must support
+avx512fp16").
+
+## Startup: `CandlePerplexityScorerInitFailed` with `max_tokens exceeds model max_position_embeddings`
+
+**Symptom:** Binary exits during startup with
+`PerplexityScorerInit: max_tokens (16384) exceeds model
+max_position_embeddings (2048)`.
+**Root cause:** The default
+`TRACE_COMMONS_PERPLEXITY_MAX_TOKENS=16384` assumes a Llama-3.x-class
+context window. Smaller or older models (TinyLlama, Llama-2, some
+smoke models) have shorter windows.
+**Fix:** Set `TRACE_COMMONS_PERPLEXITY_MAX_TOKENS` to the model's
+`max_position_embeddings` (read from the model's `config.json`).
+
+## Startup: KEK production trust boundary refused on LocalMasterKeyWrapper
+
+**Symptom:** Binary refuses to start when `TRACE_COMMONS_KEK_PROVIDER=local`
+is paired with `TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY=true`.
+**Root cause:** The local-master KEK is intentionally not a production
+trust boundary; the flag is fail-closed.
+**Fix:** Either set `TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY=false`
+(smoke/dev only — accept the relaxed boundary), or switch to a real
+cloud-KMS provider for production deploys.
+
 ## Binary refuses to start
 
 **Symptom:** `trace-commons-ingest` exits non-zero immediately.
