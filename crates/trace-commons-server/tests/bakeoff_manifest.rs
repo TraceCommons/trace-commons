@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 #[path = "../src/bin/gate_calibrate/bakeoff_manifest.rs"]
 mod bakeoff_manifest;
-use bakeoff_manifest::{parse_manifest_str, CandidateLicense};
+use bakeoff_manifest::{parse_manifest_str, CandidateArch, CandidateLicense};
 
 #[test]
 fn parses_minimal_two_candidate_manifest() {
@@ -69,6 +69,52 @@ license = "llama-community"
     let warnings = manifest.warnings();
     assert!(
         warnings.iter().any(|w| w.contains("license")),
+        "warnings: {warnings:?}"
+    );
+}
+
+#[test]
+fn parses_qwen3_arch() {
+    let raw = r#"
+[[candidate]]
+id = "qwen3-8b-base"
+path = "/srv/q3"
+arch = "qwen3"
+license = "apache-2.0"
+"#;
+    let manifest = parse_manifest_str(raw).expect("parses");
+    assert!(matches!(manifest.candidates[0].arch, CandidateArch::Qwen3));
+    assert!(manifest.warnings().is_empty());
+}
+
+#[test]
+fn parses_gemma4_arch() {
+    let raw = r#"
+[[candidate]]
+id = "gemma-4-31b"
+path = "/srv/g4"
+arch = "gemma4"
+license = "apache-2.0"
+"#;
+    let manifest = parse_manifest_str(raw).expect("parses");
+    assert!(matches!(manifest.candidates[0].arch, CandidateArch::Gemma4));
+    assert!(manifest.warnings().is_empty());
+}
+
+#[test]
+fn qwen2_alias_warns_and_resolves_to_qwen3() {
+    let raw = r#"
+[[candidate]]
+id = "qwen3-8b-base"
+path = "/srv/q3"
+arch = "qwen2"
+license = "apache-2.0"
+"#;
+    let manifest = parse_manifest_str(raw).expect("parses");
+    assert!(matches!(manifest.candidates[0].arch, CandidateArch::Qwen2));
+    let warnings = manifest.warnings();
+    assert!(
+        warnings.iter().any(|w| w.contains("deprecated arch=qwen2")),
         "warnings: {warnings:?}"
     );
 }

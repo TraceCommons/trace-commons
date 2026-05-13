@@ -15,9 +15,9 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 # Optional candle stack — enabled by the `local-gpu-models` feature. Pulled
 # in only when the gate-service binary is built for a GPU host with a staged
 # base model. Hermetic CI builds (default features) do not see these deps.
-candle-core = { version = "0.10.2", optional = true }
-candle-nn = { version = "0.10.2", optional = true }
-candle-transformers = { version = "0.10.2", optional = true }
+candle-core = { git = "https://github.com/huggingface/candle.git", rev = "5447a8779871654e542e65693e7d26f1e33b215f", optional = true }
+candle-nn = { git = "https://github.com/huggingface/candle.git", rev = "5447a8779871654e542e65693e7d26f1e33b215f", optional = true }
+candle-transformers = { git = "https://github.com/huggingface/candle.git", rev = "5447a8779871654e542e65693e7d26f1e33b215f", optional = true }
 tokenizers = { version = "0.21.4", optional = true, default-features = false, features = ["onig"] }
 hf-hub = { version = "0.4.3", optional = true }
 serde = { version = "1", optional = true, features = ["derive"] }

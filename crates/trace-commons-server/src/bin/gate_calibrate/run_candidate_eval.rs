@@ -47,7 +47,11 @@ pub enum DeviceKind {
 /// version bump.
 pub fn ctx_for(arch: &CandidateArch) -> usize {
     match arch {
-        CandidateArch::Llama | CandidateArch::Qwen2 | CandidateArch::Gemma3 => 4096,
+        CandidateArch::Llama
+        | CandidateArch::Qwen3
+        | CandidateArch::Qwen2
+        | CandidateArch::Gemma3
+        | CandidateArch::Gemma4 => 4096,
     }
 }
 
@@ -443,8 +447,10 @@ mod tests {
     #[test]
     fn ctx_for_returns_4096_for_all_arches() {
         assert_eq!(ctx_for(&CandidateArch::Llama), 4096);
+        assert_eq!(ctx_for(&CandidateArch::Qwen3), 4096);
         assert_eq!(ctx_for(&CandidateArch::Qwen2), 4096);
         assert_eq!(ctx_for(&CandidateArch::Gemma3), 4096);
+        assert_eq!(ctx_for(&CandidateArch::Gemma4), 4096);
     }
 
     #[test]

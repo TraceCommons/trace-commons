@@ -151,7 +151,9 @@ mod calibrate_impl {
     use anyhow::Context;
     use serde::{Deserialize, Serialize};
     use trace_commons_gate_enclave::embedder_fastembed::FastEmbedTextEmbedder;
-    use trace_commons_gate_enclave::perplexity_candle::{CandleDeviceKind, CandlePerplexityScorer};
+    use trace_commons_gate_enclave::perplexity_candle::{
+        BackendArch, CandleDeviceKind, CandlePerplexityScorer,
+    };
     use trace_commons_gate_enclave::vector_index::{MockVectorIndex, VectorIndex};
     use trace_commons_gate_enclave::{
         EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig, OrchestrationDecision,
@@ -168,6 +170,12 @@ mod calibrate_impl {
     const TRACE_COMMONS_PERPLEXITY_MAX_TOKENS: &str = "TRACE_COMMONS_PERPLEXITY_MAX_TOKENS";
     const TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF: &str =
         "TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF";
+    /// Selects the candle backend for `Cmd::Calibrate`'s scorer (and for the
+    /// production gate-service load in `trace-commons-ingest`). Default `"llama"`
+    /// preserves back-compat with A2.1 deployments; valid values are
+    /// `"llama"`, `"qwen3"`, `"gemma3"`, `"gemma4"`. Parsed via
+    /// `BackendArch::parse`.
+    const TRACE_COMMONS_PERPLEXITY_MODEL_ARCH: &str = "TRACE_COMMONS_PERPLEXITY_MODEL_ARCH";
     const TRACE_COMMONS_PERPLEXITY_DEFAULT_MODEL_ID: &str =
         "meta-llama/Llama-3.1-8B-Instruct";
     const TRACE_COMMONS_PERPLEXITY_DEFAULT_MAX_TOKENS: usize = 16_384;
@@ -262,6 +270,13 @@ mod calibrate_impl {
         let gate_policy_version = std::env::var(TRACE_COMMONS_GATE_POLICY_VERSION)
             .unwrap_or_else(|_| "calibrate-v1".to_string());
 
+        // Backend arch selection (default Llama for back-compat with A2.1).
+        let arch = match std::env::var(TRACE_COMMONS_PERPLEXITY_MODEL_ARCH) {
+            Ok(raw) => BackendArch::parse(&raw)
+                .context("CalibrateBadEnv: TRACE_COMMONS_PERPLEXITY_MODEL_ARCH")?,
+            Err(_) => BackendArch::Llama,
+        };
+
         // ----------------------------- build -----------------------------
         let scorer = CandlePerplexityScorer::try_new(
             model_id,
@@ -269,6 +284,7 @@ mod calibrate_impl {
             device,
             tail_cutoff,
             max_tokens,
+            arch,
         )
         .await
         .context("CalibrateInit: CandlePerplexityScorerInitFailed")?;
@@ -504,7 +520,7 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
             #[cfg(feature = "local-gpu-models")]
             {
                 use trace_commons_gate_enclave::perplexity_candle::{
-                    CandleDeviceKind, CandlePerplexityScorer,
+                    BackendArch, CandleDeviceKind, CandlePerplexityScorer,
                 };
                 // Map operator-facing HardwareTier to candle's device enum.
                 // A10 / H100 both route to CUDA device 0; the Cpu arm is
@@ -520,12 +536,26 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
                 // from the calibrate path.
                 const TAIL_LOGPROB_CUTOFF: f32 = -8.0;
                 let max_tokens = run_candidate_eval::ctx_for(&c.arch);
+                // Translate CandidateArch (server-side manifest enum) to
+                // BackendArch (enclave-side scorer enum). The deprecated
+                // `Qwen2` alias routes to the proper Qwen3 backend, fixing
+                // the A2.1 QK-Norm bug for manifests that still carry the
+                // old token; the manifest parser emits a deprecation
+                // warning so operators flip to `qwen3` over time.
+                let backend_arch = match c.arch {
+                    bakeoff_manifest::CandidateArch::Llama => BackendArch::Llama,
+                    bakeoff_manifest::CandidateArch::Qwen3
+                    | bakeoff_manifest::CandidateArch::Qwen2 => BackendArch::Qwen3,
+                    bakeoff_manifest::CandidateArch::Gemma3 => BackendArch::Gemma3,
+                    bakeoff_manifest::CandidateArch::Gemma4 => BackendArch::Gemma4,
+                };
                 let scorer = match CandlePerplexityScorer::try_new(
                     c.id.clone(),
                     c.path.clone(),
                     candle_device,
                     TAIL_LOGPROB_CUTOFF,
                     max_tokens,
+                    backend_arch,
                 )
                 .await
                 {

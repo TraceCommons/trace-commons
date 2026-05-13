@@ -66,27 +66,45 @@ release_date_unix = 1721260800
 [[candidate]]
 id = "qwen3-8b-base"
 path = "/srv/models/qwen3-8b-base"
-arch = "qwen2"
+arch = "qwen3"
 license = "apache-2.0"
 params_b = 8
 release_date_unix = 1745798400
 
 [[candidate]]
-id = "qwen3.6-27b-dense"
-path = "/srv/models/qwen3.6-27b"
-arch = "qwen2"
-license = "apache-2.0"
-params_b = 27
-release_date_unix = 1745798400
-
-[[candidate]]
 id = "gemma-4-31b-base"
 path = "/srv/models/gemma-4-31b"
-arch = "gemma3"
+arch = "gemma4"
 license = "apache-2.0"
 params_b = 31
 release_date_unix = 1743552000
 ```
+
+Supported `arch` tokens (one per candle backend):
+
+| Token    | Backend                       | Notes                                  |
+|----------|-------------------------------|----------------------------------------|
+| `llama`  | `candle_transformers::llama`  | Llama 1/2/3 family                     |
+| `qwen3`  | `candle_transformers::qwen3`  | Includes QK-Norm (use for Qwen3-Base)  |
+| `qwen2`  | (deprecated alias for `qwen3`)| Resolves to `qwen3`; emits a warning   |
+| `gemma3` | `candle_transformers::gemma3` | Gemma 2 / Gemma 3 dense                |
+| `gemma4` | `candle_transformers::gemma4` | Gemma 4 multimodal (text-only loader)  |
+
+Qwen 3.6 27B Dense (`qwen3_5`) and earlier `gemma` / `gemma2` are not
+in the supported set today; candle ships no compatible loader. Track
+the spec roadmap for any future addition.
+
+When picking the Gemma 4 candidate, verify the base (not instruct)
+variant is staged. A2.1 confirmed that instruct-tuning distorts
+perplexity calibration. Run:
+
+```sh
+python3 -c "import json; print(json.load(open('/srv/models/gemma-4-31b/config.json'))['architectures'])"
+```
+
+The expected output is `["Gemma4ForCausalLM"]` (the base architecture).
+A variant ending in `ForConditionalGeneration` or `InstructForCausalLM`
+is the instruct tuning and should not be used as the base candidate.
 
 The manifest emits a warning (not an error) for non-incumbent
 `llama-community` candidates — the spec restricts new picks to

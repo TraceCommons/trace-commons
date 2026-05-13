@@ -77,6 +77,9 @@ gate.
 - A2.1: empirical model bake-off retrofit (`trace-commons-gate-calibrate
   bake-off`, corpus builder, decision rule, operator runbook Phase 0) —
   done; see `docs/operator/calibration.md` § Phase 0
+- A2.2: candle arch dispatch + Gemma 4 support + Qwen3 QK-Norm fix —
+  pending re-run; arch-dispatch code merged, awaiting bake-off rerun
+  per spec rollout A2.2b–f
 - A3: real `Embedder` (fastembed + BGE-large-en-v1.5) — done
 - A4: real `VectorIndex` (usearch with on-disk persistence) — done
 - A5: `novelty_utility` credit-event emission — done
