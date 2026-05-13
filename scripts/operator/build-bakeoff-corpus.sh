@@ -165,10 +165,231 @@ emit_dry_run() {
   } > "$STAGING/paraphrase/paraphrase.jsonl"
 }
 
-# Real path (Task 8b will fill this in) ---------------------------------------
+# Real path -------------------------------------------------------------------
+#
+# NOTE: the real path is NOT exercised in CI. It requires HF auth + a
+# multi-GB Qwen3-4B-Base checkpoint and GPU-class hardware. Use the
+# dry-run path for CI coverage; the real path is operator work, and the
+# resulting tarball's sha256 should be appended to
+# scripts/operator/.bakeoff-corpus-checksums after each successful run.
+
+# Locate the HF CLI. Newer huggingface_hub renamed `huggingface-cli` to
+# `hf`; older installs still ship the long name. Either works.
+resolve_hf_cli() {
+  if command -v hf >/dev/null 2>&1; then
+    printf '%s' "hf"
+    return 0
+  fi
+  if command -v huggingface-cli >/dev/null 2>&1; then
+    printf '%s' "huggingface-cli"
+    return 0
+  fi
+  return 1
+}
+
+# download_hf_dataset <repo_id> <local_dir>
+download_hf_dataset() {
+  local repo="$1"
+  local dir="$2"
+  local cli
+  cli=$(resolve_hf_cli) || bail "BakeoffCorpusMissingHfCli: install hf or huggingface-cli"
+  # `hf` and `huggingface-cli` share the same `download` subcommand for
+  # datasets. --quiet keeps stdout grep-able for our key=value lines.
+  "$cli" download "$repo" \
+    --repo-type dataset \
+    --local-dir "$dir" \
+    --local-dir-use-symlinks False \
+    --quiet \
+    || bail "hf_download_failed repo_label=$(printf '%s' "$repo" | sha256sum | awk '{print substr($1,1,12)}')"
+}
+
+# emit_hf_text_samples <parquet_root> <count> <out_dir> <prefix>
+# Selects up to <count> rows whose text body is 200–2000 words and
+# contains at least one reasoning marker, and writes each as a separate
+# UTF-8 .txt file in <out_dir>, named <prefix>-NNNN.txt.
+# Returns the actual number of files written on stdout.
+emit_hf_text_samples() {
+  local root="$1"
+  local cap="$2"
+  local out_dir="$3"
+  local prefix="$4"
+  command -v python3 >/dev/null 2>&1 || bail "python3_not_installed"
+  python3 - "$root" "$cap" "$out_dir" "$prefix" <<'PYEOF'
+import os
+import re
+import sys
+
+root, cap_s, out_dir, prefix = sys.argv[1:5]
+cap = int(cap_s)
+
+try:
+    import pyarrow.parquet as pq
+except Exception:
+    print("BakeoffCorpus: pyarrow_not_installed", file=sys.stderr)
+    sys.exit(2)
+
+MARKER = re.compile(r"\bstep 1\b|\bfirst,|\bbecause\b|\btherefore\b|\bso we\b", re.IGNORECASE)
+TEXT_COLS = ("text", "message", "content", "Question", "question", "task")
+
+def iter_rows(parquet_root):
+    for dp, _, files in os.walk(parquet_root):
+        for f in files:
+            if not f.endswith(".parquet"):
+                continue
+            try:
+                tbl = pq.read_table(os.path.join(dp, f))
+            except Exception:
+                continue
+            col = next((c for c in TEXT_COLS if c in tbl.column_names), None)
+            if col is None:
+                continue
+            for v in tbl.column(col).to_pylist():
+                if v:
+                    yield str(v)
+
+n = 0
+for body in iter_rows(root):
+    words = body.split()
+    if not (200 <= len(words) <= 2000):
+        continue
+    if not MARKER.search(body):
+        continue
+    path = os.path.join(out_dir, f"{prefix}-{n:04d}.txt")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    n += 1
+    if n >= cap:
+        break
+
+print(n)
+PYEOF
+}
+
+# emit_duplicate_slice <out_dir>
+# Loops over scripts/operator/bakeoff-duplicate-seeds.txt and writes
+# DUPLICATE_COUNT files into out_dir, sampling with replacement.
+emit_duplicate_slice() {
+  local out_dir="$1"
+  local script_dir
+  script_dir="$(cd "$(dirname "$0")" && pwd)"
+  local seeds="$script_dir/bakeoff-duplicate-seeds.txt"
+  [ -f "$seeds" ] || bail "duplicate_seeds_file_missing"
+
+  # Read non-blank lines into a numbered set we can index from bash.
+  local -a SEED_LINES=()
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -z "$line" ] && continue
+    SEED_LINES+=("$line")
+  done < "$seeds"
+  local n_seeds=${#SEED_LINES[@]}
+  [ "$n_seeds" -gt 0 ] || bail "duplicate_seeds_empty"
+
+  local i
+  for (( i = 0; i < DUPLICATE_COUNT; i++ )); do
+    local pick=$(( i % n_seeds ))
+    printf '%s' "${SEED_LINES[$pick]}" > "$out_dir/dup-$(printf '%04d' "$i").txt"
+  done
+}
+
+# emit_paraphrase_slice <novel_dir> <out_jsonl>
+emit_paraphrase_slice() {
+  local novel_dir="$1"
+  local out_jsonl="$2"
+  local script_dir
+  script_dir="$(cd "$(dirname "$0")" && pwd)"
+  local helper="$script_dir/bakeoff_paraphrase.py"
+  [ -f "$helper" ] || bail "paraphrase_helper_missing"
+  command -v python3 >/dev/null 2>&1 || bail "python3_not_installed"
+
+  # Build the helper's input JSONL from the first PARAPHRASE_COUNT novel
+  # entries (sorted-filename order, which matches what the loader sees).
+  local tmp_in
+  tmp_in="$(mktemp)"
+  # shellcheck disable=SC2064
+  trap "rm -f \"$tmp_in\"" RETURN
+
+  python3 - "$novel_dir" "$PARAPHRASE_COUNT" > "$tmp_in" <<'PYEOF'
+import json
+import os
+import sys
+novel_dir, cap_s = sys.argv[1], sys.argv[2]
+cap = int(cap_s)
+files = sorted(f for f in os.listdir(novel_dir) if f.endswith(".txt"))
+for i, fname in enumerate(files[:cap]):
+    with open(os.path.join(novel_dir, fname), "r", encoding="utf-8") as fh:
+        body = fh.read()
+    sys.stdout.write(json.dumps({"original": body}) + "\n")
+PYEOF
+
+  BAKEOFF_PARAPHRASE_MODEL_PATH="$BAKEOFF_PARAPHRASE_MODEL_PATH" \
+    python3 "$helper" "$BAKEOFF_PARAPHRASE_MODEL_PATH" < "$tmp_in" > "$out_jsonl" \
+    || bail "BakeoffCorpusParaphraseHelperFailed: see paraphrase helper stderr"
+
+  [ -s "$out_jsonl" ] || bail "paraphrase_output_empty"
+}
 
 emit_real() {
-  bail "BakeoffCorpusRealPathNotImplemented: see Task 8b"
+  [ -n "${HF_TOKEN:-}" ] || bail "BakeoffCorpusMissingHfToken: HF_TOKEN env required for OASST2"
+  [ -n "${BAKEOFF_PARAPHRASE_MODEL_PATH:-}" ] \
+    || bail "BakeoffCorpusMissingParaphraseModel: BAKEOFF_PARAPHRASE_MODEL_PATH env required"
+  [ -d "$BAKEOFF_PARAPHRASE_MODEL_PATH" ] \
+    || bail "BakeoffCorpusMissingParaphraseModel: model path is not a directory"
+
+  command -v python3 >/dev/null 2>&1 || bail "python3_not_installed"
+
+  local hf_cli
+  hf_cli=$(resolve_hf_cli) || bail "BakeoffCorpusMissingHfCli: install hf or huggingface-cli"
+  echo "BakeoffCorpusStep: phase=hf_cli_resolved cli=$hf_cli"
+
+  local dl_dir
+  dl_dir="$(mktemp -d -t bakeoff-hf.XXXXXX)"
+  # Append to the existing EXIT trap so we still clean STAGING.
+  # shellcheck disable=SC2064
+  trap "rm -rf \"$STAGING\" \"$dl_dir\"" EXIT
+
+  local half=$(( NOVEL_COUNT / 2 ))
+  local oasst_target=$half
+  local gaia_target=$(( NOVEL_COUNT - half ))
+
+  echo "BakeoffCorpusStep: phase=oasst2_download"
+  download_hf_dataset "OpenAssistant/oasst2" "$dl_dir/oasst2"
+
+  echo "BakeoffCorpusStep: phase=gaia_download"
+  download_hf_dataset "gaia-benchmark/GAIA" "$dl_dir/gaia"
+
+  echo "BakeoffCorpusStep: phase=oasst2_filter target=$oasst_target"
+  local oasst_n
+  oasst_n=$(emit_hf_text_samples "$dl_dir/oasst2" "$oasst_target" "$STAGING/novel" "novel")
+  echo "BakeoffCorpusStep: phase=oasst2_filter_done count=$oasst_n"
+
+  echo "BakeoffCorpusStep: phase=gaia_filter target=$gaia_target"
+  # GAIA entries are renamed novel-NNNN.txt continuing the index after
+  # OASST2's last write. We re-emit by passing a different prefix then
+  # renaming, but simplest is to call emit_hf_text_samples with the
+  # offset baked into the prefix. We use a temp dir + rename to keep
+  # the unified naming convention novel-NNNN.txt.
+  local gaia_tmp
+  gaia_tmp="$(mktemp -d -t bakeoff-gaia.XXXXXX)"
+  local gaia_n
+  gaia_n=$(emit_hf_text_samples "$dl_dir/gaia" "$gaia_target" "$gaia_tmp" "g")
+  local i=0
+  for f in $(cd "$gaia_tmp" && find . -maxdepth 1 -type f -name 'g-*.txt' | LC_ALL=C sort); do
+    local idx=$(( oasst_n + i ))
+    mv "$gaia_tmp/${f#./}" "$STAGING/novel/novel-$(printf '%04d' "$idx").txt"
+    i=$(( i + 1 ))
+  done
+  rm -rf "$gaia_tmp"
+  echo "BakeoffCorpusStep: phase=gaia_filter_done count=$gaia_n"
+
+  local novel_total=$(( oasst_n + gaia_n ))
+  [ "$novel_total" -gt 0 ] || bail "novel_slice_empty"
+
+  echo "BakeoffCorpusStep: phase=duplicate_curate count=$DUPLICATE_COUNT"
+  emit_duplicate_slice "$STAGING/duplicate"
+
+  echo "BakeoffCorpusStep: phase=paraphrase_backtranslate count=$PARAPHRASE_COUNT"
+  emit_paraphrase_slice "$STAGING/novel" "$STAGING/paraphrase/paraphrase.jsonl"
 }
 
 # Dispatch --------------------------------------------------------------------

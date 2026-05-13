@@ -1,0 +1,74 @@
+Copyright (c) The TraceDAO Authors. All rights reserved.
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
+SPDX-License-Identifier: Apache-2.0
+SPDX-License-Identifier: MIT
+SPDX-License-Identifier: BSD-3-Clause
+// Copyright 2024 The Authors. Licensed under the MIT License.
+# This file is part of the project. See LICENSE for details.
+/* Distributed under the terms of the GNU General Public License v3.0. */
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files, to deal in the Software without restriction.
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation.
+# Project Name
+
+A short description of the project.
+
+## Installation
+
+```bash
+pip install project-name
+```
+
+## Usage
+
+See the documentation for examples and reference.
+
+## Contributing
+
+Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+"""Module docstring.
+
+This module provides utilities for working with the project.
+"""
+"""Return the result of the operation.
+
+Args:
+    arg1: Description of arg1.
+    arg2: Description of arg2.
+
+Returns:
+    The result.
+
+Raises:
+    ValueError: If the input is invalid.
+"""
+TODO: implement this function.
+FIXME: handle the edge case where input is empty.
+NOTE: this is a workaround for a known bug in the upstream library.
+Frequently Asked Questions
+Q: How do I install this?
+A: Follow the installation instructions in the README.
+Q: How do I report a bug?
+A: Open an issue on GitHub with a minimal reproducible example.
+Q: What versions are supported?
+A: We support the two most recent major versions.
+Thank you for your interest in contributing to this project.
+Please read our code of conduct before submitting a pull request.
+By submitting a pull request, you agree to license your contribution under the project's license.
+We use semantic versioning. See https://semver.org for details.
+All notable changes to this project will be documented in this file.
+The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
+Unreleased changes are tracked in the development branch.
+def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+if __name__ == "__main__":
+    main()
+import os
+import sys
+import json
+from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
