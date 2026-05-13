@@ -1,7 +1,9 @@
 #[path = "../src/bin/gate_calibrate/bakeoff_metrics.rs"]
 mod bakeoff_metrics;
 
-use bakeoff_metrics::{discrimination_auc, paraphrase_delta, tail_fraction_range};
+use bakeoff_metrics::{
+    discrimination_auc, paraphrase_delta, tail_fraction_range, ThroughputRecord, VramRecord,
+};
 
 #[test]
 fn perfect_separation_gives_auc_one() {
@@ -50,4 +52,46 @@ fn tail_fraction_range_measures_spread() {
     let duplicate_frac = vec![0.70, 0.72, 0.68];
     let range = tail_fraction_range(&novel_frac, &duplicate_frac);
     assert!((range - 0.60).abs() < 1e-9, "range={range}");
+}
+
+#[test]
+fn determinism_zero_for_identical_runs() {
+    let runs = vec![vec![10.0, 20.0], vec![10.0, 20.0], vec![10.0, 20.0]];
+    assert!(bakeoff_metrics::determinism_stddev(&runs) < 1e-12);
+}
+
+#[test]
+fn determinism_nonzero_when_runs_drift() {
+    let runs = vec![
+        vec![10.0, 20.0],
+        vec![10.000001, 20.0],
+        vec![10.0, 20.0],
+    ];
+    assert!(bakeoff_metrics::determinism_stddev(&runs) > 0.0);
+}
+
+#[test]
+fn throughput_record_round_trips_serde() {
+    let r = ThroughputRecord {
+        tokens_per_second: 1234.5,
+        total_tokens: 9876,
+        elapsed_seconds: 8.0,
+    };
+    let j = serde_json::to_string(&r).expect("serialize");
+    let back: ThroughputRecord = serde_json::from_str(&j).expect("deserialize");
+    assert!((back.tokens_per_second - 1234.5).abs() < 1e-9);
+    assert_eq!(back.total_tokens, 9876);
+    assert!((back.elapsed_seconds - 8.0).abs() < 1e-9);
+}
+
+#[test]
+fn vram_record_round_trips_serde() {
+    let r = VramRecord {
+        peak_mib: 18432,
+        model_mib: 14000,
+    };
+    let j = serde_json::to_string(&r).expect("serialize");
+    let back: VramRecord = serde_json::from_str(&j).expect("deserialize");
+    assert_eq!(back.peak_mib, 18432);
+    assert_eq!(back.model_mib, 14000);
 }

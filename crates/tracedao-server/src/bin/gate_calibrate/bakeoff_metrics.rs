@@ -7,6 +7,8 @@
 
 use std::cmp::Ordering;
 
+use serde::{Deserialize, Serialize};
+
 /// Probability that a randomly drawn novel sample has higher perplexity than a
 /// randomly drawn duplicate sample. Ties contribute 0.5 each (Mann–Whitney U
 /// convention). Empty inputs return 0.5 — no information, no preference.
@@ -57,6 +59,46 @@ pub fn tail_fraction_range(novel: &[f64], duplicate: &[f64]) -> f64 {
     let med_n = median_inplace(&mut n);
     let med_d = median_inplace(&mut d);
     (med_d - med_n).abs()
+}
+
+/// Mean per-trace standard deviation across N repeat runs of the same input
+/// (population stddev — N divisor, not N-1, because we're measuring spread
+/// inside this fixed set of runs, not estimating a wider population). Empty
+/// runs or empty rows return 0.0 so callers don't have to special-case the
+/// "we didn't gather any samples" path.
+pub fn determinism_stddev(runs: &[Vec<f64>]) -> f64 {
+    if runs.is_empty() || runs[0].is_empty() {
+        return 0.0;
+    }
+    let n_traces = runs[0].len();
+    let mut total = 0.0_f64;
+    for i in 0..n_traces {
+        let samples: Vec<f64> = runs.iter().map(|r| r[i]).collect();
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        let var = samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
+            / samples.len() as f64;
+        total += var.sqrt();
+    }
+    total / n_traces as f64
+}
+
+/// Reported throughput for a single candidate run. Pure data wrapper — the
+/// bake-off harness fills this in from wallclock + token accounting, the
+/// report module reads it back to weight against accuracy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThroughputRecord {
+    pub tokens_per_second: f64,
+    pub total_tokens: u64,
+    pub elapsed_seconds: f64,
+}
+
+/// Reported peak and steady-state VRAM for a single candidate. Pure data
+/// wrapper — `peak_mib` is the high-water mark over the whole eval, while
+/// `model_mib` is the load-time footprint we use for fits-on-GPU planning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VramRecord {
+    pub peak_mib: u64,
+    pub model_mib: u64,
 }
 
 // Sorts `values` in place and returns the median. Returns 0.0 on empty input
