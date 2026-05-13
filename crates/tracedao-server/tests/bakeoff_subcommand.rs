@@ -282,6 +282,54 @@ fn cpu_hardware_with_real_scorer_bails_clearly() {
 }
 
 #[test]
+fn bake_off_writes_incremental_report_after_each_candidate() {
+    // With --mock-scorer, both candidates succeed; the final report on
+    // disk should have partial=false and both candidates present. We
+    // cannot easily test the *incremental* mid-run write without racy
+    // timing, but this exercises the new write-after-each-candidate code
+    // path and confirms the partial flag flips to false on the final
+    // write.
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = build_synthetic_corpus(&dir, 6, 4, 4);
+    let manifest = write_two_candidate_manifest(&dir);
+    let report_json = dir.path().join("report.json");
+
+    let bin = env!("CARGO_BIN_EXE_tracedao-gate-calibrate");
+    let out = Command::new(bin)
+        .arg("bake-off")
+        .arg("--candidates")
+        .arg(&manifest)
+        .arg("--corpus")
+        .arg(&corpus)
+        .arg("--hardware=cpu")
+        .arg("--report-out")
+        .arg(&report_json)
+        .arg("--mock-scorer")
+        .arg("--determinism-repeat-runs=2")
+        .output()
+        .expect("invoke binary");
+
+    assert!(
+        out.status.success(),
+        "bake-off must succeed; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(&report_json).unwrap()).unwrap();
+    assert_eq!(
+        report.get("partial").and_then(|v| v.as_bool()),
+        Some(false),
+        "final report must have partial=false"
+    );
+    let cands = report.get("candidates").and_then(|v| v.as_array()).unwrap();
+    assert_eq!(cands.len(), 2);
+    // No tmp file should be left behind.
+    let tmp_path = report_json.with_extension("json.tmp");
+    assert!(!tmp_path.exists(), "stray tmp file: {}", tmp_path.display());
+}
+
+#[test]
 fn bake_off_subcommand_respects_skip_models() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = build_synthetic_corpus(&dir, 4, 4, 4);
