@@ -14,6 +14,11 @@ pub struct PerplexityResult {
     /// Tail-fraction perplexity (e.g., 95th-percentile token surprise) in
     /// micros. Same lower-bound semantics as the aggregate.
     pub tail_fraction_micros: u64,
+    /// Approximate token count scored, used for throughput accounting in the
+    /// bake-off. Real scorers populate this from the tokenizer; the mock
+    /// estimates from byte length. The field is informational — gate
+    /// orchestration does not consume it.
+    pub tokens_scored: u64,
 }
 
 /// Score a plaintext trace for perplexity. Real implementations run a local
@@ -50,11 +55,17 @@ impl PerplexityScorer for MockPerplexityScorer {
         let aggregate = u64::from_be_bytes(buf);
         buf.copy_from_slice(&out[8..16]);
         let tail = u64::from_be_bytes(buf);
+        // Rough token estimate from byte length (≈4 bytes/token for English
+        // text). The mock is hash-derived; the precise value isn't load-
+        // bearing — bake-off throughput accounting just needs a non-zero
+        // count proportional to the work done.
+        let tokens_scored = (plaintext.len() as u64).div_ceil(4).max(1);
         Ok(PerplexityResult {
             // Squeeze into a 0..10_000_000 micros band so values look like
             // real perplexity figures (1.0 - 10.0 in floating-point space).
             aggregate_perplexity_micros: aggregate % 10_000_000,
             tail_fraction_micros: tail % 10_000_000,
+            tokens_scored,
         })
     }
 }
