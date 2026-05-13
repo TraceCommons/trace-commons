@@ -527,8 +527,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 [[package]]
 name = "candle-core"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bd9895436c1ba5dc1037a19935d084b838db066ff4e15ef7dded020b7c12a4a"
+source = "git+https://github.com/huggingface/candle.git?rev=5447a8779871654e542e65693e7d26f1e33b215f#5447a8779871654e542e65693e7d26f1e33b215f"
 dependencies = [
  "byteorder",
  "candle-kernels",
@@ -554,8 +553,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "742e2ac226b777134436e9e692f44e77c278b8a7abb1554dc10e44dc911b349f"
+source = "git+https://github.com/huggingface/candle.git?rev=5447a8779871654e542e65693e7d26f1e33b215f#5447a8779871654e542e65693e7d26f1e33b215f"
 dependencies = [
  "cudaforge",
 ]
@@ -563,8 +561,7 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9317a09d6530b758990ed7f625ac69ff43653bc9ee28b0464644ad1169ada87"
+source = "git+https://github.com/huggingface/candle.git?rev=5447a8779871654e542e65693e7d26f1e33b215f#5447a8779871654e542e65693e7d26f1e33b215f"
 dependencies = [
  "candle-core",
  "half",
@@ -579,8 +576,7 @@ dependencies = [
 [[package]]
 name = "candle-transformers"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f59d08c89e9f4af9c464e2f3a8e16199e7cc601e6f34538c2cfbb42b623b1783"
+source = "git+https://github.com/huggingface/candle.git?rev=5447a8779871654e542e65693e7d26f1e33b215f#5447a8779871654e542e65693e7d26f1e33b215f"
 dependencies = [
  "byteorder",
  "candle-core",
@@ -598,8 +594,7 @@ dependencies = [
 [[package]]
 name = "candle-ug"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca0fc3167cbc99c8ec1be618cb620aa21dca95038f118c3579a79370e3dc5f77"
+source = "git+https://github.com/huggingface/candle.git?rev=5447a8779871654e542e65693e7d26f1e33b215f#5447a8779871654e542e65693e7d26f1e33b215f"
 dependencies = [
  "ug",
  "ug-cuda",

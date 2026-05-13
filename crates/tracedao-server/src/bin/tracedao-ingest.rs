@@ -225,6 +225,14 @@ const TRACE_COMMONS_PERPLEXITY_MODEL_PATH: &str = "TRACE_COMMONS_PERPLEXITY_MODE
 const TRACE_COMMONS_PERPLEXITY_DEVICE: &str = "TRACE_COMMONS_PERPLEXITY_DEVICE";
 #[allow(dead_code)]
 const TRACE_COMMONS_PERPLEXITY_MAX_TOKENS: &str = "TRACE_COMMONS_PERPLEXITY_MAX_TOKENS";
+/// Selects the candle backend for the production gate-service scorer.
+/// Default `"llama"` for back-compat with the A2.1 deployment; valid values
+/// are `"llama"`, `"qwen3"`, `"gemma3"`, `"gemma4"`. Parsed via
+/// `tracedao_gate_enclave::perplexity_candle::BackendArch::parse`. Sits next
+/// to the other perplexity startup config above so operators can grep for
+/// `MODEL_ARCH` and find this site.
+#[cfg(feature = "local-gpu-models")]
+const TRACE_COMMONS_PERPLEXITY_MODEL_ARCH: &str = "TRACE_COMMONS_PERPLEXITY_MODEL_ARCH";
 #[allow(dead_code)]
 const TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF: &str =
     "TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF";
@@ -4218,7 +4226,7 @@ async fn build_enclave_local_gpu_gate_service_from_env(
 ) -> anyhow::Result<Arc<dyn TraceGateService>> {
     use tracedao_gate_enclave::embedder_fastembed::FastEmbedTextEmbedder;
     use tracedao_gate_enclave::perplexity_candle::{
-        CandleDeviceKind, CandlePerplexityScorer,
+        BackendArch, CandleDeviceKind, CandlePerplexityScorer,
     };
     use tracedao_gate_enclave::vector_index_usearch::UsearchVectorIndex;
     use tracedao_gate_enclave::{EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig};
@@ -4270,10 +4278,26 @@ async fn build_enclave_local_gpu_gate_service_from_env(
         "{TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF} must be finite"
     );
 
-    let scorer =
-        CandlePerplexityScorer::try_new(model_id, &model_path, device, tail_cutoff, max_tokens)
-            .await
-            .context("CandlePerplexityScorerInitFailed")?;
+    // Backend arch selection: default Llama for back-compat with the A2.1
+    // production deployment. Operators flip this when promoting a new
+    // winning candidate per the A2.2d rollout step.
+    let arch = match std::env::var(TRACE_COMMONS_PERPLEXITY_MODEL_ARCH) {
+        Ok(raw) => BackendArch::parse(&raw).with_context(|| {
+            format!("{TRACE_COMMONS_PERPLEXITY_MODEL_ARCH} unrecognized")
+        })?,
+        Err(_) => BackendArch::Llama,
+    };
+
+    let scorer = CandlePerplexityScorer::try_new(
+        model_id,
+        &model_path,
+        device,
+        tail_cutoff,
+        max_tokens,
+        arch,
+    )
+    .await
+    .context("CandlePerplexityScorerInitFailed")?;
 
     // fastembed-rs embedder (Phase A3). Loads the configured sentence
     // embedder once at startup; same H100 hosts both this and the candle
