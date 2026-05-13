@@ -42,6 +42,7 @@ pub fn aggregate_perplexity_metrics(
         return PerplexityResult {
             aggregate_perplexity_micros: 0,
             tail_fraction_micros: 0,
+            tokens_scored: 0,
         };
     }
     let usable = &logprobs[1..];
@@ -53,6 +54,7 @@ pub fn aggregate_perplexity_metrics(
         return PerplexityResult {
             aggregate_perplexity_micros: 0,
             tail_fraction_micros: 0,
+            tokens_scored: 0,
         };
     }
 
@@ -68,6 +70,10 @@ pub fn aggregate_perplexity_metrics(
     PerplexityResult {
         aggregate_perplexity_micros,
         tail_fraction_micros,
+        // Number of tokens that contributed to the aggregate (the input
+        // length minus the dropped BOS placeholder). Real scorer path —
+        // tokenizer-derived rather than estimated.
+        tokens_scored: usable.len() as u64,
     }
 }
 
@@ -287,6 +293,7 @@ mod candle_impl {
                 return Ok(PerplexityResult {
                     aggregate_perplexity_micros: 0,
                     tail_fraction_micros: 0,
+                    tokens_scored: 0,
                 });
             }
 

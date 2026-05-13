@@ -14,6 +14,7 @@ async-trait = "0.1"
 axum = "0.8"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
 deadpool-postgres = "0.14"
 dotenvy = "0.15"
 dirs = "6"
@@ -29,6 +30,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tar = "0.4"
+tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 toml = "1"
@@ -66,7 +68,10 @@ local-gpu-models-cuda = ["local-gpu-models", "trace-commons-gate-enclave/local-g
 [[bin]]
 name = "trace-commons-gate-calibrate"
 path = "src/bin/trace-commons-gate-calibrate.rs"
-required-features = ["local-gpu-models"]
+# Binary is buildable without features so the `bake-off` subcommand (which
+# uses the deterministic mock scorer) is exercisable in hermetic CI. The
+# env-driven `calibrate` subcommand still requires `local-gpu-models` at
+# runtime and bails with a clear error when invoked without it.
 
 [[bin]]
 name = "trace-commons-vector-replay"
@@ -74,5 +79,4 @@ path = "src/bin/trace-commons-vector-replay.rs"
 required-features = ["local-gpu-models"]
 
 [dev-dependencies]
-tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
