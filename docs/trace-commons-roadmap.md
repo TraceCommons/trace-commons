@@ -60,6 +60,29 @@ service on regular GPU hardware with **cloud KMS as the KEK**, accepting
 that the operator and cloud provider can read user content via KMS
 `Decrypt`. Phase B (below) does the trust upgrade once dstack is ready.
 
+**Phase A status (2026-05-13): code-complete + smoke-validated on real GPU
+hardware.** All six work items below are merged on `main`; the binary
+boots green on a Lambda Cloud A10 with KEK + perplexity scorer + embedder
++ vector index loaded, and `audit-chain-drill` returns `ready: true`. The
+empirical model bake-off retrofit (A2.1) is also merged, so the production
+model choice is empirically grounded rather than incumbent-by-default. The
+real bake-off run, env-var default flip, and floor recalibration against
+the winner remain operator activities (per the A2.1 spec rollout A2.1b-e).
+Pilot deployment on H100 with cloud-KMS-rooted DEK wrapping is the next
+gate.
+
+- A1: `CloudKmsKeyWrapper` (GCP KMS) — done
+- A2: real `PerplexityScorer` (candle + Llama-3.1-8B-Instruct as
+  incumbent) — done
+- A2.1: empirical model bake-off retrofit (`trace-commons-gate-calibrate
+  bake-off`, corpus builder, decision rule, operator runbook Phase 0) —
+  done; see `docs/operator/calibration.md` § Phase 0
+- A3: real `Embedder` (fastembed + BGE-large-en-v1.5) — done
+- A4: real `VectorIndex` (usearch with on-disk persistence) — done
+- A5: `novelty_utility` credit-event emission — done
+- A6: revocation worker hook (`invalidate_vector_entry`) plus typed
+  propagation-failure audit retrofit for non-vector targets — done
+
 The current standalone foundation (PRs #9–#12) already has:
 
 - `KmsKeyWrapper` trait, `LocalMasterKeyWrapper` (dev), `DstackKekWrapper`
