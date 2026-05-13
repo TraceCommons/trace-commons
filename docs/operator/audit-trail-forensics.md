@@ -134,8 +134,11 @@ debugging without leaking principal identity.
 ## When to call this an incident
 
 - **Any** chain drift not explained by a known restore. P0.
-- `revocation_propagation_terminal_failed_vector_entries > 0` not
-  cleared within an hour. P1.
+- Any `revocation_propagation_terminal_failed_*` counter `> 0` not
+  cleared within an hour (covers `vector_entries`, `object_refs`,
+  `export_manifests`, `export_manifest_items`, `derived_records`,
+  `benchmark_artifacts`, `ranker_artifacts`, `credit_settlements`,
+  `worker_queues`, `physical_delete_receipts`). P1.
 - A credit row stamped with a `gate_version_hash` not in
   `TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS`. P1.
 - A submission with an `accepted` state but no corresponding

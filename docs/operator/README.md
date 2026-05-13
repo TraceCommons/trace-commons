@@ -91,9 +91,12 @@ operator-constrained trust model is Phase B work (dstack), not Phase A.
   class: what it means, what to check first, common root causes.
 - **`operational-summary.md`** — what fields in
   `/v1/admin/operational-summary` mean and which ones should alarm.
-  Includes the new gate-related fields:
-  `revocation_propagation_terminal_failed_vector_entries`, gate
-  service status reflection, etc.
+  Includes the gate-related fields and the per-target-kind
+  `revocation_propagation_terminal_failed_*` counters
+  (`vector_entries`, `object_refs`, `export_manifests`,
+  `export_manifest_items`, `derived_records`, `benchmark_artifacts`,
+  `ranker_artifacts`, `credit_settlements`, `worker_queues`,
+  `physical_delete_receipts`), gate service status reflection, etc.
 - **`drills.md`** — the full set of `/v1/admin/*-drill` endpoints,
   what each one validates, and how often to run each. Calls out
   which drills are required for promotion vs nice-to-have.
