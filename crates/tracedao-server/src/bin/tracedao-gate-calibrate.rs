@@ -537,17 +537,17 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
                 const TAIL_LOGPROB_CUTOFF: f32 = -8.0;
                 let max_tokens = run_candidate_eval::ctx_for(&c.arch);
                 // Translate CandidateArch (server-side manifest enum) to
-                // BackendArch (enclave-side scorer enum). The `Qwen2`
-                // deprecated alias resolves to Qwen3 — Slice 4 wires the
-                // manifest parser to warn on use; here we already route the
-                // load through the proper Qwen3 backend so the A2.1 QK-Norm
-                // bug is fixed regardless of which alias the manifest uses.
-                // Slice 4 expands this match to cover the new `Qwen3` and
-                // `Gemma4` variants once the manifest enum gains them.
+                // BackendArch (enclave-side scorer enum). The deprecated
+                // `Qwen2` alias routes to the proper Qwen3 backend, fixing
+                // the A2.1 QK-Norm bug for manifests that still carry the
+                // old token; the manifest parser emits a deprecation
+                // warning so operators flip to `qwen3` over time.
                 let backend_arch = match c.arch {
                     bakeoff_manifest::CandidateArch::Llama => BackendArch::Llama,
-                    bakeoff_manifest::CandidateArch::Qwen2 => BackendArch::Qwen3,
+                    bakeoff_manifest::CandidateArch::Qwen3
+                    | bakeoff_manifest::CandidateArch::Qwen2 => BackendArch::Qwen3,
                     bakeoff_manifest::CandidateArch::Gemma3 => BackendArch::Gemma3,
+                    bakeoff_manifest::CandidateArch::Gemma4 => BackendArch::Gemma4,
                 };
                 let scorer = match CandlePerplexityScorer::try_new(
                     c.id.clone(),

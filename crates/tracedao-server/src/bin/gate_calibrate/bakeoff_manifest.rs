@@ -19,12 +19,22 @@ pub enum CandidateLicense {
     GemmaCustom,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 pub enum CandidateArch {
+    #[serde(rename = "llama")]
     Llama,
+    #[serde(rename = "qwen3")]
+    Qwen3,
+    /// Deprecated alias for `Qwen3`. Manifest parsing emits a warning when
+    /// this is seen; future PRs will drop the alias entirely. Loaders route
+    /// `Qwen2` to the `BackendArch::Qwen3` backend so the A2.1 QK-Norm bug
+    /// is fixed regardless of which alias the manifest uses.
+    #[serde(rename = "qwen2")]
     Qwen2,
+    #[serde(rename = "gemma3")]
     Gemma3,
+    #[serde(rename = "gemma4")]
+    Gemma4,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -80,6 +90,13 @@ pub fn parse_manifest_str(raw: &str) -> anyhow::Result<ValidatedManifest> {
             warnings.push(format!(
                 "candidate {} uses non-permissive license llama-community; \
                  only Apache-2.0 or MIT are accepted for new picks",
+                c.id
+            ));
+        }
+        if matches!(c.arch, CandidateArch::Qwen2) {
+            warnings.push(format!(
+                "candidate {} uses deprecated arch=qwen2; switch to arch=qwen3 \
+                 (the loader resolves qwen2 to qwen3 internally)",
                 c.id
             ));
         }
