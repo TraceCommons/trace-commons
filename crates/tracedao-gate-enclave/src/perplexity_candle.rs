@@ -179,6 +179,17 @@ mod candle_impl {
             tail_logprob_cutoff: f32,
             max_tokens: usize,
         ) -> anyhow::Result<Self> {
+            // Tail cutoff is a log-probability bound (`logprob < cutoff` →
+            // tail); negative values are the only sensible regime. A
+            // non-negative cutoff would treat every token as tail.
+            anyhow::ensure!(
+                tail_logprob_cutoff.is_finite() && tail_logprob_cutoff < 0.0,
+                "PerplexityScorerInit: tail cutoff must be negative (log-probability)"
+            );
+            anyhow::ensure!(
+                max_tokens > 0,
+                "PerplexityScorerInit: max_tokens must be greater than zero"
+            );
             let model_id = model_id.into();
             let model_path = model_path.as_ref().to_path_buf();
 
@@ -206,6 +217,16 @@ mod candle_impl {
             let llama_config: LlamaConfig = serde_json::from_slice(&cfg_bytes)
                 .with_context(|| "CandleConfigParseFailed")?;
             let config = llama_config.into_config(false /* use_flash_attn */);
+
+            // Refuse a max_tokens that exceeds the model's configured
+            // context window; otherwise the KV cache could blow up at
+            // forward time. Bail at startup with a stable error class.
+            anyhow::ensure!(
+                max_tokens <= config.max_position_embeddings,
+                "PerplexityScorerInit: max_tokens ({}) exceeds model max_position_embeddings ({})",
+                max_tokens,
+                config.max_position_embeddings,
+            );
 
             let tokenizer = Tokenizer::from_file(&tokenizer_path)
                 .map_err(|e| anyhow::anyhow!("CandleTokenizerLoadFailed: {}", hash_err(&e)))?;
@@ -310,23 +331,11 @@ mod candle_impl {
     }
 
     impl PerplexityScorer for CandlePerplexityScorer {
-        fn score(&self, plaintext: &[u8]) -> PerplexityResult {
-            match self.try_score(plaintext) {
-                Ok(result) => result,
-                Err(e) => {
-                    // Hash-only log — never interpolate the underlying error
-                    // text (it may contain operator-secret paths).
-                    let _ = e;
-                    tracing::warn!(
-                        error_class = "PerplexityScorerInferenceFailed",
-                        "perplexity scorer fell back to zero result"
-                    );
-                    PerplexityResult {
-                        aggregate_perplexity_micros: 0,
-                        tail_fraction_micros: 0,
-                    }
-                }
-            }
+        fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+            // Fail-closed: a scoring failure propagates so the orchestrator
+            // refuses the gate evaluation. The previous zero-fallback path
+            // would have falsely passed any positive perplexity floor.
+            self.try_score(plaintext)
         }
     }
 
@@ -570,7 +579,9 @@ mod tests {
             })
             .expect("scorer must construct on the configured host");
 
-        let r = scorer.score(b"The quick brown fox jumps over the lazy dog.");
+        let r = scorer
+            .score(b"The quick brown fox jumps over the lazy dog.")
+            .expect("non-degenerate score must succeed");
         assert!(
             r.aggregate_perplexity_micros > 0,
             "non-degenerate input must produce a positive perplexity"
@@ -580,7 +591,7 @@ mod tests {
             "tail fraction must be in [0, 1]"
         );
 
-        let empty = scorer.score(b"");
+        let empty = scorer.score(b"").expect("empty input is degenerate but score still Ok");
         assert_eq!(empty.aggregate_perplexity_micros, 0);
         assert_eq!(empty.tail_fraction_micros, 0);
     }

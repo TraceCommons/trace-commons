@@ -9,8 +9,13 @@ pub const MOCK_EMBEDDING_DIM: usize = 256;
 /// Project a plaintext trace into an embedding vector. Real implementations
 /// invoke a pinned embedder model inside the enclave; the mock here derives
 /// a stable unit vector from a hash of the plaintext.
+///
+/// `embed` returns `anyhow::Result` so an inference failure refuses the gate
+/// evaluation rather than silently returning a zero vector that the
+/// orchestrator's `1 - max_similarity` novelty math would otherwise interpret
+/// as "maximally novel". Callers MUST propagate the error.
 pub trait Embedder: Send + Sync {
-    fn embed(&self, plaintext: &[u8]) -> Vec<f32>;
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>>;
 }
 
 /// Deterministic mock embedder.
@@ -28,7 +33,7 @@ impl MockEmbedder {
 }
 
 impl Embedder for MockEmbedder {
-    fn embed(&self, plaintext: &[u8]) -> Vec<f32> {
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
         // Build deterministic bytes by hashing (counter || plaintext) until we
         // have enough material for `MOCK_EMBEDDING_DIM * 4` bytes (each f32
         // is 4 bytes). Each f32 is then mapped from `u32` into `[-1, 1]`.
@@ -63,7 +68,7 @@ impl Embedder for MockEmbedder {
                 *x /= norm;
             }
         }
-        v
+        Ok(v)
     }
 }
 
@@ -74,8 +79,8 @@ mod tests {
     #[test]
     fn mock_embedder_is_deterministic() {
         let e = MockEmbedder::new();
-        let a = e.embed(b"hello world");
-        let b = e.embed(b"hello world");
+        let a = e.embed(b"hello world").unwrap();
+        let b = e.embed(b"hello world").unwrap();
         assert_eq!(a, b);
         assert_eq!(a.len(), MOCK_EMBEDDING_DIM);
     }
@@ -83,7 +88,7 @@ mod tests {
     #[test]
     fn mock_embedder_is_unit_norm() {
         let e = MockEmbedder::new();
-        let v = e.embed(b"hello world");
+        let v = e.embed(b"hello world").unwrap();
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 1e-3, "expected unit norm, got {norm}");
     }
@@ -91,8 +96,8 @@ mod tests {
     #[test]
     fn mock_embedder_differs_per_input() {
         let e = MockEmbedder::new();
-        let a = e.embed(b"hello world");
-        let b = e.embed(b"goodbye world");
+        let a = e.embed(b"hello world").unwrap();
+        let b = e.embed(b"goodbye world").unwrap();
         assert_ne!(a, b);
     }
 }

@@ -20,17 +20,28 @@
 //! never logs, never serializes, never leaves process memory beyond the
 //! orchestrator → vector index handoff.
 
-/// L2-normalize a vector in place. Zero vectors are left untouched (the
-/// caller's downstream consumer treats them as "no signal").
+/// L2-normalize a vector in place. Returns an error if the vector contains
+/// any non-finite element or if the resulting norm is below an
+/// `f32::EPSILON * len()` epsilon (which would imply a vector that is
+/// numerically indistinguishable from zero — the gate cannot rely on its
+/// direction).
 ///
 /// Public so it can be unit-tested without involving fastembed.
-pub fn l2_normalize_in_place(v: &mut [f32]) {
-    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for x in v.iter_mut() {
-            *x /= norm;
-        }
+pub fn l2_normalize_in_place(v: &mut [f32]) -> anyhow::Result<()> {
+    if v.iter().any(|x| !x.is_finite()) {
+        anyhow::bail!("EmbedderNonFiniteVector: input contains NaN or Inf");
     }
+    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let epsilon = f32::EPSILON * (v.len().max(1) as f32);
+    if !(norm > epsilon) {
+        anyhow::bail!(
+            "EmbedderDegenerateVector: norm {norm} not above epsilon {epsilon}"
+        );
+    }
+    for x in v.iter_mut() {
+        *x /= norm;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -44,36 +55,37 @@ mod normalize_tests {
     #[test]
     fn known_input_three_four() {
         let mut v = vec![3.0_f32, 4.0_f32];
-        l2_normalize_in_place(&mut v);
+        l2_normalize_in_place(&mut v).unwrap();
         assert!(approx_eq(v[0], 0.6), "got {}", v[0]);
         assert!(approx_eq(v[1], 0.8), "got {}", v[1]);
     }
 
     #[test]
-    fn zero_vector_stays_zero() {
+    fn zero_vector_is_rejected() {
+        // Degenerate input: norm below epsilon — cannot fail-closed by
+        // pretending the vector has a direction.
         let mut v = vec![0.0_f32; 8];
-        l2_normalize_in_place(&mut v);
-        assert!(v.iter().all(|&x| x == 0.0));
+        assert!(l2_normalize_in_place(&mut v).is_err());
     }
 
     #[test]
     fn single_positive_element() {
         let mut v = vec![7.5_f32];
-        l2_normalize_in_place(&mut v);
+        l2_normalize_in_place(&mut v).unwrap();
         assert!(approx_eq(v[0], 1.0), "got {}", v[0]);
     }
 
     #[test]
     fn single_negative_element() {
         let mut v = vec![-2.25_f32];
-        l2_normalize_in_place(&mut v);
+        l2_normalize_in_place(&mut v).unwrap();
         assert!(approx_eq(v[0], -1.0), "got {}", v[0]);
     }
 
     #[test]
     fn already_unit_norm_idempotent() {
         let mut v = vec![0.6_f32, 0.8_f32];
-        l2_normalize_in_place(&mut v);
+        l2_normalize_in_place(&mut v).unwrap();
         assert!(approx_eq(v[0], 0.6));
         assert!(approx_eq(v[1], 0.8));
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -81,10 +93,25 @@ mod normalize_tests {
     }
 
     #[test]
-    fn empty_slice_does_not_panic() {
+    fn rejects_nan_input() {
+        let mut v = vec![1.0_f32, f32::NAN, 2.0_f32];
+        let err = l2_normalize_in_place(&mut v).expect_err("NaN must be rejected");
+        assert!(format!("{err}").contains("EmbedderNonFiniteVector"));
+    }
+
+    #[test]
+    fn rejects_inf_input() {
+        let mut v = vec![1.0_f32, f32::INFINITY, 2.0_f32];
+        let err = l2_normalize_in_place(&mut v).expect_err("Inf must be rejected");
+        assert!(format!("{err}").contains("EmbedderNonFiniteVector"));
+    }
+
+    #[test]
+    fn empty_slice_is_rejected() {
         let mut v: Vec<f32> = Vec::new();
-        l2_normalize_in_place(&mut v);
-        assert!(v.is_empty());
+        // norm = 0, below any epsilon, so we reject. The caller should not
+        // be feeding empty vectors into the embedder normalization helper.
+        assert!(l2_normalize_in_place(&mut v).is_err());
     }
 }
 
@@ -153,7 +180,18 @@ mod fastembed_impl {
 
             let model_id = model_id.into();
             let cache_dir_buf = cache_dir.as_ref().to_path_buf();
-            let model_enum = parse_embedding_model(&model_id);
+            // Resolve the model id through a deliberate alias map (HF repo
+            // id → fastembed `model_code`) plus enum-name fallback. Refuse
+            // unrecognized ids at startup; the previous silent fallback to
+            // BGE-large could mask a typo and stamp every audit row with
+            // the wrong gate version.
+            let model_enum = parse_embedding_model(&model_id)
+                .with_context(|| {
+                    format!(
+                        "EmbedderModelIdUnrecognized: {}",
+                        redact_label(&model_id)
+                    )
+                })?;
 
             // Determine the model's native output dimension from fastembed's
             // metadata. We do this before constructing the model so that
@@ -177,9 +215,15 @@ mod fastembed_impl {
 
             let model_enum_for_load = model_enum;
             let cache_dir_for_load = cache_dir_buf.clone();
+            let max_tokens_for_load = max_tokens;
             let model = tokio::task::spawn_blocking(move || {
+                // `with_max_length` enforces token-level truncation inside
+                // the fastembed tokenizer; without it, oversized inputs run
+                // through the model at native context length and the
+                // operator-configured `max_tokens` bound is ignored.
                 let opts = InitOptions::new(model_enum_for_load)
                     .with_cache_dir(cache_dir_for_load)
+                    .with_max_length(max_tokens_for_load)
                     .with_show_download_progress(false);
                 TextEmbedding::try_new(opts)
             })
@@ -209,16 +253,16 @@ mod fastembed_impl {
             self.output_dim
         }
 
-        /// Internal helper returning a `Result`. Callers (the `Embedder`
-        /// trait impl) translate failures into a zero vector with a warning
-        /// log; this keeps the trait surface stable while preserving error
-        /// context for tests.
+        /// Internal helper returning a `Result`. Errors propagate through
+        /// the `Embedder` trait so the orchestrator refuses the evaluation
+        /// rather than silently emitting a zero vector that the novelty
+        /// math would interpret as "maximally novel".
         fn try_embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
             // Decode lossily. The trace is already redacted upstream and
             // the embedder tokenizer handles odd whitespace fine.
             let text = String::from_utf8_lossy(plaintext).into_owned();
             if text.trim().is_empty() {
-                return Ok(vec![0.0; self.output_dim]);
+                anyhow::bail!("EmbedderEmptyInput: empty plaintext rejected");
             }
 
             let mut model = self
@@ -226,8 +270,8 @@ mod fastembed_impl {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("EmbedderMutexPoisoned"))?;
             // fastembed handles tokenizer-aware truncation internally up to
-            // the model's nominal context (512 for BGE). batch_size=Some(1)
-            // matches the one-trace-per-call shape.
+            // the configured `max_length`. batch_size=Some(1) matches the
+            // one-trace-per-call shape.
             let mut embeddings = model
                 .embed(vec![text], Some(1))
                 .context("EmbedderInferenceFailed")?;
@@ -253,61 +297,57 @@ mod fastembed_impl {
                 v.len()
             );
 
-            l2_normalize_in_place(&mut v);
+            l2_normalize_in_place(&mut v)
+                .context("EmbedderNormalizationFailed")?;
             Ok(v)
         }
     }
 
     impl Embedder for FastEmbedTextEmbedder {
-        fn embed(&self, plaintext: &[u8]) -> Vec<f32> {
-            // The `Embedder` trait returns `Vec<f32>` with no error channel.
-            // On inference failure we log a hash-only warning and return a
-            // zero vector. NB: a zero query vector will have cosine
-            // similarity 0 with every indexed vector, which the orchestrator's
-            // novelty side maps to `novelty_score = 1.0` (most novel). This
-            // is the wrong direction for fail-closed behavior but matches
-            // the trait contract; the perplexity gate runs in parallel and
-            // typically fails too on the same trace, and the gate-decision
-            // row records the issue. Flagged for first-deploy verification.
-            match self.try_embed(plaintext) {
-                Ok(v) => v,
-                Err(err) => {
-                    tracing::warn!(
-                        error_class = "EmbedderInferenceFailed",
-                        model_id = %self.model_id,
-                        error = %err,
-                        "embedder fell back to zero vector"
-                    );
-                    vec![0.0; self.output_dim]
-                }
-            }
+        fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+            // Fail-closed: any inference / normalization failure refuses the
+            // evaluation. The previous zero-vector fallback would have made
+            // every degenerate trace look maximally novel.
+            self.try_embed(plaintext)
+        }
+    }
+
+    /// Explicit alias map from common HuggingFace repo ids to fastembed
+    /// `model_code` strings. fastembed's `list_supported_models` already
+    /// stores a `model_code` per variant, but the upstream values use the
+    /// Xenova mirrors for some entries; operators are likelier to configure
+    /// the canonical HF id (e.g. `BAAI/bge-large-en-v1.5`). This table is
+    /// the only place to add a new alias.
+    fn repo_id_alias(model_id: &str) -> Option<&'static str> {
+        match model_id {
+            "BAAI/bge-large-en-v1.5" => Some("Xenova/bge-large-en-v1.5"),
+            "BAAI/bge-base-en-v1.5" => Some("Xenova/bge-base-en-v1.5"),
+            "BAAI/bge-small-en-v1.5" => Some("Xenova/bge-small-en-v1.5"),
+            _ => None,
         }
     }
 
     /// Parse a configured `model_id` string into a fastembed
-    /// `EmbeddingModel`. Accepts both the HuggingFace repo-id form (matched
-    /// against `ModelInfo::model_code`) and the enum-name form via
-    /// `EmbeddingModel::from_str`. Falls back to `BGELargeENV15` on parse
-    /// failure with a warning log so a typo doesn't take down the gate
-    /// service; operators should still set the env var correctly.
-    fn parse_embedding_model(model_id: &str) -> EmbeddingModel {
-        // First, try matching by HuggingFace `model_code` against the
-        // supported model list.
+    /// `EmbeddingModel`. Resolution order:
+    ///   1. The explicit `repo_id_alias` table.
+    ///   2. Direct `ModelInfo::model_code` match against
+    ///      `list_supported_models`.
+    ///   3. The `EmbeddingModel::from_str` enum-name form.
+    ///
+    /// Returns `Err` when none match. The previous silent fallback to
+    /// `BGELargeENV15` is gone — a typo would otherwise stamp every audit
+    /// row with the wrong gate version while logging only a warning.
+    fn parse_embedding_model(model_id: &str) -> anyhow::Result<EmbeddingModel> {
+        let canonical = repo_id_alias(model_id).unwrap_or(model_id);
         for info in TextEmbedding::list_supported_models() {
-            if info.model_code == model_id {
-                return info.model;
+            if info.model_code == canonical {
+                return Ok(info.model);
             }
         }
-        // Then, try parsing the enum variant name directly.
         if let Ok(m) = EmbeddingModel::from_str(model_id) {
-            return m;
+            return Ok(m);
         }
-        tracing::warn!(
-            error_class = "EmbedderModelIdUnrecognized",
-            model_id = %model_id,
-            "falling back to BAAI/bge-large-en-v1.5"
-        );
-        EmbeddingModel::BGELargeENV15
+        anyhow::bail!("unrecognized embedder model id")
     }
 
     /// Truncate a string for log output. `model_id` is operator-configured
@@ -364,7 +404,9 @@ mod fastembed_impl {
             .expect("embedder constructs");
 
             // (1) Smoke: vector is unit-normalized and has the expected dim.
-            let v = embedder.embed(b"the quick brown fox jumps over the lazy dog");
+            let v = embedder
+                .embed(b"the quick brown fox jumps over the lazy dog")
+                .expect("embed must succeed");
             assert_eq!(v.len(), embedder.output_dim());
             let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
             assert!(
@@ -373,17 +415,21 @@ mod fastembed_impl {
             );
 
             // (2) Determinism: same input → exact equality.
-            let v2 = embedder.embed(b"the quick brown fox jumps over the lazy dog");
+            let v2 = embedder
+                .embed(b"the quick brown fox jumps over the lazy dog")
+                .expect("embed must succeed");
             assert_eq!(v, v2, "embedder must be deterministic");
 
             // (3) Similarity ordering: paraphrase pair beats mixed pair.
             let a = embedder
-                .embed(b"the cat sat on the mat in the warm afternoon sun");
+                .embed(b"the cat sat on the mat in the warm afternoon sun")
+                .expect("embed");
             let b = embedder
-                .embed(b"a cat was resting on a rug during the warm afternoon");
-            let c = embedder.embed(
-                b"quantum chromodynamics predicts color confinement at low energies",
-            );
+                .embed(b"a cat was resting on a rug during the warm afternoon")
+                .expect("embed");
+            let c = embedder
+                .embed(b"quantum chromodynamics predicts color confinement at low energies")
+                .expect("embed");
             let sim_paraphrase = cosine_sim(&a, &b);
             let sim_mixed = cosine_sim(&a, &c);
             assert!(
