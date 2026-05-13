@@ -46,7 +46,7 @@ use trace_commons_server::trace_artifact_store::{
     TraceArtifactProviderConfig, TraceArtifactStore,
 };
 use trace_commons_server::trace_gate_service::{
-    DstackGateService, EnclaveGateService, GateServiceStatus, InMemoryGateService,
+    DstackGateService, EnclaveGateService, GateDecision, GateServiceStatus, InMemoryGateService,
     TenantCtx as GateTenantCtx, TraceGateService,
 };
 use trace_commons_server::trace_corpus_storage::{
@@ -185,6 +185,13 @@ const TRACE_COMMONS_GATE_SERVICE_ENCLAVE_ENDPOINT: &str =
 const TRACE_COMMONS_GATE_SERVICE_ATTESTATION_VERIFIER_LABEL: &str =
     "TRACE_COMMONS_GATE_SERVICE_ATTESTATION_VERIFIER_LABEL";
 const TRACE_COMMONS_GATE_SERVICE_MASTER_KEY: &str = "TRACE_COMMONS_GATE_SERVICE_MASTER_KEY";
+// Phase A5 novelty_utility credit emission tuning. See
+// docs/superpowers/specs/2026-05-13-novelty-utility-credit-emission-design.md.
+const TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA: &str =
+    "TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA";
+const TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE: &str =
+    "TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE";
+const DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA: f32 = 1.0;
 // Candle-backed perplexity scorer (Phase A2). Read only when
 // `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu` AND the `local-gpu-models`
 // feature is compiled in; otherwise these constants are dead and the binary
@@ -944,6 +951,20 @@ struct AppState {
     ranking_max_labeler_issue_rate_micros: Option<i64>,
     ranking_min_labeler_reliability_label_count: Option<usize>,
     gate_service: Arc<dyn TraceGateService>,
+    /// Phase A5: per-gate-pass `novelty_utility` credit-points delta. Loaded
+    /// once at startup from `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA`
+    /// (default 1.0), validated finite + non-negative + within
+    /// `MAX_DELAYED_CREDIT_POINTS_DELTA`. Single deployment-wide constant; no
+    /// per-tenant or per-call override.
+    novelty_utility_credit_points_delta: f32,
+    /// Phase A5: when true, the gate worker refuses to emit credit unless the
+    /// configured `TraceGateService` reports a production trust boundary
+    /// (`safe_status().kind` is `enclave_local_gpu` or `dstack`). Non-production
+    /// services (`in_memory`, `enclave_mock`, `legacy_deterministic`,
+    /// `dstack_stub`) still produce a decision row but with
+    /// `credit_withheld_reason = "non_production_gate"`. Toggle via
+    /// `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE`.
+    novelty_utility_require_production_gate: bool,
 }
 
 #[derive(Clone)]
@@ -3007,6 +3028,10 @@ impl AppState {
             ranking_max_labeler_issue_rate_micros,
             ranking_min_labeler_reliability_label_count,
             gate_service: build_trace_gate_service_from_env().await?,
+            novelty_utility_credit_points_delta: parse_novelty_utility_credit_points_delta_from_env()?,
+            novelty_utility_require_production_gate: env_truthy(
+                TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE,
+            ),
         })
     }
 }
@@ -8255,6 +8280,34 @@ fn parse_ranking_min_confidence_threshold_from_env() -> anyhow::Result<f32> {
     }
 }
 
+/// Parse and validate the `novelty_utility` per-pass credit-points delta from
+/// the environment. Defaulted to `DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA`
+/// (1.0) when unset. The value must be finite and within the existing
+/// `MAX_DELAYED_CREDIT_POINTS_DELTA` envelope; we validate here so startup
+/// fails fast rather than every gate-evaluate call. Negative values are
+/// rejected — novelty credit is purely positive issuance.
+fn parse_novelty_utility_credit_points_delta_from_env() -> anyhow::Result<f32> {
+    let Some(raw) = optional_trimmed_env(TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA)? else {
+        return Ok(DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA);
+    };
+    let parsed = raw.parse::<f32>().with_context(|| {
+        format!("{TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA} must be a finite number")
+    })?;
+    anyhow::ensure!(
+        parsed.is_finite(),
+        "{TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA} must be finite"
+    );
+    anyhow::ensure!(
+        parsed >= 0.0,
+        "{TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA} must be non-negative"
+    );
+    anyhow::ensure!(
+        parsed <= MAX_DELAYED_CREDIT_POINTS_DELTA,
+        "{TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA} exceeds the delayed credit policy limit"
+    );
+    Ok(parsed)
+}
+
 fn validate_ranking_active_calibration_dataset_config(
     require_registry: bool,
     require_active: bool,
@@ -8854,6 +8907,15 @@ struct TraceCommonsConfigStatusResponse {
     /// Hash-only / label-only safe projection of the configured
     /// `TraceGateService`. Mirrors `TraceGateService::safe_status()`.
     gate_service: TraceCommonsGateServiceConfigStatus,
+    /// Phase A5: operator-visible novelty_utility credit configuration. Both
+    /// fields are operator-tuned thresholds, not secrets.
+    novelty_utility: TraceCommonsNoveltyUtilityConfigStatus,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceCommonsNoveltyUtilityConfigStatus {
+    credit_points_delta: f32,
+    require_production_gate: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -9384,6 +9446,10 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         }),
         trace_corpus_rls: None,
         gate_service: state.gate_service.safe_status().into(),
+        novelty_utility: TraceCommonsNoveltyUtilityConfigStatus {
+            credit_points_delta: state.novelty_utility_credit_points_delta,
+            require_production_gate: state.novelty_utility_require_production_gate,
+        },
     }
 }
 
@@ -11625,6 +11691,7 @@ enum TraceCreditLedgerEventType {
     RankingUtility,
     ReviewerBonus,
     AbusePenalty,
+    NoveltyUtility,
 }
 
 const MAX_DELAYED_CREDIT_POINTS_DELTA: f32 = 100.0;
@@ -11649,10 +11716,15 @@ impl TraceCreditLedgerEventType {
                 | Self::RegressionCatch
                 | Self::TrainingUtility
                 | Self::RankingUtility
+                | Self::NoveltyUtility
         )
     }
 
     fn is_utility_job_type(self) -> bool {
+        // `NoveltyUtility` is gate-emitted, not API-emitted, so it stays out
+        // of the `utility_credit_handler` whitelist on purpose. The gate
+        // worker route mints novelty-utility credit internally; no operator
+        // API surface accepts it.
         matches!(
             self,
             Self::RegressionCatch | Self::TrainingUtility | Self::RankingUtility
@@ -11667,6 +11739,7 @@ impl TraceCreditLedgerEventType {
             Self::BenchmarkConversion => "utility-benchmark-credit",
             Self::ReviewerBonus => "utility-reviewer-bonus",
             Self::AbusePenalty => "utility-abuse-penalty",
+            Self::NoveltyUtility => "utility-novelty-credit",
         }
     }
 }
@@ -27101,6 +27174,7 @@ fn trace_credit_event_type_is_settlement_eligible(event_type: TraceCreditLedgerE
             | TraceCreditLedgerEventType::RegressionCatch
             | TraceCreditLedgerEventType::TrainingUtility
             | TraceCreditLedgerEventType::RankingUtility
+            | TraceCreditLedgerEventType::NoveltyUtility
     )
 }
 
@@ -27111,7 +27185,8 @@ fn delayed_credit_required_allowed_uses(
         TraceCreditLedgerEventType::BenchmarkConversion => &[TraceAllowedUse::BenchmarkGeneration],
         TraceCreditLedgerEventType::RegressionCatch
         | TraceCreditLedgerEventType::TrainingUtility
-        | TraceCreditLedgerEventType::RankingUtility => {
+        | TraceCreditLedgerEventType::RankingUtility
+        | TraceCreditLedgerEventType::NoveltyUtility => {
             utility_credit_required_allowed_uses(event_type)
         }
         TraceCreditLedgerEventType::ReviewerBonus | TraceCreditLedgerEventType::AbusePenalty => &[],
@@ -27125,6 +27200,12 @@ fn utility_credit_required_allowed_uses(
         TraceCreditLedgerEventType::RegressionCatch => &[TraceAllowedUse::Evaluation],
         TraceCreditLedgerEventType::TrainingUtility => &[TraceAllowedUse::ModelTraining],
         TraceCreditLedgerEventType::RankingUtility => &[TraceAllowedUse::RankingModelTraining],
+        // Phase A5: a trace that's novel for the corpus is most directly
+        // useful as training data. The spec calls this `TrainingDataset`, but
+        // the canonical `TraceAllowedUse` enum exposes the equivalent through
+        // `ModelTraining`. Operators wanting a different use can refine this
+        // through a tenant-policy extension in a future slice.
+        TraceCreditLedgerEventType::NoveltyUtility => &[TraceAllowedUse::ModelTraining],
         TraceCreditLedgerEventType::BenchmarkConversion
         | TraceCreditLedgerEventType::ReviewerBonus
         | TraceCreditLedgerEventType::AbusePenalty => &[],
@@ -36811,6 +36892,7 @@ fn trace_operational_credit_event_type_name(
         TraceCreditLedgerEventType::RankingUtility => "ranking_utility",
         TraceCreditLedgerEventType::ReviewerBonus => "reviewer_bonus",
         TraceCreditLedgerEventType::AbusePenalty => "abuse_penalty",
+        TraceCreditLedgerEventType::NoveltyUtility => "novelty_utility",
     }
 }
 
@@ -39404,6 +39486,18 @@ struct TraceGateEvaluateWorkerResponse {
     /// (e.g. from the revocation worker) should persist this value.
     #[serde(skip_serializing_if = "Option::is_none")]
     vector_entry_id: Option<Uuid>,
+    /// Phase A5: `true` when the gate decision passed and a `novelty_utility`
+    /// credit-ledger event was actually appended (`appended > 0` from the
+    /// idempotent helper). `false` when the gate failed, ABAC withheld credit,
+    /// the production-gate guard refused, or an idempotency hit returned a
+    /// previously-emitted event (`skipped_existing`).
+    credit_emitted: bool,
+    /// Phase A5: stable label-only reason explaining why credit was withheld
+    /// despite a passing gate. `None` on gate-fail rows and on successful
+    /// emit rows. Values: `"policy_mismatch"`, `"central_issuer_denied"`,
+    /// `"non_production_gate"`, `"submission_not_accepted"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credit_withheld_reason: Option<String>,
 }
 
 /// Worker route that scores a single submission through the configured
@@ -39505,6 +39599,26 @@ async fn gate_evaluate_worker_handler(
     };
 
     let decision_id = Uuid::new_v4();
+
+    // Phase A5: if the gate passed, attempt to mint a `novelty_utility`
+    // credit-ledger event through the same pipeline that the operator-facing
+    // utility-credit handler uses. ABAC failures do NOT fail gate evaluation
+    // overall — the decision row still lands so the operator can audit; we
+    // only annotate `credit_withheld_reason` with a stable label-only string.
+    let (credit_emitted, credit_withheld_reason) = if decision.perplexity_passed
+        && decision.novelty_passed
+    {
+        attempt_emit_novelty_utility_credit(
+            state.as_ref(),
+            &tenant,
+            &decision,
+            body.submission_id,
+        )
+        .await?
+    } else {
+        (false, None)
+    };
+
     let row = StorageTraceGateDecisionRow {
         decision_id,
         submission_id: body.submission_id,
@@ -39520,6 +39634,7 @@ async fn gate_evaluate_worker_handler(
         attestation_chain_hash: decision.attestation_chain_hash.clone(),
         decided_at: Utc::now(),
         vector_entry_id: decision.vector_entry_id,
+        credit_withheld_reason: credit_withheld_reason.clone(),
     };
     db.insert_trace_gate_decision(&tenant.tenant_id, row)
         .await
@@ -39534,7 +39649,136 @@ async fn gate_evaluate_worker_handler(
         perplexity_passed: decision.perplexity_passed,
         novelty_passed: decision.novelty_passed,
         vector_entry_id: decision.vector_entry_id,
+        credit_emitted,
+        credit_withheld_reason,
     }))
+}
+
+/// Phase A5: helper called from `gate_evaluate_worker_handler` when both
+/// gate floors pass. Routes through the same central-issuer ABAC,
+/// tenant-policy allowed-uses, and idempotent-emit pipeline that
+/// `utility_credit_handler` uses for the operator-facing utility-credit
+/// kinds. Returns `(credit_emitted, credit_withheld_reason)`:
+/// - `(true, None)` — credit minted via
+///   `append_automatic_utility_credit_events_once_with_counts` (`appended > 0`)
+/// - `(false, None)` — idempotent hit (`skipped_existing > 0`); no new credit
+///   minted, but the prior emission is the audit trail
+/// - `(false, Some(label))` — credit withheld; the decision row records the
+///   stable label-only reason
+async fn attempt_emit_novelty_utility_credit(
+    state: &AppState,
+    tenant: &TenantAuth,
+    decision: &GateDecision,
+    submission_id: Uuid,
+) -> ApiResult<(bool, Option<String>)> {
+    // (1) Production-gate guard. When `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE`
+    // is truthy, only `enclave_local_gpu` (real local-GPU enclave) and `dstack`
+    // (production trust boundary) may mint credit. Stubs and dev backends
+    // produce decision rows but no credit.
+    if state.novelty_utility_require_production_gate
+        && !is_production_gate_service_kind(&state.gate_service.safe_status().kind)
+    {
+        return Ok((false, Some("non_production_gate".to_string())));
+    }
+
+    // (2) Central-issuer ABAC. Returns `Err` when the central-issuer
+    // allowlist is configured and the gate-worker principal is not in it.
+    // Unlike the operator API path where this propagates as 403, here we
+    // convert it to a withheld-reason label so the decision row still lands.
+    if require_positive_credit_issuance_principal_if_configured(
+        state,
+        tenant,
+        state.novelty_utility_credit_points_delta,
+    )
+    .is_err()
+    {
+        return Ok((false, Some("central_issuer_denied".to_string())));
+    }
+
+    let event_type = TraceCreditLedgerEventType::NoveltyUtility;
+    let required_uses = utility_credit_required_allowed_uses(event_type);
+
+    // (3) Tenant policy fetch. Errors here are surfaced as ApiErrors (e.g.,
+    // scoped-token claim mismatch is a hard rejection, not a withheld reason).
+    let tenant_policy = tenant_utility_credit_policy_for_request(state, tenant, required_uses)
+        .await?;
+
+    // (4) Load the submission record. Treat a missing record as a real not-found
+    // failure rather than withholding silently — the gate route already loaded
+    // the storage row from the same backend earlier in the handler, so this
+    // path should normally succeed.
+    let Some(submission_record) =
+        read_utility_submission_record(state, tenant, submission_id)
+            .await
+            .map_err(internal_error)?
+    else {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "trace submission not found",
+        ));
+    };
+
+    // (5) Defense-in-depth submission status check. The gate route only
+    // operates on already-loaded submissions but the operator pipeline
+    // requires Accepted status before crediting.
+    if submission_record.status != TraceCorpusStatus::Accepted {
+        return Ok((false, Some("submission_not_accepted".to_string())));
+    }
+
+    // (6) Per-submission ABAC: required allowed-use must appear on both the
+    // submission record AND, if configured, the tenant policy.
+    if !record_matches_utility_credit_policy_abac(
+        &submission_record,
+        tenant,
+        tenant_policy.as_ref(),
+        required_uses,
+    ) {
+        return Ok((false, Some("policy_mismatch".to_string())));
+    }
+
+    // (7) Emit. `external_ref` binds the gate version to the submission id —
+    // NOT the decision id, which is freshly minted on every gate-worker call.
+    // Keying on `(gate_version_hash, submission_id)` makes route retries
+    // idempotent at the ledger level (per the spec's open-question
+    // resolution: "allow duplicate decision rows on retry; ledger idempotency
+    // on external_ref handles the credit side"). The `decision_id` itself is
+    // not lost — the trace_gate_decisions row carries it and the audit log
+    // links the two via the `reason` and the row's `decided_at` ordering.
+    let external_ref = format!(
+        "novelty_utility:{}:{}",
+        decision.gate_version_hash, submission_id,
+    );
+    let reason = format!("novelty_utility:{}", decision.gate_policy_version);
+    let counts = append_automatic_utility_credit_events_once_with_counts(
+        state,
+        tenant,
+        AutomaticUtilityCreditConfig {
+            idempotency_label: event_type.utility_idempotency_label(),
+            idempotency_ref: Some(external_ref.clone()),
+            event_type,
+            credit_points_delta: state.novelty_utility_credit_points_delta,
+            reason,
+            external_ref,
+        },
+        vec![AutomaticUtilityCreditSource {
+            submission_id: submission_record.submission_id,
+            trace_id: submission_record.trace_id,
+            auth_principal_ref: submission_record.auth_principal_ref.clone(),
+        }],
+    )
+    .await?;
+
+    Ok((counts.appended > 0, None))
+}
+
+/// Returns true when `kind` (as returned by `TraceGateService::safe_status()`)
+/// names a production trust boundary. Mirrors the spec's enumeration: the only
+/// production-trust kinds today are `enclave_local_gpu` (Phase A2 real local
+/// GPU) and `dstack` (Phase A2/A3 enclave deployment). Stubs
+/// (`in_memory`, `enclave_mock`, `legacy_deterministic`, `dstack_stub`) are
+/// explicitly non-production.
+fn is_production_gate_service_kind(kind: &str) -> bool {
+    matches!(kind, "enclave_local_gpu" | "dstack")
 }
 
 async fn vector_index_handler(
@@ -43018,6 +43262,9 @@ fn trace_credit_event_type_from_storage(
             Some(TraceCreditLedgerEventType::ReviewerBonus)
         }
         StorageTraceCreditEventType::AbusePenalty => Some(TraceCreditLedgerEventType::AbusePenalty),
+        StorageTraceCreditEventType::NoveltyUtility => {
+            Some(TraceCreditLedgerEventType::NoveltyUtility)
+        }
     }
 }
 
@@ -46233,6 +46480,7 @@ fn storage_credit_event_type(
         TraceCreditLedgerEventType::RankingUtility => StorageTraceCreditEventType::RankingUtility,
         TraceCreditLedgerEventType::ReviewerBonus => StorageTraceCreditEventType::ReviewerBonus,
         TraceCreditLedgerEventType::AbusePenalty => StorageTraceCreditEventType::AbusePenalty,
+        TraceCreditLedgerEventType::NoveltyUtility => StorageTraceCreditEventType::NoveltyUtility,
     }
 }
 
@@ -61645,6 +61893,8 @@ mod tests {
                 "in_memory_default",
                 "sha256:in_memory_default",
             )),
+            novelty_utility_credit_points_delta: DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA,
+            novelty_utility_require_production_gate: false,
         })
     }
 
@@ -81087,6 +81337,8 @@ mod tests {
                 "in_memory_default",
                 "sha256:in_memory_default",
             )),
+            novelty_utility_credit_points_delta: DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA,
+            novelty_utility_require_production_gate: false,
         });
 
         let mut envelope = sample_envelope().await;
@@ -119410,6 +119662,25 @@ mod tests {
         state: &AppState,
         tenant_id: &str,
     ) -> Uuid {
+        seed_gate_worker_fixture_with_allowed_uses(
+            backend,
+            state,
+            tenant_id,
+            vec!["evaluation".to_string()],
+        )
+        .await
+    }
+
+    /// Phase A5 helper: same as `seed_gate_worker_fixture` but the caller chooses
+    /// the submission's `allowed_uses`. Used by the novelty-credit caller tests
+    /// to seed an `accepted` submission that does (or does not) carry the
+    /// `model_training` allowed-use that `NoveltyUtility` policy ABAC requires.
+    async fn seed_gate_worker_fixture_with_allowed_uses(
+        backend: &trace_commons_server::db::postgres::PgBackend,
+        state: &AppState,
+        tenant_id: &str,
+        allowed_uses: Vec<String>,
+    ) -> Uuid {
         let submission_id = Uuid::new_v4();
         let trace_id = Uuid::new_v4();
         backend
@@ -119423,7 +119694,7 @@ mod tests {
                 schema_version: "trace_contribution.v1".to_string(),
                 consent_policy_version: "trace-consent-v1".to_string(),
                 consent_scopes: vec!["debugging_evaluation".to_string()],
-                allowed_uses: vec!["evaluation".to_string()],
+                allowed_uses,
                 retention_policy_id: "retention-debugging-evaluation-v1".to_string(),
                 status: StorageTraceCorpusStatus::Accepted,
                 privacy_risk: "low".to_string(),
@@ -119487,12 +119758,17 @@ mod tests {
         let (artifact_store, _object_store_name) =
             fixture_gate_worker_artifact_store(artifact_temp.path());
         let db_mirror: Arc<dyn Database> = backend.clone();
+        // Phase A5: enable db_reviewer_reads so the novelty-credit emission
+        // path can resolve the submission record from the DB mirror. The
+        // submission seeded here keeps the legacy `evaluation` allowed-use
+        // (no `model_training`) so the gate passes but credit is withheld
+        // with `policy_mismatch` — proving the policy-ABAC guard is wired.
         let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
             temp.path().to_path_buf(),
             Some(db_mirror),
             Some(artifact_store),
             false,
-            false,
+            true,
             false,
             false,
             false,
@@ -119525,6 +119801,13 @@ mod tests {
         assert_eq!(response.gate_version_hash, "sha256:in_memory_default");
         assert!(response.perplexity_passed);
         assert!(response.novelty_passed);
+        // Submission's allowed_uses=[evaluation] omits model_training, so
+        // the novelty-credit ABAC withholds credit but still writes the row.
+        assert!(!response.credit_emitted);
+        assert_eq!(
+            response.credit_withheld_reason.as_deref(),
+            Some("policy_mismatch")
+        );
 
         // Verify the audit row landed in trace_gate_decisions under tenant-a.
         let client = backend
@@ -119539,7 +119822,7 @@ mod tests {
             .expect("set tenant context");
         let rows = client
             .query(
-                "SELECT submission_id, gate_policy_version, perplexity_passed, novelty_passed
+                "SELECT submission_id, gate_policy_version, perplexity_passed, novelty_passed, credit_withheld_reason
                  FROM trace_gate_decisions WHERE tenant_id = $1 AND submission_id = $2",
                 &[&tenant_a, &submission_id],
             )
@@ -119550,10 +119833,12 @@ mod tests {
         let stored_policy: String = rows[0].get(1);
         let stored_perplexity_passed: bool = rows[0].get(2);
         let stored_novelty_passed: bool = rows[0].get(3);
+        let stored_withheld: Option<String> = rows[0].get(4);
         assert_eq!(stored_submission_id, submission_id);
         assert_eq!(stored_policy, "in_memory_default");
         assert!(stored_perplexity_passed);
         assert!(stored_novelty_passed);
+        assert_eq!(stored_withheld.as_deref(), Some("policy_mismatch"));
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
@@ -119643,5 +119928,459 @@ mod tests {
         .await
         .expect_err("reviewer token must not reach gate evaluate worker");
         assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase A5: novelty_utility credit-emission caller tests
+    // -----------------------------------------------------------------------
+
+    /// Test-only gate service that always emits a failing decision (perplexity
+    /// below the floor). The numeric outputs match `build_deterministic_decision`
+    /// so the rest of the worker pipeline keeps working; only the pass-flags
+    /// are forced low. Used by `gate_fail_skips_credit_attempt` to assert that
+    /// the credit path is short-circuited when the gate does not pass.
+    struct FailingGateService;
+
+    impl TraceGateService for FailingGateService {
+        fn evaluate_trace(
+            &self,
+            tenant_ctx: &trace_commons_server::trace_gate_service::TenantCtx,
+            envelope_ciphertext: &[u8],
+            wrapped_dek: &trace_commons_server::trace_artifact_kek::WrappedDek,
+            object_kind: TraceArtifactKind,
+        ) -> anyhow::Result<GateDecision> {
+            // Reuse the deterministic builder for stable hash fields, then
+            // mark the gates as failing.
+            let policy = "failing_gate_for_tests".to_string();
+            let version_hash = "sha256:failing_gate_for_tests".to_string();
+            let in_memory = InMemoryGateService::new(policy.clone(), version_hash.clone());
+            let mut decision = in_memory.evaluate_trace(
+                tenant_ctx,
+                envelope_ciphertext,
+                wrapped_dek,
+                object_kind,
+            )?;
+            decision.perplexity_passed = false;
+            decision.novelty_passed = false;
+            decision.vector_entry_id = None;
+            Ok(decision)
+        }
+
+        fn invalidate_vector_entry(
+            &self,
+            _tenant_ctx: &trace_commons_server::trace_gate_service::TenantCtx,
+            _vector_entry_id: Uuid,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn safe_status(&self) -> GateServiceStatus {
+            GateServiceStatus {
+                kind: "in_memory".into(),
+                gate_policy_version: "failing_gate_for_tests".into(),
+                gate_version_hash: "sha256:failing_gate_for_tests".into(),
+                attestation_verifier_configured: false,
+            }
+        }
+    }
+
+    /// Test-only gate service that mimics a production trust boundary by
+    /// reporting `safe_status().kind = "dstack"`. Decisions reuse the
+    /// deterministic in-memory builder so the gate passes. Used by the
+    /// production-gate-guard happy-path inverse: with the guard enabled, this
+    /// service is allowed to mint credit while `InMemoryGateService` is not.
+    /// Currently only `non_production_gate_guard_withholds_credit` tests the
+    /// negative direction (in_memory + guard enabled → withheld), which is the
+    /// case the spec calls out.
+    #[allow(dead_code)]
+    struct ProductionLikeGateService;
+
+    impl TraceGateService for ProductionLikeGateService {
+        fn evaluate_trace(
+            &self,
+            tenant_ctx: &trace_commons_server::trace_gate_service::TenantCtx,
+            envelope_ciphertext: &[u8],
+            wrapped_dek: &trace_commons_server::trace_artifact_kek::WrappedDek,
+            object_kind: TraceArtifactKind,
+        ) -> anyhow::Result<GateDecision> {
+            InMemoryGateService::new("production_like_for_tests", "sha256:production_like_for_tests")
+                .evaluate_trace(tenant_ctx, envelope_ciphertext, wrapped_dek, object_kind)
+        }
+
+        fn invalidate_vector_entry(
+            &self,
+            _tenant_ctx: &trace_commons_server::trace_gate_service::TenantCtx,
+            _vector_entry_id: Uuid,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn safe_status(&self) -> GateServiceStatus {
+            GateServiceStatus {
+                kind: "dstack".into(),
+                gate_policy_version: "production_like_for_tests".into(),
+                gate_version_hash: "sha256:production_like_for_tests".into(),
+                attestation_verifier_configured: true,
+            }
+        }
+    }
+
+    /// Build a configured gate-worker test state with db_reviewer_reads enabled
+    /// (so the credit pipeline can resolve the submission from the DB mirror).
+    /// `allowed_uses` is the per-submission allowed-uses list seeded into the
+    /// trace_submissions row; passing `["model_training"]` produces a happy-path
+    /// fixture, `["evaluation"]` produces a policy-mismatch fixture.
+    async fn novelty_credit_test_fixture(
+        backend: Arc<trace_commons_server::db::postgres::PgBackend>,
+        temp_root: &Path,
+        artifact_temp: &Path,
+        tenant_id: &str,
+        allowed_uses: Vec<String>,
+    ) -> (Arc<AppState>, Uuid) {
+        let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp);
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp_root.to_path_buf(),
+            Some(db_mirror),
+            Some(artifact_store),
+            false,
+            true, // db_reviewer_reads — required for utility-credit submission lookup
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).gate_service = Arc::new(InMemoryGateService::new(
+            "novelty_credit_test_v1",
+            "sha256:novelty_credit_test_v1",
+        ));
+        let submission_id = seed_gate_worker_fixture_with_allowed_uses(
+            backend.as_ref(),
+            state.as_ref(),
+            tenant_id,
+            allowed_uses,
+        )
+        .await;
+        (state, submission_id)
+    }
+
+    /// Read the on-disk credit ledger for a tenant. The novelty-utility helper
+    /// writes through `append_automatic_utility_credit_events_once_with_counts`
+    /// which appends to the same file-backed ledger the operator API uses.
+    fn read_novelty_credit_events_for_test(root: &Path, tenant_id: &str) -> Vec<String> {
+        read_all_credit_events(root, tenant_id)
+            .expect("credit ledger reads")
+            .into_iter()
+            .filter(|event| event.event_type == TraceCreditLedgerEventType::NoveltyUtility)
+            .map(|event| event.external_ref.clone().unwrap_or_default())
+            .collect()
+    }
+
+    /// (1) Happy path: gate passes, submission carries `model_training`,
+    /// central-issuer allowlist is empty (so ABAC permits), production-gate
+    /// guard is disabled. The route mints a `novelty_utility` ledger event
+    /// whose `external_ref` ties the gate version hash to the decision id.
+    #[tokio::test]
+    async fn novelty_credit_emission_happy_path() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let (state, submission_id) = novelty_credit_test_fixture(
+            backend.clone(),
+            temp.path(),
+            artifact_temp.path(),
+            "tenant-a",
+            vec!["model_training".to_string()],
+        )
+        .await;
+
+        let Json(response) = gate_evaluate_worker_handler(
+            State(state.clone()),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceGateEvaluateWorkerRequest { submission_id }),
+        )
+        .await
+        .expect("happy-path gate evaluation succeeds");
+
+        assert!(response.perplexity_passed);
+        assert!(response.novelty_passed);
+        assert!(response.credit_emitted, "expected novelty_utility credit to be emitted");
+        assert!(response.credit_withheld_reason.is_none());
+
+        let external_refs = read_novelty_credit_events_for_test(temp.path(), "tenant-a");
+        assert_eq!(external_refs.len(), 1, "exactly one novelty_utility ledger row");
+        let expected_external_ref =
+            format!("novelty_utility:{}:{}", response.gate_version_hash, submission_id);
+        assert_eq!(
+            external_refs[0], expected_external_ref,
+            "external_ref must encode (gate_version_hash, submission_id) for retry idempotency"
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    /// (2) Policy mismatch: submission's allowed_uses omits `model_training`,
+    /// so the per-submission ABAC step withholds credit. The decision row
+    /// still lands with `credit_withheld_reason = "policy_mismatch"`; no
+    /// ledger row appears.
+    #[tokio::test]
+    async fn novelty_credit_emission_withheld_on_policy_mismatch() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let (state, submission_id) = novelty_credit_test_fixture(
+            backend.clone(),
+            temp.path(),
+            artifact_temp.path(),
+            "tenant-a",
+            vec!["evaluation".to_string()],
+        )
+        .await;
+
+        let Json(response) = gate_evaluate_worker_handler(
+            State(state.clone()),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceGateEvaluateWorkerRequest { submission_id }),
+        )
+        .await
+        .expect("gate evaluation succeeds even when credit is withheld");
+
+        assert!(response.perplexity_passed);
+        assert!(response.novelty_passed);
+        assert!(!response.credit_emitted);
+        assert_eq!(
+            response.credit_withheld_reason.as_deref(),
+            Some("policy_mismatch")
+        );
+        assert!(
+            read_novelty_credit_events_for_test(temp.path(), "tenant-a").is_empty(),
+            "no novelty_utility ledger row when credit is withheld"
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    /// (3) Central-issuer denied: the central-issuer allowlist is configured
+    /// but excludes the vector-worker principal that calls the gate route.
+    /// `require_positive_credit_issuance_principal_if_configured` returns Err,
+    /// which the gate worker converts to `credit_withheld_reason = "central_issuer_denied"`.
+    #[tokio::test]
+    async fn novelty_credit_emission_withheld_on_central_issuer_denied() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let (mut state, submission_id) = novelty_credit_test_fixture(
+            backend.clone(),
+            temp.path(),
+            artifact_temp.path(),
+            "tenant-a",
+            vec!["model_training".to_string()],
+        )
+        .await;
+        // Lock the central-issuer allowlist to a different principal so the
+        // gate-worker principal is rejected. Keep it non-empty (the helper
+        // short-circuits when empty).
+        Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
+            Arc::new(BTreeSet::from(["some-other-central-issuer".to_string()]));
+
+        let Json(response) = gate_evaluate_worker_handler(
+            State(state.clone()),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceGateEvaluateWorkerRequest { submission_id }),
+        )
+        .await
+        .expect("gate evaluation succeeds even when central issuer denies credit");
+
+        assert!(response.perplexity_passed);
+        assert!(response.novelty_passed);
+        assert!(!response.credit_emitted);
+        assert_eq!(
+            response.credit_withheld_reason.as_deref(),
+            Some("central_issuer_denied")
+        );
+        assert!(
+            read_novelty_credit_events_for_test(temp.path(), "tenant-a").is_empty(),
+            "no ledger row when central-issuer ABAC denies credit"
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    /// (4) Gate fail: a stub `TraceGateService` returns a failing decision.
+    /// The credit pipeline is skipped entirely (no ABAC attempt, no ledger
+    /// row), and `credit_withheld_reason` stays `None` because the gate did
+    /// not pass — the column is reserved for cases where the gate passed but
+    /// credit was withheld.
+    #[tokio::test]
+    async fn novelty_credit_emission_skipped_on_gate_fail() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let (mut state, submission_id) = novelty_credit_test_fixture(
+            backend.clone(),
+            temp.path(),
+            artifact_temp.path(),
+            "tenant-a",
+            vec!["model_training".to_string()],
+        )
+        .await;
+        Arc::make_mut(&mut state).gate_service = Arc::new(FailingGateService);
+
+        let Json(response) = gate_evaluate_worker_handler(
+            State(state.clone()),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceGateEvaluateWorkerRequest { submission_id }),
+        )
+        .await
+        .expect("gate evaluation returns 200 even when the gate fails");
+
+        assert!(!response.perplexity_passed);
+        assert!(!response.novelty_passed);
+        assert!(!response.credit_emitted);
+        assert!(
+            response.credit_withheld_reason.is_none(),
+            "credit_withheld_reason must stay None when the gate itself failed"
+        );
+        assert!(
+            read_novelty_credit_events_for_test(temp.path(), "tenant-a").is_empty(),
+            "no novelty_utility ledger row when the gate fails"
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    /// (5) Idempotent retry: calling the gate worker twice for the same
+    /// submission under the same gate version produces exactly one ledger row
+    /// across the two calls (the helper's `external_ref`-keyed idempotency
+    /// catches the second emission as a skipped duplicate). The second call's
+    /// `credit_emitted` is `false` because no NEW credit was minted; the
+    /// audit trail from the first call is the canonical record.
+    #[tokio::test]
+    async fn novelty_credit_emission_idempotent_on_retry() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let (state, submission_id) = novelty_credit_test_fixture(
+            backend.clone(),
+            temp.path(),
+            artifact_temp.path(),
+            "tenant-a",
+            vec!["model_training".to_string()],
+        )
+        .await;
+
+        let Json(first) = gate_evaluate_worker_handler(
+            State(state.clone()),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceGateEvaluateWorkerRequest { submission_id }),
+        )
+        .await
+        .expect("first gate evaluation succeeds");
+        assert!(first.credit_emitted, "first call must mint credit");
+
+        let Json(second) = gate_evaluate_worker_handler(
+            State(state.clone()),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceGateEvaluateWorkerRequest { submission_id }),
+        )
+        .await
+        .expect("second gate evaluation succeeds");
+        // The external_ref is keyed on (gate_version_hash, submission_id) so
+        // it is stable across retries even though `decision_id` is freshly
+        // minted per call. The helper detects the duplicate external_ref and
+        // reports `skipped_existing` instead of appending. The second
+        // response surfaces `credit_emitted: false` because no NEW credit was
+        // minted — the first call's audit row remains the canonical record.
+        assert!(second.perplexity_passed && second.novelty_passed);
+        assert!(
+            !second.credit_emitted,
+            "second call must not emit duplicate credit"
+        );
+        assert!(
+            second.credit_withheld_reason.is_none(),
+            "idempotent retry is not a withheld-reason case — credit already exists"
+        );
+
+        let expected_external_ref =
+            format!("novelty_utility:{}:{}", first.gate_version_hash, submission_id);
+        let refs = read_novelty_credit_events_for_test(temp.path(), "tenant-a");
+        assert_eq!(
+            refs.len(),
+            1,
+            "exactly one novelty_utility ledger row across two route calls",
+        );
+        assert_eq!(refs[0], expected_external_ref);
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    /// (6) Production-gate guard: with `novelty_utility_require_production_gate`
+    /// enabled, an `InMemoryGateService` (kind = "in_memory") may not mint
+    /// credit. The decision row still lands with
+    /// `credit_withheld_reason = "non_production_gate"`.
+    #[tokio::test]
+    async fn novelty_credit_emission_withheld_on_non_production_gate() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let (mut state, submission_id) = novelty_credit_test_fixture(
+            backend.clone(),
+            temp.path(),
+            artifact_temp.path(),
+            "tenant-a",
+            vec!["model_training".to_string()],
+        )
+        .await;
+        Arc::make_mut(&mut state).novelty_utility_require_production_gate = true;
+
+        let Json(response) = gate_evaluate_worker_handler(
+            State(state.clone()),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceGateEvaluateWorkerRequest { submission_id }),
+        )
+        .await
+        .expect("gate evaluation succeeds with production-gate guard enabled");
+
+        assert!(response.perplexity_passed);
+        assert!(response.novelty_passed);
+        assert!(!response.credit_emitted);
+        assert_eq!(
+            response.credit_withheld_reason.as_deref(),
+            Some("non_production_gate")
+        );
+        assert!(
+            read_novelty_credit_events_for_test(temp.path(), "tenant-a").is_empty(),
+            "no ledger row when production-gate guard withholds credit"
+        );
+        // Sanity-check the kind-classifier helper.
+        assert!(!is_production_gate_service_kind("in_memory"));
+        assert!(!is_production_gate_service_kind("enclave_mock"));
+        assert!(!is_production_gate_service_kind("legacy_deterministic"));
+        assert!(!is_production_gate_service_kind("dstack_stub"));
+        assert!(is_production_gate_service_kind("enclave_local_gpu"));
+        assert!(is_production_gate_service_kind("dstack"));
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
 }

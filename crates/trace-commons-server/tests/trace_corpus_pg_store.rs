@@ -3312,6 +3312,7 @@ fn sample_gate_decision(submission_id: Uuid) -> TraceGateDecisionRow {
         attestation_chain_hash: "sha256:fixture-attestation".to_string(),
         decided_at: Utc::now(),
         vector_entry_id: Some(Uuid::new_v4()),
+        credit_withheld_reason: None,
     }
 }
 
@@ -3432,6 +3433,89 @@ async fn pg_store_inserts_trace_gate_decision_under_tenant_scope() {
         assert!(
             stored.is_none(),
             "NULL vector_entry_id must round-trip as None"
+        );
+    }
+
+    // Phase A5: insert a decision row carrying `credit_withheld_reason` and
+    // assert the new V25 column round-trips for both Some and None. The
+    // earlier rows we wrote in this test already cover the None case (the
+    // sample fixture sets it to None); this block covers the Some case and
+    // re-asserts None for completeness.
+    let mut withheld_decision = sample_gate_decision(submission_id);
+    withheld_decision.decision_id = Uuid::new_v4();
+    withheld_decision.credit_withheld_reason = Some("policy_mismatch".to_string());
+    let withheld_decision_id = withheld_decision.decision_id;
+    backend
+        .insert_trace_gate_decision(&tenant_alpha, withheld_decision)
+        .await
+        .expect("insert decision row with credit_withheld_reason");
+    {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("get withheld readback connection");
+        let tx = client
+            .transaction()
+            .await
+            .expect("start withheld readback transaction");
+        tx.execute(
+            "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+            &[&tenant_alpha],
+        )
+        .await
+        .expect("set tenant context for withheld readback");
+        let row = tx
+            .query_one(
+                "SELECT credit_withheld_reason FROM trace_gate_decisions \
+                 WHERE tenant_id = $1 AND decision_id = $2",
+                &[&tenant_alpha, &withheld_decision_id],
+            )
+            .await
+            .expect("read back gate decision with credit_withheld_reason");
+        tx.commit()
+            .await
+            .expect("commit withheld readback transaction");
+        let stored: Option<String> = row.get("credit_withheld_reason");
+        assert_eq!(
+            stored,
+            Some("policy_mismatch".to_string()),
+            "credit_withheld_reason must round-trip through trace_gate_decisions"
+        );
+    }
+    // Re-assert that the earlier rows (with credit_withheld_reason = None)
+    // surface NULL on readback so the column is genuinely nullable.
+    {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("get withheld none readback connection");
+        let tx = client
+            .transaction()
+            .await
+            .expect("start withheld none readback transaction");
+        tx.execute(
+            "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+            &[&tenant_alpha],
+        )
+        .await
+        .expect("set tenant context for withheld none readback");
+        let row = tx
+            .query_one(
+                "SELECT credit_withheld_reason FROM trace_gate_decisions \
+                 WHERE tenant_id = $1 AND decision_id = $2",
+                &[&tenant_alpha, &decision_id],
+            )
+            .await
+            .expect("read back baseline gate decision row");
+        tx.commit()
+            .await
+            .expect("commit withheld none readback transaction");
+        let stored: Option<String> = row.get("credit_withheld_reason");
+        assert!(
+            stored.is_none(),
+            "NULL credit_withheld_reason must round-trip as None"
         );
     }
 
