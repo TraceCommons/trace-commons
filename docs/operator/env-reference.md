@@ -62,6 +62,7 @@ procedure.
 | `TRACE_COMMONS_PERPLEXITY_DEVICE` | optional | `cuda` | One of `cuda`, `cuda:N`, `metal`, `cpu`. |
 | `TRACE_COMMONS_PERPLEXITY_MAX_TOKENS` | optional | `16384` | Context window cap. |
 | `TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF` | optional | `-8.0` | Negative log-probability threshold for the tail fraction. |
+| `TRACE_COMMONS_PERPLEXITY_MODEL_ARCH` | optional | `llama` | Candle backend selector. Accepted: `llama`, `qwen3`, `gemma3`, `gemma4`, plus `qwen2` as a deprecated alias for `qwen3` (parses, but emits a warning at scorer startup). Operators flip this after a bake-off promotes a new winner. Unknown values fail closed at startup. Used by both `tracedao-ingest` (production gate-service scorer) and `tracedao-gate-calibrate calibrate`. |
 
 ## 4. Embedder surface (with `local-gpu-models`)
 
