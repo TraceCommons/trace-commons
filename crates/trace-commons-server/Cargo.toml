@@ -65,6 +65,11 @@ name = "trace-commons-gate-calibrate"
 path = "src/bin/trace-commons-gate-calibrate.rs"
 required-features = ["local-gpu-models"]
 
+[[bin]]
+name = "trace-commons-vector-replay"
+path = "src/bin/trace-commons-vector-replay.rs"
+required-features = ["local-gpu-models"]
+
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

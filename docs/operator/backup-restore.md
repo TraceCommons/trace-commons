@@ -57,36 +57,54 @@ The DEK wrapping that artifact lives in `trace_object_refs` /
 `trace_object_versions` in PG; the GCS object generation is what gets
 referenced. As long as you have both, restoration is straightforward.
 
-## Vector index: no remote backup
+## Vector index: rebuild via `trace-commons-vector-replay`
 
-This is the documented weakness in v1. The vector index files are local
-disk only. The rebuild path is:
+The per-tenant vector index files are local disk only — there is no
+remote backup. To recover from a corrupted or lost
+`<root>/<tenant_hash>.usearch` file (or to bring up a freshly
+provisioned host with the historical embeddings), use
+`trace-commons-vector-replay`. The binary walks `trace_gate_decisions`
+chronologically for the requested tenant, re-fetches each accepted
+submission's encrypted envelope from the artifact store, decrypts via
+KMS, re-embeds with the configured embedder, and reinserts at the
+canonical `vector_entry_id`. It does **not** emit gate-decision rows,
+audit events, or credit events — the original audit trail is preserved
+as-is.
 
-1. Stop `trace-commons-ingest`.
-2. Empty `TRACE_COMMONS_VECTOR_INDEX_ROOT`.
-3. Restart. The index will be empty.
-4. Replay inserts from `trace_gate_decisions` — every row that recorded
-   `inserted_vector_entry_id` has the embedding evidence hash and the
-   tenant_storage_ref needed to re-derive the embedding.
-
-The replay procedure leverages the V24 + V25 schema columns introduced
-by the A4 spec: `vector_entry_id` plus the embedding-evidence hash let
-the gate worker walk `trace_gate_decisions` in chronological order and
-re-call the embedder to repopulate the index.
-
-This is **not** automated in v1. The runbook step is:
+Concrete invocation, single tenant, fresh rebuild:
 
 ```sh
-# Conceptual; actual replay tooling is a separate piece of work.
-# For now, the lossy fallback is: accept an empty index and let it fill
-# over time. Novelty floors will trivially pass for ~1k traces until
-# the index regrows.
+export DATABASE_URL=postgres://...
+export TRACE_COMMONS_KEK_PROVIDER=local_master_key          # or "dstack"
+export TRACE_COMMONS_ARTIFACT_KEY_HEX=...
+export TRACE_COMMONS_ARTIFACT_DIR=/var/lib/trace-commons-artifacts
+export TRACE_COMMONS_EMBEDDER_MODEL_ID=BAAI/bge-large-en-v1.5
+export TRACE_COMMONS_EMBEDDER_CACHE_DIR=/var/cache/trace-commons-embedder
+export TRACE_COMMONS_VECTOR_INDEX_ROOT=/var/lib/trace-commons-vector-index
+export TRACE_COMMONS_VECTOR_INDEX_DIM=1024
+
+# Stop trace-commons-ingest first so the index file is not held open.
+systemctl stop trace-commons-ingest
+
+trace-commons-vector-replay \
+  --tenant-id 550e8400-e29b-41d4-a716-446655440000 \
+  --fresh
+
+systemctl start trace-commons-ingest
 ```
 
-A future PR will ship a `bin/trace-commons-vector-replay` for automated
-reconstruction. Until then, the honest operator answer is: keep the
-disk on a redundant volume (e.g. zonal SSD persistent disk with
-snapshots).
+The binary prints a JSON summary on stdout when it finishes and exits
+non-zero if any per-row error occurred. See
+[`vector-replay.md`](vector-replay.md) for the full reference: flag
+semantics, `--incremental` vs `--fresh` selection, `--dry-run`,
+`--require-embedder-match`, expected runtimes, and the per-row event-log
+fields the operator should watch.
+
+Operators who want to avoid the full rebuild path should still keep
+`TRACE_COMMONS_VECTOR_INDEX_ROOT` on a redundant volume (e.g. zonal SSD
+persistent disk with snapshots) so the file-level restore is the
+primary recovery and `trace-commons-vector-replay` is the fallback when
+that's lost too.
 
 ## Model weights
 

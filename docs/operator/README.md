@@ -82,6 +82,11 @@ operator-constrained trust model is Phase B work (dstack), not Phase A.
   bytes), local disk (vector index files + model cache), Cloud KMS
   (out of scope — managed by GCP). Restore procedures + RPO/RTO
   targets honest about what's recoverable and what isn't.
+- **`vector-replay.md`** — operator reference for the
+  `trace-commons-vector-replay` recovery binary. Rebuilds a tenant's local
+  vector index from `trace_gate_decisions` + the encrypted artifact
+  store without touching audit/credit history. Used when the per-
+  tenant `.usearch` file is corrupted, lost, or out of sync.
 
 ### Observability
 

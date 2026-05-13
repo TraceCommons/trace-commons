@@ -230,6 +230,80 @@ impl UsearchVectorIndex {
         ])
     }
 
+    /// Delete the on-disk tenant index file for `tenant_storage_ref`, if it
+    /// exists. Also drops any cached handle for that tenant so the next
+    /// `insert`/`nearest` call rebuilds an empty index. Logs hash-only.
+    ///
+    /// Used by `trace-commons-vector-replay --fresh` to start the rebuild from a
+    /// clean slate.
+    pub fn delete_tenant_index_file(&self, tenant_storage_ref: &str) -> anyhow::Result<()> {
+        // Drop any in-memory handle first so a subsequent insert doesn't
+        // unintentionally re-flush the stale handle's in-memory contents
+        // back to disk after we've removed the file.
+        {
+            let mut cache = self
+                .open_indexes
+                .lock()
+                .expect("UsearchVectorIndex lru mutex poisoned");
+            cache.pop(tenant_storage_ref);
+        }
+        let path = self.tenant_file_path(tenant_storage_ref);
+        let file_hash = {
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("<unknown>");
+            name.to_string()
+        };
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                tracing::info!(
+                    target: "trace_commons_vector_replay",
+                    tenant_file = %file_hash,
+                    "VectorReplayResetTenantIndex: removed existing tenant index file"
+                );
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::info!(
+                    target: "trace_commons_vector_replay",
+                    tenant_file = %file_hash,
+                    "VectorReplayResetTenantIndex: no existing tenant index file"
+                );
+                Ok(())
+            }
+            Err(e) => Err(anyhow!(
+                "VectorReplayResetTenantIndex: failed to remove tenant index file {file_hash}: {e}"
+            )),
+        }
+    }
+
+    /// Return the live entry count for `tenant_storage_ref`. Opens (or
+    /// reloads) the per-tenant handle and reports `Index::size()`.
+    pub fn tenant_entry_count(&self, tenant_storage_ref: &str) -> anyhow::Result<usize> {
+        let handle = self.handle_for(tenant_storage_ref)?;
+        let guard = handle
+            .lock()
+            .expect("UsearchVectorIndex tenant mutex poisoned");
+        Ok(guard.index.size())
+    }
+
+    /// Return true if the tenant index already contains an entry for
+    /// `vector_entry_id`. Used by `trace-commons-vector-replay --incremental`
+    /// to skip rows that are already present on disk.
+    pub fn contains_entry(
+        &self,
+        tenant_storage_ref: &str,
+        vector_entry_id: Uuid,
+    ) -> anyhow::Result<bool> {
+        let handle = self.handle_for(tenant_storage_ref)?;
+        let guard = handle
+            .lock()
+            .expect("UsearchVectorIndex tenant mutex poisoned");
+        let key = Self::uuid_to_key(vector_entry_id);
+        Ok(guard.index.contains(key))
+    }
+
     /// Flush every still-cached tenant. Best-effort; returns the first error
     /// encountered (but attempts to flush every handle regardless).
     pub fn flush_all(&self) -> anyhow::Result<()> {
@@ -603,6 +677,59 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(recovered_key, UsearchVectorIndex::uuid_to_key(id_a));
+    }
+
+    #[test]
+    fn contains_entry_reports_membership() {
+        let tmp = tempdir().unwrap();
+        let idx = build_index(tmp.path(), 4);
+        let id = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let v = norm(vec![1.0, 0.0, 0.0, 0.0]);
+        assert!(!idx.contains_entry("tenant", id).unwrap());
+        idx.insert(id, "tenant", &v).unwrap();
+        assert!(idx.contains_entry("tenant", id).unwrap());
+        assert!(!idx.contains_entry("tenant", other).unwrap());
+        // Cross-tenant: same id should NOT show up under a different tenant.
+        assert!(!idx.contains_entry("other_tenant", id).unwrap());
+    }
+
+    #[test]
+    fn tenant_entry_count_reports_index_size() {
+        let tmp = tempdir().unwrap();
+        let idx = build_index(tmp.path(), 4);
+        assert_eq!(idx.tenant_entry_count("tenant").unwrap(), 0);
+        idx.insert(Uuid::new_v4(), "tenant", &norm(vec![1.0, 0.0, 0.0, 0.0]))
+            .unwrap();
+        idx.insert(Uuid::new_v4(), "tenant", &norm(vec![0.0, 1.0, 0.0, 0.0]))
+            .unwrap();
+        assert_eq!(idx.tenant_entry_count("tenant").unwrap(), 2);
+        assert_eq!(idx.tenant_entry_count("other_tenant").unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_tenant_index_file_wipes_disk_and_cache() {
+        let tmp = tempdir().unwrap();
+        let dim = 4;
+        let id = Uuid::new_v4();
+        let v = norm(vec![1.0, 0.0, 0.0, 0.0]);
+        let idx = build_index(tmp.path(), dim);
+        idx.insert(id, "tenant", &v).unwrap();
+        idx.flush_all().unwrap();
+        // File exists on disk now.
+        assert!(idx.contains_entry("tenant", id).unwrap());
+
+        idx.delete_tenant_index_file("tenant").unwrap();
+
+        // After delete: the file is gone AND the in-memory handle has been
+        // dropped. A fresh contains_entry / nearest call must rebuild an
+        // empty index for this tenant.
+        assert!(!idx.contains_entry("tenant", id).unwrap());
+        let neighbors = idx.nearest("tenant", &v, 5).unwrap();
+        assert!(neighbors.is_empty(), "fresh index must be empty: {neighbors:?}");
+
+        // No-op when the file doesn't exist.
+        idx.delete_tenant_index_file("never_seen_tenant").unwrap();
     }
 
     /// Phase A audit fix: when an LRU eviction is triggered AND the victim
