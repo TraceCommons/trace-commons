@@ -95,7 +95,11 @@ incumbent.
 
 ### Run the bake-off
 
-On the H100 host with `local-gpu-models` built:
+On the H100 host the binary must be built with the `local-gpu-models`
+feature so the real `CandlePerplexityScorer` is compiled in
+(`cargo build --release -p trace-commons-server --features local-gpu-models`).
+Default-features builds refuse the real-scorer path with
+`BakeoffRealScorerRequiresFeature`.
 
 ```sh
 ./target/release/trace-commons-gate-calibrate bake-off \

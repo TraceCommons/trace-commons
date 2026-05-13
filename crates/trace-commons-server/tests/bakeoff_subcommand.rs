@@ -199,8 +199,57 @@ fn bake_off_subcommand_writes_mock_report() {
     assert!(md.contains("Winner: "));
 }
 
+// The third real-scorer-path test that would exercise the
+// `#[cfg(feature = "local-gpu-models")]` branch requires actual candle
+// model weights on a CUDA host; it is out of scope for hermetic CI and
+// is exercised manually by the operator on the GPU host during Phase 0.
+// The two tests below cover the negative paths (no feature flag; CPU
+// hardware) which are reachable in default-feature CI.
+
 #[test]
-fn bake_off_subcommand_requires_mock_flag_until_real_path_wired() {
+fn real_scorer_path_without_feature_bails_clearly() {
+    // Without `--mock-scorer` and without the `local-gpu-models` feature
+    // (the default-features build that CI uses), the binary must refuse
+    // with a named error class so operators get a self-explanatory
+    // diagnostic instead of a generic load failure deeper in the candle
+    // stack. `--hardware=h100` is used so the CPU short-circuit does not
+    // fire first.
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = build_synthetic_corpus(&dir, 4, 4, 4);
+    let manifest = write_two_candidate_manifest(&dir);
+    let report_json = dir.path().join("report.json");
+
+    let bin = env!("CARGO_BIN_EXE_trace-commons-gate-calibrate");
+    let out = Command::new(bin)
+        .arg("bake-off")
+        .arg("--candidates")
+        .arg(&manifest)
+        .arg("--corpus")
+        .arg(&corpus)
+        .arg("--hardware=h100")
+        .arg("--report-out")
+        .arg(&report_json)
+        .arg("--determinism-repeat-runs=2")
+        // intentionally NO --mock-scorer
+        .output()
+        .expect("invoke binary");
+
+    assert!(
+        !out.status.success(),
+        "bake-off without --mock-scorer and without local-gpu-models must fail"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("BakeoffRealScorerRequiresFeature"),
+        "stderr should name BakeoffRealScorerRequiresFeature; got: {stderr}"
+    );
+}
+
+#[test]
+fn cpu_hardware_with_real_scorer_bails_clearly() {
+    // `--hardware=cpu` paired with a real scorer is unsupported: the
+    // candle Llama loader needs CUDA at any reasonable model size, so
+    // we refuse early with a named error class.
     let dir = tempfile::tempdir().unwrap();
     let corpus = build_synthetic_corpus(&dir, 4, 4, 4);
     let manifest = write_two_candidate_manifest(&dir);
@@ -223,12 +272,12 @@ fn bake_off_subcommand_requires_mock_flag_until_real_path_wired() {
 
     assert!(
         !out.status.success(),
-        "bake-off without --mock-scorer must fail until the real-scorer path is wired"
+        "bake-off with --hardware=cpu and without --mock-scorer must fail"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("BakeoffRealScorerNotWired") || stderr.contains("--mock-scorer"),
-        "stderr should explain that --mock-scorer is currently required; got: {stderr}"
+        stderr.contains("BakeoffCpuRequiresMockScorer"),
+        "stderr should name BakeoffCpuRequiresMockScorer; got: {stderr}"
     );
 }
 
