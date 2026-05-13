@@ -613,6 +613,15 @@ const TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_DRY_RUN: &str =
     "TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_DRY_RUN";
 const TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_PURPOSE: &str =
     "TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_PURPOSE";
+/// Per-item retry cap for the revocation-propagation worker. After this many
+/// failures the item moves to a terminal `Failed` state with `next_attempt_at`
+/// cleared so it is not re-claimed on subsequent ticks. Defaults to
+/// `DEFAULT_REVOCATION_PROPAGATION_MAX_ATTEMPTS` (5). Phase A6 introduces this
+/// gate for the `VectorEntry` target kind; other target kinds will adopt the
+/// same shape in a follow-up retrofit.
+const TRACE_COMMONS_REVOCATION_PROPAGATION_MAX_ATTEMPTS: &str =
+    "TRACE_COMMONS_REVOCATION_PROPAGATION_MAX_ATTEMPTS";
+const DEFAULT_REVOCATION_PROPAGATION_MAX_ATTEMPTS: u32 = 5;
 const TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS: &str =
     "TRACE_COMMONS_RANKING_CALIBRATION_MAX_AGE_HOURS";
 const TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY: &str =
@@ -957,6 +966,13 @@ struct AppState {
     /// `MAX_DELAYED_CREDIT_POINTS_DELTA`. Single deployment-wide constant; no
     /// per-tenant or per-call override.
     novelty_utility_credit_points_delta: f32,
+    /// Phase A6: revocation-propagation per-item retry cap. After
+    /// `attempt_count >= revocation_propagation_max_attempts` failures the
+    /// worker stops re-scheduling the item (sets `next_attempt_at = None`)
+    /// and emits a `RevocationPropagationFailure` audit row tagged with the
+    /// terminal flag. Tunable via
+    /// `TRACE_COMMONS_REVOCATION_PROPAGATION_MAX_ATTEMPTS`.
+    revocation_propagation_max_attempts: u32,
     /// Phase A5: when true, the gate worker refuses to emit credit unless the
     /// configured `TraceGateService` reports a production trust boundary
     /// (`safe_status().kind` is `enclave_local_gpu` or `dstack`). Non-production
@@ -3028,6 +3044,8 @@ impl AppState {
             ranking_max_labeler_issue_rate_micros,
             ranking_min_labeler_reliability_label_count,
             gate_service: build_trace_gate_service_from_env().await?,
+            revocation_propagation_max_attempts:
+                parse_revocation_propagation_max_attempts_from_env()?,
             novelty_utility_credit_points_delta: parse_novelty_utility_credit_points_delta_from_env()?,
             novelty_utility_require_production_gate: env_truthy(
                 TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE,
@@ -8304,6 +8322,27 @@ fn parse_novelty_utility_credit_points_delta_from_env() -> anyhow::Result<f32> {
     anyhow::ensure!(
         parsed <= MAX_DELAYED_CREDIT_POINTS_DELTA,
         "{TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA} exceeds the delayed credit policy limit"
+    );
+    Ok(parsed)
+}
+
+/// Parse the revocation-propagation per-item retry cap from the environment
+/// (defaulting to `DEFAULT_REVOCATION_PROPAGATION_MAX_ATTEMPTS`). The cap is
+/// clamped to at least 1 — a zero cap would terminal-fail every item on first
+/// attempt, which the spec does not contemplate.
+fn parse_revocation_propagation_max_attempts_from_env() -> anyhow::Result<u32> {
+    let Some(raw) = optional_trimmed_env(TRACE_COMMONS_REVOCATION_PROPAGATION_MAX_ATTEMPTS)?
+    else {
+        return Ok(DEFAULT_REVOCATION_PROPAGATION_MAX_ATTEMPTS);
+    };
+    let parsed = raw.parse::<u32>().with_context(|| {
+        format!(
+            "{TRACE_COMMONS_REVOCATION_PROPAGATION_MAX_ATTEMPTS} must be a non-negative integer"
+        )
+    })?;
+    anyhow::ensure!(
+        parsed >= 1,
+        "{TRACE_COMMONS_REVOCATION_PROPAGATION_MAX_ATTEMPTS} must be >= 1"
     );
     Ok(parsed)
 }
@@ -42809,6 +42848,9 @@ fn trace_commons_audit_event_from_storage(
             }),
             None,
         ),
+        StorageTraceAuditSafeMetadata::RevocationPropagationFailure { .. } => {
+            (None, event.reason.clone(), None)
+        }
         StorageTraceAuditSafeMetadata::Empty => (None, event.reason.clone(), None),
     };
     Ok(TraceCommonsAuditEvent {
@@ -44512,7 +44554,12 @@ async fn run_revocation_propagation_worker(
                 response.skipped += 1;
             }
             Err(error) => {
-                let next_attempt_at = revocation_propagation_retry_at(now, attempt_count);
+                let is_terminal = attempt_count >= state.revocation_propagation_max_attempts;
+                let next_attempt_at = if is_terminal {
+                    None
+                } else {
+                    Some(revocation_propagation_retry_at(now, attempt_count))
+                };
                 db.update_trace_revocation_propagation_item_status(
                     &tenant.tenant_id,
                     item.propagation_item_id,
@@ -44520,7 +44567,7 @@ async fn run_revocation_propagation_worker(
                         status: StorageTraceRevocationPropagationItemStatus::Failed,
                         attempt_count,
                         last_error: Some(safe_worker_error(&error)),
-                        next_attempt_at: Some(next_attempt_at),
+                        next_attempt_at,
                         completed_at: None,
                         evidence_hash: None,
                     },
@@ -44532,8 +44579,36 @@ async fn run_revocation_propagation_worker(
                         item.propagation_item_id
                     )
                 })?;
+                // Phase A6: hash-only audit row for the failure. Scoped to
+                // the VectorEntry target kind for this slice; other target
+                // kinds will adopt the same shape in a follow-up retrofit.
+                if matches!(
+                    item.target_kind,
+                    StorageTraceRevocationPropagationTargetKind::VectorEntry
+                ) {
+                    let error_class = revocation_propagation_error_class_for(item.action);
+                    if let Err(audit_err) = append_revocation_propagation_failure_audit(
+                        state,
+                        tenant,
+                        &item,
+                        error_class,
+                        &error,
+                        attempt_count,
+                        is_terminal,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            error_hash = %safe_display_error_hash(&audit_err),
+                            propagation_item_id = %item.propagation_item_id,
+                            "failed to append revocation propagation failure audit row"
+                        );
+                    }
+                }
                 response.failed += 1;
-                response.next_attempt_scheduled += 1;
+                if !is_terminal {
+                    response.next_attempt_scheduled += 1;
+                }
             }
         }
     }
@@ -44647,6 +44722,16 @@ async fn apply_revocation_propagation_item(
             )
             .await
             .context("failed to invalidate targeted vector entry for revocation propagation")?;
+            // Phase A6: also tell the gate service to drop the entry from its
+            // in-memory ANN index. The legacy/in-memory services no-op; the
+            // dstack stub fails closed; the enclave services route through to
+            // the underlying VectorIndex::delete, which treats "not present"
+            // as a successful no-op (postcondition is "entry is gone").
+            let tenant_ctx = GateTenantCtx::new(tenant.tenant_id.clone());
+            state
+                .gate_service
+                .invalidate_vector_entry(&tenant_ctx, *vector_entry_id)
+                .context("VectorInvalidationFailed")?;
             Ok(done_revocation_propagation_item(item, "invalidate_vector"))
         }
         StorageTraceRevocationPropagationAction::InvalidateBenchmarkArtifact => {
@@ -45460,6 +45545,101 @@ async fn append_revocation_propagation_audit(
             purpose_hash: Some(purpose_hash),
             dry_run: response.dry_run,
             action_counts,
+        },
+    )
+    .await
+}
+
+/// Phase A6: map a propagation action to its stable error class label, used
+/// on the typed `RevocationPropagationFailure` audit-metadata variant.
+fn revocation_propagation_error_class_for(
+    action: StorageTraceRevocationPropagationAction,
+) -> &'static str {
+    match action {
+        StorageTraceRevocationPropagationAction::InvalidateVector => "VectorInvalidationFailed",
+        StorageTraceRevocationPropagationAction::InvalidateMetadata => "MetadataInvalidationFailed",
+        StorageTraceRevocationPropagationAction::InvalidateExportMembership => {
+            "ExportInvalidationFailed"
+        }
+        StorageTraceRevocationPropagationAction::DeleteObjectPayload => "ObjectDeletionFailed",
+        StorageTraceRevocationPropagationAction::InvalidateBenchmarkArtifact => {
+            "BenchmarkArtifactInvalidationFailed"
+        }
+        StorageTraceRevocationPropagationAction::InvalidateRankerArtifact => {
+            "RankerArtifactInvalidationFailed"
+        }
+        StorageTraceRevocationPropagationAction::InvalidateWorkerQueue => {
+            "WorkerQueueInvalidationFailed"
+        }
+        StorageTraceRevocationPropagationAction::ReverseCreditSettlement => {
+            "CreditSettlementReversalFailed"
+        }
+        StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt => {
+            "PhysicalDeleteReceiptRecordFailed"
+        }
+    }
+}
+
+/// Phase A6: emit a hash-only `RevocationPropagationFailure` audit row for a
+/// propagation-item attempt that errored out. Bound to the propagation item +
+/// source submission so operators can grep; the raw error is hashed.
+async fn append_revocation_propagation_failure_audit(
+    state: &AppState,
+    tenant: &TenantAuth,
+    item: &StorageTraceRevocationPropagationItemRecord,
+    error_class: &str,
+    error: &anyhow::Error,
+    attempt_count: u32,
+    is_terminal: bool,
+) -> anyhow::Result<()> {
+    let error_hash = safe_display_error_hash(error);
+    tracing::warn!(
+        tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
+        propagation_item_id = %item.propagation_item_id,
+        source_submission_id = %item.source_submission_id,
+        target_kind = ?item.target_kind,
+        error_class = error_class,
+        error_hash = %error_hash,
+        attempt_count = attempt_count,
+        is_terminal = is_terminal,
+        "revocation propagation attempt failed"
+    );
+    append_audit_event_with_db_mirror(
+        state,
+        tenant,
+        TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            submission_id: item.source_submission_id,
+            kind: "revocation_propagation_failure".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(tenant.role),
+            actor_principal_ref: Some(tenant.principal_ref.clone()),
+            reason: Some(format!(
+                "propagation_item_id={};target_kind={:?};error_class={};attempt_count={};is_terminal={}",
+                item.propagation_item_id,
+                item.target_kind,
+                error_class,
+                attempt_count,
+                is_terminal,
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        },
+        StorageTraceAuditAction::Revoke,
+        StorageTraceAuditSafeMetadata::RevocationPropagationFailure {
+            propagation_item_id: item.propagation_item_id,
+            source_submission_id: item.source_submission_id,
+            target_kind: item.target_kind,
+            action: item.action,
+            error_class: error_class.to_string(),
+            error_hash,
+            attempt_count,
+            is_terminal,
         },
     )
     .await
@@ -58930,6 +59110,14 @@ struct TraceOperationalRevocationPropagationSummary {
     worker_cache_invalidator_required: bool,
     worker_cache_invalidator_configured: bool,
     worker_cache_invalidator_ready: bool,
+    /// Phase A6: number of `VectorEntry` propagation items that have reached
+    /// the configured retry cap (`TRACE_COMMONS_REVOCATION_PROPAGATION_MAX_ATTEMPTS`)
+    /// without succeeding. Counted across all recent
+    /// `revocation_propagation_failure` audit events for this tenant where the
+    /// `RevocationPropagationFailure` metadata variant has
+    /// `target_kind = "vector_entry"` and `is_terminal = true`. Duplicates per
+    /// `propagation_item_id` are collapsed so retry exhaustion is counted once.
+    revocation_propagation_terminal_failed_vector_entries: u64,
 }
 
 impl Default for TraceOperationalRevocationPropagationSummary {
@@ -58946,6 +59134,7 @@ impl Default for TraceOperationalRevocationPropagationSummary {
             worker_cache_invalidator_required: false,
             worker_cache_invalidator_configured: false,
             worker_cache_invalidator_ready: true,
+            revocation_propagation_terminal_failed_vector_entries: 0,
         }
     }
 }
@@ -58970,7 +59159,28 @@ impl TraceOperationalRevocationPropagationSummary {
                 latest = Some(record);
             }
         }
-        Ok(latest.unwrap_or_default())
+        let mut summary = latest.unwrap_or_default();
+        // Phase A6: count distinct VectorEntry propagation items that reached
+        // the retry cap. Reuses the hash-only reason fields stamped onto each
+        // RevocationPropagationFailure audit row.
+        let mut terminal_vector_entries: BTreeSet<String> = BTreeSet::new();
+        for event in events
+            .iter()
+            .filter(|event| event.kind == "revocation_propagation_failure")
+        {
+            let reason = event.reason.as_deref();
+            let target_kind = trace_audit_reason_value(reason, "target_kind").unwrap_or("");
+            let is_terminal = trace_audit_reason_bool(reason, "is_terminal").unwrap_or(false);
+            if !is_terminal || target_kind != "VectorEntry" {
+                continue;
+            }
+            if let Some(item_id) = trace_audit_reason_value(reason, "propagation_item_id") {
+                terminal_vector_entries.insert(item_id.to_string());
+            }
+        }
+        summary.revocation_propagation_terminal_failed_vector_entries =
+            terminal_vector_entries.len() as u64;
+        Ok(summary)
     }
 }
 
@@ -61893,6 +62103,7 @@ mod tests {
                 "in_memory_default",
                 "sha256:in_memory_default",
             )),
+            revocation_propagation_max_attempts: DEFAULT_REVOCATION_PROPAGATION_MAX_ATTEMPTS,
             novelty_utility_credit_points_delta: DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA,
             novelty_utility_require_production_gate: false,
         })
@@ -81337,6 +81548,7 @@ mod tests {
                 "in_memory_default",
                 "sha256:in_memory_default",
             )),
+            revocation_propagation_max_attempts: DEFAULT_REVOCATION_PROPAGATION_MAX_ATTEMPTS,
             novelty_utility_credit_points_delta: DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA,
             novelty_utility_require_production_gate: false,
         });
@@ -82323,6 +82535,478 @@ mod tests {
         );
         assert_eq!(tenant_b_items[0].attempt_count, 0);
         assert!(tenant_b_items[0].completed_at.is_none());
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase A6: revocation worker -> gate_service.invalidate_vector_entry hook
+    // -----------------------------------------------------------------------
+
+    /// Test-only gate service that records every `invalidate_vector_entry`
+    /// invocation so callers can assert the worker dispatched. Always returns
+    /// `Ok(())`.
+    struct RecordingInvalidationGateService {
+        calls: std::sync::Mutex<Vec<(String, Uuid)>>,
+    }
+
+    impl RecordingInvalidationGateService {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<(String, Uuid)> {
+            self.calls.lock().expect("lock").clone()
+        }
+    }
+
+    impl tracedao_server::trace_gate_service::TraceGateService
+        for RecordingInvalidationGateService
+    {
+        fn evaluate_trace(
+            &self,
+            tenant_ctx: &tracedao_server::trace_gate_service::TenantCtx,
+            envelope_ciphertext: &[u8],
+            wrapped_dek: &tracedao_server::trace_artifact_kek::WrappedDek,
+            object_kind: TraceArtifactKind,
+        ) -> anyhow::Result<GateDecision> {
+            InMemoryGateService::new("phase_a6_recording", "sha256:phase_a6_recording")
+                .evaluate_trace(tenant_ctx, envelope_ciphertext, wrapped_dek, object_kind)
+        }
+
+        fn invalidate_vector_entry(
+            &self,
+            tenant_ctx: &tracedao_server::trace_gate_service::TenantCtx,
+            vector_entry_id: Uuid,
+        ) -> anyhow::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock")
+                .push((tenant_ctx.tenant_id.clone(), vector_entry_id));
+            Ok(())
+        }
+
+        fn safe_status(&self) -> GateServiceStatus {
+            GateServiceStatus {
+                kind: "in_memory".into(),
+                gate_policy_version: "phase_a6_recording".into(),
+                gate_version_hash: "sha256:phase_a6_recording".into(),
+                attestation_verifier_configured: false,
+            }
+        }
+    }
+
+    async fn seed_vector_entry_propagation_item(
+        backend: &PgBackend,
+        tenant_id: &str,
+        attempt_count: u32,
+    ) -> (Uuid, Uuid, Uuid) {
+        let source_submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        let propagation_item_id = Uuid::new_v4();
+        let vector_entry_id = Uuid::new_v4();
+        backend
+            .upsert_trace_revocation_propagation_item(
+                StorageTraceRevocationPropagationItemWrite {
+                    tenant_id: tenant_id.to_string(),
+                    propagation_item_id,
+                    source_submission_id,
+                    target: StorageTraceRevocationPropagationTarget::VectorEntry {
+                        vector_entry_id,
+                    },
+                    action: StorageTraceRevocationPropagationAction::InvalidateVector,
+                    status: StorageTraceRevocationPropagationItemStatus::Pending,
+                    idempotency_key: sha256_prefixed(&format!(
+                        "phase-a6-vector-entry-{propagation_item_id}"
+                    )),
+                    reason: "phase a6 vector invalidation test".to_string(),
+                    attempt_count,
+                    last_error: None,
+                    next_attempt_at: None,
+                    completed_at: None,
+                    evidence_hash: None,
+                    metadata: BTreeMap::new(),
+                },
+            )
+            .await
+            .expect("upsert vector-entry propagation item");
+        let _ = trace_id;
+        (propagation_item_id, source_submission_id, vector_entry_id)
+    }
+
+    fn revocation_worker_tenant_auth(tenant_id: &str) -> TenantAuth {
+        TenantAuth {
+            tenant_id: tenant_id.to_string(),
+            role: TokenRole::RevocationWorker,
+            principal_ref: principal_storage_ref(&format!(
+                "revocation-worker-token-{tenant_id}"
+            )),
+            expires_at: None,
+            auth_method: TraceAuthMethod::StaticToken,
+            signed_claim_issuer: None,
+            signed_claim_audiences: BTreeSet::new(),
+            signed_claim_subject: None,
+            allowed_consent_scopes: BTreeSet::new(),
+            allowed_uses: BTreeSet::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn revocation_propagation_vector_entry_happy_path_invokes_gate_service() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            true,
+            false,
+            false,
+        );
+        let recorder = Arc::new(RecordingInvalidationGateService::new());
+        Arc::make_mut(&mut state).gate_service = recorder.clone();
+
+        let (propagation_item_id, source_submission_id, vector_entry_id) =
+            seed_vector_entry_propagation_item(backend.as_ref(), "tenant-a", 0).await;
+        let auth = revocation_worker_tenant_auth("tenant-a");
+
+        let response = run_revocation_propagation_worker(
+            state.as_ref(),
+            &auth,
+            TraceRevocationPropagationWorkerRequest {
+                purpose: Some("phase a6 happy path".to_string()),
+                dry_run: false,
+                limit: 10,
+            },
+        )
+        .await
+        .expect("worker runs");
+
+        assert_eq!(response.checked, 1);
+        assert_eq!(response.completed, 1);
+        assert_eq!(response.failed, 0);
+        let _ = source_submission_id;
+
+        let calls = recorder.calls();
+        assert_eq!(calls.len(), 1, "gate service invalidation called once");
+        assert_eq!(calls[0].0, "tenant-a");
+        assert_eq!(calls[0].1, vector_entry_id);
+
+        let items = backend
+            .list_trace_revocation_propagation_items("tenant-a", source_submission_id)
+            .await
+            .expect("read propagation items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].propagation_item_id, propagation_item_id);
+        assert_eq!(
+            items[0].status,
+            StorageTraceRevocationPropagationItemStatus::Done
+        );
+        assert_eq!(items[0].attempt_count, 1);
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn revocation_propagation_vector_entry_already_deleted_treated_as_done() {
+        // The recorder always returns Ok(()) regardless of whether the entry
+        // exists. This mirrors the gate-service contract: VectorIndex::delete
+        // returns Ok(false) on a miss, the orchestrator discards the bool,
+        // and the gate service surfaces Ok(()). The worker postcondition is
+        // "the entry is gone" — satisfied either way.
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            true,
+            false,
+            false,
+        );
+        let recorder = Arc::new(RecordingInvalidationGateService::new());
+        Arc::make_mut(&mut state).gate_service = recorder.clone();
+
+        let (_, source_submission_id, vector_entry_id) =
+            seed_vector_entry_propagation_item(backend.as_ref(), "tenant-a", 0).await;
+        let auth = revocation_worker_tenant_auth("tenant-a");
+
+        let response = run_revocation_propagation_worker(
+            state.as_ref(),
+            &auth,
+            TraceRevocationPropagationWorkerRequest {
+                purpose: Some("phase a6 already-deleted".to_string()),
+                dry_run: false,
+                limit: 10,
+            },
+        )
+        .await
+        .expect("worker runs");
+
+        assert_eq!(response.completed, 1);
+        assert_eq!(response.failed, 0);
+        assert_eq!(recorder.calls().len(), 1);
+        let calls = recorder.calls();
+        assert_eq!(calls[0].1, vector_entry_id);
+
+        let items = backend
+            .list_trace_revocation_propagation_items("tenant-a", source_submission_id)
+            .await
+            .expect("read propagation items");
+        assert_eq!(
+            items[0].status,
+            StorageTraceRevocationPropagationItemStatus::Done
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn revocation_propagation_vector_entry_gate_bail_fails_with_audit_row() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            true,
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).gate_service = Arc::new(DstackGateService::new(
+            "https://dstack.invalid.test/gate",
+            "phase-a6-attestation-verifier",
+        ));
+
+        let (propagation_item_id, source_submission_id, _) =
+            seed_vector_entry_propagation_item(backend.as_ref(), "tenant-a", 0).await;
+        let auth = revocation_worker_tenant_auth("tenant-a");
+
+        let response = run_revocation_propagation_worker(
+            state.as_ref(),
+            &auth,
+            TraceRevocationPropagationWorkerRequest {
+                purpose: Some("phase a6 gate-bail".to_string()),
+                dry_run: false,
+                limit: 10,
+            },
+        )
+        .await
+        .expect("worker runs");
+
+        assert_eq!(response.completed, 0);
+        assert_eq!(response.failed, 1);
+        assert_eq!(response.next_attempt_scheduled, 1);
+
+        let items = backend
+            .list_trace_revocation_propagation_items("tenant-a", source_submission_id)
+            .await
+            .expect("read propagation items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].propagation_item_id, propagation_item_id);
+        assert_eq!(
+            items[0].status,
+            StorageTraceRevocationPropagationItemStatus::Failed
+        );
+        assert_eq!(items[0].attempt_count, 1);
+        assert!(items[0].last_error.is_some());
+        assert!(items[0].next_attempt_at.is_some());
+
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        let failure_audit = audit_events
+            .iter()
+            .find(|event| event.kind == "revocation_propagation_failure")
+            .expect("revocation propagation failure audit row exists");
+        let reason = failure_audit
+            .reason
+            .as_deref()
+            .expect("failure audit reason set");
+        assert!(reason.contains("error_class=VectorInvalidationFailed"));
+        assert!(reason.contains("target_kind=VectorEntry"));
+        assert!(reason.contains("attempt_count=1"));
+        assert!(reason.contains("is_terminal=false"));
+        assert!(
+            !reason.contains("dstack.invalid.test"),
+            "raw error text must not leak"
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn revocation_propagation_vector_entry_retry_cap_exhaustion_terminal_failed() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            true,
+            false,
+            true, // db_audit_reads — operational summary reads from DB
+        );
+        Arc::make_mut(&mut state).gate_service = Arc::new(DstackGateService::new(
+            "https://dstack.invalid.test/gate",
+            "phase-a6-attestation-verifier",
+        ));
+        // Cap at 5; pre-seed attempt_count=4 so the next failure becomes
+        // attempt_count=5 == max, i.e. terminal.
+        Arc::make_mut(&mut state).revocation_propagation_max_attempts = 5;
+
+        let (propagation_item_id, source_submission_id, _) =
+            seed_vector_entry_propagation_item(backend.as_ref(), "tenant-a", 4).await;
+        let auth = revocation_worker_tenant_auth("tenant-a");
+
+        let response = run_revocation_propagation_worker(
+            state.as_ref(),
+            &auth,
+            TraceRevocationPropagationWorkerRequest {
+                purpose: Some("phase a6 retry cap".to_string()),
+                dry_run: false,
+                limit: 10,
+            },
+        )
+        .await
+        .expect("worker runs");
+
+        assert_eq!(response.failed, 1);
+        // Terminal failures are NOT re-scheduled, so next_attempt_scheduled
+        // stays at 0 for this tick.
+        assert_eq!(response.next_attempt_scheduled, 0);
+
+        let items = backend
+            .list_trace_revocation_propagation_items("tenant-a", source_submission_id)
+            .await
+            .expect("read propagation items");
+        assert_eq!(items[0].propagation_item_id, propagation_item_id);
+        assert_eq!(
+            items[0].status,
+            StorageTraceRevocationPropagationItemStatus::Failed
+        );
+        assert_eq!(items[0].attempt_count, 5);
+        assert!(
+            items[0].next_attempt_at.is_none(),
+            "terminal-failed items must not be re-scheduled"
+        );
+
+        let audit_events =
+            read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        let failure_audit = audit_events
+            .iter()
+            .find(|event| event.kind == "revocation_propagation_failure")
+            .expect("revocation propagation failure audit row exists");
+        let reason = failure_audit
+            .reason
+            .as_deref()
+            .expect("failure audit reason set");
+        assert!(reason.contains("is_terminal=true"));
+        assert!(reason.contains("attempt_count=5"));
+
+        let summary =
+            TraceOperationalRevocationPropagationSummary::from_audit_events(&audit_events)
+                .expect("summary computes");
+        assert_eq!(
+            summary.revocation_propagation_terminal_failed_vector_entries, 1,
+            "operational summary reports the terminal-failed vector entry"
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn revocation_propagation_vector_entry_tenant_isolation() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            true,
+            false,
+            false,
+        );
+        let recorder = Arc::new(RecordingInvalidationGateService::new());
+        Arc::make_mut(&mut state).gate_service = recorder.clone();
+
+        let (_, tenant_a_sub, tenant_a_vec) =
+            seed_vector_entry_propagation_item(backend.as_ref(), "tenant-a", 0).await;
+        let (_, tenant_b_sub, _tenant_b_vec) =
+            seed_vector_entry_propagation_item(backend.as_ref(), "tenant-b", 0).await;
+        let auth_a = revocation_worker_tenant_auth("tenant-a");
+
+        let response = run_revocation_propagation_worker(
+            state.as_ref(),
+            &auth_a,
+            TraceRevocationPropagationWorkerRequest {
+                purpose: Some("phase a6 tenant isolation".to_string()),
+                dry_run: false,
+                limit: 10,
+            },
+        )
+        .await
+        .expect("worker runs");
+        assert_eq!(response.checked, 1, "only tenant-a's item is claimed");
+        assert_eq!(response.completed, 1);
+
+        let calls = recorder.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "tenant-a");
+        assert_eq!(calls[0].1, tenant_a_vec);
+
+        let tenant_a_items = backend
+            .list_trace_revocation_propagation_items("tenant-a", tenant_a_sub)
+            .await
+            .expect("read tenant-a items");
+        assert_eq!(
+            tenant_a_items[0].status,
+            StorageTraceRevocationPropagationItemStatus::Done
+        );
+
+        let tenant_b_items = backend
+            .list_trace_revocation_propagation_items("tenant-b", tenant_b_sub)
+            .await
+            .expect("read tenant-b items");
+        assert_eq!(
+            tenant_b_items[0].status,
+            StorageTraceRevocationPropagationItemStatus::Pending,
+            "tenant-b's item must not be touched by tenant-a's worker run"
+        );
+        assert_eq!(tenant_b_items[0].attempt_count, 0);
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
