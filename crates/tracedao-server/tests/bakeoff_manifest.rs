@@ -120,6 +120,25 @@ license = "apache-2.0"
 }
 
 #[test]
+fn parses_qwen3_5_arch() {
+    // A2.3 adds `qwen3_5` as a manifest arch token so the bake-off can
+    // schedule Qwen 3.6 27B Dense (the family ships under the
+    // `qwen3_5` model_type id) alongside the existing candidates.
+    // mistralrs auto-detects the architecture from `config.json` at load
+    // time; the manifest field is informational (used for `ctx_for`).
+    let raw = r#"
+[[candidate]]
+id = "qwen3.6-27b-dense"
+path = "/srv/q36"
+arch = "qwen3_5"
+license = "apache-2.0"
+"#;
+    let m = parse_manifest_str(raw).expect("parses");
+    assert!(matches!(m.candidates[0].arch, CandidateArch::Qwen3_5));
+    assert!(m.warnings().is_empty());
+}
+
+#[test]
 fn no_warning_for_incumbent_llama_community() {
     let raw = r#"
 [[candidate]]
