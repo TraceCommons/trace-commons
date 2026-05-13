@@ -144,6 +144,78 @@ mod candle_impl {
     use std::sync::Mutex;
     use tokenizers::Tokenizer;
 
+    /// Flatten a multimodal `config.json` so the candle text-loaders, which
+    /// only know how to deserialize the flat HF schema, can read configs that
+    /// nest text params under a `text_config` object (Gemma 4, Qwen 3.6,
+    /// etc.). Top-level keys win on collision; sibling `vision_config` /
+    /// `audio_config` objects are left in place and ignored by the loader.
+    pub(crate) fn flatten_text_config(raw: &[u8]) -> anyhow::Result<Vec<u8>> {
+        let mut value: serde_json::Value = serde_json::from_slice(raw)
+            .context("config.json must be valid JSON")?;
+        let text = value.get("text_config").cloned();
+        if let Some(serde_json::Value::Object(text_map)) = text {
+            let map = value
+                .as_object_mut()
+                .context("config.json must be an object")?;
+            for (k, v) in text_map {
+                map.entry(k).or_insert(v);
+            }
+        }
+        Ok(serde_json::to_vec(&value)?)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::flatten_text_config;
+        use serde_json::json;
+
+        #[test]
+        fn flat_config_passes_through_unchanged() {
+            let raw = json!({"model_type": "llama", "hidden_size": 4096}).to_string();
+            let out = flatten_text_config(raw.as_bytes()).unwrap();
+            let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+            assert_eq!(parsed["hidden_size"], 4096);
+            assert!(parsed.get("text_config").is_none());
+        }
+
+        #[test]
+        fn nested_text_config_is_flattened_to_top_level() {
+            let raw = json!({
+                "model_type": "gemma4",
+                "text_config": {"hidden_size": 5120, "num_attention_heads": 40},
+                "vision_config": {"hidden_size": 1024}
+            })
+            .to_string();
+            let out = flatten_text_config(raw.as_bytes()).unwrap();
+            let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+            assert_eq!(parsed["hidden_size"], 5120, "text hidden_size should be lifted");
+            assert_eq!(parsed["num_attention_heads"], 40);
+            // vision_config should remain — we just ignore it later.
+            assert!(parsed.get("vision_config").is_some());
+            // text_config also remains; we merged keys but didn't strip the source.
+            assert!(parsed.get("text_config").is_some());
+        }
+
+        #[test]
+        fn top_level_wins_over_text_config_collision() {
+            let raw = json!({
+                "model_type": "gemma4",
+                "hidden_size": 9999,
+                "text_config": {"hidden_size": 5120}
+            })
+            .to_string();
+            let out = flatten_text_config(raw.as_bytes()).unwrap();
+            let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+            assert_eq!(parsed["hidden_size"], 9999, "explicit top-level wins");
+        }
+
+        #[test]
+        fn invalid_json_errors_clearly() {
+            let err = flatten_text_config(b"{not json").unwrap_err();
+            assert!(err.to_string().contains("valid JSON"));
+        }
+    }
+
     /// Candle-backed perplexity scorer. Holds the loaded model, tokenizer,
     /// device, and a `Mutex`-guarded KV cache that is reset before every
     /// score call.
