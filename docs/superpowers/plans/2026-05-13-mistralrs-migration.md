@@ -280,59 +280,125 @@ What gets rewritten:
   `return_raw_logits=true`, compute log_softmax + gather actual-
   next-token logprobs, aggregate via existing helper
 
-**Approximate target shape (verify against actual mistralrs API from Slice 0):**
+**Target shape (verified against mistralrs SHA `2d4ba4f` via Slice 0 PoC; see report `docs/superpowers/reports/2026-05-13-a23-slice0-poc.md`):**
 
 ```rust
 #[cfg(feature = "local-gpu-models")]
 mod local_impl {
-    use mistralrs::{TextModel, TextModelBuilder, ForwardInputsResult, ...};
-    use std::sync::Mutex;
+    use mistralrs::{
+        cross_entropy_loss, Constraint, MistralRs, Model, ModelBuilder,
+        NormalRequest, Request, RequestMessage, ResponseOk, SamplingParams,
+    };
+    use tokio::sync::mpsc::channel;
+    use std::sync::{Arc, Mutex};
 
     pub struct LocalPerplexityScorer {
-        model: Mutex<TextModel>,
-        device: Device,
-        dtype: DType,
+        model: Mutex<Model>,            // mistralrs::Model wrapper
+        runtime: tokio::runtime::Runtime,
         tail_logprob_cutoff: f32,
         model_id: String,
         max_tokens: usize,
     }
 
     impl LocalPerplexityScorer {
-        pub async fn try_new(
+        pub fn try_new(  // SYNC — see "Owned-runtime sketch" above
             model_id: impl Into<String>,
             model_path: impl AsRef<Path>,
             device: LocalDeviceKind,
             tail_logprob_cutoff: f32,
             max_tokens: usize,
-            // No arch parameter — mistralrs auto-detects from config.json
         ) -> anyhow::Result<Self> {
-            let model = TextModelBuilder::new(model_path)
-                .with_dtype(DType::BF16)
-                .with_device(map_device(device))
-                .build()
-                .await?;
-            Ok(Self {
-                model: Mutex::new(model),
-                ...
-            })
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all().build()?;
+            let model = runtime.block_on(async {
+                ModelBuilder::new(model_id_str)
+                    // .with_dtype(...) / .with_device(...) per mistralrs builder API
+                    .build().await
+            })?;
+            Ok(Self { model: Mutex::new(model), runtime, ... })
+        }
+
+        async fn async_score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+            let model_guard = self.model.lock().unwrap();
+            let inner: &Arc<MistralRs> = model_guard.inner();
+
+            // 1. Tokenize.
+            let text = std::str::from_utf8(plaintext)?.to_string();
+            let tokens = model_guard.tokenize(
+                either::Either::Right(text), None, false, false, None,
+            ).await?;
+            let bos_token = model_guard.tokenize(
+                either::Either::Right(" ".to_string()), None, true, false, None,
+            ).await?[0];
+            let input_tokens = std::iter::once(bos_token).chain(tokens).collect::<Vec<_>>();
+
+            // 2. Build request with return_raw_logits=true.
+            let (tx, mut rx) = channel(1);
+            let request = Request::Normal(Box::new(NormalRequest {
+                messages: RequestMessage::CompletionTokens(input_tokens.clone()),
+                sampling_params: SamplingParams {
+                    max_len: Some(0),
+                    ..SamplingParams::deterministic()
+                },
+                response: tx,
+                return_logprobs: false,
+                is_streaming: false,
+                id: 0,
+                constraint: Constraint::None,
+                suffix: None,
+                tools: None,
+                tool_choice: None,
+                logits_processors: None,
+                return_raw_logits: true,
+                web_search_options: None,
+                max_tool_rounds: None,
+                tool_dispatch_url: None,
+                model_id: None,
+                truncate_sequence: false,
+            }));
+            inner.get_sender(None)?.send(request).await?;
+
+            // 3. Recv and destructure.
+            let response = rx.recv().await
+                .context("mistralrs response channel closed")?
+                .as_result()?;
+            let ResponseOk::Raw { logits_chunks, tokens: out_tokens } = response else {
+                anyhow::bail!("expected ResponseOk::Raw");
+            };
+
+            // 4. Aggregate. cross_entropy_loss is publicly re-exported from
+            //    mistralrs — use it for the headline perplexity. The
+            //    existing aggregate_perplexity_metrics helper computes the
+            //    tail-fraction the gate needs.
+            let aggregate_perplexity_micros = ...;  // from cross_entropy_loss
+            let tail_fraction_micros = ...;          // from existing helper
+            let tokens_scored = out_tokens.len() as u64;
+
+            Ok(PerplexityResult { aggregate_perplexity_micros, tail_fraction_micros, tokens_scored })
         }
     }
 
     impl PerplexityScorer for LocalPerplexityScorer {
         fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
-            // 1. Tokenize plaintext into token_ids.
-            // 2. Build a forward request with return_raw_logits=true.
-            // 3. Call model.forward(req).await.
-            //    (Need to bridge sync trait method to async API —
-            //     use tokio::task::block_in_place or a runtime handle.)
-            // 4. Extract RawLogits tensor.
-            // 5. Compute log_softmax over vocab dim.
-            // 6. Gather actual-next-token logprobs.
-            // 7. Aggregate via aggregate_perplexity_metrics.
+            self.runtime.block_on(self.async_score(plaintext))
         }
     }
 }
 ```
+
+**Key API notes from the PoC:**
+- `ForwardInputsResult` is **not** publicly re-exported from the `mistralrs`
+  crate. The public path is `Request::Normal { ..., return_raw_logits: true }`
+  → channel `rx.recv()` → `ResponseOk::Raw { logits_chunks, tokens }`.
+- `model.inner()` returns `&Arc<MistralRs>` (the runtime); `Model` is the
+  wrapper that adds `tokenize` and other helpers.
+- mistralrs auto-detects the architecture from `config.json` — no `arch:`
+  parameter at any layer.
+- mistralrs publicly re-exports `cross_entropy_loss`, so the perplexity
+  aggregation can lean on its implementation rather than rolling our own
+  log_softmax + gather.
+- `either::Either` is required for the tokenize API (`Right` for a String,
+  `Left` for a Vec<u32>). The `either` crate is already in tree.
 
 **Key design notes:**
 - mistralrs is async. The `PerplexityScorer` trait is sync.
