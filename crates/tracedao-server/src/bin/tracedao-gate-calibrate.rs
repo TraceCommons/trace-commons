@@ -34,6 +34,8 @@ mod bakeoff_manifest;
 mod bakeoff_metrics;
 #[path = "gate_calibrate/bakeoff_report.rs"]
 mod bakeoff_report;
+#[path = "gate_calibrate/run_candidate_eval.rs"]
+mod run_candidate_eval;
 
 use clap::{Args, Parser, Subcommand};
 
