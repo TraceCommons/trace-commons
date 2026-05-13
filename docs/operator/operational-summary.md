@@ -61,6 +61,15 @@ absolute values are less informative than rate.
 | `embedder_inference_failed_total` | new | Phase A3 |
 | `vector_invalidation_failed_total` | new | Phase A4 |
 | `revocation_propagation_terminal_failed_vector_entries` | new | Count of vector-entry revocations that exhausted retries and are terminal-failed. **Should be zero**; any non-zero value is an operator action item — investigate and remediate via the vector index drill. |
+| `revocation_propagation_terminal_failed_object_refs` | new (A6 retrofit) | Count of object-payload revocations terminal-failed after exhausting retries. Cross-reference `ObjectDeletionFailed` in logs. **Should be zero.** |
+| `revocation_propagation_terminal_failed_export_manifests` | new (A6 retrofit) | Count of export-manifest revocations terminal-failed. Cross-reference `ExportInvalidationFailed`. **Should be zero.** |
+| `revocation_propagation_terminal_failed_export_manifest_items` | new (A6 retrofit) | Count of export-manifest-item revocations terminal-failed. Cross-reference `ExportInvalidationFailed`. **Should be zero.** |
+| `revocation_propagation_terminal_failed_derived_records` | new (A6 retrofit) | Count of derived-record revocations terminal-failed. Cross-reference `DerivedRecordInvalidationFailed`. **Should be zero.** |
+| `revocation_propagation_terminal_failed_benchmark_artifacts` | new (A6 retrofit) | Count of benchmark-artifact revocations terminal-failed. Cross-reference `BenchmarkArtifactInvalidationFailed`. **Should be zero.** |
+| `revocation_propagation_terminal_failed_ranker_artifacts` | new (A6 retrofit) | Count of ranker-artifact revocations terminal-failed. Cross-reference `RankerArtifactInvalidationFailed`. **Should be zero.** |
+| `revocation_propagation_terminal_failed_credit_settlements` | new (A6 retrofit) | Count of credit-settlement reversals terminal-failed (often NEAR outbox dependency). Cross-reference `CreditSettlementReversalFailed`. **Should be zero.** |
+| `revocation_propagation_terminal_failed_worker_queues` | new (A6 retrofit) | Count of worker-queue invalidations terminal-failed (typically missing external invalidator). Cross-reference `WorkerQueueInvalidationFailed`. **Should be zero.** |
+| `revocation_propagation_terminal_failed_physical_delete_receipts` | new (A6 retrofit) | Count of physical-delete-receipt records terminal-failed after delete. Cross-reference `PhysicalDeleteReceiptRecordFailed`. **Should be zero.** |
 | `audit_chain_drift_rejected_total` | — | Cumulative |
 | `tenant_drift_rejected_total` | — | Cumulative |
 | `privileged_action_abac_denied_total` | — | Cumulative |
@@ -69,7 +78,11 @@ absolute values are less informative than rate.
 
 - **Critical** — alarm immediately:
   - Any drill in `failure` state.
-  - `revocation_propagation_terminal_failed_vector_entries > 0`.
+  - Any `revocation_propagation_terminal_failed_*` counter `> 0`
+    (`vector_entries`, `object_refs`, `export_manifests`,
+    `export_manifest_items`, `derived_records`, `benchmark_artifacts`,
+    `ranker_artifacts`, `credit_settlements`, `worker_queues`,
+    `physical_delete_receipts`).
   - `gate_service_status.ready == false`.
   - `audit_chain.last_audit_event_at` stale > 1h during business hours.
 
