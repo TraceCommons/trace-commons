@@ -105,3 +105,47 @@ fn recency_breaks_tie_after_license_and_size_tied() {
     assert_eq!(winner.id, "b");
 }
 
+fn fixture_report() -> bakeoff_report::Report {
+    bakeoff_report::Report {
+        generated_at: "2026-05-13T12:00:00Z".into(),
+        corpus_sha256: "sha256:abc".into(),
+        manifest_sha256: "sha256:def".into(),
+        candidates: vec![result("x", 0.9, 0.1, 0.5, 1000.0, 1e-7)],
+        winner_id: Some("x".into()),
+        decision_rule_version: 1,
+        mock_scorer: false,
+        ctx_max_tokens: 4096,
+        determinism_gate_value: 1e-5,
+    }
+}
+
+#[test]
+fn report_json_round_trips() {
+    let r = fixture_report();
+    let json = serde_json::to_string(&r).expect("serialize");
+    let back: bakeoff_report::Report = serde_json::from_str(&json).expect("parse");
+    assert_eq!(back.winner_id.as_deref(), Some("x"));
+    assert_eq!(back.ctx_max_tokens, 4096);
+}
+
+#[test]
+fn report_markdown_includes_winner_and_table() {
+    let md = bakeoff_report::render_markdown(&fixture_report());
+    assert!(md.contains("Winner: x"), "missing winner line: {md}");
+    assert!(
+        md.contains("| candidate | auc |"),
+        "missing table header: {md}"
+    );
+}
+
+#[test]
+fn mock_report_renders_warning_banner() {
+    let mut r = fixture_report();
+    r.mock_scorer = true;
+    let md = bakeoff_report::render_markdown(&r);
+    assert!(md.contains("[MOCK SCORER"), "missing banner: {md}");
+    assert!(
+        !md.contains('\u{26A0}'),
+        "banner contained the warning-sign emoji"
+    );
+}

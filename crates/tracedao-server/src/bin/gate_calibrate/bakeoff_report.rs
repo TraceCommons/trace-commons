@@ -6,6 +6,7 @@
 // behavior strictly pure — no I/O outside `write_report`.
 
 use std::cmp::Ordering;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -146,4 +147,77 @@ pub fn pick_winner(results: &[CandidateResult]) -> Option<&CandidateResult> {
     });
 
     contenders.first().map(|(c, _)| *c)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Report {
+    pub generated_at: String,
+    pub corpus_sha256: String,
+    pub manifest_sha256: String,
+    pub candidates: Vec<CandidateResult>,
+    pub winner_id: Option<String>,
+    pub decision_rule_version: u32,
+    pub mock_scorer: bool,
+    pub ctx_max_tokens: u32,
+    pub determinism_gate_value: f64,
+}
+
+/// Render the report as a markdown document. The output is intentionally
+/// stable: review tooling greps for `"Winner: "` and the table header
+/// `"| candidate | auc |"`. When `mock_scorer` is set, the banner is loud and
+/// bracketed (no emojis — repo convention).
+pub fn render_markdown(report: &Report) -> String {
+    let mut out = String::new();
+    if report.mock_scorer {
+        out.push_str("> [MOCK SCORER - NOT VALID FOR PRODUCTION DECISIONS]\n\n");
+    }
+    out.push_str(&format!("# Bake-off report ({})\n\n", report.generated_at));
+    out.push_str(&format!("- corpus: {}\n", report.corpus_sha256));
+    out.push_str(&format!("- manifest: {}\n", report.manifest_sha256));
+    out.push_str(&format!(
+        "- decision-rule version: {}\n",
+        report.decision_rule_version
+    ));
+    out.push_str(&format!("- ctx_max_tokens: {}\n", report.ctx_max_tokens));
+    out.push_str(&format!(
+        "- determinism gate: {}\n\n",
+        report.determinism_gate_value
+    ));
+
+    let winner = report.winner_id.as_deref().unwrap_or("none");
+    out.push_str(&format!("Winner: {}\n\n", winner));
+
+    out.push_str("| candidate | auc | paraphrase_delta | tail_range | throughput_tps | determinism_stddev | license | params_b | passed_gate |\n");
+    out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+    for c in &report.candidates {
+        out.push_str(&format!(
+            "| {} | {:.6} | {:.6} | {:.6} | {:.3} | {:.3e} | {:?} | {} | {} |\n",
+            c.id,
+            c.discrimination_auc,
+            c.paraphrase_delta,
+            c.tail_fraction_range,
+            c.throughput_tps,
+            c.determinism_stddev,
+            c.license,
+            c.params_b,
+            c.passed_determinism_gate,
+        ));
+    }
+    out
+}
+
+/// Write the report as JSON to `json_out`. Best-effort writes the markdown
+/// alongside (same stem, `.md` suffix) when the path has a `.json` extension;
+/// failures to write the companion file are propagated so partial state is
+/// visible. SHA companion is intentionally deferred — not on the critical
+/// path for this slice.
+pub fn write_report(report: &Report, json_out: &Path) -> anyhow::Result<()> {
+    let json = serde_json::to_vec_pretty(report)?;
+    std::fs::write(json_out, &json)?;
+    if json_out.extension().and_then(|s| s.to_str()) == Some("json") {
+        let md_path = json_out.with_extension("md");
+        let md = render_markdown(report);
+        std::fs::write(md_path, md)?;
+    }
+    Ok(())
 }
