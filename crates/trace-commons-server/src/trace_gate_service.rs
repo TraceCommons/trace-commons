@@ -31,16 +31,39 @@ use crate::trace_artifact_store::{TraceArtifactKind, aead_decrypt_with_dek};
 /// Minimal tenant context plumbed into the gate service. We intentionally
 /// keep this struct independent of the binary-private `TenantAuth` type so
 /// the trait stays defined in the library crate.
+///
+/// The `tenant_storage_ref` is the canonical `"tenant_sha256:..."` form used
+/// across the artifact store, KEK context binding, and vector-index sharding.
+/// Constructing this struct from anything but the canonical form would make
+/// the gate worker's KEK context disagree with the wrapped DEK that was
+/// produced under the canonical ref → `KekContextMismatch` at first read.
 #[derive(Debug, Clone)]
 pub struct TenantCtx {
-    pub tenant_id: String,
+    tenant_storage_ref: String,
 }
 
 impl TenantCtx {
-    pub fn new(tenant_id: impl Into<String>) -> Self {
+    /// Construct from a value that is already the canonical
+    /// `tenant_sha256:...` storage ref. Callers MUST NOT pass a raw tenant id
+    /// here; use the binary's `tenant_storage_ref(&tenant.tenant_id)` helper to
+    /// canonicalize first.
+    pub fn from_canonical(tenant_storage_ref: impl Into<String>) -> Self {
         Self {
-            tenant_id: tenant_id.into(),
+            tenant_storage_ref: tenant_storage_ref.into(),
         }
+    }
+
+    /// Test/dev constructor. Treats the argument as already-canonical and
+    /// records it verbatim. Production code MUST go through `from_canonical`
+    /// with the output of `tenant_storage_ref(&tenant.tenant_id)`.
+    pub fn new(tenant_storage_ref: impl Into<String>) -> Self {
+        Self::from_canonical(tenant_storage_ref)
+    }
+
+    /// The canonical storage ref this context represents. Use this for KEK
+    /// context binding, vector-index sharding, and any other store/index keying.
+    pub fn tenant_storage_ref(&self) -> &str {
+        &self.tenant_storage_ref
     }
 }
 
@@ -128,7 +151,7 @@ fn deterministic_decision_digest(
     h.update(b"trace_gate_service_decision.v1\n");
     h.update(gate_policy_version.as_bytes());
     h.update(b"\n");
-    h.update(tenant_ctx.tenant_id.as_bytes());
+    h.update(tenant_ctx.tenant_storage_ref().as_bytes());
     h.update(b"\n");
     h.update(object_kind.as_path_segment().as_bytes());
     h.update(b"\n");
@@ -473,8 +496,13 @@ where
         // should pass raw bytes.
         let ciphertext = decode_envelope_ciphertext(envelope_ciphertext);
 
+        // Critical: use the canonical tenant_storage_ref for BOTH the KEK
+        // context binding and the orchestrator's per-tenant index sharding.
+        // The wrapped DEK was produced under the canonical ref by the
+        // artifact-store path; constructing the KekContext with anything else
+        // (e.g. raw tenant id) makes the unwrap fail with KekContextMismatch.
         let ctx = KekContext {
-            tenant_storage_ref: tenant_ctx.tenant_id.clone(),
+            tenant_storage_ref: tenant_ctx.tenant_storage_ref().to_string(),
             artifact_kind: object_kind.clone(),
         };
         let dek = self.decryptor.unwrap_dek(wrapped_dek, &ctx)?;
@@ -482,7 +510,7 @@ where
 
         let decision = self
             .orchestrator
-            .evaluate(&plaintext, &tenant_ctx.tenant_id)?;
+            .evaluate(&plaintext, tenant_ctx.tenant_storage_ref())?;
         Ok(GateDecision {
             gate_policy_version: decision.gate_policy_version,
             gate_version_hash: decision.gate_version_hash,
@@ -511,7 +539,7 @@ where
         // postcondition, so we discard the bool.
         let _ = self
             .orchestrator
-            .delete_vector_entry(&tenant_ctx.tenant_id, vector_entry_id)?;
+            .delete_vector_entry(tenant_ctx.tenant_storage_ref(), vector_entry_id)?;
         Ok(())
     }
 
@@ -590,7 +618,7 @@ mod enclave_gate_service_tests {
         let svc = EnclaveGateService::mock_with_decryptor(Arc::clone(&decryptor));
 
         let tenant = TenantCtx::new("tenant-a");
-        let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), &tenant.tenant_id);
+        let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
         let ciphertext =
             aead_encrypt_with_dek(&dek, b"a fresh trace plaintext").expect("encrypt fixture");
 
@@ -614,7 +642,7 @@ mod enclave_gate_service_tests {
         let svc = EnclaveGateService::mock_with_decryptor(Arc::clone(&decryptor));
 
         let tenant = TenantCtx::new("tenant-a");
-        let (dek, mut wrapped) = wrap_fixture_dek(decryptor.as_ref(), &tenant.tenant_id);
+        let (dek, mut wrapped) = wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
         let ciphertext = aead_encrypt_with_dek(&dek, b"a fresh trace plaintext").unwrap();
 
         // Tamper with the wrapped DEK's context_hash so the unwrap fails.
@@ -679,7 +707,7 @@ mod enclave_gate_service_tests {
         let svc = EnclaveGateService::mock_with_decryptor(Arc::clone(&decryptor));
 
         let tenant = TenantCtx::new("tenant-del-test");
-        let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), &tenant.tenant_id);
+        let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
         let ciphertext =
             aead_encrypt_with_dek(&dek, b"delete-restore-novelty-plaintext")
                 .expect("encrypt fixture");
@@ -719,6 +747,103 @@ mod enclave_gate_service_tests {
             second.novelty_score_micros >= 900_000,
             "novelty must be high again after deletion, got {}",
             second.novelty_score_micros
+        );
+    }
+
+    /// Phase A audit fix: an embedder inference failure MUST propagate as an
+    /// `evaluate_trace` error so the gate worker fails closed. The previous
+    /// fail-open shape returned a zero vector → novelty math would interpret
+    /// that as "maximally novel" → gate trivially passes despite the failure.
+    #[test]
+    fn enclave_gate_service_embedder_error_propagates_as_evaluate_failure() {
+        use trace_commons_gate_enclave::{
+            EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig, MockVectorIndex,
+        };
+
+        /// Always-failing embedder: every call returns `Err`.
+        struct FailingEmbedder;
+        impl trace_commons_gate_enclave::Embedder for FailingEmbedder {
+            fn embed(&self, _plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+                anyhow::bail!("EmbedderInferenceFailed: synthetic test failure")
+            }
+        }
+
+        let decryptor = fixture_decryptor();
+        let cfg = EnclaveGateOrchestratorConfig::mock_default();
+        let orchestrator = EnclaveGateOrchestrator::new(
+            MockPerplexityScorer::new(),
+            FailingEmbedder,
+            MockVectorIndex::new(),
+            cfg,
+        );
+        let svc = EnclaveGateService::new(
+            orchestrator,
+            Arc::clone(&decryptor),
+            "enclave_test_failing_embedder",
+        );
+
+        let tenant = TenantCtx::new("tenant-failing-embedder");
+        let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
+        let ciphertext =
+            aead_encrypt_with_dek(&dek, b"fail-closed-fixture-plaintext").expect("encrypt");
+
+        let err = svc
+            .evaluate_trace(
+                &tenant,
+                &ciphertext,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+            )
+            .expect_err("embedder error must propagate as evaluate_trace failure");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("EmbedderInferenceFailed"),
+            "expected EmbedderInferenceFailed error class, got: {msg}"
+        );
+    }
+
+    /// Phase A audit fix: TenantCtx now carries the canonical
+    /// `tenant_sha256:...` form. A wrapped DEK produced under canonical-X must
+    /// unwrap under canonical-X (success), and must FAIL when the gate
+    /// service is handed a non-canonical ref — this is the regression that
+    /// caused KekContextMismatch in real deployments when the worker passed
+    /// raw `tenant.tenant_id`.
+    #[test]
+    fn enclave_gate_service_uses_canonical_tenant_ref() {
+        let decryptor = fixture_decryptor();
+        let svc = EnclaveGateService::mock_with_decryptor(Arc::clone(&decryptor));
+
+        // Wrap a DEK under the canonical-form ref the artifact store uses.
+        let canonical = "tenant_sha256:abcd1234";
+        let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), canonical);
+        let ciphertext = aead_encrypt_with_dek(&dek, b"canonical-fixture").expect("encrypt");
+
+        // Canonical-ref ctx: evaluate succeeds (KEK context matches).
+        let canonical_ctx = TenantCtx::from_canonical(canonical);
+        svc.evaluate_trace(
+            &canonical_ctx,
+            &ciphertext,
+            &wrapped,
+            TraceArtifactKind::ContributionEnvelope,
+        )
+        .expect("canonical TenantCtx must unwrap the DEK and evaluate");
+
+        // Non-canonical ref (raw tenant id form): KekContext disagrees with
+        // the wrapped DEK's context binding → `KekContextMismatch` is the
+        // exact regression the canonical-threading fix prevents in
+        // production.
+        let raw_ctx = TenantCtx::from_canonical("raw-tenant-id");
+        let err = svc
+            .evaluate_trace(
+                &raw_ctx,
+                &ciphertext,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+            )
+            .expect_err("non-canonical ref must fail with KekContextMismatch");
+        assert!(
+            format!("{err:#}").contains("KekContextMismatch"),
+            "expected KekContextMismatch, got: {err}"
         );
     }
 }

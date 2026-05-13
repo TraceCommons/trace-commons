@@ -1,6 +1,7 @@
 //! Compose `PerplexityScorer` + `Embedder` + `VectorIndex` into a single
 //! gate-decision pipeline.
 
+use anyhow::Context;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -112,8 +113,17 @@ where
         plaintext: &[u8],
         tenant_storage_ref: &str,
     ) -> anyhow::Result<OrchestrationDecision> {
-        let perp = self.perplexity.score(plaintext);
-        let embedding = self.embedder.embed(plaintext);
+        // Fail-closed inference: a scorer / embedder error refuses the
+        // evaluation. Returning Ok with zero-valued fallbacks would let any
+        // positive floor be defeated silently, falsely passing the gate.
+        let perp = self
+            .perplexity
+            .score(plaintext)
+            .context("PerplexityScorerInferenceFailed")?;
+        let embedding = self
+            .embedder
+            .embed(plaintext)
+            .context("EmbedderInferenceFailed")?;
         let neighbors = self
             .index
             .nearest(tenant_storage_ref, &embedding, self.cfg.top_k)?;

@@ -186,11 +186,35 @@ impl UsearchVectorIndex {
             file_path,
         }));
 
-        // `put` returns the evicted (oldest) entry. Flush + drop it
-        // synchronously so we never lose dirty writes.
-        if let Some((_evicted_key, evicted)) = cache.push(tenant_storage_ref.to_string(), Arc::clone(&handle))
+        // `push` returns the evicted (oldest) entry. Flush + drop it
+        // synchronously so we never lose dirty writes. On flush failure, the
+        // evicted handle's data is still in-memory only — silently dropping
+        // it would lose writes. Restore it to the cache and surface the
+        // error to the caller so the upstream `insert`/`nearest` request
+        // fails closed rather than partially succeeding.
+        if let Some((evicted_key, evicted)) =
+            cache.push(tenant_storage_ref.to_string(), Arc::clone(&handle))
         {
-            flush_handle_arc(&evicted)?;
+            if let Err(flush_err) = flush_handle_arc(&evicted) {
+                // Re-insert the victim so its dirty data isn't lost. Note
+                // this displaces the freshly inserted `handle` again — that
+                // is acceptable: we are propagating an error and the caller
+                // will see the failed insert/nearest, and the next caller
+                // for `tenant_storage_ref` will go through the normal
+                // load-from-disk path. Best-effort: if reinsert ALSO evicts
+                // something, we can't recover from that case any more
+                // cleanly; log and bail.
+                if let Some((_, double_evicted)) = cache.push(evicted_key, evicted) {
+                    if let Err(secondary) = flush_handle_arc(&double_evicted) {
+                        tracing::warn!(
+                            error = ?secondary,
+                            "UsearchVectorIndex secondary eviction flush also failed; possible dirty-write loss"
+                        );
+                    }
+                }
+                return Err(flush_err
+                    .context("UsearchVectorIndex eviction flush failed; victim re-cached"));
+            }
         }
 
         Ok(handle)
@@ -579,5 +603,61 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(recovered_key, UsearchVectorIndex::uuid_to_key(id_a));
+    }
+
+    /// Phase A audit fix: when an LRU eviction is triggered AND the victim
+    /// fails to flush to disk, the error must surface to the caller (so the
+    /// upstream gate evaluation fails closed) and the victim's data must NOT
+    /// be silently dropped. We simulate the flush failure on Unix by making
+    /// the root directory read-only between two inserts.
+    #[cfg(unix)]
+    #[test]
+    fn lru_eviction_with_flush_failure_surfaces_and_does_not_lose_data() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().unwrap();
+        let dim = 4;
+        // max_open = 1 so EVERY new tenant evicts the previous one.
+        // flush_every = 1024 so the inline flush isn't triggered by a single
+        // insert — only the eviction-path flush is.
+        let idx = UsearchVectorIndex::try_new(tmp.path(), dim, 16, 200, 50, 1, 1024).unwrap();
+        let id_a = Uuid::new_v4();
+        let v_a = norm(vec![1.0, 0.0, 0.0, 0.0]);
+        idx.insert(id_a, "tenant_a", &v_a).unwrap();
+
+        // Make the root dir read-only so the eviction-path flush
+        // (Index::save → fs write) cannot succeed.
+        let mut perms = std::fs::metadata(tmp.path()).unwrap().permissions();
+        perms.set_mode(0o500);
+        std::fs::set_permissions(tmp.path(), perms.clone()).unwrap();
+
+        let id_b = Uuid::new_v4();
+        let v_b = norm(vec![0.0, 1.0, 0.0, 0.0]);
+        let err = idx
+            .insert(id_b, "tenant_b", &v_b)
+            .expect_err("eviction flush must fail under read-only root");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("eviction flush failed") || msg.contains("save"),
+            "expected eviction-flush error, got: {msg}"
+        );
+
+        // Restore permissions so the tempdir Drop can clean up.
+        let mut perms = std::fs::metadata(tmp.path()).unwrap().permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(tmp.path(), perms).unwrap();
+
+        // tenant_a's data must still be queryable (re-cached after the
+        // failed flush). With max_open=1 it MAY have been ejected again
+        // during the secondary push, but its dirty in-memory state was
+        // either re-cached or flushed to disk. After permissions restore,
+        // either path resolves: cached or disk-loadable. We assert the
+        // query succeeds; an empty result would indicate silent data loss.
+        let neighbors_a = idx.nearest("tenant_a", &v_a, 5).unwrap();
+        assert_eq!(
+            neighbors_a.len(),
+            1,
+            "tenant_a data must not be silently lost on eviction flush failure"
+        );
     }
 }
