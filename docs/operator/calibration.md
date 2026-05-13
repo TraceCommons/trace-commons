@@ -6,7 +6,151 @@ How to choose the three gate floors —
 `TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS` — and when to flip credit
 emission on.
 
-Three phases, in order:
+Three phases, in order. **Phase 0** (model bake-off) happens once per
+production deployment, before Phase 1 runs.
+
+## Phase 0 — Model bake-off (A2.1)
+
+Goal: empirically pick the perplexity scorer model from a candidate set,
+rather than carrying the incumbent on tooling-maturity grounds. Run once
+per deployment, before any floor calibration — floors are scaled to the
+winning model's perplexity distribution, so picking the model first is
+the prerequisite.
+
+The bake-off binary is the `bake-off` subcommand of
+`tracedao-gate-calibrate`. The decision rule (`0.6 * AUC + 0.3 *
+stability + 0.1 * tail_range`, with determinism gate, throughput floor,
+and license / size / recency tiebreakers) is committed before the run;
+the winner is determined by formula, not by inspection.
+
+Authoritative design and rollout sequence:
+
+- Spec: `docs/superpowers/specs/2026-05-13-model-bakeoff-retrofit-design.md`
+- Plan: `docs/superpowers/plans/2026-05-13-model-bakeoff-retrofit.md`
+
+### Build the corpus
+
+```sh
+HF_TOKEN=hf_xxxx \
+BAKEOFF_PARAPHRASE_MODEL_PATH=/srv/models/qwen3-4b-base \
+./scripts/operator/build-bakeoff-corpus.sh /srv/bakeoff/corpus.tar.zst
+```
+
+The script downloads OASST2 + GAIA for the novel slice, samples from
+`scripts/operator/bakeoff-duplicate-seeds.txt` for the duplicate slice,
+and runs Qwen3-4B-Base back-translation for the paraphrase slice.
+Outputs a `.tar.zst` tarball plus its SHA256. **Append the SHA256 to
+`scripts/operator/.bakeoff-corpus-checksums`** so the bake-off is
+reproducible.
+
+For CI / smoke without HF auth, the dry-run path emits a 6-entry
+synthetic corpus:
+
+```sh
+BAKEOFF_CORPUS_DRY_RUN=1 ./scripts/operator/build-bakeoff-corpus.sh /tmp/dry.tar.zst
+```
+
+### Write the candidate manifest
+
+`candidates.toml`:
+
+```toml
+[[candidate]]
+id = "llama-3.1-8b-instruct"
+path = "/srv/models/llama-3.1-8b-instruct"
+arch = "llama"
+license = "llama-community"
+params_b = 8
+release_date_unix = 1721260800
+
+[[candidate]]
+id = "qwen3-8b-base"
+path = "/srv/models/qwen3-8b-base"
+arch = "qwen2"
+license = "apache-2.0"
+params_b = 8
+release_date_unix = 1745798400
+
+[[candidate]]
+id = "qwen3.6-27b-dense"
+path = "/srv/models/qwen3.6-27b"
+arch = "qwen2"
+license = "apache-2.0"
+params_b = 27
+release_date_unix = 1745798400
+
+[[candidate]]
+id = "gemma-4-31b-base"
+path = "/srv/models/gemma-4-31b"
+arch = "gemma3"
+license = "apache-2.0"
+params_b = 31
+release_date_unix = 1743552000
+```
+
+The manifest emits a warning (not an error) for non-incumbent
+`llama-community` candidates — the spec restricts new picks to
+Apache-2.0 or MIT, but Llama-3.1-8B-Instruct is grandfathered as the
+incumbent.
+
+### Run the bake-off
+
+On the H100 host with `local-gpu-models` built:
+
+```sh
+./target/release/tracedao-gate-calibrate bake-off \
+  --candidates=/srv/bakeoff/candidates.toml \
+  --corpus=/srv/bakeoff/corpus.tar.zst \
+  --hardware=h100 \
+  --report-out=/srv/bakeoff/report.json
+```
+
+The binary loads each candidate sequentially (they don't all fit
+simultaneously), scores the three corpus slices, runs the determinism
+replay, captures `nvidia-smi` VRAM, and writes a JSON report plus a
+companion markdown file. Total runtime is `sum(load + score)` across
+candidates; budget ~9 hr GPU at ~$35 (single H100).
+
+For dry-run validation without GPU weights:
+
+```sh
+./target/debug/tracedao-gate-calibrate bake-off \
+  --candidates=/tmp/dry-candidates.toml \
+  --corpus=/tmp/dry.tar.zst \
+  --hardware=cpu \
+  --report-out=/tmp/dry-report.json \
+  --mock-scorer
+```
+
+Reports emitted with `--mock-scorer` set carry `mock_scorer: true` and
+a `[MOCK SCORER - NOT VALID FOR PRODUCTION DECISIONS]` markdown banner
+so they cannot be confused with a real bake-off.
+
+### Apply the decision
+
+The `winner_id` field in `report.json` is the empirically-chosen
+production model. Commit the report under
+`docs/superpowers/reports/YYYY-MM-DD-model-bakeoff-result.md`
+(alongside the JSON), then flip the
+`TRACE_COMMONS_PERPLEXITY_MODEL_ID` and
+`TRACE_COMMONS_PERPLEXITY_MODEL_PATH` defaults in a one-line PR. After
+the swap, **re-run Phase 1** below against the winning model — floors
+must be re-derived because they're scaled to the model's perplexity
+distribution.
+
+A model swap is operationally expensive (vector replay, audit
+grandfathering); the spec's 2% tolerance band on the decision rule
+exists precisely to avoid swapping for marginal gains. "No change" is
+a valid bake-off outcome — if the incumbent is within 2% of the leader
+on the weighted score, the incumbent wins on the license tiebreaker
+(or keeps the win outright).
+
+Phase 0 is complete when:
+
+- [ ] The bake-off ran end-to-end without aborted candidates.
+- [ ] `report.json` has a populated `winner_id`.
+- [ ] The report's SHA256 is recorded somewhere durable.
+- [ ] The corresponding env-var defaults are flipped (or the no-change decision is documented).
 
 ## Phase 1 — Offline HF bootstrap
 
