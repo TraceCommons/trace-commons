@@ -2256,4 +2256,33 @@ pub trait TraceCorpusStore: Send + Sync {
         tenant_id: &str,
         decision: TraceGateDecisionRow,
     ) -> Result<(), DatabaseError>;
+
+    /// Paginated scan over `trace_gate_decisions` for the replay binary.
+    /// Filters to rows with `vector_entry_id IS NOT NULL` (i.e. rows that
+    /// actually produced a vector-index insert) and orders by `decided_at
+    /// ASC, decision_id ASC` so paging via the `(decided_at, decision_id)`
+    /// cursor is stable. Implementations MUST scope the read by
+    /// `tenant_id` through the same forced-RLS facade used by every other
+    /// audit-table read.
+    ///
+    /// Pass `after_cursor = None` for the first page. Subsequent calls
+    /// pass the `(decided_at, decision_id)` tuple of the last row from
+    /// the previous page.
+    async fn stream_trace_gate_decisions_for_replay(
+        &self,
+        tenant_id: &str,
+        page_size: u32,
+        after_cursor: Option<(DateTime<Utc>, Uuid)>,
+    ) -> Result<Vec<TraceGateDecisionRow>, DatabaseError>;
+
+    /// Return true if a `trace_revocation_propagation_items` row exists
+    /// matching `target_kind = VectorEntry`, `action = InvalidateVector`,
+    /// `status = Done`, and the embedded `vector_entry_id` equals the
+    /// supplied id. Used by the vector-replay binary to skip entries whose
+    /// revocation has already propagated.
+    async fn is_vector_entry_revoked(
+        &self,
+        tenant_id: &str,
+        vector_entry_id: Uuid,
+    ) -> Result<bool, DatabaseError>;
 }

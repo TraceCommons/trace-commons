@@ -5145,6 +5145,106 @@ impl TraceCorpusStore for PgBackend {
         Ok(deleted)
     }
 
+    async fn stream_trace_gate_decisions_for_replay(
+        &self,
+        tenant_id: &str,
+        page_size: u32,
+        after_cursor: Option<(DateTime<Utc>, Uuid)>,
+    ) -> Result<Vec<TraceGateDecisionRow>, DatabaseError> {
+        if page_size == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = page_size as i64;
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = if let Some((after_decided_at, after_decision_id)) = after_cursor {
+            tx.query(
+                "SELECT decision_id, submission_id, gate_policy_version, gate_version_hash, \
+                        perplexity_micros, tail_fraction_micros, perplexity_passed, \
+                        novelty_score_micros, nearest_neighbor_hash, novelty_passed, \
+                        embedding_evidence_hash, attestation_chain_hash, decided_at, \
+                        vector_entry_id, credit_withheld_reason \
+                 FROM trace_gate_decisions \
+                 WHERE tenant_id = $1 \
+                   AND vector_entry_id IS NOT NULL \
+                   AND (decided_at, decision_id) > ($2, $3) \
+                 ORDER BY decided_at ASC, decision_id ASC \
+                 LIMIT $4",
+                &[&tenant_id, &after_decided_at, &after_decision_id, &limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+        } else {
+            tx.query(
+                "SELECT decision_id, submission_id, gate_policy_version, gate_version_hash, \
+                        perplexity_micros, tail_fraction_micros, perplexity_passed, \
+                        novelty_score_micros, nearest_neighbor_hash, novelty_passed, \
+                        embedding_evidence_hash, attestation_chain_hash, decided_at, \
+                        vector_entry_id, credit_withheld_reason \
+                 FROM trace_gate_decisions \
+                 WHERE tenant_id = $1 \
+                   AND vector_entry_id IS NOT NULL \
+                 ORDER BY decided_at ASC, decision_id ASC \
+                 LIMIT $2",
+                &[&tenant_id, &limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+        };
+        let out = rows
+            .iter()
+            .map(|row| TraceGateDecisionRow {
+                decision_id: row.get("decision_id"),
+                submission_id: row.get("submission_id"),
+                gate_policy_version: row.get("gate_policy_version"),
+                gate_version_hash: row.get("gate_version_hash"),
+                perplexity_micros: row.get("perplexity_micros"),
+                tail_fraction_micros: row.get("tail_fraction_micros"),
+                perplexity_passed: row.get("perplexity_passed"),
+                novelty_score_micros: row.get("novelty_score_micros"),
+                nearest_neighbor_hash: row.get("nearest_neighbor_hash"),
+                novelty_passed: row.get("novelty_passed"),
+                embedding_evidence_hash: row.get("embedding_evidence_hash"),
+                attestation_chain_hash: row.get("attestation_chain_hash"),
+                decided_at: row.get("decided_at"),
+                vector_entry_id: row.get("vector_entry_id"),
+                credit_withheld_reason: row.get("credit_withheld_reason"),
+            })
+            .collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(out)
+    }
+
+    async fn is_vector_entry_revoked(
+        &self,
+        tenant_id: &str,
+        vector_entry_id: Uuid,
+    ) -> Result<bool, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // target_json is the serde representation of TraceRevocationPropagationTarget,
+        // which serializes as `{"kind":"vector_entry","vector_entry_id":"<uuid>"}`
+        // (snake_case adjacent-tagged enum). We match on both the explicit
+        // `target_kind` column (storage label) AND the embedded uuid to be
+        // robust to any future addition of other VectorEntry-shaped targets.
+        let row = tx
+            .query_opt(
+                "SELECT 1 \
+                 FROM trace_revocation_propagation_items \
+                 WHERE tenant_id = $1 \
+                   AND target_kind = 'vector_entry' \
+                   AND action = 'invalidate_vector' \
+                   AND status = 'done' \
+                   AND (target_json ->> 'vector_entry_id') = $2 \
+                 LIMIT 1",
+                &[&tenant_id, &vector_entry_id.to_string()],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(row.is_some())
+    }
+
     async fn insert_trace_gate_decision(
         &self,
         tenant_id: &str,

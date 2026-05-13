@@ -1172,11 +1172,12 @@ pub(crate) fn aead_encrypt_with_dek(
 /// AES-256-GCM decrypt the `[nonce || aead_ciphertext_with_tag]` packed form
 /// produced by `aead_encrypt_with_dek`.
 ///
-/// `pub(crate)` so the in-process gate service (`EnclaveGateService`) can
-/// reuse the same routine to recover plaintext from envelope ciphertext for
-/// scoring. Outside-crate callers must continue going through the existing
+/// `pub` so the in-process gate service (`EnclaveGateService`) and the
+/// `tracedao-vector-replay` recovery binary can reuse the same routine to
+/// recover plaintext from envelope ciphertext for scoring / re-embedding.
+/// JSON-payload callers must continue going through the existing
 /// `decrypt_artifact_json*` helpers, which also handle schema-version gating.
-pub(crate) fn aead_decrypt_with_dek(
+pub fn aead_decrypt_with_dek(
     dek: &Zeroizing<[u8; 32]>,
     encrypted: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
