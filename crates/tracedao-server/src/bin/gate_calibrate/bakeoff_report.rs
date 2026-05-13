@@ -82,7 +82,7 @@ impl CandidateResult {
     /// Construct a placeholder result for a candidate that failed to load
     /// or evaluate. All numeric fields zero and `passed_determinism_gate =
     /// false`, so the row never wins. `error_class` is a stable label such
-    /// as `"CandlePerplexityScorerLoadFailed"` — never raw error text.
+    /// as `"LocalPerplexityScorerLoadFailed"` — never raw error text.
     pub fn failed(
         id: String,
         license: License,

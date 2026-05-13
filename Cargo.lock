@@ -695,34 +695,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6bd9895436c1ba5dc1037a19935d084b838db066ff4e15ef7dded020b7c12a4a"
 dependencies = [
  "byteorder",
- "candle-kernels 0.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "candle-ug 0.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "cudarc 0.19.6",
- "float8",
- "gemm 0.19.0",
- "half",
- "libm",
- "memmap2",
- "num-traits",
- "num_cpus",
- "rand 0.9.4",
- "rand_distr 0.5.1",
- "rayon",
- "safetensors 0.7.0",
- "thiserror 2.0.18",
- "tokenizers 0.22.2",
- "yoke 0.8.2",
- "zip",
-]
-
-[[package]]
-name = "candle-core"
-version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5447a8779871654e542e65693e7d26f1e33b215f#5447a8779871654e542e65693e7d26f1e33b215f"
-dependencies = [
- "byteorder",
- "candle-kernels 0.10.2 (git+https://github.com/huggingface/candle.git?rev=5447a8779871654e542e65693e7d26f1e33b215f)",
- "candle-ug 0.10.2 (git+https://github.com/huggingface/candle.git?rev=5447a8779871654e542e65693e7d26f1e33b215f)",
+ "candle-kernels",
+ "candle-ug",
  "cudarc 0.19.6",
  "float8",
  "gemm 0.19.0",
@@ -751,20 +725,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "candle-kernels"
-version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5447a8779871654e542e65693e7d26f1e33b215f#5447a8779871654e542e65693e7d26f1e33b215f"
-dependencies = [
- "cudaforge",
-]
-
-[[package]]
 name = "candle-nn"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a9317a09d6530b758990ed7f625ac69ff43653bc9ee28b0464644ad1169ada87"
 dependencies = [
- "candle-core 0.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "candle-core",
  "half",
  "libc",
  "num-traits",
@@ -772,39 +738,6 @@ dependencies = [
  "safetensors 0.7.0",
  "serde",
  "thiserror 2.0.18",
-]
-
-[[package]]
-name = "candle-nn"
-version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5447a8779871654e542e65693e7d26f1e33b215f#5447a8779871654e542e65693e7d26f1e33b215f"
-dependencies = [
- "candle-core 0.10.2 (git+https://github.com/huggingface/candle.git?rev=5447a8779871654e542e65693e7d26f1e33b215f)",
- "half",
- "libc",
- "num-traits",
- "rayon",
- "safetensors 0.7.0",
- "serde",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "candle-transformers"
-version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5447a8779871654e542e65693e7d26f1e33b215f#5447a8779871654e542e65693e7d26f1e33b215f"
-dependencies = [
- "byteorder",
- "candle-core 0.10.2 (git+https://github.com/huggingface/candle.git?rev=5447a8779871654e542e65693e7d26f1e33b215f)",
- "candle-nn 0.10.2 (git+https://github.com/huggingface/candle.git?rev=5447a8779871654e542e65693e7d26f1e33b215f)",
- "fancy-regex 0.17.0",
- "num-traits",
- "rand 0.9.4",
- "rayon",
- "serde",
- "serde_json",
- "serde_plain",
- "tracing",
 ]
 
 [[package]]
@@ -812,15 +745,6 @@ name = "candle-ug"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca0fc3167cbc99c8ec1be618cb620aa21dca95038f118c3579a79370e3dc5f77"
-dependencies = [
- "ug",
- "ug-cuda",
-]
-
-[[package]]
-name = "candle-ug"
-version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5447a8779871654e542e65693e7d26f1e33b215f#5447a8779871654e542e65693e7d26f1e33b215f"
 dependencies = [
  "ug",
  "ug-cuda",
@@ -1912,17 +1836,6 @@ name = "fancy-regex"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e24cb5a94bcae1e5408b0effca5cd7172ea3c5755049c5f3af4cd283a165298"
-dependencies = [
- "bit-set 0.8.0",
- "regex-automata",
- "regex-syntax",
-]
-
-[[package]]
-name = "fancy-regex"
-version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72cf461f865c862bb7dc573f643dd6a2b6842f7c30b07882b56bd148cc2761b8"
 dependencies = [
  "bit-set 0.8.0",
  "regex-automata",
@@ -3744,8 +3657,8 @@ version = "0.8.1"
 source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=2d4ba4f16f61e5e18be085d0dd137bc95cba038a#2d4ba4f16f61e5e18be085d0dd137bc95cba038a"
 dependencies = [
  "anyhow",
- "candle-core 0.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "candle-nn 0.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "candle-core",
+ "candle-nn",
  "clap",
  "either",
  "futures",
@@ -3791,8 +3704,8 @@ dependencies = [
  "bm25",
  "bytemuck",
  "bytemuck_derive",
- "candle-core 0.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "candle-nn 0.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "candle-core",
+ "candle-nn",
  "cfgrammar",
  "chrono",
  "clap",
@@ -3908,7 +3821,7 @@ version = "0.8.1"
 source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=2d4ba4f16f61e5e18be085d0dd137bc95cba038a#2d4ba4f16f61e5e18be085d0dd137bc95cba038a"
 dependencies = [
  "anyhow",
- "candle-core 0.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "candle-core",
  "cudaforge",
  "float8",
  "half",
@@ -3921,8 +3834,8 @@ version = "0.8.1"
 source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=2d4ba4f16f61e5e18be085d0dd137bc95cba038a#2d4ba4f16f61e5e18be085d0dd137bc95cba038a"
 dependencies = [
  "byteorder",
- "candle-core 0.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "candle-nn 0.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "candle-core",
+ "candle-nn",
  "cudaforge",
  "float8",
  "half",
@@ -3946,7 +3859,7 @@ name = "mistralrs-vision"
 version = "0.8.1"
 source = "git+https://github.com/EricLBuehler/mistral.rs.git?rev=2d4ba4f16f61e5e18be085d0dd137bc95cba038a#2d4ba4f16f61e5e18be085d0dd137bc95cba038a"
 dependencies = [
- "candle-core 0.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "candle-core",
  "image",
  "rayon",
 ]
@@ -7101,9 +7014,6 @@ name = "tracedao-gate-enclave"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "candle-core 0.10.2 (git+https://github.com/huggingface/candle.git?rev=5447a8779871654e542e65693e7d26f1e33b215f)",
- "candle-nn 0.10.2 (git+https://github.com/huggingface/candle.git?rev=5447a8779871654e542e65693e7d26f1e33b215f)",
- "candle-transformers",
  "either",
  "fastembed",
  "hf-hub 0.4.3",

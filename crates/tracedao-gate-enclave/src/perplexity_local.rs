@@ -1,26 +1,28 @@
-//! Candle-backed perplexity scorer (Phase A2).
+//! Local perplexity scorer (Phase A2.3).
 //!
-//! Loads a Llama-style base model (default: Llama-3.1-8B-Instruct, bf16) into
-//! `candle_transformers::models::llama` and scores plaintext traces by running
-//! prefill, collecting per-token logprobs from a single sequential forward
-//! pass over the token sequence (driven by the model's KV cache), and
-//! aggregating them into `(mean_nll → perplexity_micros, tail_fraction_micros)`.
+//! Loads a base language model via [`mistralrs`] and scores plaintext traces
+//! by running a single forward pass with `return_raw_logits = true`,
+//! aggregating per-token logprobs over the realized next-token sequence. The
+//! model architecture is auto-detected by mistralrs from `config.json` —
+//! there is no per-arch dispatch on our side anymore (A2.2's `ScorerBackend`
+//! and `BackendArch` enums are removed in this slice).
 //!
 //! ### Honest scope
 //!
-//! The aggregate-math helper [`aggregate_perplexity_metrics`] is factored out
-//! of the candle forward path so it can be unit-tested without a GPU. The
-//! candle forward pass itself is **hardware-untested in CI**: this module's
-//! integration test is `#[ignore]`d and only runs when both
-//! `TRACEDAO_PERPLEXITY_INTEGRATION=1` and `TRACE_COMMONS_PERPLEXITY_MODEL_PATH`
-//! are set in the environment. First production deployment must validate
-//! runtime correctness before the gate is wired into credit emission.
+//! The aggregate-math helper [`aggregate_perplexity_metrics`] stays factored
+//! out so it can be unit-tested without a GPU. The mistralrs forward path
+//! itself is **hardware-untested in CI**: this module's integration test is
+//! `#[ignore]`d and only runs when both
+//! `TRACEDAO_PERPLEXITY_INTEGRATION=1` and
+//! `TRACE_COMMONS_PERPLEXITY_MODEL_PATH` are set in the environment. First
+//! production deployment must validate runtime correctness before the gate is
+//! wired into credit emission.
 //!
 //! ### Hash-only logging
 //!
 //! All operational tracing on the score path is label-only. Plaintext never
-//! logs, never serializes, never leaves process memory; only the two aggregate
-//! `u64` micros leave the function.
+//! logs, never serializes, never leaves process memory; only the two
+//! aggregate `u64` micros leave the function.
 
 use crate::perplexity::PerplexityResult;
 
@@ -32,7 +34,7 @@ use crate::perplexity::PerplexityResult;
 /// orchestrator's perplexity floor (configured positive) then fails the gate
 /// naturally, matching the spec's "fail-closed on degenerate input" contract.
 ///
-/// This is the unit-tested surface; the candle forward path constructs the
+/// This is the unit-tested surface; the mistralrs forward path constructs the
 /// `logprobs` slice and delegates to this function.
 pub fn aggregate_perplexity_metrics(
     logprobs: &[f32],
@@ -92,14 +94,18 @@ fn saturating_micros(v: f32) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// Candle device selector — always compiled so the binary's env-parsing path
+// Local-device selector — always compiled so the binary's env-parsing path
 // can refer to it without flipping on the `local-gpu-models` feature.
 // ---------------------------------------------------------------------------
 
-/// Selector for the candle compute device. Parsed from
+/// Selector for the local compute device. Parsed from
 /// `TRACE_COMMONS_PERPLEXITY_DEVICE` at startup. `Cuda(0)` is the production
 /// default; `Cpu` is permitted for development and is impractical at 8B model
 /// size.
+///
+/// The type name keeps the historical `Candle` prefix for back-compat of
+/// operator-facing env-var documentation; mistralrs reads the same concept
+/// and the parser is byte-identical to A2.2's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CandleDeviceKind {
     Cuda(usize),
@@ -129,312 +135,121 @@ impl CandleDeviceKind {
 }
 
 // ---------------------------------------------------------------------------
-// CandlePerplexityScorer — feature-gated.
+// LocalPerplexityScorer — feature-gated.
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "local-gpu-models")]
-mod candle_impl {
+mod local_impl {
     use super::{aggregate_perplexity_metrics, CandleDeviceKind};
     use crate::perplexity::{PerplexityResult, PerplexityScorer};
     use anyhow::Context;
-    use candle_core::{DType, Device, Tensor};
-    use candle_nn::VarBuilder;
-    use candle_transformers::models::gemma3 as candle_gemma3;
-    use candle_transformers::models::gemma4 as candle_gemma4;
-    use candle_transformers::models::llama::{
-        Cache as LlamaCache, Config as LlamaConfigResolved, Llama, LlamaConfig,
+    use mistralrs::{
+        Constraint, MistralRs, Model, ModelBuilder, NormalRequest, Request,
+        RequestMessage, ResponseOk, SamplingParams,
     };
-    use candle_transformers::models::qwen3 as candle_qwen3;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::sync::Mutex;
-    use tokenizers::Tokenizer;
+    use std::thread;
+    use tokio::sync::mpsc::channel;
 
-    /// Locally-owned arch enum. Distinct from `tracedao-server`'s
-    /// `CandidateArch` because the gate-enclave crate must not depend on the
-    /// server bin crate (dep direction is enclave ← server). Server-side
-    /// callers convert `CandidateArch → BackendArch` at the `try_new` boundary
-    /// via a small inline `match`.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum BackendArch {
-        Llama,
-        Qwen3,
-        Gemma3,
-        Gemma4,
-    }
-
-    impl BackendArch {
-        /// Parse `TRACE_COMMONS_PERPLEXITY_MODEL_ARCH` values. Accepted
-        /// strings: `"llama"`, `"qwen3"`, `"gemma3"`, `"gemma4"`. Returns
-        /// `Err` on unknown values so an operator typo fails closed at
-        /// startup rather than silently defaulting.
-        pub fn parse(s: &str) -> anyhow::Result<Self> {
-            match s.trim().to_ascii_lowercase().as_str() {
-                "llama" => Ok(Self::Llama),
-                "qwen3" => Ok(Self::Qwen3),
-                "gemma3" => Ok(Self::Gemma3),
-                "gemma4" => Ok(Self::Gemma4),
-                other => anyhow::bail!(
-                    "PerplexityScorerInit: unknown BackendArch {other:?}; \
-                     accepted: llama, qwen3, gemma3, gemma4"
-                ),
-            }
-        }
-    }
-
-    /// Flatten a multimodal `config.json` so the candle text-loaders, which
-    /// only know how to deserialize the flat HF schema, can read configs that
-    /// nest text params under a `text_config` object (Gemma 4, Qwen 3.6,
-    /// etc.). Top-level keys win on collision; sibling `vision_config` /
-    /// `audio_config` objects are left in place and ignored by the loader.
-    pub(crate) fn flatten_text_config(raw: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let mut value: serde_json::Value = serde_json::from_slice(raw)
-            .context("config.json must be valid JSON")?;
-        let text = value.get("text_config").cloned();
-        if let Some(serde_json::Value::Object(text_map)) = text {
-            let map = value
-                .as_object_mut()
-                .context("config.json must be an object")?;
-            for (k, v) in text_map {
-                map.entry(k).or_insert(v);
-            }
-        }
-        Ok(serde_json::to_vec(&value)?)
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::flatten_text_config;
-        use serde_json::json;
-
-        #[test]
-        fn flat_config_passes_through_unchanged() {
-            let raw = json!({"model_type": "llama", "hidden_size": 4096}).to_string();
-            let out = flatten_text_config(raw.as_bytes()).unwrap();
-            let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
-            assert_eq!(parsed["hidden_size"], 4096);
-            assert!(parsed.get("text_config").is_none());
-        }
-
-        #[test]
-        fn nested_text_config_is_flattened_to_top_level() {
-            let raw = json!({
-                "model_type": "gemma4",
-                "text_config": {"hidden_size": 5120, "num_attention_heads": 40},
-                "vision_config": {"hidden_size": 1024}
-            })
-            .to_string();
-            let out = flatten_text_config(raw.as_bytes()).unwrap();
-            let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
-            assert_eq!(parsed["hidden_size"], 5120, "text hidden_size should be lifted");
-            assert_eq!(parsed["num_attention_heads"], 40);
-            // vision_config should remain — we just ignore it later.
-            assert!(parsed.get("vision_config").is_some());
-            // text_config also remains; we merged keys but didn't strip the source.
-            assert!(parsed.get("text_config").is_some());
-        }
-
-        #[test]
-        fn top_level_wins_over_text_config_collision() {
-            let raw = json!({
-                "model_type": "gemma4",
-                "hidden_size": 9999,
-                "text_config": {"hidden_size": 5120}
-            })
-            .to_string();
-            let out = flatten_text_config(raw.as_bytes()).unwrap();
-            let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
-            assert_eq!(parsed["hidden_size"], 9999, "explicit top-level wins");
-        }
-
-        #[test]
-        fn invalid_json_errors_clearly() {
-            let err = flatten_text_config(b"{not json").unwrap_err();
-            assert!(err.to_string().contains("valid JSON"));
-        }
-    }
-
-    /// Per-arch backend state. Each variant owns the correctly-typed candle
-    /// model (and its config / device handles) for one architecture.
+    /// mistralrs-backed perplexity scorer. Holds the loaded model (wrapped
+    /// in a `Mutex` because mistralrs's forward path mutates internal KV
+    /// state across calls), an owned single-thread tokio runtime, and per-
+    /// call config (tail cutoff, max tokens). The public `score()` API is
+    /// arch-agnostic — mistralrs dispatches internally based on
+    /// `config.json`'s `model_type`.
     ///
-    /// Llama uses an external `Cache` struct that we explicitly thread
-    /// through `forward(input, pos, &mut cache)` — the historical pattern.
-    /// Qwen3 / Gemma3 / Gemma4 carry their KV state inside the model itself
-    /// and expose a `clear_kv_cache(&mut self)` reset method; their
-    /// `forward(&mut self, input, offset)` mutates the model in place, so we
-    /// wrap the model in a `Mutex`.
-    enum ScorerBackend {
-        Llama {
-            model: Llama,
-            config: LlamaConfigResolved,
-            cache: Mutex<LlamaCache>,
-            device: Device,
-            dtype: DType,
-        },
-        Qwen3 {
-            model: Mutex<candle_qwen3::ModelForCausalLM>,
-        },
-        Gemma3 {
-            model: Mutex<candle_gemma3::Model>,
-        },
-        Gemma4 {
-            model: Mutex<candle_gemma4::text::TextModel>,
-        },
-    }
-
-    impl ScorerBackend {
-        fn max_position_embeddings(&self) -> usize {
-            // Pulled out at load time onto the parent scorer; this is only
-            // surfaced for clarity. Currently unused after construction.
-            match self {
-                Self::Llama { config, .. } => config.max_position_embeddings,
-                // The non-Llama variants don't retain a public config handle;
-                // the bound is enforced at load time on the parsed Config.
-                Self::Qwen3 { .. } | Self::Gemma3 { .. } | Self::Gemma4 { .. } => usize::MAX,
-            }
-        }
-
-        /// Run a single forward step for token at position `pos`. Returns a
-        /// 1-D `[vocab]` logits tensor over f32 ready for log_softmax.
-        ///
-        /// Llama: external `Cache` is locked here; the `MutexGuard<LlamaCache>`
-        /// is deref'd to `&mut LlamaCache` for the call (note the `&mut *c`).
-        /// Qwen3 / Gemma3 / Gemma4: the model itself is `&mut`-locked and
-        /// owns its KV cache internally.
-        fn forward_step(&self, input: &Tensor, pos: usize) -> anyhow::Result<Tensor> {
-            match self {
-                Self::Llama { model, cache, .. } => {
-                    let mut c = cache
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("CandleCacheMutexPoisoned"))?;
-                    // candle takes &mut Cache; deref the MutexGuard.
-                    let logits = model
-                        .forward(input, pos, &mut *c)
-                        .context("CandleForwardFailed")?;
-                    // Llama returns [batch, vocab] for last position; squeeze
-                    // the batch dim down to [vocab].
-                    logits.squeeze(0).context("CandleLogitsSqueezeFailed")
-                }
-                Self::Qwen3 { model } => {
-                    let mut m = model
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("CandleCacheMutexPoisoned"))?;
-                    let logits = m.forward(input, pos).context("CandleForwardFailed")?;
-                    // Shape: [batch, 1, vocab] → [vocab].
-                    let logits = logits
-                        .squeeze(1)
-                        .context("CandleLogitsSqueezeFailed")?
-                        .squeeze(0)
-                        .context("CandleLogitsSqueezeFailed")?;
-                    Ok(logits)
-                }
-                Self::Gemma3 { model } => {
-                    let mut m = model
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("CandleCacheMutexPoisoned"))?;
-                    let logits = m.forward(input, pos).context("CandleForwardFailed")?;
-                    let logits = logits
-                        .squeeze(1)
-                        .context("CandleLogitsSqueezeFailed")?
-                        .squeeze(0)
-                        .context("CandleLogitsSqueezeFailed")?;
-                    Ok(logits)
-                }
-                Self::Gemma4 { model } => {
-                    let mut m = model
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("CandleCacheMutexPoisoned"))?;
-                    let logits = m.forward(input, pos).context("CandleForwardFailed")?;
-                    let logits = logits
-                        .squeeze(1)
-                        .context("CandleLogitsSqueezeFailed")?
-                        .squeeze(0)
-                        .context("CandleLogitsSqueezeFailed")?;
-                    Ok(logits)
-                }
-            }
-        }
-
-        /// Reset KV state ahead of a fresh `score()` call. Each call is
-        /// independent so we wipe state between calls.
-        fn reset_cache(&self) -> anyhow::Result<()> {
-            match self {
-                Self::Llama {
-                    cache,
-                    config,
-                    device,
-                    dtype,
-                    ..
-                } => {
-                    let mut c = cache
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("CandleCacheMutexPoisoned"))?;
-                    *c = LlamaCache::new(true, *dtype, config, device)
-                        .context("CandleCacheResetFailed")?;
-                    Ok(())
-                }
-                Self::Qwen3 { model } => {
-                    let mut m = model
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("CandleCacheMutexPoisoned"))?;
-                    m.clear_kv_cache();
-                    Ok(())
-                }
-                Self::Gemma3 { model } => {
-                    let mut m = model
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("CandleCacheMutexPoisoned"))?;
-                    m.clear_kv_cache();
-                    Ok(())
-                }
-                Self::Gemma4 { model } => {
-                    let mut m = model
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("CandleCacheMutexPoisoned"))?;
-                    m.clear_kv_cache();
-                    Ok(())
-                }
-            }
-        }
-    }
-
-    /// Candle-backed perplexity scorer. Holds the per-arch backend, the
-    /// tokenizer, and per-call config (tail cutoff, max tokens). The public
-    /// `score()` API is arch-agnostic — dispatch happens inside
-    /// `ScorerBackend::forward_step`.
+    /// The scorer owns its own runtime so the sync
+    /// [`PerplexityScorer::score`] trait method can bridge to mistralrs's
+    /// async API via `runtime.block_on(self.async_score(...))`. This
+    /// pattern decouples the scorer from the caller's runtime flavor — in
+    /// particular it does not require a multi-thread runtime, which the
+    /// in-crate test (and the Slice 0 PoC) intentionally do not use.
     ///
-    /// The forward path runs sequentially with KV caching: tokens are fed one
-    /// at a time, each call returns the logits over the vocabulary for the
-    /// next-token prediction, and we accumulate per-token logprobs for the
-    /// `aggregate_perplexity_metrics` helper. This is the standard candle
-    /// pattern (cf. `candle-examples/examples/llama/main.rs` et al.) and is
-    /// the only way to obtain per-position logits from candle's per-arch
-    /// forward APIs, which collapse to last-position logits.
-    pub struct CandlePerplexityScorer {
-        backend: ScorerBackend,
-        tokenizer: Tokenizer,
-        device: Device,
+    /// `tokio::task::block_in_place` was tried first and rejected: it
+    /// panics inside a current-thread runtime, which the integration test
+    /// and most callers use.
+    /// Internal scorer state owned by the dispatch thread.
+    struct ScorerInner {
+        model: Mutex<Model>,
         tail_logprob_cutoff: f32,
-        #[allow(dead_code)] // surfaced via safe_status in future wiring
+        #[allow(dead_code)]
         model_id: String,
         max_tokens: usize,
     }
 
-    impl CandlePerplexityScorer {
-        /// Load the model from a local directory containing the standard HF
-        /// release layout: `config.json`, `tokenizer.json`, and either
-        /// `model.safetensors` (single-shard) or `model.safetensors.index.json`
-        /// (multi-shard, e.g. Llama-3.1-8B).
+    /// A job dispatched to the scorer thread. Each job carries the
+    /// plaintext to score and a oneshot sender for the result. The
+    /// dispatch thread owns the tokio runtime + the mistralrs model
+    /// (the only thread that ever calls `runtime.block_on` and the only
+    /// thread that ever touches the model lock). This isolates the
+    /// mistralrs async I/O from whatever runtime / runtime flavor the
+    /// caller of `score()` is running on — fixing the
+    /// `"Cannot start a runtime from within a runtime"` panic that would
+    /// otherwise fire when the production gate-service (under
+    /// `#[tokio::main]`) calls `try_new` or `score`.
+    enum Job {
+        Score {
+            plaintext: Vec<u8>,
+            reply: std::sync::mpsc::Sender<anyhow::Result<PerplexityResult>>,
+        },
+        Shutdown,
+    }
+
+    pub struct LocalPerplexityScorer {
+        /// Sender into the dispatch thread that owns the runtime + model.
+        job_tx: std::sync::mpsc::Sender<Job>,
+        /// Join handle for the dispatch thread, taken at shutdown.
+        worker: Mutex<Option<thread::JoinHandle<()>>>,
+    }
+
+    impl Drop for LocalPerplexityScorer {
+        fn drop(&mut self) {
+            let _ = self.job_tx.send(Job::Shutdown);
+            if let Some(handle) = self.worker.lock().ok().and_then(|mut g| g.take()) {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    impl LocalPerplexityScorer {
+        /// Load the model via mistralrs's [`ModelBuilder`] from a local
+        /// directory path containing the HF release layout (`config.json`,
+        /// `tokenizer.json`, safetensors). mistralrs auto-detects the
+        /// architecture from `config.json` — no `arch:` parameter at any
+        /// layer (the A2.2 `BackendArch` enum is removed in this slice).
         ///
-        /// `arch` selects the candle module used to load the weights and run
-        /// forward. Callers in `tracedao-server` translate their
-        /// `CandidateArch` to `BackendArch` at this call site.
-        pub async fn try_new(
+        /// `try_new` is **synchronous** even though mistralrs is async.
+        /// It spawns a dedicated OS thread that owns a single-thread tokio
+        /// runtime; the runtime is the ONLY runtime that touches the
+        /// mistralrs model. The scorer holds a `mpsc::Sender<Job>` into
+        /// that thread; the sync [`PerplexityScorer::score`] trait method
+        /// dispatches a job and blocks on a oneshot reply.
+        ///
+        /// Why a dedicated thread (not just an owned `Runtime` in the
+        /// caller thread): the production gate-service runs under
+        /// `#[tokio::main]`, and the bake-off binary runs under
+        /// `#[tokio::main]`. Calling `runtime.block_on(...)` from within
+        /// any existing tokio runtime panics with `"Cannot start a runtime
+        /// from within a runtime"`. The dedicated thread has no tokio
+        /// context, so its `block_on` is always legal. This is the
+        /// resolution of the open question in the spec around the async/
+        /// sync bridge.
+        ///
+        /// Callers must NOT `.await` this constructor; A2.2's `await` on
+        /// `CandlePerplexityScorer::try_new` is dropped at every call
+        /// site in this slice.
+        ///
+        /// `_device` is accepted for env-var-shape compatibility but
+        /// ignored: mistralrs picks a device automatically based on its
+        /// own build features (CUDA, Metal, CPU). Operators who need a
+        /// specific device flip the build feature, not this parameter.
+        pub fn try_new(
             model_id: impl Into<String>,
             model_path: impl AsRef<Path>,
-            device: CandleDeviceKind,
+            _device: CandleDeviceKind,
             tail_logprob_cutoff: f32,
             max_tokens: usize,
-            arch: BackendArch,
         ) -> anyhow::Result<Self> {
             // Tail cutoff is a log-probability bound (`logprob < cutoff` →
             // tail); negative values are the only sensible regime. A
@@ -447,158 +262,124 @@ mod candle_impl {
                 max_tokens > 0,
                 "PerplexityScorerInit: max_tokens must be greater than zero"
             );
+
             let model_id = model_id.into();
-            let model_path = model_path.as_ref().to_path_buf();
+            let model_path = model_path.as_ref();
+            let model_path_str = model_path
+                .to_str()
+                .context("PerplexityScorerInit: non-utf8 model_path")?
+                .to_string();
 
-            // I/O work is wrapped in spawn_blocking so the candle load path
-            // (which is synchronous and does mmap + GPU copy) does not block
-            // the tokio reactor.
-            let cfg_path = model_path.join("config.json");
-            let tokenizer_path = model_path.join("tokenizer.json");
-
-            let device_obj = match device {
-                CandleDeviceKind::Cuda(idx) => Device::new_cuda(idx)
-                    .context("CandleDeviceUnavailable: cuda")?,
-                CandleDeviceKind::Metal => Device::new_metal(0)
-                    .context("CandleDeviceUnavailable: metal")?,
-                CandleDeviceKind::Cpu => Device::Cpu,
-            };
-
-            let dtype = DType::BF16;
-
-            let safetensor_files = discover_safetensors(&model_path)
-                .context("CandleSafetensorsDiscoveryFailed")?;
-
-            let raw_cfg = std::fs::read(&cfg_path).with_context(|| "CandleConfigReadFailed")?;
-            // Flatten multimodal text_config nesting so the per-arch flat
-            // config deserializers (Gemma4TextConfig, qwen3::Config, etc.)
-            // can read configs that bury text params under `text_config`.
-            let cfg_bytes =
-                flatten_text_config(&raw_cfg).context("CandleConfigFlattenFailed")?;
-
-            let tokenizer = Tokenizer::from_file(&tokenizer_path)
-                .map_err(|e| anyhow::anyhow!("CandleTokenizerLoadFailed: {}", hash_err(&e)))?;
-
-            // SAFETY: VarBuilder::from_mmaped_safetensors mmaps the weight
-            // files; this is the standard candle loading idiom and matches
-            // the behavior of the upstream per-arch examples.
-            let vb = unsafe {
-                VarBuilder::from_mmaped_safetensors(&safetensor_files, dtype, &device_obj)
-                    .context("CandleVarBuilderFailed")?
-            };
-
-            let backend = match arch {
-                BackendArch::Llama => {
-                    let llama_config: LlamaConfig = serde_json::from_slice(&cfg_bytes)
-                        .with_context(|| "CandleConfigParseFailed")?;
-                    let config = llama_config.into_config(false /* use_flash_attn */);
-                    anyhow::ensure!(
-                        max_tokens <= config.max_position_embeddings,
-                        "PerplexityScorerInit: max_tokens ({}) exceeds model max_position_embeddings ({})",
-                        max_tokens,
-                        config.max_position_embeddings,
-                    );
-                    let model = Llama::load(vb, &config).context("CandleModelLoadFailed")?;
-                    let cache = LlamaCache::new(true, dtype, &config, &device_obj)
-                        .context("CandleCacheInitFailed")?;
-                    ScorerBackend::Llama {
-                        model,
-                        config,
-                        cache: Mutex::new(cache),
-                        device: device_obj.clone(),
-                        dtype,
-                    }
-                }
-                BackendArch::Qwen3 => {
-                    let config: candle_qwen3::Config = serde_json::from_slice(&cfg_bytes)
-                        .with_context(|| "CandleConfigParseFailed")?;
-                    anyhow::ensure!(
-                        max_tokens <= config.max_position_embeddings,
-                        "PerplexityScorerInit: max_tokens ({}) exceeds model max_position_embeddings ({})",
-                        max_tokens,
-                        config.max_position_embeddings,
-                    );
-                    let model = candle_qwen3::ModelForCausalLM::new(&config, vb)
-                        .context("CandleModelLoadFailed")?;
-                    ScorerBackend::Qwen3 {
+            // Spin up the dispatch thread. It builds its own runtime + the
+            // mistralrs model on-thread, ships the load result back via a
+            // oneshot, then enters the job loop.
+            let (job_tx, job_rx) = std::sync::mpsc::channel::<Job>();
+            let (init_tx, init_rx) = std::sync::mpsc::channel::<anyhow::Result<()>>();
+            let model_id_for_thread = model_id.clone();
+            let handle = thread::Builder::new()
+                .name("local-perplexity-scorer".into())
+                .spawn(move || {
+                    let rt = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .context("LocalPerplexityScorerRuntimeInitFailed")
+                    {
+                        Ok(rt) => rt,
+                        Err(e) => {
+                            let _ = init_tx.send(Err(e));
+                            return;
+                        }
+                    };
+                    let model = match rt.block_on(async {
+                        ModelBuilder::new(model_path_str).build().await
+                    }) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            let _ = init_tx.send(
+                                Err(e).context("LocalPerplexityScorerLoadFailed"),
+                            );
+                            return;
+                        }
+                    };
+                    let inner = ScorerInner {
                         model: Mutex::new(model),
-                    }
-                }
-                BackendArch::Gemma3 => {
-                    let config: candle_gemma3::Config = serde_json::from_slice(&cfg_bytes)
-                        .with_context(|| "CandleConfigParseFailed")?;
-                    anyhow::ensure!(
-                        max_tokens <= config.max_position_embeddings,
-                        "PerplexityScorerInit: max_tokens ({}) exceeds model max_position_embeddings ({})",
+                        tail_logprob_cutoff,
+                        model_id: model_id_for_thread,
                         max_tokens,
-                        config.max_position_embeddings,
-                    );
-                    let model = candle_gemma3::Model::new(false /* use_flash_attn */, &config, vb)
-                        .context("CandleModelLoadFailed")?;
-                    ScorerBackend::Gemma3 {
-                        model: Mutex::new(model),
+                    };
+                    let _ = init_tx.send(Ok(()));
+                    // Job loop.
+                    while let Ok(job) = job_rx.recv() {
+                        match job {
+                            Job::Shutdown => break,
+                            Job::Score { plaintext, reply } => {
+                                let out = rt.block_on(inner.async_score(&plaintext));
+                                let _ = reply.send(out);
+                            }
+                        }
                     }
-                }
-                BackendArch::Gemma4 => {
-                    let config: candle_gemma4::config::Gemma4TextConfig =
-                        serde_json::from_slice(&cfg_bytes)
-                            .with_context(|| "CandleConfigParseFailed")?;
-                    anyhow::ensure!(
-                        max_tokens <= config.max_position_embeddings,
-                        "PerplexityScorerInit: max_tokens ({}) exceeds model max_position_embeddings ({})",
-                        max_tokens,
-                        config.max_position_embeddings,
-                    );
-                    let model = candle_gemma4::text::TextModel::new(&config, vb)
-                        .context("CandleModelLoadFailed")?;
-                    ScorerBackend::Gemma4 {
-                        model: Mutex::new(model),
-                    }
-                }
-            };
+                })
+                .context("LocalPerplexityScorerThreadSpawnFailed")?;
 
-            // Silence the dead_code lint on the helper while the bound is
-            // already checked per-arch above.
-            let _ = backend.max_position_embeddings();
+            // Wait for the worker to either complete model init or fail.
+            match init_rx.recv() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    // Thread already exited with the error; reap.
+                    let _ = handle.join();
+                    return Err(e);
+                }
+                Err(_) => {
+                    let _ = handle.join();
+                    anyhow::bail!("LocalPerplexityScorerInitChannelClosed");
+                }
+            }
 
             Ok(Self {
-                backend,
-                tokenizer,
-                device: device_obj,
-                tail_logprob_cutoff,
-                model_id,
-                max_tokens,
+                job_tx,
+                worker: Mutex::new(Some(handle)),
             })
         }
+    }
 
-        /// Inner fallible scoring path. Errors are caught by the trait
-        /// `score()` shim and converted to a fail-closed zero result.
-        fn try_score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+    impl ScorerInner {
+        async fn async_score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
             // 1. UTF-8 decode (lossy: the gate doesn't care about byte-level
             //    pedantry; tokenizer can handle replacement characters).
-            let text = std::str::from_utf8(plaintext)
-                .map(std::borrow::Cow::Borrowed)
-                .unwrap_or_else(|_| std::borrow::Cow::Owned(String::from_utf8_lossy(plaintext).into_owned()));
+            let text = match std::str::from_utf8(plaintext) {
+                Ok(s) => s.to_string(),
+                Err(_) => String::from_utf8_lossy(plaintext).into_owned(),
+            };
 
-            // 2. Tokenize.
-            let encoding = self
-                .tokenizer
-                .encode(text.as_ref(), true)
-                .map_err(|e| anyhow::anyhow!("CandleTokenizeFailed: {}", hash_err(&e)))?;
-            let mut token_ids: Vec<u32> = encoding.get_ids().to_vec();
+            let model_guard = self
+                .model
+                .lock()
+                .map_err(|_| anyhow::anyhow!("LocalPerplexityScorerMutexPoisoned"))?;
+
+            // 2. Tokenize. mistralrs's tokenize API takes an
+            //    `Either<Vec<u32>, String>` via the `either` crate;
+            //    `Right(text)` for raw text input.
+            let tokens = model_guard
+                .tokenize(either::Either::Right(text), None, false, false, None)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("LocalPerplexityScorerTokenizeFailed: {}", hash_err(&e))
+                })?;
 
             // 3. Truncate to max_tokens. Truncation is hash-only logged
-            //    (the cap value itself is operator-set so it's safe to label).
-            if token_ids.len() > self.max_tokens {
+            //    (the cap value itself is operator-set so it's safe to
+            //    label).
+            let mut input_tokens = tokens;
+            if input_tokens.len() > self.max_tokens {
                 tracing::warn!(
                     error_class = "PerplexityScorerInputTruncated",
                     cap = self.max_tokens,
                     "perplexity scorer truncated overlong input"
                 );
-                token_ids.truncate(self.max_tokens);
+                input_tokens.truncate(self.max_tokens);
             }
 
-            if token_ids.len() < 2 {
+            if input_tokens.len() < 2 {
                 // Degenerate: no usable predictive context. Fail-closed.
                 return Ok(PerplexityResult {
                     aggregate_perplexity_micros: 0,
@@ -607,90 +388,188 @@ mod candle_impl {
                 });
             }
 
-            // 4. Reset the KV cache. Each call to score() is independent;
-            //    each backend variant wipes its own state.
-            self.backend.reset_cache()?;
+            // 4. Build the raw-logits request. The default mistralrs response
+            //    is a chat-completion message, not raw logits, so the
+            //    `return_raw_logits: true` flag is critical — it changes the
+            //    pipeline path to produce `ResponseOk::Raw` instead of
+            //    `ResponseOk::CompletionChunk`.
+            //
+            //    `sampling_params.max_len = Some(0)` tells the pipeline to
+            //    do prefill only and return logits over the input sequence;
+            //    no token generation happens.
+            let inner: &MistralRs = model_guard.inner();
+            let (tx, mut rx) = channel(1);
+            let request = Request::Normal(Box::new(NormalRequest {
+                messages: RequestMessage::CompletionTokens(input_tokens.clone()),
+                sampling_params: SamplingParams {
+                    max_len: Some(0),
+                    ..SamplingParams::deterministic()
+                },
+                response: tx,
+                return_logprobs: false,
+                is_streaming: false,
+                id: 0,
+                constraint: Constraint::None,
+                suffix: None,
+                tools: None,
+                tool_choice: None,
+                logits_processors: None,
+                return_raw_logits: true,
+                web_search_options: None,
+                model_id: None,
+                max_tool_rounds: None,
+                tool_dispatch_url: None,
+                truncate_sequence: false,
+            }));
+            inner
+                .get_sender(None)
+                .map_err(|e| {
+                    anyhow::anyhow!("LocalPerplexityScorerSenderFailed: {}", hash_err(&e))
+                })?
+                .send(request)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("LocalPerplexityScorerSendFailed: {}", hash_err(&e))
+                })?;
 
-            // 5. Run sequential forward passes, accumulating per-token
-            //    logprobs. Each candle per-arch `forward` returns logits over
-            //    the vocabulary for the LAST position only — so we feed tokens
-            //    one at a time, advancing `index_pos`. For position i
-            //    (0-indexed), the model's prediction at step i scores
-            //    token[i+1]. We collect one logprob entry per token; the
-            //    first entry stays as a placeholder (BOS / no-context) and is
-            //    dropped by `aggregate_perplexity_metrics`.
-            let mut logprobs: Vec<f32> = Vec::with_capacity(token_ids.len());
-            logprobs.push(0.0); // placeholder for position 0; dropped downstream.
+            // 5. Recv + destructure. The channel is single-shot; the
+            //    pipeline sends one response and closes.
+            let response = rx
+                .recv()
+                .await
+                .context("LocalPerplexityScorerResponseChannelClosed")?
+                .as_result()
+                .map_err(|e| anyhow::anyhow!("LocalPerplexityScorerError: {}", hash_err(&e)))?;
+            let ResponseOk::Raw {
+                logits_chunks,
+                tokens: out_tokens,
+            } = response
+            else {
+                anyhow::bail!("LocalPerplexityScorerUnexpectedResponseShape");
+            };
 
-            for i in 0..token_ids.len() - 1 {
-                // Build a [1, 1] tensor with the i-th token.
-                let input = Tensor::new(&[token_ids[i]], &self.device)
-                    .context("CandleTokenTensorFailed")?
-                    .unsqueeze(0)
-                    .context("CandleTokenTensorReshapeFailed")?;
-                let logits = self.backend.forward_step(&input, i)?;
-                let logprob = log_softmax_pick(&logits, token_ids[i + 1])?;
-                logprobs.push(logprob);
-            }
-
-            Ok(aggregate_perplexity_metrics(&logprobs, self.tail_logprob_cutoff))
+            // 6. Aggregate. `logits_chunks[0]` is a `[seq_len, vocab]`
+            //    tensor over the input sequence; convert to per-token
+            //    logprobs of the realized next token via log_softmax +
+            //    gather, then run through the existing aggregate helper
+            //    (which handles BOS-drop, tail-fraction, and fail-closed
+            //    semantics).
+            let logprobs = logprobs_from_logits(&logits_chunks, &out_tokens)?;
+            Ok(aggregate_perplexity_metrics(
+                &logprobs,
+                self.tail_logprob_cutoff,
+            ))
         }
     }
 
-    impl PerplexityScorer for CandlePerplexityScorer {
+    impl PerplexityScorer for LocalPerplexityScorer {
         fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
-            // Fail-closed: a scoring failure propagates so the orchestrator
-            // refuses the gate evaluation. The previous zero-fallback path
-            // would have falsely passed any positive perplexity floor.
-            self.try_score(plaintext)
+            // Dispatch the job to the scorer thread (which owns the
+            // runtime + model) and block on its reply. Fail-closed: a
+            // scoring failure propagates so the orchestrator refuses the
+            // gate evaluation; a closed reply channel is converted into a
+            // stable error class so callers see a self-explanatory
+            // diagnostic.
+            let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+            self.job_tx
+                .send(Job::Score {
+                    plaintext: plaintext.to_vec(),
+                    reply: reply_tx,
+                })
+                .map_err(|_| anyhow::anyhow!("LocalPerplexityScorerWorkerGone"))?;
+            reply_rx
+                .recv()
+                .map_err(|_| anyhow::anyhow!("LocalPerplexityScorerReplyChannelClosed"))?
         }
     }
 
-    /// Apply log_softmax to a 1-D `[vocab]` logits tensor and read the
-    /// log-probability of the target token id.
-    fn log_softmax_pick(logits: &Tensor, target: u32) -> anyhow::Result<f32> {
-        let lp = candle_nn::ops::log_softmax(logits, 0).context("CandleLogSoftmaxFailed")?;
-        // log_softmax returns f32 (the Llama forward already casts to F32
-        // for the final lm_head output), so a direct extraction is fine.
-        let lp_vec = lp.to_vec1::<f32>().context("CandleLogprobVecFailed")?;
-        let idx = target as usize;
-        if idx >= lp_vec.len() {
-            anyhow::bail!("CandleLogprobTargetOutOfRange");
-        }
-        Ok(lp_vec[idx])
-    }
+    /// Convert mistralrs's per-position logits (shape `[seq_len, vocab]`)
+    /// plus the observed token sequence into per-token logprobs of the
+    /// realized next token. The first slot is a placeholder for the
+    /// BOS-conditioned position; `aggregate_perplexity_metrics` drops it.
+    fn logprobs_from_logits(
+        logits_chunks: &[mistralrs::Tensor],
+        tokens: &[u32],
+    ) -> anyhow::Result<Vec<f32>> {
+        anyhow::ensure!(
+            !logits_chunks.is_empty(),
+            "LocalPerplexityScorerEmptyLogitsChunks"
+        );
+        let logits = &logits_chunks[0];
+        // Shape can come back as [seq_len, vocab] or [1, seq_len, vocab];
+        // squeeze a leading batch dim if present.
+        let logits = if logits.dims().len() == 3 {
+            logits.squeeze(0).map_err(|e| {
+                anyhow::anyhow!("LocalPerplexityScorerSqueezeFailed: {}", hash_err(&e))
+            })?
+        } else {
+            logits.clone()
+        };
+        let dims = logits.dims();
+        anyhow::ensure!(
+            dims.len() == 2,
+            "LocalPerplexityScorerUnexpectedLogitsShape"
+        );
+        let seq_len = dims[0];
+        let _vocab = dims[1];
 
-    /// Discover the safetensors files in `model_path`. Supports both
-    /// single-file (`model.safetensors`) and multi-shard
-    /// (`model.safetensors.index.json` listing several shards) layouts.
-    fn discover_safetensors(model_path: &Path) -> anyhow::Result<Vec<PathBuf>> {
-        let single = model_path.join("model.safetensors");
-        if single.exists() {
-            return Ok(vec![single]);
-        }
-        let index_path = model_path.join("model.safetensors.index.json");
-        if index_path.exists() {
-            let raw =
-                std::fs::read(&index_path).context("CandleSafetensorsIndexReadFailed")?;
-            #[derive(serde::Deserialize)]
-            struct Index {
-                weight_map: std::collections::HashMap<String, String>,
+        let lp_tensor = log_softmax_dim1(&logits)
+            .context("LocalPerplexityScorerLogSoftmaxFailed")?;
+        let lp_vec: Vec<Vec<f32>> = lp_tensor.to_vec2::<f32>().map_err(|e| {
+            anyhow::anyhow!("LocalPerplexityScorerToVec2Failed: {}", hash_err(&e))
+        })?;
+        anyhow::ensure!(
+            lp_vec.len() == seq_len,
+            "LocalPerplexityScorerLogprobShapeMismatch"
+        );
+
+        let usable = std::cmp::min(seq_len, tokens.len());
+        let mut logprobs: Vec<f32> = Vec::with_capacity(usable);
+        // Position 0 is a placeholder (BOS / no predictive context); the
+        // aggregate helper drops it.
+        logprobs.push(0.0);
+        for i in 0..usable.saturating_sub(1) {
+            let target = tokens[i + 1] as usize;
+            let row = &lp_vec[i];
+            if target >= row.len() {
+                anyhow::bail!("LocalPerplexityScorerTokenOutOfVocab");
             }
-            let parsed: Index = serde_json::from_slice(&raw)
-                .context("CandleSafetensorsIndexParseFailed")?;
-            let mut shards: Vec<String> =
-                parsed.weight_map.values().cloned().collect::<std::collections::HashSet<_>>()
-                    .into_iter()
-                    .collect();
-            shards.sort();
-            return Ok(shards.into_iter().map(|s| model_path.join(s)).collect());
+            logprobs.push(row[target]);
         }
-        anyhow::bail!("CandleSafetensorsNotFound")
+        Ok(logprobs)
+    }
+
+    /// Log-softmax along dim 1 of a 2-D `[rows, cols]` tensor, returning a
+    /// tensor of the same shape. Implemented via the log-sum-exp trick
+    /// (subtract per-row max, exp, sum, log) to avoid overflow. Casts to
+    /// f32 first so bf16/f16 pipelines round through a stable space.
+    fn log_softmax_dim1(logits: &mistralrs::Tensor) -> anyhow::Result<mistralrs::Tensor> {
+        let logits_f32 = logits.to_dtype(mistralrs::DType::F32).map_err(|e| {
+            anyhow::anyhow!("LocalPerplexityScorerDTypeFailed: {}", hash_err(&e))
+        })?;
+        let max = logits_f32
+            .max_keepdim(1)
+            .map_err(|e| anyhow::anyhow!("LocalPerplexityScorerMaxFailed: {}", hash_err(&e)))?;
+        let shifted = logits_f32
+            .broadcast_sub(&max)
+            .map_err(|e| anyhow::anyhow!("LocalPerplexityScorerSubFailed: {}", hash_err(&e)))?;
+        let exp = shifted
+            .exp()
+            .map_err(|e| anyhow::anyhow!("LocalPerplexityScorerExpFailed: {}", hash_err(&e)))?;
+        let sum = exp
+            .sum_keepdim(1)
+            .map_err(|e| anyhow::anyhow!("LocalPerplexityScorerSumFailed: {}", hash_err(&e)))?;
+        let log_sum = sum
+            .log()
+            .map_err(|e| anyhow::anyhow!("LocalPerplexityScorerLogFailed: {}", hash_err(&e)))?;
+        shifted.broadcast_sub(&log_sum).map_err(|e| {
+            anyhow::anyhow!("LocalPerplexityScorerSub2Failed: {}", hash_err(&e))
+        })
     }
 
     /// Stable, low-entropy fingerprint of a borrowed error value. Used so
-    /// `try_score`'s `anyhow::Error` doesn't carry raw operator-secret text
-    /// when bubbled to the trait shim's hash-only log.
+    /// the score path's `anyhow::Error` doesn't carry raw operator-secret
+    /// text when bubbled to the trait shim's hash-only log.
     fn hash_err<T: std::fmt::Display>(e: &T) -> String {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
@@ -700,7 +579,7 @@ mod candle_impl {
 }
 
 #[cfg(feature = "local-gpu-models")]
-pub use candle_impl::{BackendArch, CandlePerplexityScorer};
+pub use local_impl::LocalPerplexityScorer;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -851,7 +730,8 @@ mod tests {
     #[cfg(feature = "local-gpu-models")]
     #[test]
     #[ignore]
-    fn candle_perplexity_smoke_against_real_model() {
+    fn local_perplexity_smoke_against_real_model() {
+        use super::local_impl::LocalPerplexityScorer;
         use crate::perplexity::PerplexityScorer;
         if std::env::var("TRACEDAO_PERPLEXITY_INTEGRATION").ok().as_deref() != Some("1") {
             eprintln!(
@@ -867,25 +747,15 @@ mod tests {
             std::env::var("TRACE_COMMONS_PERPLEXITY_DEVICE").unwrap_or_else(|_| "cuda".into());
         let device = CandleDeviceKind::from_env_str(&device_raw).expect("device parse");
 
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
-
-        let scorer = rt
-            .block_on(async {
-                CandlePerplexityScorer::try_new(
-                    std::env::var("TRACE_COMMONS_PERPLEXITY_MODEL_ID")
-                        .unwrap_or_else(|_| "meta-llama/Llama-3.1-8B-Instruct".into()),
-                    &model_path,
-                    device,
-                    -8.0_f32,
-                    16_384,
-                    BackendArch::Llama,
-                )
-                .await
-            })
-            .expect("scorer must construct on the configured host");
+        let scorer = LocalPerplexityScorer::try_new(
+            std::env::var("TRACE_COMMONS_PERPLEXITY_MODEL_ID")
+                .unwrap_or_else(|_| "meta-llama/Llama-3.1-8B-Instruct".into()),
+            &model_path,
+            device,
+            -8.0_f32,
+            16_384,
+        )
+        .expect("scorer must construct on the configured host");
 
         let r = scorer
             .score(b"The quick brown fox jumps over the lazy dog.")
@@ -899,7 +769,9 @@ mod tests {
             "tail fraction must be in [0, 1]"
         );
 
-        let empty = scorer.score(b"").expect("empty input is degenerate but score still Ok");
+        let empty = scorer
+            .score(b"")
+            .expect("empty input is degenerate but score still Ok");
         assert_eq!(empty.aggregate_perplexity_micros, 0);
         assert_eq!(empty.tail_fraction_micros, 0);
     }

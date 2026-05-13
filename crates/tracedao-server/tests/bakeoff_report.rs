@@ -151,7 +151,7 @@ fn failed_candidate_with_load_error_is_excluded_from_winner() {
         License::Apache2,
         8,
         0,
-        "CandlePerplexityScorerLoadFailed",
+        "LocalPerplexityScorerLoadFailed",
     );
     assert!(failed.load_or_eval_error.is_some());
     assert!(!failed.passed_determinism_gate);
@@ -172,11 +172,11 @@ fn failed_candidate_renders_in_markdown_failed_section() {
         License::Apache2,
         8,
         0,
-        "CandlePerplexityScorerLoadFailed",
+        "LocalPerplexityScorerLoadFailed",
     ));
     let md = bakeoff_report::render_markdown(&r);
     assert!(md.contains("## Failed candidates"), "missing failed section: {md}");
-    assert!(md.contains("CandlePerplexityScorerLoadFailed"), "missing class: {md}");
+    assert!(md.contains("LocalPerplexityScorerLoadFailed"), "missing class: {md}");
     assert!(md.contains("broken"), "missing id: {md}");
 }
 
