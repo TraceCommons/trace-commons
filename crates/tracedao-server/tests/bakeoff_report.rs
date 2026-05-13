@@ -16,6 +16,7 @@ fn result(id: &str, auc: f64, para: f64, tail: f64, throughput: f64, det: f64) -
         params_b: 8,
         passed_determinism_gate: det < DETERMINISM_GATE,
         release_date_unix: 0,
+        load_or_eval_error: None,
     }
 }
 
@@ -116,6 +117,7 @@ fn fixture_report() -> bakeoff_report::Report {
         mock_scorer: false,
         ctx_max_tokens: 4096,
         determinism_gate_value: 1e-5,
+        partial: false,
     }
 }
 
@@ -136,6 +138,55 @@ fn report_markdown_includes_winner_and_table() {
         md.contains("| candidate | auc |"),
         "missing table header: {md}"
     );
+}
+
+#[test]
+fn failed_candidate_with_load_error_is_excluded_from_winner() {
+    // A candidate row produced by the new failure path:
+    // load_or_eval_error = Some(_), passed_determinism_gate = false,
+    // all numeric fields zero. pick_winner must not pick it even if it's
+    // the only candidate in the list.
+    let failed = bakeoff_report::CandidateResult::failed(
+        "broken".into(),
+        License::Apache2,
+        8,
+        0,
+        "CandlePerplexityScorerLoadFailed",
+    );
+    assert!(failed.load_or_eval_error.is_some());
+    assert!(!failed.passed_determinism_gate);
+    assert!(pick_winner(&[failed.clone()]).is_none());
+
+    // With a healthy candidate alongside, the healthy one wins.
+    let healthy = result("healthy", 0.8, 0.1, 0.5, 1000.0, 1e-7);
+    let cands = [failed, healthy];
+    let winner = pick_winner(&cands).expect("a winner");
+    assert_eq!(winner.id, "healthy");
+}
+
+#[test]
+fn failed_candidate_renders_in_markdown_failed_section() {
+    let mut r = fixture_report();
+    r.candidates.push(bakeoff_report::CandidateResult::failed(
+        "broken".into(),
+        License::Apache2,
+        8,
+        0,
+        "CandlePerplexityScorerLoadFailed",
+    ));
+    let md = bakeoff_report::render_markdown(&r);
+    assert!(md.contains("## Failed candidates"), "missing failed section: {md}");
+    assert!(md.contains("CandlePerplexityScorerLoadFailed"), "missing class: {md}");
+    assert!(md.contains("broken"), "missing id: {md}");
+}
+
+#[test]
+fn failed_candidate_json_omits_field_when_none() {
+    // When load_or_eval_error is None, the field must be skipped from
+    // serialized JSON so existing report consumers don't see a new key.
+    let r = result("x", 0.9, 0.1, 0.5, 1000.0, 1e-7);
+    let json = serde_json::to_string(&r).unwrap();
+    assert!(!json.contains("load_or_eval_error"), "unexpected key: {json}");
 }
 
 #[test]
