@@ -336,14 +336,113 @@ mod calibrate_impl {
 }
 
 // ---------------------------------------------------------------------------
-// `bake-off` subcommand — placeholder. The full implementation is wired in
-// the next commit (Task 7c / 7b). This stub keeps the clap refactor commit
-// self-contained: parser tests can verify subcommand dispatch without
-// depending on run_candidate_eval (which doesn't exist yet at this commit).
+// `bake-off` subcommand
 // ---------------------------------------------------------------------------
 
-async fn run_bakeoff(_args: BakeOffArgs) -> anyhow::Result<()> {
-    anyhow::bail!("BakeoffNotYetWired: subcommand wiring lands in a follow-up commit")
+impl From<HardwareTier> for run_candidate_eval::DeviceKind {
+    fn from(t: HardwareTier) -> Self {
+        match t {
+            // A10 / H100 hosts both run the CUDA query path; the label is
+            // preserved in operator-visible logs even though the VRAM
+            // measurement code only cares about CUDA vs not-CUDA.
+            HardwareTier::A10 | HardwareTier::H100 => run_candidate_eval::DeviceKind::Cuda,
+            HardwareTier::Cpu => run_candidate_eval::DeviceKind::NonCuda,
+        }
+    }
+}
+
+async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
+    let manifest = bakeoff_manifest::parse_manifest_file(&args.candidates)?;
+    for w in manifest.warnings() {
+        tracing::warn!(warning = %w, "bakeoff_manifest_warning");
+    }
+    let corpus = bakeoff_corpus::load_corpus(&args.corpus)?;
+    let manifest_sha = sha256_of_file(&args.candidates)?;
+    let corpus_sha = sha256_of_file(&args.corpus)?;
+
+    let skip: std::collections::BTreeSet<String> = args
+        .skip_models
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // The real-scorer wiring (a candle scorer per candidate) lives outside
+    // this slice and is gated behind `local-gpu-models`. Until that's
+    // landed, the bake-off requires `--mock-scorer` so operators can't
+    // accidentally produce a report that looks production-valid.
+    if !args.mock_scorer {
+        anyhow::bail!(
+            "BakeoffRealScorerNotWired: real-scorer path is not yet wired; \
+             pass --mock-scorer for dry runs (Slice 5 / A2.1)"
+        );
+    }
+
+    let device_kind: run_candidate_eval::DeviceKind = args.hardware.into();
+    let mut results: Vec<bakeoff_report::CandidateResult> = Vec::new();
+    let scorer = tracedao_gate_enclave::perplexity::MockPerplexityScorer::new();
+    for c in &manifest.candidates {
+        if skip.contains(&c.id) {
+            tracing::info!(candidate_id = %c.id, "bakeoff_skip_candidate");
+            continue;
+        }
+        tracing::info!(candidate_id = %c.id, "bakeoff_load_candidate");
+        let result = run_candidate_eval::run_candidate_eval(
+            &scorer,
+            c,
+            &corpus,
+            args.determinism_repeat_runs,
+            device_kind,
+        )
+        .await?;
+        results.push(result);
+    }
+
+    let winner_id = bakeoff_report::pick_winner(&results).map(|w| w.id.clone());
+    let report = bakeoff_report::Report {
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        corpus_sha256: corpus_sha,
+        manifest_sha256: manifest_sha,
+        candidates: results,
+        winner_id,
+        decision_rule_version: 1,
+        mock_scorer: args.mock_scorer,
+        ctx_max_tokens: 4096,
+        determinism_gate_value: bakeoff_report::DETERMINISM_GATE,
+    };
+
+    bakeoff_report::write_report(&report, &args.report_out)?;
+    tracing::info!(winner = ?report.winner_id, "bakeoff_complete");
+    Ok(())
+}
+
+/// Streaming sha256 of a file. 64 KiB read buffer; output is the canonical
+/// `sha256:<hex>` label matching the corpus-loader convention.
+fn sha256_of_file(path: &std::path::Path) -> anyhow::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)
+        .map_err(|e| anyhow::anyhow!("sha256_of_file: open {}: {e}", path.display()))?;
+    let mut h = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| anyhow::anyhow!("sha256_of_file: read {}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    let digest = h.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        use std::fmt::Write as _;
+        write!(&mut hex, "{b:02x}").ok();
+    }
+    Ok(format!("sha256:{hex}"))
 }
 
 // ----------------------------- tests -----------------------------
