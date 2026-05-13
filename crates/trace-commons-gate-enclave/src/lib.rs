@@ -15,7 +15,7 @@ pub mod embedder;
 pub mod embedder_fastembed;
 pub mod orchestrator;
 pub mod perplexity;
-pub mod perplexity_candle;
+pub mod perplexity_local;
 pub mod vector_index;
 #[cfg(feature = "local-gpu-models")]
 pub mod vector_index_usearch;

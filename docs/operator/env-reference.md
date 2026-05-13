@@ -62,7 +62,7 @@ procedure.
 | `TRACE_COMMONS_PERPLEXITY_DEVICE` | optional | `cuda` | One of `cuda`, `cuda:N`, `metal`, `cpu`. |
 | `TRACE_COMMONS_PERPLEXITY_MAX_TOKENS` | optional | `16384` | Context window cap. |
 | `TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF` | optional | `-8.0` | Negative log-probability threshold for the tail fraction. |
-| `TRACE_COMMONS_PERPLEXITY_MODEL_ARCH` | optional | `llama` | Candle backend selector. Accepted: `llama`, `qwen3`, `gemma3`, `gemma4`, plus `qwen2` as a deprecated alias for `qwen3` (parses, but emits a warning at scorer startup). Operators flip this after a bake-off promotes a new winner. Unknown values fail closed at startup. Used by both `trace-commons-ingest` (production gate-service scorer) and `trace-commons-gate-calibrate calibrate`. |
+| `TRACE_COMMONS_PERPLEXITY_MODEL_ARCH` | **deprecated** (A2.3) | n/a | Historical candle-backend selector. As of A2.3 the perplexity scorer is mistralrs-backed and auto-detects the architecture from each model's `config.json`; this env var is ignored. The production binary still grep-spots it at startup and emits a deprecation warn-log when set so operators flip their configs. Slated for hard-error in A2.4. |
 
 ## 4. Embedder surface (with `local-gpu-models`)
 

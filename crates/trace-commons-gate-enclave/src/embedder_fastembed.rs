@@ -162,9 +162,11 @@ mod fastembed_impl {
         /// nominal context window). The field exists for safe_status
         /// reporting and future char-level prefiltering if needed.
         ///
-        /// Construction is async to match `CandlePerplexityScorer::try_new`
-        /// so both can be built during the gate-service binary's async
-        /// startup path. The underlying fastembed call is sync; we wrap with
+        /// Construction is async so it composes with the gate-service
+        /// binary's async startup path. (Sibling
+        /// `LocalPerplexityScorer::try_new` is sync as of A2.3 because
+        /// mistralrs is driven from an owned tokio runtime inside the
+        /// scorer itself.) The underlying fastembed call is sync; we wrap with
         /// `tokio::task::spawn_blocking` to keep the executor responsive
         /// while ONNX initializes.
         pub async fn try_new(
