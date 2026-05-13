@@ -94,6 +94,80 @@ the index.
 - Verify `TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_ENABLED=true` and that
   the scheduler bearer token is set.
 
+## `ObjectDeletionFailed`
+
+**Symptom:** Physical object payloads remain after revocation; receipts
+are not recorded.
+**Signature:** `ObjectDeletionFailed`;
+`revocation_propagation_terminal_failed_object_refs` increments.
+**Root cause:**
+- Remote object deleter (e.g., GCS deleter) is required but not
+  configured (`TRACE_COMMONS_REQUIRE_REMOTE_OBJECT_DELETER=true` with no
+  deleter wired).
+- Service-owned encrypted store is unreachable (KMS unwrap fails).
+- Pre-deletion tenant/payload verification mismatch — the object's
+  embedded `tenant_id` no longer matches.
+**Fix:**
+- Confirm the deleter dependency is wired and reachable.
+- Run the encrypted-store smoke; check KMS bindings.
+- For verification mismatches, treat as a data-integrity incident —
+  do not bypass the check.
+
+## `CreditSettlementReversalFailed`
+
+**Symptom:** Revocation events queue up; credit reversals never make
+it to the NEAR outbox.
+**Signature:** `CreditSettlementReversalFailed`;
+`revocation_propagation_terminal_failed_credit_settlements` increments.
+**Root cause:**
+- NEAR credit outbox is unreachable or the settlement batch list
+  read fails.
+- The contributor's settlement batch is missing the source line item
+  (data drift).
+- DB mirror writes blocked while the reversal ledger row is appended.
+**Fix:**
+- Check NEAR outbox connectivity and the credit-settlement-batch read
+  path.
+- Run the credit-settlement drill to confirm batch state.
+- Verify the DB mirror is healthy (the audit row stamps the failure
+  hash; raw NEAR error text never leaks).
+
+## `WorkerQueueInvalidationFailed`
+
+**Symptom:** Process-evaluation or ranking-training queues retain
+work items for revoked traces.
+**Signature:** `WorkerQueueInvalidationFailed`;
+`revocation_propagation_terminal_failed_worker_queues` increments.
+**Root cause:**
+- External worker cache invalidator required
+  (`TRACE_COMMONS_REVOCATION_WORKER_CACHE_INVALIDATOR_REQUIRED=true`)
+  but no endpoint is wired.
+- The configured invalidator returns non-2xx or fails the evidence-hash
+  validation.
+**Fix:**
+- Confirm the invalidator endpoint is configured and healthy.
+- If it's the in-tree placeholder, swap the surface for a real cache
+  invalidator before re-enabling the requirement flag.
+
+## `MetadataInvalidationFailed` / `ExportInvalidationFailed` / `DerivedRecordInvalidationFailed` / `BenchmarkArtifactInvalidationFailed` / `RankerArtifactInvalidationFailed` / `PhysicalDeleteReceiptRecordFailed`
+
+**Symptom:** Revocation effects on derived artifacts or manifest
+membership fail to land.
+**Signature:** Matching class above;
+`revocation_propagation_terminal_failed_<kind>` increments in the
+operational summary (kind = `derived_records`, `export_manifests`,
+`export_manifest_items`, `benchmark_artifacts`, `ranker_artifacts`,
+`physical_delete_receipts`).
+**Root cause:** Almost always a DB mirror outage or a constraint
+deadlock under load — every one of these handlers is a thin call to
+the PG mirror.
+**Fix:**
+- Verify DB mirror connectivity and that RLS predicates (forced via
+  `trace_current_tenant_id()`) are intact.
+- For deadlocks, the retry cap (`TRACE_COMMONS_REVOCATION_PROPAGATION_MAX_ATTEMPTS`)
+  usually clears transient drift. If a specific item stays terminal-failed,
+  inspect the DB row for unexpected state.
+
 ## `PerplexityScorerInferenceFailed` (non-OOM)
 
 **Symptom:** All gate evaluations fail, GPU memory looks fine.

@@ -44724,31 +44724,29 @@ async fn run_revocation_propagation_worker(
                         item.propagation_item_id
                     )
                 })?;
-                // Phase A6: hash-only audit row for the failure. Scoped to
-                // the VectorEntry target kind for this slice; other target
-                // kinds will adopt the same shape in a follow-up retrofit.
-                if matches!(
-                    item.target_kind,
-                    StorageTraceRevocationPropagationTargetKind::VectorEntry
-                ) {
-                    let error_class = revocation_propagation_error_class_for(item.action);
-                    if let Err(audit_err) = append_revocation_propagation_failure_audit(
-                        state,
-                        tenant,
-                        &item,
-                        error_class,
-                        &error,
-                        attempt_count,
-                        is_terminal,
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            error_hash = %safe_display_error_hash(&audit_err),
-                            propagation_item_id = %item.propagation_item_id,
-                            "failed to append revocation propagation failure audit row"
-                        );
-                    }
+                // Phase A6 retrofit: hash-only audit row for the failure
+                // across all propagation target kinds. The typed
+                // `RevocationPropagationFailure` metadata variant carries the
+                // `<Action>Failed` error class so operators can filter on
+                // stable labels; the raw error text is hashed.
+                let error_class = revocation_propagation_error_class_for(item.action);
+                if let Err(audit_err) = append_revocation_propagation_failure_audit(
+                    state,
+                    tenant,
+                    &item,
+                    error_class,
+                    &error,
+                    attempt_count,
+                    is_terminal,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        error_hash = %safe_display_error_hash(&audit_err),
+                        propagation_item_id = %item.propagation_item_id,
+                        target_kind = ?item.target_kind,
+                        "failed to append revocation propagation failure audit row"
+                    );
                 }
                 response.failed += 1;
                 if !is_terminal {
@@ -59268,6 +59266,20 @@ struct TraceOperationalRevocationPropagationSummary {
     /// `target_kind = "vector_entry"` and `is_terminal = true`. Duplicates per
     /// `propagation_item_id` are collapsed so retry exhaustion is counted once.
     revocation_propagation_terminal_failed_vector_entries: u64,
+    /// Phase A6 retrofit: terminal-failed counters for the remaining
+    /// propagation target kinds. Semantics match
+    /// `revocation_propagation_terminal_failed_vector_entries`; each counter
+    /// collapses duplicate `propagation_item_id` values so retry exhaustion
+    /// is counted once per item.
+    revocation_propagation_terminal_failed_object_refs: u64,
+    revocation_propagation_terminal_failed_export_manifests: u64,
+    revocation_propagation_terminal_failed_export_manifest_items: u64,
+    revocation_propagation_terminal_failed_derived_records: u64,
+    revocation_propagation_terminal_failed_benchmark_artifacts: u64,
+    revocation_propagation_terminal_failed_ranker_artifacts: u64,
+    revocation_propagation_terminal_failed_credit_settlements: u64,
+    revocation_propagation_terminal_failed_worker_queues: u64,
+    revocation_propagation_terminal_failed_physical_delete_receipts: u64,
 }
 
 impl Default for TraceOperationalRevocationPropagationSummary {
@@ -59285,6 +59297,15 @@ impl Default for TraceOperationalRevocationPropagationSummary {
             worker_cache_invalidator_configured: false,
             worker_cache_invalidator_ready: true,
             revocation_propagation_terminal_failed_vector_entries: 0,
+            revocation_propagation_terminal_failed_object_refs: 0,
+            revocation_propagation_terminal_failed_export_manifests: 0,
+            revocation_propagation_terminal_failed_export_manifest_items: 0,
+            revocation_propagation_terminal_failed_derived_records: 0,
+            revocation_propagation_terminal_failed_benchmark_artifacts: 0,
+            revocation_propagation_terminal_failed_ranker_artifacts: 0,
+            revocation_propagation_terminal_failed_credit_settlements: 0,
+            revocation_propagation_terminal_failed_worker_queues: 0,
+            revocation_propagation_terminal_failed_physical_delete_receipts: 0,
         }
     }
 }
@@ -59310,10 +59331,12 @@ impl TraceOperationalRevocationPropagationSummary {
             }
         }
         let mut summary = latest.unwrap_or_default();
-        // Phase A6: count distinct VectorEntry propagation items that reached
-        // the retry cap. Reuses the hash-only reason fields stamped onto each
-        // RevocationPropagationFailure audit row.
-        let mut terminal_vector_entries: BTreeSet<String> = BTreeSet::new();
+        // Phase A6 retrofit: count distinct propagation items that reached
+        // the retry cap, bucketed by target kind. Reuses the hash-only
+        // reason fields stamped onto each RevocationPropagationFailure audit
+        // row. Duplicates per propagation_item_id are collapsed so retry
+        // exhaustion is counted once.
+        let mut per_kind: BTreeMap<&'static str, BTreeSet<String>> = BTreeMap::new();
         for event in events
             .iter()
             .filter(|event| event.kind == "revocation_propagation_failure")
@@ -59321,15 +59344,46 @@ impl TraceOperationalRevocationPropagationSummary {
             let reason = event.reason.as_deref();
             let target_kind = trace_audit_reason_value(reason, "target_kind").unwrap_or("");
             let is_terminal = trace_audit_reason_bool(reason, "is_terminal").unwrap_or(false);
-            if !is_terminal || target_kind != "VectorEntry" {
+            if !is_terminal {
                 continue;
             }
+            let bucket = match target_kind {
+                "VectorEntry" => "vector_entry",
+                "ObjectRef" => "object_ref",
+                "ExportManifest" => "export_manifest",
+                "ExportManifestItem" => "export_manifest_item",
+                "DerivedRecord" => "derived_record",
+                "BenchmarkArtifact" => "benchmark_artifact",
+                "RankerArtifact" => "ranker_artifact",
+                "CreditSettlement" => "credit_settlement",
+                "WorkerQueue" => "worker_queue",
+                "PhysicalDeleteReceipt" => "physical_delete_receipt",
+                _ => continue,
+            };
             if let Some(item_id) = trace_audit_reason_value(reason, "propagation_item_id") {
-                terminal_vector_entries.insert(item_id.to_string());
+                per_kind
+                    .entry(bucket)
+                    .or_default()
+                    .insert(item_id.to_string());
             }
         }
-        summary.revocation_propagation_terminal_failed_vector_entries =
-            terminal_vector_entries.len() as u64;
+        let count = |bucket: &str| -> u64 {
+            per_kind.get(bucket).map(|s| s.len() as u64).unwrap_or(0)
+        };
+        summary.revocation_propagation_terminal_failed_vector_entries = count("vector_entry");
+        summary.revocation_propagation_terminal_failed_object_refs = count("object_ref");
+        summary.revocation_propagation_terminal_failed_export_manifests = count("export_manifest");
+        summary.revocation_propagation_terminal_failed_export_manifest_items =
+            count("export_manifest_item");
+        summary.revocation_propagation_terminal_failed_derived_records = count("derived_record");
+        summary.revocation_propagation_terminal_failed_benchmark_artifacts =
+            count("benchmark_artifact");
+        summary.revocation_propagation_terminal_failed_ranker_artifacts = count("ranker_artifact");
+        summary.revocation_propagation_terminal_failed_credit_settlements =
+            count("credit_settlement");
+        summary.revocation_propagation_terminal_failed_worker_queues = count("worker_queue");
+        summary.revocation_propagation_terminal_failed_physical_delete_receipts =
+            count("physical_delete_receipt");
         Ok(summary)
     }
 }
@@ -83160,6 +83214,413 @@ mod tests {
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+    }
+
+    // -------------------------------------------------------------------
+    // Phase A6 retrofit: typed RevocationPropagationFailure audit row +
+    // per-kind terminal-failed operational summary coverage for the nine
+    // non-vector propagation target kinds.
+    // -------------------------------------------------------------------
+
+    /// Build a synthetic `revocation_propagation_failure` audit event whose
+    /// hash-only reason fields match the format
+    /// `append_revocation_propagation_failure_audit` writes.
+    fn revocation_propagation_failure_audit_event(
+        tenant_id: &str,
+        target_kind_debug: &str,
+        propagation_item_id: Uuid,
+        attempt_count: u32,
+        is_terminal: bool,
+    ) -> TraceCommonsAuditEvent {
+        TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant_id.to_string(),
+            submission_id: Uuid::new_v4(),
+            kind: "revocation_propagation_failure".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::RevocationWorker),
+            actor_principal_ref: Some(principal_storage_ref("revocation-worker-token-test")),
+            reason: Some(format!(
+                "propagation_item_id={};target_kind={};error_class=TestFailed;attempt_count={};is_terminal={}",
+                propagation_item_id, target_kind_debug, attempt_count, is_terminal,
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    /// Phase A6 retrofit: the operational summary aggregator buckets
+    /// terminal-failed audit events by propagation target kind. One event
+    /// per kind is seeded; each per-kind counter must increment to exactly
+    /// one. Non-terminal events must not be counted.
+    #[test]
+    fn revocation_propagation_terminal_failed_buckets_each_target_kind() {
+        let kinds: [(&str, fn(&TraceOperationalRevocationPropagationSummary) -> u64); 10] = [
+            (
+                "VectorEntry",
+                |s| s.revocation_propagation_terminal_failed_vector_entries,
+            ),
+            (
+                "ObjectRef",
+                |s| s.revocation_propagation_terminal_failed_object_refs,
+            ),
+            (
+                "ExportManifest",
+                |s| s.revocation_propagation_terminal_failed_export_manifests,
+            ),
+            (
+                "ExportManifestItem",
+                |s| s.revocation_propagation_terminal_failed_export_manifest_items,
+            ),
+            (
+                "DerivedRecord",
+                |s| s.revocation_propagation_terminal_failed_derived_records,
+            ),
+            (
+                "BenchmarkArtifact",
+                |s| s.revocation_propagation_terminal_failed_benchmark_artifacts,
+            ),
+            (
+                "RankerArtifact",
+                |s| s.revocation_propagation_terminal_failed_ranker_artifacts,
+            ),
+            (
+                "CreditSettlement",
+                |s| s.revocation_propagation_terminal_failed_credit_settlements,
+            ),
+            (
+                "WorkerQueue",
+                |s| s.revocation_propagation_terminal_failed_worker_queues,
+            ),
+            (
+                "PhysicalDeleteReceipt",
+                |s| s.revocation_propagation_terminal_failed_physical_delete_receipts,
+            ),
+        ];
+
+        let mut events = Vec::new();
+        for (target_kind, _) in &kinds {
+            // One terminal failure: counts.
+            events.push(revocation_propagation_failure_audit_event(
+                "tenant-a",
+                target_kind,
+                Uuid::new_v4(),
+                5,
+                true,
+            ));
+            // One non-terminal failure: does NOT count.
+            events.push(revocation_propagation_failure_audit_event(
+                "tenant-a",
+                target_kind,
+                Uuid::new_v4(),
+                1,
+                false,
+            ));
+        }
+
+        let summary = TraceOperationalRevocationPropagationSummary::from_audit_events(&events)
+            .expect("aggregator computes");
+
+        for (target_kind, getter) in &kinds {
+            assert_eq!(
+                getter(&summary),
+                1,
+                "terminal-failed counter for {target_kind} must be exactly 1",
+            );
+        }
+    }
+
+    /// Phase A6 retrofit: duplicate audit events for the same
+    /// `propagation_item_id` (e.g., one row per failed attempt) are
+    /// collapsed so retry exhaustion is counted once per item.
+    #[test]
+    fn revocation_propagation_terminal_failed_dedupes_per_item() {
+        let item_id = Uuid::new_v4();
+        let events = vec![
+            revocation_propagation_failure_audit_event(
+                "tenant-a",
+                "ObjectRef",
+                item_id,
+                4,
+                false,
+            ),
+            revocation_propagation_failure_audit_event(
+                "tenant-a",
+                "ObjectRef",
+                item_id,
+                5,
+                true,
+            ),
+            revocation_propagation_failure_audit_event(
+                "tenant-a",
+                "ObjectRef",
+                item_id,
+                5,
+                true,
+            ),
+        ];
+
+        let summary = TraceOperationalRevocationPropagationSummary::from_audit_events(&events)
+            .expect("aggregator computes");
+
+        assert_eq!(
+            summary.revocation_propagation_terminal_failed_object_refs, 1,
+            "duplicate terminal rows for the same propagation item are collapsed"
+        );
+    }
+
+    /// Phase A6 retrofit: stable `<Action>Failed` error class for every
+    /// `TraceRevocationPropagationAction`. Verifies the mapping owns the
+    /// full action surface so the audit-row error_class label cannot drift
+    /// from the action enum.
+    #[test]
+    fn revocation_propagation_error_class_mapping_covers_every_action() {
+        use StorageTraceRevocationPropagationAction as A;
+        let cases = [
+            (A::InvalidateMetadata, "MetadataInvalidationFailed"),
+            (A::InvalidateExportMembership, "ExportInvalidationFailed"),
+            (A::InvalidateVector, "VectorInvalidationFailed"),
+            (
+                A::InvalidateBenchmarkArtifact,
+                "BenchmarkArtifactInvalidationFailed",
+            ),
+            (
+                A::InvalidateRankerArtifact,
+                "RankerArtifactInvalidationFailed",
+            ),
+            (A::ReverseCreditSettlement, "CreditSettlementReversalFailed"),
+            (A::InvalidateWorkerQueue, "WorkerQueueInvalidationFailed"),
+            (A::DeleteObjectPayload, "ObjectDeletionFailed"),
+            (
+                A::RecordPhysicalDeleteReceipt,
+                "PhysicalDeleteReceiptRecordFailed",
+            ),
+        ];
+        for (action, expected) in cases {
+            assert_eq!(
+                revocation_propagation_error_class_for(action),
+                expected,
+                "stable error_class for {action:?}",
+            );
+        }
+    }
+
+    /// Seed a `WorkerQueue` propagation item with a supported queue surface
+    /// and the canonical key hash. When the worker runs and the configured
+    /// invalidator is required but missing, the handler will return Err and
+    /// the worker loop must emit a typed `RevocationPropagationFailure`
+    /// audit row tagged `WorkerQueueInvalidationFailed`.
+    async fn seed_worker_queue_propagation_item(
+        backend: &PgBackend,
+        tenant_id: &str,
+        attempt_count: u32,
+    ) -> (Uuid, Uuid) {
+        let source_submission_id = Uuid::new_v4();
+        let propagation_item_id = Uuid::new_v4();
+        let queue_surface = "process_evaluation_queue".to_string();
+        let queue_key_hash = trace_revocation_worker_queue_key_hash(
+            tenant_id,
+            source_submission_id,
+            &queue_surface,
+        );
+        backend
+            .upsert_trace_revocation_propagation_item(
+                StorageTraceRevocationPropagationItemWrite {
+                    tenant_id: tenant_id.to_string(),
+                    propagation_item_id,
+                    source_submission_id,
+                    target: StorageTraceRevocationPropagationTarget::WorkerQueue {
+                        queue_surface,
+                        queue_key_hash,
+                    },
+                    action: StorageTraceRevocationPropagationAction::InvalidateWorkerQueue,
+                    status: StorageTraceRevocationPropagationItemStatus::Pending,
+                    idempotency_key: sha256_prefixed(&format!(
+                        "phase-a6-retrofit-worker-queue-{propagation_item_id}"
+                    )),
+                    reason: "phase a6 retrofit worker queue invalidation test".to_string(),
+                    attempt_count,
+                    last_error: None,
+                    next_attempt_at: None,
+                    completed_at: None,
+                    evidence_hash: None,
+                    metadata: BTreeMap::new(),
+                },
+            )
+            .await
+            .expect("upsert worker-queue propagation item");
+        (propagation_item_id, source_submission_id)
+    }
+
+    /// Phase A6 retrofit: a `WorkerQueue` propagation item whose configured
+    /// invalidator is required-but-missing fails through the typed audit
+    /// path. Mirrors `revocation_propagation_vector_entry_gate_bail_fails_with_audit_row`
+    /// for the `WorkerQueue` target kind end-to-end.
+    #[tokio::test]
+    async fn revocation_propagation_worker_queue_failure_emits_typed_audit_row() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            true,
+            false,
+            false,
+        );
+        // Force the worker-cache invalidator to be required without
+        // configuring one, so the handler bails on every attempt.
+        Arc::make_mut(&mut state).require_external_worker_cache_invalidator = true;
+
+        let (propagation_item_id, source_submission_id) =
+            seed_worker_queue_propagation_item(backend.as_ref(), "tenant-a", 0).await;
+        let auth = revocation_worker_tenant_auth("tenant-a");
+
+        let response = run_revocation_propagation_worker(
+            state.as_ref(),
+            &auth,
+            TraceRevocationPropagationWorkerRequest {
+                purpose: Some("phase a6 retrofit worker-queue failure".to_string()),
+                dry_run: false,
+                limit: 10,
+            },
+        )
+        .await
+        .expect("worker runs");
+
+        assert_eq!(response.failed, 1);
+        assert_eq!(response.next_attempt_scheduled, 1);
+
+        let items = backend
+            .list_trace_revocation_propagation_items("tenant-a", source_submission_id)
+            .await
+            .expect("read propagation items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].propagation_item_id, propagation_item_id);
+        assert_eq!(
+            items[0].status,
+            StorageTraceRevocationPropagationItemStatus::Failed
+        );
+        assert_eq!(items[0].attempt_count, 1);
+        assert!(items[0].last_error.is_some());
+        assert!(items[0].next_attempt_at.is_some());
+
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        let failure_audit = audit_events
+            .iter()
+            .find(|event| event.kind == "revocation_propagation_failure")
+            .expect("revocation propagation failure audit row exists");
+        let reason = failure_audit
+            .reason
+            .as_deref()
+            .expect("failure audit reason set");
+        assert!(
+            reason.contains("error_class=WorkerQueueInvalidationFailed"),
+            "reason carries typed error_class: {reason}"
+        );
+        assert!(reason.contains("target_kind=WorkerQueue"));
+        assert!(reason.contains("attempt_count=1"));
+        assert!(reason.contains("is_terminal=false"));
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    /// Phase A6 retrofit: retry-cap exhaustion for a non-vector kind
+    /// (`WorkerQueue`). The shared retry cap lives at the worker loop level,
+    /// so this single test covers terminal-failure semantics for every
+    /// retrofitted target kind: terminal items are not re-scheduled, and the
+    /// operational summary's per-kind counter increments.
+    #[tokio::test]
+    async fn revocation_propagation_worker_queue_retry_cap_exhaustion_terminal_failed() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            true,
+            false,
+            true,
+        );
+        Arc::make_mut(&mut state).require_external_worker_cache_invalidator = true;
+        Arc::make_mut(&mut state).revocation_propagation_max_attempts = 5;
+
+        let (propagation_item_id, source_submission_id) =
+            seed_worker_queue_propagation_item(backend.as_ref(), "tenant-a", 4).await;
+        let auth = revocation_worker_tenant_auth("tenant-a");
+
+        let response = run_revocation_propagation_worker(
+            state.as_ref(),
+            &auth,
+            TraceRevocationPropagationWorkerRequest {
+                purpose: Some("phase a6 retrofit worker-queue retry cap".to_string()),
+                dry_run: false,
+                limit: 10,
+            },
+        )
+        .await
+        .expect("worker runs");
+
+        assert_eq!(response.failed, 1);
+        assert_eq!(response.next_attempt_scheduled, 0);
+
+        let items = backend
+            .list_trace_revocation_propagation_items("tenant-a", source_submission_id)
+            .await
+            .expect("read propagation items");
+        assert_eq!(items[0].propagation_item_id, propagation_item_id);
+        assert_eq!(
+            items[0].status,
+            StorageTraceRevocationPropagationItemStatus::Failed
+        );
+        assert_eq!(items[0].attempt_count, 5);
+        assert!(
+            items[0].next_attempt_at.is_none(),
+            "terminal-failed items must not be re-scheduled"
+        );
+
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        let failure_audit = audit_events
+            .iter()
+            .find(|event| event.kind == "revocation_propagation_failure")
+            .expect("revocation propagation failure audit row exists");
+        let reason = failure_audit
+            .reason
+            .as_deref()
+            .expect("failure audit reason set");
+        assert!(reason.contains("is_terminal=true"));
+        assert!(reason.contains("attempt_count=5"));
+        assert!(reason.contains("target_kind=WorkerQueue"));
+
+        let summary =
+            TraceOperationalRevocationPropagationSummary::from_audit_events(&audit_events)
+                .expect("summary computes");
+        assert_eq!(
+            summary.revocation_propagation_terminal_failed_worker_queues, 1,
+            "operational summary reports the terminal-failed worker queue"
+        );
+        assert_eq!(
+            summary.revocation_propagation_terminal_failed_vector_entries, 0,
+            "vector-entry counter is unaffected by worker-queue failures"
+        );
+
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
 
     #[tokio::test]
