@@ -1,0 +1,6 @@
+# Pinned SHA256s of bake-off corpus tarballs.
+# Operators append after a successful real run; format:
+#   <date>  <sha256>  <notes>
+# This file is the reproducibility anchor for the bake-off — anyone running
+# the same corpus + candidates on the same hardware generation should be
+# able to reproduce the report.
