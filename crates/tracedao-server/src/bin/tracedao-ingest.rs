@@ -185,6 +185,27 @@ const TRACE_COMMONS_GATE_SERVICE_ENCLAVE_ENDPOINT: &str =
 const TRACE_COMMONS_GATE_SERVICE_ATTESTATION_VERIFIER_LABEL: &str =
     "TRACE_COMMONS_GATE_SERVICE_ATTESTATION_VERIFIER_LABEL";
 const TRACE_COMMONS_GATE_SERVICE_MASTER_KEY: &str = "TRACE_COMMONS_GATE_SERVICE_MASTER_KEY";
+// Phase A audit-fixes: env-driven gate-orchestrator config. Read only when
+// `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu` AND the `local-gpu-models`
+// feature is compiled in. All three floors are required; at least one MUST
+// be greater than zero. Startup fails closed otherwise so the production
+// gate cannot fall back to the mock-default zero-floor shape (which would
+// trivially pass every trace).
+#[allow(dead_code)]
+const TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS: &str =
+    "TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS";
+#[allow(dead_code)]
+const TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS: &str =
+    "TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS";
+#[allow(dead_code)]
+const TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS: &str =
+    "TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS";
+#[allow(dead_code)]
+const TRACE_COMMONS_GATE_POLICY_VERSION: &str = "TRACE_COMMONS_GATE_POLICY_VERSION";
+#[allow(dead_code)]
+const TRACE_COMMONS_GATE_TOP_K: &str = "TRACE_COMMONS_GATE_TOP_K";
+#[allow(dead_code)]
+const TRACE_COMMONS_GATE_DEFAULT_TOP_K: usize = 5;
 // Phase A5 novelty_utility credit emission tuning. See
 // docs/superpowers/specs/2026-05-13-novelty-utility-credit-emission-design.md.
 const TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA: &str =
@@ -4343,7 +4364,78 @@ async fn build_enclave_local_gpu_gate_service_from_env(
         )
     })?;
 
-    let cfg = EnclaveGateOrchestratorConfig::mock_default();
+    // Embedder/vector-index dim agreement is load-bearing: if usearch is
+    // configured for dim D but the embedder produces dim D', every insert
+    // would fail with a dim-mismatch at first eval. Refuse at startup.
+    anyhow::ensure!(
+        embedder.output_dim() == vector_index_dim,
+        "embedder output_dim ({}) must equal {} ({})",
+        embedder.output_dim(),
+        TRACE_COMMONS_VECTOR_INDEX_DIM,
+        vector_index_dim,
+    );
+
+    // Real env-driven orchestrator config. The previous `mock_default()` had
+    // zero floors AND a fixed gate_policy_version ("enclave_mock_v1") — under
+    // those settings every trace passes the gate trivially and every credit
+    // event is stamped with a placeholder version hash. Both are blocked at
+    // startup here.
+    let perplexity_floor_micros = parse_required_u64_env(
+        TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS,
+    )?;
+    let tail_fraction_floor_micros = parse_required_u64_env(
+        TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS,
+    )?;
+    let novelty_floor_micros =
+        parse_required_u64_env(TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS)?;
+    anyhow::ensure!(
+        perplexity_floor_micros > 0
+            || tail_fraction_floor_micros > 0
+            || novelty_floor_micros > 0,
+        "{}/{}/{} cannot all be zero — at least one gate floor must be positive",
+        TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS,
+        TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS,
+        TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS,
+    );
+    let gate_policy_version = std::env::var(TRACE_COMMONS_GATE_POLICY_VERSION)
+        .with_context(|| {
+            format!(
+                "{} must be set when {}=\"enclave_local_gpu\"",
+                TRACE_COMMONS_GATE_POLICY_VERSION, TRACE_COMMONS_GATE_SERVICE,
+            )
+        })?;
+    anyhow::ensure!(
+        !gate_policy_version.trim().is_empty(),
+        "{} must be non-empty",
+        TRACE_COMMONS_GATE_POLICY_VERSION,
+    );
+    let top_k = parse_usize_env(TRACE_COMMONS_GATE_TOP_K, TRACE_COMMONS_GATE_DEFAULT_TOP_K)?;
+
+    let gate_version_hash = compute_gate_version_hash(
+        &gate_policy_version,
+        perplexity_floor_micros,
+        tail_fraction_floor_micros,
+        novelty_floor_micros,
+        top_k,
+        &std::env::var(TRACE_COMMONS_PERPLEXITY_MODEL_ID)
+            .unwrap_or_else(|_| TRACE_COMMONS_PERPLEXITY_DEFAULT_MODEL_ID.to_string()),
+        max_tokens,
+        tail_cutoff,
+        &std::env::var(TRACE_COMMONS_EMBEDDER_MODEL_ID)
+            .unwrap_or_else(|_| TRACE_COMMONS_EMBEDDER_DEFAULT_MODEL_ID.to_string()),
+        embedder_max_tokens,
+        embedder_matryoshka_dim,
+        vector_index_dim,
+    );
+
+    let cfg = EnclaveGateOrchestratorConfig {
+        gate_policy_version,
+        gate_version_hash,
+        perplexity_floor_micros,
+        tail_fraction_floor_micros,
+        novelty_floor_micros,
+        top_k,
+    };
     let orchestrator =
         EnclaveGateOrchestrator::new(scorer, embedder, vector_index, cfg);
     Ok(Arc::new(EnclaveGateService::new(
@@ -4351,6 +4443,55 @@ async fn build_enclave_local_gpu_gate_service_from_env(
         wrapper,
         "enclave_local_gpu",
     )))
+}
+
+/// Parse a required `u64` env var. Returns an error if the var is unset,
+/// empty, or doesn't parse. Used for the three gate floors that the
+/// orchestrator config refuses to default.
+#[cfg(feature = "local-gpu-models")]
+fn parse_required_u64_env(var: &'static str) -> anyhow::Result<u64> {
+    let raw = std::env::var(var)
+        .with_context(|| format!("{var} must be set when TRACE_COMMONS_GATE_SERVICE=\"enclave_local_gpu\""))?;
+    let trimmed = raw.trim();
+    anyhow::ensure!(!trimmed.is_empty(), "{var} must not be empty");
+    trimmed
+        .parse::<u64>()
+        .with_context(|| format!("{var} must parse as a non-negative integer"))
+}
+
+/// Stable canonical-bytes hash of every dimension that influences the gate
+/// decision: policy version, floors, top-k, both model identifiers + token
+/// caps, and the vector index dim. Operators rotating any of these MUST see
+/// the audit trail break — the previous fixed `"sha256:enclave_mock_v1"` value
+/// stamped every decision regardless of configuration.
+#[cfg(feature = "local-gpu-models")]
+#[allow(clippy::too_many_arguments)]
+fn compute_gate_version_hash(
+    policy_version: &str,
+    perplexity_floor_micros: u64,
+    tail_fraction_floor_micros: u64,
+    novelty_floor_micros: u64,
+    top_k: usize,
+    perplexity_model_id: &str,
+    perplexity_max_tokens: usize,
+    perplexity_tail_cutoff: f32,
+    embedder_model_id: &str,
+    embedder_max_tokens: usize,
+    embedder_matryoshka_dim: Option<usize>,
+    vector_index_dim: usize,
+) -> String {
+    let canonical = format!(
+        "trace_commons_gate_version.v1\n\
+         policy={policy_version}\n\
+         floors={perplexity_floor_micros},{tail_fraction_floor_micros},{novelty_floor_micros}\n\
+         top_k={top_k}\n\
+         perplexity={perplexity_model_id}:{perplexity_max_tokens}:{perplexity_tail_cutoff}\n\
+         embedder={embedder_model_id}:{embedder_max_tokens}:{embedder_matryoshka_dim:?}\n\
+         vector_dim={vector_index_dim}",
+    );
+    let mut h = Sha256::new();
+    h.update(canonical.as_bytes());
+    format!("sha256:{:x}", h.finalize())
 }
 
 /// Parse `T = usize` from an env var with a default fallback. Trim + strict
@@ -39620,7 +39761,11 @@ async fn gate_evaluate_worker_handler(
         )
     })?;
 
-    let tenant_ctx = GateTenantCtx::new(tenant.tenant_id.clone());
+    // Canonical tenant_storage_ref: the wrapped DEK was produced under this
+    // ref by the artifact-store path. Passing raw tenant.tenant_id here would
+    // make the gate service's KekContext disagree with the wrapped DEK's
+    // context binding → KekContextMismatch on every real-deployment evaluation.
+    let tenant_ctx = GateTenantCtx::from_canonical(tenant_storage_ref(&tenant.tenant_id));
     let decision = match state.gate_service.evaluate_trace(
         &tenant_ctx,
         &ciphertext,
@@ -44727,7 +44872,12 @@ async fn apply_revocation_propagation_item(
             // dstack stub fails closed; the enclave services route through to
             // the underlying VectorIndex::delete, which treats "not present"
             // as a successful no-op (postcondition is "entry is gone").
-            let tenant_ctx = GateTenantCtx::new(tenant.tenant_id.clone());
+            // Canonical tenant_storage_ref: must match the form the gate
+            // worker used at insertion time, otherwise UsearchVectorIndex
+            // would route the deletion to a different shard than the one
+            // holding the entry.
+            let tenant_ctx =
+                GateTenantCtx::from_canonical(tenant_storage_ref(&tenant.tenant_id));
             state
                 .gate_service
                 .invalidate_vector_entry(&tenant_ctx, *vector_entry_id)
@@ -82585,7 +82735,7 @@ mod tests {
             self.calls
                 .lock()
                 .expect("lock")
-                .push((tenant_ctx.tenant_id.clone(), vector_entry_id));
+                .push((tenant_ctx.tenant_storage_ref().to_string(), vector_entry_id));
             Ok(())
         }
 
@@ -121066,5 +121216,86 @@ mod tests {
         assert!(is_production_gate_service_kind("dstack"));
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    // ----- Phase A audit-fix unit tests -------------------------------------
+    //
+    // These cover the env-driven gate-orchestrator config path that replaces
+    // `EnclaveGateOrchestratorConfig::mock_default()`. They are feature-gated
+    // because the helpers they call (`parse_required_u64_env`,
+    // `compute_gate_version_hash`) are only compiled under
+    // `local-gpu-models`.
+
+    #[cfg(feature = "local-gpu-models")]
+    #[test]
+    fn parse_required_u64_env_bails_when_unset() {
+        // Use a per-test env var name so we don't race other tests.
+        let var = "TRACE_COMMONS_TEST_REQUIRED_U64_UNSET";
+        // Ensure unset.
+        // SAFETY: env mutation in tests is OK here because the var name is
+        // unique to this test and not read elsewhere.
+        unsafe { std::env::remove_var(var) };
+        let err = parse_required_u64_env(var).expect_err("unset var must error");
+        assert!(format!("{err}").contains("must be set"));
+    }
+
+    #[cfg(feature = "local-gpu-models")]
+    #[test]
+    fn parse_required_u64_env_accepts_zero() {
+        // "0" is a valid u64 — only ALL-ZERO floors is invalid, and that
+        // check lives at the caller. This helper must accept 0.
+        let var = "TRACE_COMMONS_TEST_REQUIRED_U64_ZERO";
+        unsafe { std::env::set_var(var, "0") };
+        let v = parse_required_u64_env(var).expect("0 must parse");
+        assert_eq!(v, 0);
+        unsafe { std::env::remove_var(var) };
+    }
+
+    #[cfg(feature = "local-gpu-models")]
+    #[test]
+    fn compute_gate_version_hash_changes_on_any_dimension() {
+        // The hash MUST be sensitive to every input: policy, floors, top_k,
+        // model ids, max_tokens, matryoshka dim, vector dim. We assert a
+        // baseline + permutations differ. Previously the mock_default path
+        // stamped every audit row with a fixed `"sha256:enclave_mock_v1"`.
+        let base = compute_gate_version_hash(
+            "policy-1", 10, 20, 30, 5, "p-model", 1024, -8.0, "e-model", 512, Some(256), 1024,
+        );
+        let diff_policy = compute_gate_version_hash(
+            "policy-2", 10, 20, 30, 5, "p-model", 1024, -8.0, "e-model", 512, Some(256), 1024,
+        );
+        let diff_floor = compute_gate_version_hash(
+            "policy-1", 11, 20, 30, 5, "p-model", 1024, -8.0, "e-model", 512, Some(256), 1024,
+        );
+        let diff_topk = compute_gate_version_hash(
+            "policy-1", 10, 20, 30, 6, "p-model", 1024, -8.0, "e-model", 512, Some(256), 1024,
+        );
+        let diff_pmodel = compute_gate_version_hash(
+            "policy-1", 10, 20, 30, 5, "p-model-2", 1024, -8.0, "e-model", 512, Some(256), 1024,
+        );
+        let diff_emodel = compute_gate_version_hash(
+            "policy-1", 10, 20, 30, 5, "p-model", 1024, -8.0, "e-model-2", 512, Some(256), 1024,
+        );
+        let diff_matry = compute_gate_version_hash(
+            "policy-1", 10, 20, 30, 5, "p-model", 1024, -8.0, "e-model", 512, Some(128), 1024,
+        );
+        let diff_vdim = compute_gate_version_hash(
+            "policy-1", 10, 20, 30, 5, "p-model", 1024, -8.0, "e-model", 512, Some(256), 512,
+        );
+        assert!(base.starts_with("sha256:"));
+        for (label, other) in &[
+            ("policy", &diff_policy),
+            ("floor", &diff_floor),
+            ("top_k", &diff_topk),
+            ("p_model", &diff_pmodel),
+            ("e_model", &diff_emodel),
+            ("matryoshka", &diff_matry),
+            ("vector_dim", &diff_vdim),
+        ] {
+            assert_ne!(
+                &base, *other,
+                "gate_version_hash must change when {label} changes"
+            );
+        }
     }
 }

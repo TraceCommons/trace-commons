@@ -55,6 +55,10 @@ gcp-kms = ["dep:google-cloud-kms"]
 # Phase A2 wires this with a `CandlePerplexityScorer` + `MockEmbedder` +
 # `MockVectorIndex`; A3 / A4 swap the latter two for real implementations.
 local-gpu-models = ["tracedao-gate-enclave/local-gpu-models"]
+# Add-on that forwards to `tracedao-gate-enclave/local-gpu-models-cuda`, which
+# pulls in the candle CUDA backend. Implies `local-gpu-models`. Only useful on
+# hosts with the CUDA toolchain installed; CI builds keep this off.
+local-gpu-models-cuda = ["local-gpu-models", "tracedao-gate-enclave/local-gpu-models-cuda"]
 
 [dev-dependencies]
 tempfile = "3"
