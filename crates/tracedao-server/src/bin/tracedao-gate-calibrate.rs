@@ -54,9 +54,11 @@ enum Cmd {
     /// JSONL to stdout.
     Calibrate,
     /// Run the A2.1 perplexity-scorer bake-off and write a JSON + markdown
-    /// report. Mock-scorer mode is the only mode currently wired in this
-    /// build of the binary; pass `--mock-scorer` explicitly to acknowledge
-    /// that the report cannot be used for production decisions.
+    /// report. The real-scorer path requires the `local-gpu-models` build
+    /// feature and CUDA hardware (`--hardware=a10` or `--hardware=h100`);
+    /// `--mock-scorer` is available for dry runs on CPU hosts and emits
+    /// reports flagged `mock_scorer: true` so they cannot be confused with
+    /// a production bake-off.
     BakeOff(BakeOffArgs),
 }
 
@@ -369,35 +371,97 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
         .filter(|s| !s.is_empty())
         .collect();
 
-    // The real-scorer wiring (a candle scorer per candidate) lives outside
-    // this slice and is gated behind `local-gpu-models`. Until that's
-    // landed, the bake-off requires `--mock-scorer` so operators can't
-    // accidentally produce a report that looks production-valid.
-    if !args.mock_scorer {
+    // `--hardware=cpu` paired with a real candle scorer is unsupported:
+    // the candle Llama loader needs CUDA at any reasonable model size.
+    // Refuse early with a named error class before attempting any load
+    // so operators get a self-explanatory diagnostic rather than a
+    // generic candle failure deep in the stack.
+    if matches!(args.hardware, HardwareTier::Cpu) && !args.mock_scorer {
         anyhow::bail!(
-            "BakeoffRealScorerNotWired: real-scorer path is not yet wired; \
-             pass --mock-scorer for dry runs (Slice 5 / A2.1)"
+            "BakeoffCpuRequiresMockScorer: real candle scorers need \
+             --hardware=a10 or --hardware=h100; rerun with --mock-scorer \
+             for a CPU dry run"
         );
     }
 
     let device_kind: run_candidate_eval::DeviceKind = args.hardware.into();
     let mut results: Vec<bakeoff_report::CandidateResult> = Vec::new();
-    let scorer = tracedao_gate_enclave::perplexity::MockPerplexityScorer::new();
-    for c in &manifest.candidates {
-        if skip.contains(&c.id) {
-            tracing::info!(candidate_id = %c.id, "bakeoff_skip_candidate");
-            continue;
+    if args.mock_scorer {
+        let scorer = tracedao_gate_enclave::perplexity::MockPerplexityScorer::new();
+        for c in &manifest.candidates {
+            if skip.contains(&c.id) {
+                tracing::info!(candidate_id = %c.id, "bakeoff_skip_candidate");
+                continue;
+            }
+            tracing::info!(candidate_id = %c.id, "bakeoff_load_candidate");
+            let result = run_candidate_eval::run_candidate_eval(
+                &scorer,
+                c,
+                &corpus,
+                args.determinism_repeat_runs,
+                device_kind,
+            )
+            .await?;
+            results.push(result);
         }
-        tracing::info!(candidate_id = %c.id, "bakeoff_load_candidate");
-        let result = run_candidate_eval::run_candidate_eval(
-            &scorer,
-            c,
-            &corpus,
-            args.determinism_repeat_runs,
-            device_kind,
-        )
-        .await?;
-        results.push(result);
+    } else {
+        #[cfg(feature = "local-gpu-models")]
+        {
+            use anyhow::Context as _;
+            use tracedao_gate_enclave::perplexity_candle::{
+                CandleDeviceKind, CandlePerplexityScorer,
+            };
+            // Map the operator-facing HardwareTier to candle's device enum.
+            // A10 / H100 both route to CUDA device 0 — the bake-off loads
+            // one candidate at a time, so multi-GPU sharding is out of
+            // scope. The Cpu arm is unreachable here because the
+            // BakeoffCpuRequiresMockScorer guard above already bailed.
+            let candle_device = match args.hardware {
+                HardwareTier::A10 | HardwareTier::H100 => CandleDeviceKind::Cuda(0),
+                HardwareTier::Cpu => unreachable!(
+                    "BakeoffCpuRequiresMockScorer guard should have refused this path"
+                ),
+            };
+            // The tail-logprob cutoff matches the established calibrate
+            // default; see TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF.
+            const TAIL_LOGPROB_CUTOFF: f32 = -8.0;
+            for c in &manifest.candidates {
+                if skip.contains(&c.id) {
+                    tracing::info!(candidate_id = %c.id, "bakeoff_skip_candidate");
+                    continue;
+                }
+                tracing::info!(candidate_id = %c.id, "bakeoff_load_candidate");
+                let max_tokens = run_candidate_eval::ctx_for(&c.arch);
+                let scorer = CandlePerplexityScorer::try_new(
+                    c.id.clone(),
+                    c.path.clone(),
+                    candle_device,
+                    TAIL_LOGPROB_CUTOFF,
+                    max_tokens,
+                )
+                .await
+                .with_context(|| {
+                    format!("CandlePerplexityScorerLoadFailed candidate_id={}", c.id)
+                })?;
+                let result = run_candidate_eval::run_candidate_eval(
+                    &scorer,
+                    c,
+                    &corpus,
+                    args.determinism_repeat_runs,
+                    device_kind,
+                )
+                .await?;
+                results.push(result);
+            }
+        }
+        #[cfg(not(feature = "local-gpu-models"))]
+        {
+            anyhow::bail!(
+                "BakeoffRealScorerRequiresFeature: rebuild with \
+                 --features local-gpu-models, or pass --mock-scorer for \
+                 dry runs"
+            );
+        }
     }
 
     let winner_id = bakeoff_report::pick_winner(&results).map(|w| w.id.clone());
