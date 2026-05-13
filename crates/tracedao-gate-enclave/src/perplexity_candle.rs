@@ -139,10 +139,47 @@ mod candle_impl {
     use anyhow::Context;
     use candle_core::{DType, Device, Tensor};
     use candle_nn::VarBuilder;
-    use candle_transformers::models::llama::{Cache, Config, Llama, LlamaConfig};
+    use candle_transformers::models::gemma3 as candle_gemma3;
+    use candle_transformers::models::gemma4 as candle_gemma4;
+    use candle_transformers::models::llama::{
+        Cache as LlamaCache, Config as LlamaConfigResolved, Llama, LlamaConfig,
+    };
+    use candle_transformers::models::qwen3 as candle_qwen3;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
     use tokenizers::Tokenizer;
+
+    /// Locally-owned arch enum. Distinct from `tracedao-server`'s
+    /// `CandidateArch` because the gate-enclave crate must not depend on the
+    /// server bin crate (dep direction is enclave ← server). Server-side
+    /// callers convert `CandidateArch → BackendArch` at the `try_new` boundary
+    /// via a small inline `match`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum BackendArch {
+        Llama,
+        Qwen3,
+        Gemma3,
+        Gemma4,
+    }
+
+    impl BackendArch {
+        /// Parse `TRACE_COMMONS_PERPLEXITY_MODEL_ARCH` values. Accepted
+        /// strings: `"llama"`, `"qwen3"`, `"gemma3"`, `"gemma4"`. Returns
+        /// `Err` on unknown values so an operator typo fails closed at
+        /// startup rather than silently defaulting.
+        pub fn parse(s: &str) -> anyhow::Result<Self> {
+            match s.trim().to_ascii_lowercase().as_str() {
+                "llama" => Ok(Self::Llama),
+                "qwen3" => Ok(Self::Qwen3),
+                "gemma3" => Ok(Self::Gemma3),
+                "gemma4" => Ok(Self::Gemma4),
+                other => anyhow::bail!(
+                    "PerplexityScorerInit: unknown BackendArch {other:?}; \
+                     accepted: llama, qwen3, gemma3, gemma4"
+                ),
+            }
+        }
+    }
 
     /// Flatten a multimodal `config.json` so the candle text-loaders, which
     /// only know how to deserialize the flat HF schema, can read configs that
@@ -216,29 +253,166 @@ mod candle_impl {
         }
     }
 
-    /// Candle-backed perplexity scorer. Holds the loaded model, tokenizer,
-    /// device, and a `Mutex`-guarded KV cache that is reset before every
-    /// score call.
+    /// Per-arch backend state. Each variant owns the correctly-typed candle
+    /// model (and its config / device handles) for one architecture.
+    ///
+    /// Llama uses an external `Cache` struct that we explicitly thread
+    /// through `forward(input, pos, &mut cache)` — the historical pattern.
+    /// Qwen3 / Gemma3 / Gemma4 carry their KV state inside the model itself
+    /// and expose a `clear_kv_cache(&mut self)` reset method; their
+    /// `forward(&mut self, input, offset)` mutates the model in place, so we
+    /// wrap the model in a `Mutex`.
+    enum ScorerBackend {
+        Llama {
+            model: Llama,
+            config: LlamaConfigResolved,
+            cache: Mutex<LlamaCache>,
+            device: Device,
+            dtype: DType,
+        },
+        Qwen3 {
+            model: Mutex<candle_qwen3::ModelForCausalLM>,
+        },
+        Gemma3 {
+            model: Mutex<candle_gemma3::Model>,
+        },
+        Gemma4 {
+            model: Mutex<candle_gemma4::text::TextModel>,
+        },
+    }
+
+    impl ScorerBackend {
+        fn max_position_embeddings(&self) -> usize {
+            // Pulled out at load time onto the parent scorer; this is only
+            // surfaced for clarity. Currently unused after construction.
+            match self {
+                Self::Llama { config, .. } => config.max_position_embeddings,
+                // The non-Llama variants don't retain a public config handle;
+                // the bound is enforced at load time on the parsed Config.
+                Self::Qwen3 { .. } | Self::Gemma3 { .. } | Self::Gemma4 { .. } => usize::MAX,
+            }
+        }
+
+        /// Run a single forward step for token at position `pos`. Returns a
+        /// 1-D `[vocab]` logits tensor over f32 ready for log_softmax.
+        ///
+        /// Llama: external `Cache` is locked here; the `MutexGuard<LlamaCache>`
+        /// is deref'd to `&mut LlamaCache` for the call (note the `&mut *c`).
+        /// Qwen3 / Gemma3 / Gemma4: the model itself is `&mut`-locked and
+        /// owns its KV cache internally.
+        fn forward_step(&self, input: &Tensor, pos: usize) -> anyhow::Result<Tensor> {
+            match self {
+                Self::Llama { model, cache, .. } => {
+                    let mut c = cache
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("CandleCacheMutexPoisoned"))?;
+                    // candle takes &mut Cache; deref the MutexGuard.
+                    let logits = model
+                        .forward(input, pos, &mut *c)
+                        .context("CandleForwardFailed")?;
+                    // Llama returns [batch, vocab] for last position; squeeze
+                    // the batch dim down to [vocab].
+                    logits.squeeze(0).context("CandleLogitsSqueezeFailed")
+                }
+                Self::Qwen3 { model } => {
+                    let mut m = model
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("CandleCacheMutexPoisoned"))?;
+                    let logits = m.forward(input, pos).context("CandleForwardFailed")?;
+                    // Shape: [batch, 1, vocab] → [vocab].
+                    let logits = logits
+                        .squeeze(1)
+                        .context("CandleLogitsSqueezeFailed")?
+                        .squeeze(0)
+                        .context("CandleLogitsSqueezeFailed")?;
+                    Ok(logits)
+                }
+                Self::Gemma3 { model } => {
+                    let mut m = model
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("CandleCacheMutexPoisoned"))?;
+                    let logits = m.forward(input, pos).context("CandleForwardFailed")?;
+                    let logits = logits
+                        .squeeze(1)
+                        .context("CandleLogitsSqueezeFailed")?
+                        .squeeze(0)
+                        .context("CandleLogitsSqueezeFailed")?;
+                    Ok(logits)
+                }
+                Self::Gemma4 { model } => {
+                    let mut m = model
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("CandleCacheMutexPoisoned"))?;
+                    let logits = m.forward(input, pos).context("CandleForwardFailed")?;
+                    let logits = logits
+                        .squeeze(1)
+                        .context("CandleLogitsSqueezeFailed")?
+                        .squeeze(0)
+                        .context("CandleLogitsSqueezeFailed")?;
+                    Ok(logits)
+                }
+            }
+        }
+
+        /// Reset KV state ahead of a fresh `score()` call. Each call is
+        /// independent so we wipe state between calls.
+        fn reset_cache(&self) -> anyhow::Result<()> {
+            match self {
+                Self::Llama {
+                    cache,
+                    config,
+                    device,
+                    dtype,
+                    ..
+                } => {
+                    let mut c = cache
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("CandleCacheMutexPoisoned"))?;
+                    *c = LlamaCache::new(true, *dtype, config, device)
+                        .context("CandleCacheResetFailed")?;
+                    Ok(())
+                }
+                Self::Qwen3 { model } => {
+                    let mut m = model
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("CandleCacheMutexPoisoned"))?;
+                    m.clear_kv_cache();
+                    Ok(())
+                }
+                Self::Gemma3 { model } => {
+                    let mut m = model
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("CandleCacheMutexPoisoned"))?;
+                    m.clear_kv_cache();
+                    Ok(())
+                }
+                Self::Gemma4 { model } => {
+                    let mut m = model
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("CandleCacheMutexPoisoned"))?;
+                    m.clear_kv_cache();
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// Candle-backed perplexity scorer. Holds the per-arch backend, the
+    /// tokenizer, and per-call config (tail cutoff, max tokens). The public
+    /// `score()` API is arch-agnostic — dispatch happens inside
+    /// `ScorerBackend::forward_step`.
     ///
     /// The forward path runs sequentially with KV caching: tokens are fed one
     /// at a time, each call returns the logits over the vocabulary for the
     /// next-token prediction, and we accumulate per-token logprobs for the
     /// `aggregate_perplexity_metrics` helper. This is the standard candle
-    /// pattern (cf. `candle-examples/examples/llama/main.rs`) and is the only
-    /// way to obtain per-position logits from the upstream `Llama::forward`
-    /// API, which itself collapses to last-position logits.
+    /// pattern (cf. `candle-examples/examples/llama/main.rs` et al.) and is
+    /// the only way to obtain per-position logits from candle's per-arch
+    /// forward APIs, which collapse to last-position logits.
     pub struct CandlePerplexityScorer {
-        model: Llama,
+        backend: ScorerBackend,
         tokenizer: Tokenizer,
         device: Device,
-        config: Config,
-        // Cache is held under a Mutex because score() takes &self per the
-        // trait, but the candle Cache mutates KV state during forward(). We
-        // reset() the cache per call by reconstructing it; the Mutex is a
-        // safe, low-contention wrapper given the gate worker is the only
-        // concurrent caller.
-        cache: Mutex<Cache>,
-        dtype: DType,
         tail_logprob_cutoff: f32,
         #[allow(dead_code)] // surfaced via safe_status in future wiring
         model_id: String,
@@ -250,12 +424,17 @@ mod candle_impl {
         /// release layout: `config.json`, `tokenizer.json`, and either
         /// `model.safetensors` (single-shard) or `model.safetensors.index.json`
         /// (multi-shard, e.g. Llama-3.1-8B).
+        ///
+        /// `arch` selects the candle module used to load the weights and run
+        /// forward. Callers in `tracedao-server` translate their
+        /// `CandidateArch` to `BackendArch` at this call site.
         pub async fn try_new(
             model_id: impl Into<String>,
             model_path: impl AsRef<Path>,
             device: CandleDeviceKind,
             tail_logprob_cutoff: f32,
             max_tokens: usize,
+            arch: BackendArch,
         ) -> anyhow::Result<Self> {
             // Tail cutoff is a log-probability bound (`logprob < cutoff` →
             // tail); negative values are the only sensible regime. A
@@ -290,43 +469,102 @@ mod candle_impl {
             let safetensor_files = discover_safetensors(&model_path)
                 .context("CandleSafetensorsDiscoveryFailed")?;
 
-            let cfg_bytes = std::fs::read(&cfg_path)
-                .with_context(|| "CandleConfigReadFailed")?;
-            let llama_config: LlamaConfig = serde_json::from_slice(&cfg_bytes)
-                .with_context(|| "CandleConfigParseFailed")?;
-            let config = llama_config.into_config(false /* use_flash_attn */);
-
-            // Refuse a max_tokens that exceeds the model's configured
-            // context window; otherwise the KV cache could blow up at
-            // forward time. Bail at startup with a stable error class.
-            anyhow::ensure!(
-                max_tokens <= config.max_position_embeddings,
-                "PerplexityScorerInit: max_tokens ({}) exceeds model max_position_embeddings ({})",
-                max_tokens,
-                config.max_position_embeddings,
-            );
+            let raw_cfg = std::fs::read(&cfg_path).with_context(|| "CandleConfigReadFailed")?;
+            // Flatten multimodal text_config nesting so the per-arch flat
+            // config deserializers (Gemma4TextConfig, qwen3::Config, etc.)
+            // can read configs that bury text params under `text_config`.
+            let cfg_bytes =
+                flatten_text_config(&raw_cfg).context("CandleConfigFlattenFailed")?;
 
             let tokenizer = Tokenizer::from_file(&tokenizer_path)
                 .map_err(|e| anyhow::anyhow!("CandleTokenizerLoadFailed: {}", hash_err(&e)))?;
 
             // SAFETY: VarBuilder::from_mmaped_safetensors mmaps the weight
             // files; this is the standard candle loading idiom and matches
-            // the behavior of the upstream Llama example.
+            // the behavior of the upstream per-arch examples.
             let vb = unsafe {
                 VarBuilder::from_mmaped_safetensors(&safetensor_files, dtype, &device_obj)
                     .context("CandleVarBuilderFailed")?
             };
-            let model = Llama::load(vb, &config).context("CandleModelLoadFailed")?;
-            let cache = Cache::new(true, dtype, &config, &device_obj)
-                .context("CandleCacheInitFailed")?;
+
+            let backend = match arch {
+                BackendArch::Llama => {
+                    let llama_config: LlamaConfig = serde_json::from_slice(&cfg_bytes)
+                        .with_context(|| "CandleConfigParseFailed")?;
+                    let config = llama_config.into_config(false /* use_flash_attn */);
+                    anyhow::ensure!(
+                        max_tokens <= config.max_position_embeddings,
+                        "PerplexityScorerInit: max_tokens ({}) exceeds model max_position_embeddings ({})",
+                        max_tokens,
+                        config.max_position_embeddings,
+                    );
+                    let model = Llama::load(vb, &config).context("CandleModelLoadFailed")?;
+                    let cache = LlamaCache::new(true, dtype, &config, &device_obj)
+                        .context("CandleCacheInitFailed")?;
+                    ScorerBackend::Llama {
+                        model,
+                        config,
+                        cache: Mutex::new(cache),
+                        device: device_obj.clone(),
+                        dtype,
+                    }
+                }
+                BackendArch::Qwen3 => {
+                    let config: candle_qwen3::Config = serde_json::from_slice(&cfg_bytes)
+                        .with_context(|| "CandleConfigParseFailed")?;
+                    anyhow::ensure!(
+                        max_tokens <= config.max_position_embeddings,
+                        "PerplexityScorerInit: max_tokens ({}) exceeds model max_position_embeddings ({})",
+                        max_tokens,
+                        config.max_position_embeddings,
+                    );
+                    let model = candle_qwen3::ModelForCausalLM::new(&config, vb)
+                        .context("CandleModelLoadFailed")?;
+                    ScorerBackend::Qwen3 {
+                        model: Mutex::new(model),
+                    }
+                }
+                BackendArch::Gemma3 => {
+                    let config: candle_gemma3::Config = serde_json::from_slice(&cfg_bytes)
+                        .with_context(|| "CandleConfigParseFailed")?;
+                    anyhow::ensure!(
+                        max_tokens <= config.max_position_embeddings,
+                        "PerplexityScorerInit: max_tokens ({}) exceeds model max_position_embeddings ({})",
+                        max_tokens,
+                        config.max_position_embeddings,
+                    );
+                    let model = candle_gemma3::Model::new(false /* use_flash_attn */, &config, vb)
+                        .context("CandleModelLoadFailed")?;
+                    ScorerBackend::Gemma3 {
+                        model: Mutex::new(model),
+                    }
+                }
+                BackendArch::Gemma4 => {
+                    let config: candle_gemma4::config::Gemma4TextConfig =
+                        serde_json::from_slice(&cfg_bytes)
+                            .with_context(|| "CandleConfigParseFailed")?;
+                    anyhow::ensure!(
+                        max_tokens <= config.max_position_embeddings,
+                        "PerplexityScorerInit: max_tokens ({}) exceeds model max_position_embeddings ({})",
+                        max_tokens,
+                        config.max_position_embeddings,
+                    );
+                    let model = candle_gemma4::text::TextModel::new(&config, vb)
+                        .context("CandleModelLoadFailed")?;
+                    ScorerBackend::Gemma4 {
+                        model: Mutex::new(model),
+                    }
+                }
+            };
+
+            // Silence the dead_code lint on the helper while the bound is
+            // already checked per-arch above.
+            let _ = backend.max_position_embeddings();
 
             Ok(Self {
-                model,
+                backend,
                 tokenizer,
                 device: device_obj,
-                config,
-                cache: Mutex::new(cache),
-                dtype,
                 tail_logprob_cutoff,
                 model_id,
                 max_tokens,
@@ -370,22 +608,17 @@ mod candle_impl {
             }
 
             // 4. Reset the KV cache. Each call to score() is independent;
-            //    reconstructing the cache is the simplest correct reset.
-            let mut cache = self
-                .cache
-                .lock()
-                .map_err(|_| anyhow::anyhow!("CandleCacheMutexPoisoned"))?;
-            *cache = Cache::new(true, self.dtype, &self.config, &self.device)
-                .context("CandleCacheResetFailed")?;
+            //    each backend variant wipes its own state.
+            self.backend.reset_cache()?;
 
             // 5. Run sequential forward passes, accumulating per-token
-            //    logprobs. The candle Llama::forward returns logits over the
-            //    vocabulary for the LAST position only — so we feed tokens one
-            //    at a time, advancing `index_pos`. For position i (0-indexed),
-            //    the model's prediction at step i scores token[i+1]. We
-            //    collect one logprob entry per token; the first entry stays
-            //    as a placeholder (BOS / no-context) and is dropped by
-            //    `aggregate_perplexity_metrics`.
+            //    logprobs. Each candle per-arch `forward` returns logits over
+            //    the vocabulary for the LAST position only — so we feed tokens
+            //    one at a time, advancing `index_pos`. For position i
+            //    (0-indexed), the model's prediction at step i scores
+            //    token[i+1]. We collect one logprob entry per token; the
+            //    first entry stays as a placeholder (BOS / no-context) and is
+            //    dropped by `aggregate_perplexity_metrics`.
             let mut logprobs: Vec<f32> = Vec::with_capacity(token_ids.len());
             logprobs.push(0.0); // placeholder for position 0; dropped downstream.
 
@@ -395,12 +628,7 @@ mod candle_impl {
                     .context("CandleTokenTensorFailed")?
                     .unsqueeze(0)
                     .context("CandleTokenTensorReshapeFailed")?;
-                let logits = self
-                    .model
-                    .forward(&input, i, &mut cache)
-                    .context("CandleForwardFailed")?;
-                // logits is shape [1, vocab] (last position).
-                let logits = logits.squeeze(0).context("CandleLogitsSqueezeFailed")?;
+                let logits = self.backend.forward_step(&input, i)?;
                 let logprob = log_softmax_pick(&logits, token_ids[i + 1])?;
                 logprobs.push(logprob);
             }
@@ -472,7 +700,7 @@ mod candle_impl {
 }
 
 #[cfg(feature = "local-gpu-models")]
-pub use candle_impl::CandlePerplexityScorer;
+pub use candle_impl::{BackendArch, CandlePerplexityScorer};
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -653,6 +881,7 @@ mod tests {
                     device,
                     -8.0_f32,
                     16_384,
+                    BackendArch::Llama,
                 )
                 .await
             })
