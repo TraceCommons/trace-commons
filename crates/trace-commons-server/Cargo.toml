@@ -60,6 +60,11 @@ local-gpu-models = ["trace-commons-gate-enclave/local-gpu-models"]
 # hosts with the CUDA toolchain installed; CI builds keep this off.
 local-gpu-models-cuda = ["local-gpu-models", "trace-commons-gate-enclave/local-gpu-models-cuda"]
 
+[[bin]]
+name = "trace-commons-gate-calibrate"
+path = "src/bin/trace-commons-gate-calibrate.rs"
+required-features = ["local-gpu-models"]
+
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

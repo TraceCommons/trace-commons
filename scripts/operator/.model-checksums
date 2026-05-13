@@ -1,0 +1,27 @@
+# Pinned SHA256 checksums for staged model files.
+#
+# Format: one entry per line, "<sha256-hex>  <key>". Lines starting with
+# `#` are comments. Empty lines OK.
+#
+# Keys are of the form "<hf-repo>/<filename>". Entries below are
+# placeholders — the operator fills them in after the first verified
+# download. Until pinned, stage-models.sh emits a
+# `StageModelsChecksumUnpinned` warning and accepts the file.
+#
+# TODO(operator): record the SHA256 of each staged file here after the
+# first successful download. Example:
+#   abcdef0123...  meta-llama/Llama-3.1-8B-Instruct/config.json
+#
+# Perplexity (Llama-3.1-8B-Instruct):
+#   meta-llama/Llama-3.1-8B-Instruct/config.json
+#   meta-llama/Llama-3.1-8B-Instruct/tokenizer.json
+#   meta-llama/Llama-3.1-8B-Instruct/model.safetensors.index.json
+#   meta-llama/Llama-3.1-8B-Instruct/model-00001-of-00004.safetensors
+#   meta-llama/Llama-3.1-8B-Instruct/model-00002-of-00004.safetensors
+#   meta-llama/Llama-3.1-8B-Instruct/model-00003-of-00004.safetensors
+#   meta-llama/Llama-3.1-8B-Instruct/model-00004-of-00004.safetensors
+#
+# Embedder (BGE-large-en-v1.5, ONNX):
+#   Xenova/bge-large-en-v1.5/model.onnx
+#   Xenova/bge-large-en-v1.5/tokenizer.json
+#   Xenova/bge-large-en-v1.5/config.json
