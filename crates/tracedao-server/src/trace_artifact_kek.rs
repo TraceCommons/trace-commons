@@ -131,6 +131,32 @@ impl<K: KmsKeyWrapper + ?Sized> KmsKeyWrapper for Box<K> {
     }
 }
 
+/// Blanket impl for `Arc<K>` so the `tracedao-vector-replay` recovery binary
+/// (and any other consumer that needs to share a single wrapper between the
+/// artifact-store generic parameter and a direct `unwrap_dek` call site) can
+/// pass an `Arc<dyn KmsKeyWrapper + Send + Sync>` for both.
+impl<K: KmsKeyWrapper + ?Sized> KmsKeyWrapper for std::sync::Arc<K> {
+    fn wrap_dek(&self, dek: &[u8; 32], context: &KekContext) -> anyhow::Result<WrappedDek> {
+        (**self).wrap_dek(dek, context)
+    }
+
+    fn unwrap_dek(
+        &self,
+        wrapped: &WrappedDek,
+        context: &KekContext,
+    ) -> anyhow::Result<Zeroizing<[u8; 32]>> {
+        (**self).unwrap_dek(wrapped, context)
+    }
+
+    fn safe_status(&self) -> KekWrapperStatus {
+        (**self).safe_status()
+    }
+
+    fn is_production_trust_boundary(&self) -> bool {
+        (**self).is_production_trust_boundary()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // LocalMasterKeyWrapper
 // ---------------------------------------------------------------------------
