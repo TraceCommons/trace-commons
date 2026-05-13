@@ -29,6 +29,63 @@ You must have:
 7. **Rust toolchain** on a build host (can be the H100). Stable channel,
    workspace-pinned.
 
+## Build host preflight
+
+Two known build-host issues to clear before invoking cargo. Both were
+observed on a fresh Ubuntu 22.04 Lambda Cloud A10 host in the 2026-05
+smoke deploy; either will surface as a confusing late-stage build error.
+
+### 1. Compiler must support `avx512fp16`
+
+The `numkong` SIMD crate (transitive dep of `usearch`) uses the
+`__attribute__((target("avx512fp16")))` syntax. gcc-11 (the default on
+Ubuntu 22.04) does not recognize it; the build fails inside a vendored
+C++ source file.
+
+Use gcc-12 or newer:
+
+```sh
+sudo apt-get install -y gcc-12 g++-12
+sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 60 \
+  --slave /usr/bin/g++ g++ /usr/bin/g++-12 \
+  --slave /usr/bin/cc cc /usr/bin/gcc-12
+```
+
+Ubuntu 24.04 ships gcc-13 by default and does not need this step.
+
+### 2. ONNX Runtime prebuilt binary requires glibc 2.38+
+
+The `ort` 2.0.0-rc.12 crate (transitive dep of `fastembed`) downloads a
+pre-built ONNX Runtime binary that references C2X glibc aliases
+(`__isoc23_strtol`, `__isoc23_strtoll`, `__isoc23_strtoul`,
+`__isoc23_strtoull`). These first appear in glibc 2.38. The link will
+fail on Ubuntu 22.04 (glibc 2.35) with `rust-lld: undefined symbol`.
+
+**Recommended fix: deploy on Ubuntu 24.04 (glibc 2.39).** This is the
+intended target.
+
+**Fallback for Ubuntu 22.04:** link a small shim that aliases the C2X
+symbols to the plain `strto*` functions. Only the binary-literal parsing
+extension is lost, which the ORT runtime does not exercise on the input
+paths the gate uses.
+
+```sh
+mkdir -p $HOME/isoc23-shim
+cat > $HOME/isoc23-shim/shim.c <<'EOF'
+#include <stdlib.h>
+long __isoc23_strtol(const char *s, char **e, int b) { return strtol(s,e,b); }
+long long __isoc23_strtoll(const char *s, char **e, int b) { return strtoll(s,e,b); }
+unsigned long __isoc23_strtoul(const char *s, char **e, int b) { return strtoul(s,e,b); }
+unsigned long long __isoc23_strtoull(const char *s, char **e, int b) { return strtoull(s,e,b); }
+EOF
+gcc -O2 -fPIC -c $HOME/isoc23-shim/shim.c -o $HOME/isoc23-shim/shim.o
+ar rcs $HOME/isoc23-shim/libisoc23shim.a $HOME/isoc23-shim/shim.o
+export RUSTFLAGS="-L $HOME/isoc23-shim -l static=isoc23shim"
+```
+
+This is a deploy-host workaround, not a code change. Track it as a known
+constraint until Ubuntu 24.04 (or a newer base) is the operator default.
+
 ## Build the binary
 
 On a build host with CUDA available:
