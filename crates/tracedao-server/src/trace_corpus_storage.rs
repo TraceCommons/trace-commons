@@ -124,6 +124,7 @@ pub enum TraceCreditEventType {
     RankingUtility,
     ReviewerBonus,
     AbusePenalty,
+    NoveltyUtility,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1736,6 +1737,13 @@ pub struct TraceGateDecisionRow {
     /// V24 adds the nullable column). `None` for pass-fail decisions and for
     /// deterministic/legacy service rows that never touch a real index.
     pub vector_entry_id: Option<Uuid>,
+    /// Stable label-only reason populated when the gate passed but
+    /// `novelty_utility` credit emission was withheld (migration V25 adds the
+    /// nullable column). `None` on legacy rows, when the gate failed, or when
+    /// credit was actually emitted. Allowed values written by the server are
+    /// `"policy_mismatch"`, `"central_issuer_denied"`,
+    /// `"non_production_gate"`, and `"submission_not_accepted"`.
+    pub credit_withheld_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
