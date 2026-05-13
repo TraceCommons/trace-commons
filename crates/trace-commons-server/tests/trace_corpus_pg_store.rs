@@ -25,7 +25,8 @@ use trace_commons_server::trace_corpus_storage::{
     TraceRankingWorkerRunWrite, TraceRetentionJobItemAction, TraceRetentionJobItemStatus,
     TraceRetentionJobItemWrite, TraceRetentionJobStatus, TraceRetentionJobWrite,
     TraceRevocationPropagationAction, TraceRevocationPropagationItemStatus,
-    TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget, TraceSubmissionWrite,
+    TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget,
+    TraceRevocationPropagationTargetKind, TraceSubmissionWrite,
     TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus, TraceTenantAccessGrantWrite,
     TraceTenantPolicyWrite, TraceTombstoneWrite, TraceUtilityAttestationWrite,
     TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
@@ -3521,4 +3522,88 @@ async fn pg_store_inserts_trace_gate_decision_under_tenant_scope() {
 
     cleanup_tenant(&backend, &tenant_alpha).await;
     cleanup_tenant(&backend, &tenant_beta).await;
+}
+
+#[tokio::test]
+async fn revocation_propagation_failure_audit_metadata_round_trips() {
+    // Phase A6: the typed RevocationPropagationFailure audit-metadata variant
+    // is serialized as JSON into trace_audit_events.metadata_json. Exercise
+    // the round-trip through PgBackend so a schema or serde drift surfaces
+    // here rather than silently in production.
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    let tenant_id = "tenant-phase-a6-failure".to_string();
+    cleanup_tenant(&backend, &tenant_id).await;
+
+    let audit_event_id = Uuid::new_v4();
+    let submission_id = Uuid::new_v4();
+    let propagation_item_id = Uuid::new_v4();
+
+    backend
+        .append_trace_audit_event(TraceAuditEventWrite {
+            audit_event_id,
+            tenant_id: tenant_id.clone(),
+            actor_principal_ref: "principal:phase-a6-revocation-worker".to_string(),
+            actor_role: "revocation_worker".to_string(),
+            action: TraceAuditAction::Revoke,
+            reason: Some(format!(
+                "propagation_item_id={};target_kind=VectorEntry;error_class=VectorInvalidationFailed;attempt_count=5;is_terminal=true",
+                propagation_item_id
+            )),
+            request_id: Some(format!("req-phase-a6-{propagation_item_id}")),
+            submission_id: Some(submission_id),
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: Some(format!("sha256:phase-a6-{propagation_item_id}")),
+            canonical_event_json: Some("{\"phase\":\"a6\"}".to_string()),
+            metadata: TraceAuditSafeMetadata::RevocationPropagationFailure {
+                propagation_item_id,
+                source_submission_id: submission_id,
+                target_kind: TraceRevocationPropagationTargetKind::VectorEntry,
+                action: TraceRevocationPropagationAction::InvalidateVector,
+                error_class: "VectorInvalidationFailed".to_string(),
+                error_hash: "sha256:phase-a6-failure-hash".to_string(),
+                attempt_count: 5,
+                is_terminal: true,
+            },
+        })
+        .await
+        .expect("append revocation propagation failure audit row");
+
+    let event = backend
+        .get_trace_audit_event_by_id(&tenant_id, audit_event_id)
+        .await
+        .expect("audit row read")
+        .expect("audit row present");
+
+    match event.metadata {
+        TraceAuditSafeMetadata::RevocationPropagationFailure {
+            propagation_item_id: round_trip_item_id,
+            source_submission_id: round_trip_sub_id,
+            target_kind,
+            action,
+            error_class,
+            error_hash,
+            attempt_count,
+            is_terminal,
+        } => {
+            assert_eq!(round_trip_item_id, propagation_item_id);
+            assert_eq!(round_trip_sub_id, submission_id);
+            assert_eq!(
+                target_kind,
+                TraceRevocationPropagationTargetKind::VectorEntry
+            );
+            assert_eq!(action, TraceRevocationPropagationAction::InvalidateVector);
+            assert_eq!(error_class, "VectorInvalidationFailed");
+            assert_eq!(error_hash, "sha256:phase-a6-failure-hash");
+            assert_eq!(attempt_count, 5);
+            assert!(is_terminal);
+        }
+        other => panic!("expected RevocationPropagationFailure metadata, got {other:?}"),
+    }
+
+    cleanup_tenant(&backend, &tenant_id).await;
 }
