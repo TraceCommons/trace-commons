@@ -151,7 +151,7 @@ mod calibrate_impl {
     use anyhow::Context;
     use serde::{Deserialize, Serialize};
     use tracedao_gate_enclave::embedder_fastembed::FastEmbedTextEmbedder;
-    use tracedao_gate_enclave::perplexity_candle::{
+    use tracedao_gate_enclave::perplexity_local::{
         BackendArch, CandleDeviceKind, CandlePerplexityScorer,
     };
     use tracedao_gate_enclave::vector_index::{MockVectorIndex, VectorIndex};
@@ -519,7 +519,7 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
 
             #[cfg(feature = "local-gpu-models")]
             {
-                use tracedao_gate_enclave::perplexity_candle::{
+                use tracedao_gate_enclave::perplexity_local::{
                     BackendArch, CandleDeviceKind, CandlePerplexityScorer,
                 };
                 // Map operator-facing HardwareTier to candle's device enum.

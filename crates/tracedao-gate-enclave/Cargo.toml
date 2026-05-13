@@ -15,11 +15,25 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 # Optional candle stack — enabled by the `local-gpu-models` feature. Pulled
 # in only when the gate-service binary is built for a GPU host with a staged
 # base model. Hermetic CI builds (default features) do not see these deps.
+#
+# A2.3 (mistralrs migration): these direct candle git pins are scheduled
+# for removal in Slice 2 when `perplexity_local.rs` switches to the
+# mistralrs-backed implementation. mistralrs brings candle 0.10.2
+# (crates.io) transitively. Slice 1 keeps them in tree so the
+# still-candle-based scorer module continues to compile under
+# `local-gpu-models`.
 candle-core = { git = "https://github.com/huggingface/candle.git", rev = "5447a8779871654e542e65693e7d26f1e33b215f", optional = true }
 candle-nn = { git = "https://github.com/huggingface/candle.git", rev = "5447a8779871654e542e65693e7d26f1e33b215f", optional = true }
 candle-transformers = { git = "https://github.com/huggingface/candle.git", rev = "5447a8779871654e542e65693e7d26f1e33b215f", optional = true }
+# mistralrs replaces the candle-direct integration starting in A2.3 (Slice 2).
+# Git-pinned to master SHA 2d4ba4f16f61e5e18be085d0dd137bc95cba038a
+# (2026-04-15); Slice 0 PoC validated raw-logits perplexity on Lambda A100
+# against this SHA.
+mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs.git", rev = "2d4ba4f16f61e5e18be085d0dd137bc95cba038a", optional = true, default-features = false }
 tokenizers = { version = "0.21.4", optional = true, default-features = false, features = ["onig"] }
 hf-hub = { version = "0.4.3", optional = true }
+# Used by mistralrs's tokenize API in Slice 2 (`Either::Right(text)`).
+either = { version = "1", optional = true }
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
 # Phase A4: usearch HNSW vector index + lru-bounded per-tenant handle cache.
@@ -47,8 +61,10 @@ local-gpu-models = [
     "dep:candle-core",
     "dep:candle-nn",
     "dep:candle-transformers",
+    "dep:mistralrs",
     "dep:tokenizers",
     "dep:hf-hub",
+    "dep:either",
     "dep:serde",
     "dep:serde_json",
     "dep:fastembed",
@@ -61,6 +77,7 @@ local-gpu-models-cuda = [
     "candle-core/cuda",
     "candle-nn/cuda",
     "candle-transformers/cuda",
+    "mistralrs/cuda",
 ]
 
 [dev-dependencies]

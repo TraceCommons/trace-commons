@@ -228,7 +228,7 @@ const TRACE_COMMONS_PERPLEXITY_MAX_TOKENS: &str = "TRACE_COMMONS_PERPLEXITY_MAX_
 /// Selects the candle backend for the production gate-service scorer.
 /// Default `"llama"` for back-compat with the A2.1 deployment; valid values
 /// are `"llama"`, `"qwen3"`, `"gemma3"`, `"gemma4"`. Parsed via
-/// `tracedao_gate_enclave::perplexity_candle::BackendArch::parse`. Sits next
+/// `tracedao_gate_enclave::perplexity_local::BackendArch::parse`. Sits next
 /// to the other perplexity startup config above so operators can grep for
 /// `MODEL_ARCH` and find this site.
 #[cfg(feature = "local-gpu-models")]
@@ -4225,7 +4225,7 @@ async fn build_trace_gate_service_from_env() -> anyhow::Result<Arc<dyn TraceGate
 async fn build_enclave_local_gpu_gate_service_from_env(
 ) -> anyhow::Result<Arc<dyn TraceGateService>> {
     use tracedao_gate_enclave::embedder_fastembed::FastEmbedTextEmbedder;
-    use tracedao_gate_enclave::perplexity_candle::{
+    use tracedao_gate_enclave::perplexity_local::{
         BackendArch, CandleDeviceKind, CandlePerplexityScorer,
     };
     use tracedao_gate_enclave::vector_index_usearch::UsearchVectorIndex;
