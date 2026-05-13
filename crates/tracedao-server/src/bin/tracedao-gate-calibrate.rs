@@ -151,8 +151,8 @@ mod calibrate_impl {
     use anyhow::Context;
     use serde::{Deserialize, Serialize};
     use tracedao_gate_enclave::embedder_fastembed::FastEmbedTextEmbedder;
-    use tracedao_gate_enclave::perplexity_candle::{
-        BackendArch, CandleDeviceKind, CandlePerplexityScorer,
+    use tracedao_gate_enclave::perplexity_local::{
+        CandleDeviceKind, LocalPerplexityScorer,
     };
     use tracedao_gate_enclave::vector_index::{MockVectorIndex, VectorIndex};
     use tracedao_gate_enclave::{
@@ -174,7 +174,10 @@ mod calibrate_impl {
     /// production gate-service load in `tracedao-ingest`). Default `"llama"`
     /// preserves back-compat with A2.1 deployments; valid values are
     /// `"llama"`, `"qwen3"`, `"gemma3"`, `"gemma4"`. Parsed via
-    /// `BackendArch::parse`.
+    /// As of A2.3 this env var is **deprecated** and ignored — mistralrs
+    /// auto-detects the architecture from `config.json`. If the operator
+    /// still sets it, the calibrate path emits a deprecation warning at
+    /// startup and continues with auto-detection.
     const TRACE_COMMONS_PERPLEXITY_MODEL_ARCH: &str = "TRACE_COMMONS_PERPLEXITY_MODEL_ARCH";
     const TRACE_COMMONS_PERPLEXITY_DEFAULT_MODEL_ID: &str =
         "meta-llama/Llama-3.1-8B-Instruct";
@@ -270,24 +273,28 @@ mod calibrate_impl {
         let gate_policy_version = std::env::var(TRACE_COMMONS_GATE_POLICY_VERSION)
             .unwrap_or_else(|_| "calibrate-v1".to_string());
 
-        // Backend arch selection (default Llama for back-compat with A2.1).
-        let arch = match std::env::var(TRACE_COMMONS_PERPLEXITY_MODEL_ARCH) {
-            Ok(raw) => BackendArch::parse(&raw)
-                .context("CalibrateBadEnv: TRACE_COMMONS_PERPLEXITY_MODEL_ARCH")?,
-            Err(_) => BackendArch::Llama,
-        };
+        // A2.3: TRACE_COMMONS_PERPLEXITY_MODEL_ARCH is deprecated.
+        // mistralrs auto-detects the architecture from `config.json`.
+        // We continue to honor the env var's *presence* by emitting a
+        // deprecation warning so operators flip their configs, but the
+        // value is otherwise ignored.
+        if std::env::var(TRACE_COMMONS_PERPLEXITY_MODEL_ARCH).is_ok() {
+            tracing::warn!(
+                deprecated_env = TRACE_COMMONS_PERPLEXITY_MODEL_ARCH,
+                "TRACE_COMMONS_PERPLEXITY_MODEL_ARCH is deprecated; mistralrs auto-detects \
+                 architecture from config.json"
+            );
+        }
 
         // ----------------------------- build -----------------------------
-        let scorer = CandlePerplexityScorer::try_new(
+        let scorer = LocalPerplexityScorer::try_new(
             model_id,
             &model_path,
             device,
             tail_cutoff,
             max_tokens,
-            arch,
         )
-        .await
-        .context("CalibrateInit: CandlePerplexityScorerInitFailed")?;
+        .context("CalibrateInit: LocalPerplexityScorerInitFailed")?;
 
         let embedder = FastEmbedTextEmbedder::try_new(
             embedder_model_id,
@@ -519,13 +526,15 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
 
             #[cfg(feature = "local-gpu-models")]
             {
-                use tracedao_gate_enclave::perplexity_candle::{
-                    BackendArch, CandleDeviceKind, CandlePerplexityScorer,
+                use tracedao_gate_enclave::perplexity_local::{
+                    CandleDeviceKind, LocalPerplexityScorer,
                 };
-                // Map operator-facing HardwareTier to candle's device enum.
-                // A10 / H100 both route to CUDA device 0; the Cpu arm is
-                // unreachable because the BakeoffCpuRequiresMockScorer
-                // guard above bailed.
+                // Map operator-facing HardwareTier to the local-device
+                // enum. The selector is informational under mistralrs
+                // (which picks its compute device from build features),
+                // but we keep the parameter for env-var-shape continuity.
+                // The Cpu arm is unreachable because the
+                // BakeoffCpuRequiresMockScorer guard above bailed.
                 let candle_device = match args.hardware {
                     HardwareTier::A10 | HardwareTier::H100 => CandleDeviceKind::Cuda(0),
                     HardwareTier::Cpu => unreachable!(
@@ -536,32 +545,20 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
                 // from the calibrate path.
                 const TAIL_LOGPROB_CUTOFF: f32 = -8.0;
                 let max_tokens = run_candidate_eval::ctx_for(&c.arch);
-                // Translate CandidateArch (server-side manifest enum) to
-                // BackendArch (enclave-side scorer enum). The deprecated
-                // `Qwen2` alias routes to the proper Qwen3 backend, fixing
-                // the A2.1 QK-Norm bug for manifests that still carry the
-                // old token; the manifest parser emits a deprecation
-                // warning so operators flip to `qwen3` over time.
-                let backend_arch = match c.arch {
-                    bakeoff_manifest::CandidateArch::Llama => BackendArch::Llama,
-                    bakeoff_manifest::CandidateArch::Qwen3
-                    | bakeoff_manifest::CandidateArch::Qwen2 => BackendArch::Qwen3,
-                    bakeoff_manifest::CandidateArch::Gemma3 => BackendArch::Gemma3,
-                    bakeoff_manifest::CandidateArch::Gemma4 => BackendArch::Gemma4,
-                };
-                let scorer = match CandlePerplexityScorer::try_new(
+                // A2.3: arch dispatch is gone — mistralrs auto-detects the
+                // architecture from `config.json`. The `CandidateArch` on
+                // the candidate is informational (used for `ctx_for`); no
+                // backend translation is required at this call site.
+                let scorer = match LocalPerplexityScorer::try_new(
                     c.id.clone(),
                     c.path.clone(),
                     candle_device,
                     TAIL_LOGPROB_CUTOFF,
                     max_tokens,
-                    backend_arch,
-                )
-                .await
-                {
+                ) {
                     Ok(s) => s,
                     Err(e) => {
-                        break 'eval Err(("CandlePerplexityScorerLoadFailed", e));
+                        break 'eval Err(("LocalPerplexityScorerLoadFailed", e));
                     }
                 };
                 tracing::info!(

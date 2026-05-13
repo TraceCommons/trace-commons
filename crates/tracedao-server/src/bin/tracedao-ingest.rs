@@ -225,12 +225,12 @@ const TRACE_COMMONS_PERPLEXITY_MODEL_PATH: &str = "TRACE_COMMONS_PERPLEXITY_MODE
 const TRACE_COMMONS_PERPLEXITY_DEVICE: &str = "TRACE_COMMONS_PERPLEXITY_DEVICE";
 #[allow(dead_code)]
 const TRACE_COMMONS_PERPLEXITY_MAX_TOKENS: &str = "TRACE_COMMONS_PERPLEXITY_MAX_TOKENS";
-/// Selects the candle backend for the production gate-service scorer.
-/// Default `"llama"` for back-compat with the A2.1 deployment; valid values
-/// are `"llama"`, `"qwen3"`, `"gemma3"`, `"gemma4"`. Parsed via
-/// `tracedao_gate_enclave::perplexity_candle::BackendArch::parse`. Sits next
-/// to the other perplexity startup config above so operators can grep for
-/// `MODEL_ARCH` and find this site.
+/// As of A2.3 this env var is **deprecated** and ignored — mistralrs
+/// auto-detects the architecture from `config.json`. The production
+/// gate-service startup path still grep-spots the name and emits a
+/// deprecation warning when it is set so operators flip their configs.
+/// Kept at the same site so operators can grep `MODEL_ARCH` and find the
+/// deprecation note.
 #[cfg(feature = "local-gpu-models")]
 const TRACE_COMMONS_PERPLEXITY_MODEL_ARCH: &str = "TRACE_COMMONS_PERPLEXITY_MODEL_ARCH";
 #[allow(dead_code)]
@@ -4144,7 +4144,7 @@ fn parse_trace_vector_search_timeout_from_env() -> anyhow::Result<StdDuration> {
 ///   ciphertext + wrapped-DEK plumbing end-to-end.
 /// - `"enclave_local_gpu"` (only available when the `local-gpu-models` cargo
 ///   feature is compiled in): `EnclaveGateService` wired with the
-///   candle-backed `CandlePerplexityScorer` + `FastEmbedTextEmbedder` +
+///   mistralrs-backed `LocalPerplexityScorer` + `FastEmbedTextEmbedder` +
 ///   `MockVectorIndex`. Reads `TRACE_COMMONS_PERPLEXITY_MODEL_PATH`
 ///   (required), `TRACE_COMMONS_PERPLEXITY_MODEL_ID`,
 ///   `TRACE_COMMONS_PERPLEXITY_DEVICE`, `TRACE_COMMONS_PERPLEXITY_MAX_TOKENS`,
@@ -4211,22 +4211,22 @@ async fn build_trace_gate_service_from_env() -> anyhow::Result<Arc<dyn TraceGate
     }
 }
 
-/// Build the `enclave_local_gpu` gate service: candle-backed perplexity
+/// Build the `enclave_local_gpu` gate service: mistralrs-backed perplexity
 /// scorer + fastembed-rs embedder + mock vector index. Returns a fail-closed
-/// error if the perplexity model path is unset, the candle loader rejects
-/// the staged checkpoint, or fastembed cannot load its ONNX model from the
+/// error if the perplexity model path is unset, mistralrs rejects the
+/// staged checkpoint, or fastembed cannot load its ONNX model from the
 /// configured cache directory.
 ///
-/// The candle forward path and fastembed inference are hardware-untested in
-/// this repo's CI; first production deployment must verify a non-zero
+/// The mistralrs forward path and fastembed inference are hardware-untested
+/// in this repo's CI; first production deployment must verify a non-zero
 /// perplexity on a known input and a unit-normalized embedding before the
 /// gate is allowed to drive credit emission.
 #[cfg(feature = "local-gpu-models")]
 async fn build_enclave_local_gpu_gate_service_from_env(
 ) -> anyhow::Result<Arc<dyn TraceGateService>> {
     use tracedao_gate_enclave::embedder_fastembed::FastEmbedTextEmbedder;
-    use tracedao_gate_enclave::perplexity_candle::{
-        BackendArch, CandleDeviceKind, CandlePerplexityScorer,
+    use tracedao_gate_enclave::perplexity_local::{
+        CandleDeviceKind, LocalPerplexityScorer,
     };
     use tracedao_gate_enclave::vector_index_usearch::UsearchVectorIndex;
     use tracedao_gate_enclave::{EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig};
@@ -4278,26 +4278,26 @@ async fn build_enclave_local_gpu_gate_service_from_env(
         "{TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF} must be finite"
     );
 
-    // Backend arch selection: default Llama for back-compat with the A2.1
-    // production deployment. Operators flip this when promoting a new
-    // winning candidate per the A2.2d rollout step.
-    let arch = match std::env::var(TRACE_COMMONS_PERPLEXITY_MODEL_ARCH) {
-        Ok(raw) => BackendArch::parse(&raw).with_context(|| {
-            format!("{TRACE_COMMONS_PERPLEXITY_MODEL_ARCH} unrecognized")
-        })?,
-        Err(_) => BackendArch::Llama,
-    };
+    // A2.3: TRACE_COMMONS_PERPLEXITY_MODEL_ARCH is deprecated. mistralrs
+    // auto-detects the architecture from `config.json`. We continue to
+    // honor the env var's *presence* by emitting a deprecation warning so
+    // operators flip their configs, but the value is otherwise ignored.
+    if std::env::var(TRACE_COMMONS_PERPLEXITY_MODEL_ARCH).is_ok() {
+        tracing::warn!(
+            deprecated_env = TRACE_COMMONS_PERPLEXITY_MODEL_ARCH,
+            "TRACE_COMMONS_PERPLEXITY_MODEL_ARCH is deprecated; mistralrs auto-detects \
+             architecture from config.json"
+        );
+    }
 
-    let scorer = CandlePerplexityScorer::try_new(
+    let scorer = LocalPerplexityScorer::try_new(
         model_id,
         &model_path,
         device,
         tail_cutoff,
         max_tokens,
-        arch,
     )
-    .await
-    .context("CandlePerplexityScorerInitFailed")?;
+    .context("LocalPerplexityScorerInitFailed")?;
 
     // fastembed-rs embedder (Phase A3). Loads the configured sentence
     // embedder once at startup; same H100 hosts both this and the candle
@@ -121782,5 +121782,87 @@ mod tests {
                 "gate_version_hash must change when {label} changes"
             );
         }
+    }
+
+    /// A2.3 production-gate init test. Exercises
+    /// `build_enclave_local_gpu_gate_service_from_env` with a clearly bogus
+    /// `TRACE_COMMONS_PERPLEXITY_MODEL_PATH` and asserts construction fails
+    /// with the expected error class label. The test proves the production
+    /// scorer wiring compiles and dispatches correctly under the
+    /// `local-gpu-models` feature; we deliberately do not load a real model
+    /// in CI.
+    ///
+    /// The test does NOT cover the success path — that requires a staged
+    /// model on a GPU host and is the responsibility of the operator's
+    /// first-deploy validation. It DOES cover the failure path's error
+    /// label, which the gate-rollout drills assert on as a stable string.
+    #[cfg(feature = "local-gpu-models")]
+    #[tokio::test]
+    async fn enclave_local_gpu_init_returns_local_perplexity_scorer_init_failed() {
+        // Save and clear all env vars the helper reads so the test is
+        // isolated from operator-machine config. We restore each var on
+        // exit to avoid leaking state into sibling tests in the same
+        // process.
+        let keys = [
+            TRACE_COMMONS_GATE_SERVICE_MASTER_KEY,
+            TRACE_COMMONS_PERPLEXITY_MODEL_PATH,
+            TRACE_COMMONS_PERPLEXITY_MODEL_ID,
+            TRACE_COMMONS_PERPLEXITY_DEVICE,
+            TRACE_COMMONS_PERPLEXITY_MAX_TOKENS,
+            TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF,
+            TRACE_COMMONS_PERPLEXITY_MODEL_ARCH,
+        ];
+        let saved: Vec<(&str, Option<String>)> =
+            keys.iter().map(|k| (*k, std::env::var(*k).ok())).collect();
+        // SAFETY: this test runs single-threaded with respect to env
+        // mutation; no other thread is reading these vars while we
+        // overwrite them. Rust 2024 marks `set_var`/`remove_var` unsafe
+        // to flag the global-state hazard.
+        unsafe {
+            for k in &keys {
+                std::env::remove_var(k);
+            }
+            // Master key is required first; provide a placeholder so init
+            // proceeds past KEK setup to the scorer-load failure we want
+            // to assert on.
+            std::env::set_var(
+                TRACE_COMMONS_GATE_SERVICE_MASTER_KEY,
+                "test-master-key-not-secret-test-master-key-not-secret-32",
+            );
+            std::env::set_var(
+                TRACE_COMMONS_PERPLEXITY_MODEL_PATH,
+                "/tmp/tracedao-a23-notreal",
+            );
+            std::env::set_var(TRACE_COMMONS_PERPLEXITY_DEVICE, "cpu");
+            std::env::set_var(TRACE_COMMONS_PERPLEXITY_MAX_TOKENS, "128");
+        }
+
+        let result = build_enclave_local_gpu_gate_service_from_env().await;
+
+        // Restore env state before any assertion so a failure here does not
+        // leak state across other tests in the same process.
+        unsafe {
+            for k in &keys {
+                std::env::remove_var(k);
+            }
+            for (k, v) in saved {
+                if let Some(val) = v {
+                    std::env::set_var(k, val);
+                }
+            }
+        }
+
+        let err = match result {
+            Ok(_) => panic!(
+                "init must fail when TRACE_COMMONS_PERPLEXITY_MODEL_PATH points to a nonexistent dir"
+            ),
+            Err(e) => e,
+        };
+        let chain = format!("{err:?}");
+        assert!(
+            chain.contains("LocalPerplexityScorerInitFailed")
+                || chain.contains("LocalPerplexityScorerLoadFailed"),
+            "expected LocalPerplexityScorer* error class, got: {chain}"
+        );
     }
 }

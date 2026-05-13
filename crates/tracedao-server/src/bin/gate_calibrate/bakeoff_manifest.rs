@@ -25,6 +25,14 @@ pub enum CandidateArch {
     Llama,
     #[serde(rename = "qwen3")]
     Qwen3,
+    /// Qwen 3.5 / 3.6 dense family (the family identifier under which
+    /// Qwen 3.6 27B Dense ships). Added in A2.3 once mistralrs took over
+    /// arch dispatch — candle had no `qwen3_5` loader, so this entry was
+    /// unrunnable through A2.2. The field is informational on our side
+    /// (used for `ctx_for`); mistralrs auto-detects the architecture
+    /// from `config.json`'s `model_type`.
+    #[serde(rename = "qwen3_5")]
+    Qwen3_5,
     /// Deprecated alias for `Qwen3`. Manifest parsing emits a warning when
     /// this is seen; future PRs will drop the alias entirely. Loaders route
     /// `Qwen2` to the `BackendArch::Qwen3` backend so the A2.1 QK-Norm bug

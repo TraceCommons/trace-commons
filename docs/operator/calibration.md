@@ -78,21 +78,33 @@ arch = "gemma4"
 license = "apache-2.0"
 params_b = 31
 release_date_unix = 1743552000
+
+[[candidate]]
+id = "qwen3.6-27b-dense"
+path = "/srv/models/qwen3.6-27b"
+arch = "qwen3_5"
+license = "apache-2.0"
+params_b = 27
+release_date_unix = 1776470400
 ```
 
-Supported `arch` tokens (one per candle backend):
+Supported `arch` tokens (informational; mistralrs auto-detects the
+architecture from each candidate's `config.json`):
 
-| Token    | Backend                       | Notes                                  |
-|----------|-------------------------------|----------------------------------------|
-| `llama`  | `candle_transformers::llama`  | Llama 1/2/3 family                     |
-| `qwen3`  | `candle_transformers::qwen3`  | Includes QK-Norm (use for Qwen3-Base)  |
-| `qwen2`  | (deprecated alias for `qwen3`)| Resolves to `qwen3`; emits a warning   |
-| `gemma3` | `candle_transformers::gemma3` | Gemma 2 / Gemma 3 dense                |
-| `gemma4` | `candle_transformers::gemma4` | Gemma 4 multimodal (text-only loader)  |
+| Token     | Notes                                                        |
+|-----------|--------------------------------------------------------------|
+| `llama`   | Llama 1/2/3 family.                                          |
+| `qwen3`   | Qwen3 dense (QK-Norm; use for Qwen3-Base).                   |
+| `qwen3_5` | Qwen 3.5 / 3.6 dense (the family id under which 3.6 ships).  |
+| `qwen2`   | Deprecated alias for `qwen3`; resolves to qwen3 with a warn. |
+| `gemma3`  | Gemma 2 / Gemma 3 dense.                                     |
+| `gemma4`  | Gemma 4 (text-only path; multimodal heads are ignored).      |
 
-Qwen 3.6 27B Dense (`qwen3_5`) and earlier `gemma` / `gemma2` are not
-in the supported set today; candle ships no compatible loader. Track
-the spec roadmap for any future addition.
+A2.3 dropped per-arch dispatch on our side. The bake-off binary
+forwards each candidate's local path to mistralrs, which reads
+`config.json` and selects the pipeline internally. The `arch` field
+in the manifest is retained for `ctx_for` lookup and operator
+ergonomics but does NOT drive backend selection.
 
 When picking the Gemma 4 candidate, verify the base (not instruct)
 variant is staged. A2.1 confirmed that instruct-tuning distorts
@@ -114,10 +126,21 @@ incumbent.
 ### Run the bake-off
 
 On the H100 host the binary must be built with the `local-gpu-models`
-feature so the real `CandlePerplexityScorer` is compiled in
-(`cargo build --release -p tracedao-server --features local-gpu-models`).
+feature so the real `LocalPerplexityScorer` (mistralrs-backed) is
+compiled in
+(`cargo build --release -p tracedao-server --features local-gpu-models`,
+or `--features local-gpu-models-cuda` to activate mistralrs's CUDA
+kernels).
 Default-features builds refuse the real-scorer path with
 `BakeoffRealScorerRequiresFeature`.
+
+The mistralrs backend is git-pinned to master SHA
+`2d4ba4f16f61e5e18be085d0dd137bc95cba038a` (2026-04-15). Slice 0 of the
+A2.3 migration validated the pin on Lambda A100 — full release build
+in ~5m30s, ~177 MB binary, raw-logits perplexity finite over an
+82-token English input on Gemma 4 E4B. Update the pin in
+`crates/tracedao-gate-enclave/Cargo.toml` if upstream lands a fix the
+operator needs; record the new SHA + validation date alongside.
 
 ```sh
 ./target/release/tracedao-gate-calibrate bake-off \
