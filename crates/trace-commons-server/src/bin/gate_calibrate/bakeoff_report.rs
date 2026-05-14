@@ -125,6 +125,9 @@ impl CandidateResult {
     /// or evaluate. All numeric fields zero and `passed_determinism_gate =
     /// false`, so the row never wins. `error_class` is a stable label such
     /// as `"LocalPerplexityScorerLoadFailed"` — never raw error text.
+    // Reserved for the rarity-real-scorer failure path; #63 added the
+    // constructor but deferred wiring it into a test target.
+    #[allow(dead_code)]
     pub fn failed(
         id: String,
         license: License,
@@ -351,6 +354,10 @@ pub fn render_markdown(report: &Report) -> String {
 /// companion is written non-atomically (best-effort) because consumers grep
 /// the JSON file for "is the run still going" — the markdown is for humans
 /// and a transient half-write is acceptable.
+// Used by the bake-off binary loop; the `bakeoff_report` integration test
+// target imports the module via `#[path = ...]` and exercises the pure
+// scoring functions, not the on-disk writer.
+#[allow(dead_code)]
 pub fn write_report_atomic(report: &Report, dest: &Path) -> anyhow::Result<()> {
     use std::io::Write;
     let tmp = dest.with_extension("json.tmp");

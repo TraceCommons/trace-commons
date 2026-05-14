@@ -36,6 +36,8 @@ mod bakeoff_metrics;
 mod bakeoff_report;
 #[path = "gate_calibrate/run_candidate_eval.rs"]
 mod run_candidate_eval;
+#[path = "gate_calibrate/tail_floor.rs"]
+mod tail_floor;
 
 use clap::{Args, Parser, Subcommand};
 
@@ -60,6 +62,12 @@ enum Cmd {
     /// reports flagged `mock_scorer: true` so they cannot be confused with
     /// a production bake-off.
     BakeOff(BakeOffArgs),
+    /// Propose a value for `TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS`
+    /// by joining a pilot-bootstrap sidecar JSONL against the
+    /// `trace_gate_decisions` table and computing a percentile of the
+    /// observed `tail_fraction_micros` distribution. Operator-only; no
+    /// tenant scoping (every matching decision row contributes).
+    TailFloor(tail_floor::TailFloorArgs),
 }
 
 #[derive(Args, Debug)]
@@ -136,6 +144,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.cmd.unwrap_or(Cmd::Calibrate) {
         Cmd::Calibrate => run_calibrate().await,
         Cmd::BakeOff(args) => run_bakeoff(args).await,
+        Cmd::TailFloor(args) => tail_floor::run(args).await,
     }
 }
 
