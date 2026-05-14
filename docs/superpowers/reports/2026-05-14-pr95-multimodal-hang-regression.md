@@ -1,5 +1,14 @@
 # PR #95 Multimodal Pipeline Hang Regression — 2026-05-14
 
+> **2026-05-14 update — hypothesis retracted.** Follow-up investigation
+> (no GPU required) demonstrates that PR #95 cannot have introduced a
+> deadlock. The reproduction was run against a **CPU-only mistralrs
+> build** (`--features local-gpu-models`, missing the `-cuda` suffix),
+> not the CUDA build A2.6 used. The "hang" is CPU inference of a 27B
+> multimodal model — functionally unbounded, not deadlocked. The
+> original hypothesis section is preserved below for the audit trail;
+> see the "Actual root cause" section at the bottom for the correction.
+
 ## Summary
 
 The bake-off binary post PR #95 (`Persist per-trace perplexity scores
@@ -71,6 +80,89 @@ drain).
 - Pilot launches with `TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=0` per A2.5 (conservative-by-default).
 - The `tail-floor` subcommand (PR #66) drives a separate calibration path off real pilot traffic via `trace-commons-gate-decisions` rows.
 - A2.7 calibration runbook (`docs/operator/a27-perplexity-floor-calibration.md`) already carries the "BLOCKED ON BAKE-OFF BINARY GAP" callout — extend it with a reference to this regression report.
+
+## Actual root cause (2026-05-14 follow-up)
+
+Source review against `main` at commit `02fed39` shows the original
+"PR #95 introduced a multimodal channel-drain deadlock" hypothesis
+cannot be correct:
+
+1. **PR #95's diff to `run_candidate_eval.rs` adds only synchronous
+   `Vec::push(Some(_))` / `Vec::push(None)` lines** alongside the
+   existing scoring code. No new `await`, no channel-receive, no
+   `select!`, no async branching. The function `run_candidate_eval`
+   is `async fn` but contains zero `.await` calls before or after
+   PR #95 — every scorer call goes through the synchronous
+   `PerplexityScorer::score` trait method.
+2. **The mistralrs channel-receive in
+   `crates/trace-commons-gate-enclave/src/perplexity_local.rs` was not
+   touched by PR #95.** That code (single-shot `rx.recv().await` on
+   a `tokio::sync::mpsc::channel(1)` plus a `ResponseOk::Raw`
+   destructure) is unchanged since PR #40 (A2.3 mistralrs migration).
+3. **`Cargo.lock` has not been modified since PR #85** (before A2.6).
+   mistralrs is pinned to git rev
+   `2d4ba4f16f61e5e18be085d0dd137bc95cba038a` and is byte-identical
+   between A2.6 and the today's binary. No transitive dependency
+   bumps.
+4. **A2.6 successfully scored the same model in this same code path.**
+   The only Rust difference between A2.6's binary and today's binary
+   is the synchronous accumulator added by PR #95 — which cannot
+   deadlock anything.
+
+Re-reading the reproduction command in this report's "Reproduction"
+section reveals the actual cause:
+
+```
+cargo build --release -p trace-commons-server --bin trace-commons-gate-calibrate \
+    --features local-gpu-models
+```
+
+This is the **CPU-only mistralrs build**. The CUDA build requires
+`--features local-gpu-models-cuda` (see `docs/operator/deployment.md`,
+`docs/operator/env-reference.md`, and `docs/operator/calibration.md`,
+all of which document the `-cuda` suffix). On a Lambda H100 the
+operator runbook calls for `local-gpu-models-cuda`; A2.6's
+log-confirmed 10.3s load + 57 GB peak VRAM is consistent with the
+CUDA build. Today's 93.8s load + 0 MiB VRAM is consistent with
+mistralrs running on CPU.
+
+The "hang" is not a deadlock. It is CPU inference of a 27B
+multimodal model — well into the days-per-trace regime, with no
+truncation WARN because the first trace's tokenization succeeds
+but the prefill never finishes. nvidia-smi reports 0% / 0 MiB
+because nothing was ever dispatched to the GPU. No `score_failed`
+events fire because the scorer is blocked in mistralrs's CPU
+forward pass, not erroring.
+
+### Why no Rust fix is needed
+
+The bug is in the operator command, not the code. The fix is:
+
+- Re-issue the A2.7 build with `--features local-gpu-models-cuda`.
+- Add a runtime guard in the bake-off binary (or a startup check in
+  `LocalPerplexityScorer::try_new`) that refuses to run on CUDA
+  hosts when mistralrs was compiled without the CUDA backend, so
+  this footgun fails closed with a useful error instead of silently
+  burning CPU hours. Tracked as a follow-up — out of scope for the
+  A2.7 calibration rerun itself.
+
+### What I did NOT change
+
+- No Rust source edits. PR #95's accumulator additions are correct
+  and uninvolved.
+- No mistralrs version bump.
+- No new integration test. A test that mocks a "multimodal Raw
+  response shape" would not reproduce the actual issue (CPU
+  inference is too slow) and would mislead future maintainers.
+
+### Action items
+
+1. **Re-run A2.7 with the correct feature flag.** Single-line fix
+   in whatever provisioning script staged the broken build.
+2. **Optional follow-up:** add the CUDA-feature/device-mismatch
+   startup guard so this can't recur silently.
+3. Roadmap entry for A2.7 stays "blocked on H100 capacity"; the
+   bake-off binary itself is not blocked.
 
 ## Hash-only audit
 
