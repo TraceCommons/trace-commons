@@ -84,6 +84,12 @@ gate.
   (mistralrs git-pinned to `2d4ba4f`); per-arch candle dispatch
   replaced by mistralrs auto-detection; pending the 4-way bake-off
   re-run on Lambda H100 (A2.3c) and the env-var default flip (A2.3e)
+- A2.5: gate-floor recalibration after bake-off findings — done; see
+  `docs/superpowers/reports/2026-05-14-gate-floor-recalibration-findings.md`
+  and `docs/operator/calibration.md` Phase 1. Perplexity floor ships
+  at 0 (disabled) for pilot launch; tail-fraction floor at 0
+  pending post-first-1000-trace calibration; novelty floor at 500000
+  is the active primary gate.
 - A3: real `Embedder` (fastembed + BGE-large-en-v1.5) — done
 - A4: real `VectorIndex` (usearch with on-disk persistence) — done
 - A5: `novelty_utility` credit-event emission — done
@@ -131,6 +137,32 @@ Strategy brief: `docs/superpowers/specs/2026-05-11-trace-kek-strategy-design.md`
 Full design: `docs/superpowers/specs/2026-05-11-private-vector-system-design.md`
 (applies to Phase A with the enclave-resident framing relaxed; the same
 components run on regular hardware).
+
+### 1.5. Phase A.5 — perplexity-replacement metric (deferred)
+
+A2.3c + A2.4 showed that aggregate perplexity does not discriminate
+novel reasoning from duplicate content on any of the four candidate
+LLMs we measured (AUC < 0.5 across the board; the metric is
+inverted, not noisy). A2.5 ships the pilot with the perplexity floor
+disabled and the novelty-embedder floor as the only active gate.
+Phase A.5 is the eventual gate-design follow-up: pick and implement
+a replacement metric once we have ~1000 labeled pilot traces from
+the real contributor distribution to design against.
+
+Three candidate approaches recorded in
+`docs/superpowers/reports/2026-05-14-gate-floor-recalibration-findings.md`:
+
+- **Contrastive perplexity** — delta in logprobs between two model
+  checkpoints. No schema change; one extra model load.
+- **Per-token rarity** — gate on the lowest-N logprob tail. A
+  tighter version of `tail_fraction`; may collapse into it after
+  pilot calibration.
+- **Learned discriminator** — small classifier trained on labeled
+  novel/duplicate exemplars. Highest ceiling, depends on labeled
+  pilot data.
+
+Dependency: first ~1000 pilot traces. Until those exist, designing a
+replacement metric is premature.
 
 ### 2. Phase B — dstack migration
 

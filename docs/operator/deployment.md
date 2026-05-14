@@ -160,12 +160,13 @@ export TRACE_COMMONS_EMBEDDER_CACHE_DIR=/var/cache/tracedao-embedder
 export TRACE_COMMONS_VECTOR_INDEX_ROOT=/var/lib/tracedao-vector-index
 export TRACE_COMMONS_VECTOR_INDEX_DIM=1024
 
-# --- Gate (floors) — START AT ZERO-CREDIT during Phase 2 of calibration ---
-# Values below come from `analyze-calibration.sh` on the HF bootstrap.
-# Replace with Phase-2 re-cal numbers after ~1000 real traces.
-export TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=0      # placeholder; calibrate first
-export TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS=0   # placeholder
-export TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS=500000    # 0.5 cosine novelty
+# --- Gate (floors) — A2.5 pilot-launch defaults; see calibration.md Phase 1 ---
+# A2.3c + A2.4 measured perplexity-AUC < 0.5 across all candidates and corpora,
+# so the perplexity floor ships disabled. Tail-fraction floor is calibrated
+# post-first-1000-pilot-traces. Novelty is the active primary gate at launch.
+export TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=0      # A2.5: perplexity AUC < 0.5; disabled at pilot launch
+export TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS=0   # A2.5: calibrate post-first-1000-traces
+export TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS=500000    # 0.5 cosine novelty; unchanged
 export TRACE_COMMONS_GATE_POLICY_VERSION=pilot-v1
 export TRACE_COMMONS_GATE_TOP_K=5
 
@@ -179,9 +180,15 @@ export TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY=true
 ```
 
 At least one of the three gate floors must be positive — the binary
-refuses to start if all are zero. Setting `novelty_floor_micros=500000`
-(corresponds to cosine novelty 0.5) is a reasonable starting point that
-will later be replaced by calibrated values.
+refuses to start if all are zero. Under the A2.5 pilot-launch defaults
+the novelty floor (`TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS=500000`,
+cosine novelty 0.5) is the floor satisfying that invariant; the
+perplexity and tail-fraction floors ship disabled. The tail-fraction
+floor is calibrated against the pilot distribution after ~1000 traces;
+the perplexity floor stays at zero until Phase A.5 work lands a
+replacement metric. See `calibration.md` Phase 1 for the rationale
+and `docs/superpowers/reports/2026-05-14-gate-floor-recalibration-findings.md`
+for the underlying data.
 
 ## Initial start
 
