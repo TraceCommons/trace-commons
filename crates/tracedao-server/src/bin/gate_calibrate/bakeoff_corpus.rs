@@ -6,6 +6,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // used by `load_corpus` in the gate-calibrate binary; test target only re-imports the module for unit tests of other helpers
 struct TarballManifest {
     #[allow(dead_code)] // accepted for forward compat; only v1 is recognized today
     version: u32,
@@ -28,11 +29,13 @@ pub struct LoadedCorpus {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // deserialized inside `load_corpus`; not reached from the test target
 struct ParaphraseLine {
     original: String,
     paraphrase: String,
 }
 
+#[allow(dead_code)] // called by the gate-calibrate binary; test target only includes the module for other helpers
 pub fn load_corpus(tarball: &Path) -> anyhow::Result<LoadedCorpus> {
     let file = fs::File::open(tarball).map_err(|e| anyhow::anyhow!("open corpus tarball: {e}"))?;
     let dec = zstd::Decoder::new(BufReader::new(file))
@@ -94,6 +97,7 @@ pub fn load_corpus(tarball: &Path) -> anyhow::Result<LoadedCorpus> {
 
 /// Read every regular file in `dir`, sorted by filename, returning the
 /// UTF-8 contents and the `sha256:<hex>` of the concatenated raw bytes.
+#[allow(dead_code)] // helper for `load_corpus`; not exercised directly from the test target
 fn read_text_slice(dir: &Path) -> anyhow::Result<(Vec<String>, String)> {
     let mut entries: Vec<_> = fs::read_dir(dir)
         .map_err(|e| anyhow::anyhow!("read slice dir {}: {e}", dir.display()))?
@@ -117,6 +121,7 @@ fn read_text_slice(dir: &Path) -> anyhow::Result<(Vec<String>, String)> {
     Ok((texts, sha))
 }
 
+#[allow(dead_code)] // helper for `load_corpus`; not exercised directly from the test target
 fn sha256_label(chunks: &[&[u8]]) -> String {
     let mut h = Sha256::new();
     for c in chunks {
@@ -131,6 +136,7 @@ fn sha256_label(chunks: &[&[u8]]) -> String {
     format!("sha256:{hex}")
 }
 
+#[allow(dead_code)] // helper for `load_corpus`; not exercised directly from the test target
 fn verify_sha(slice: &str, actual: &str, expected: &str) -> anyhow::Result<()> {
     if actual != expected {
         anyhow::bail!(
