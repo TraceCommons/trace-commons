@@ -137,6 +137,83 @@ enum HardwareTier {
     Cpu,
 }
 
+/// Set when the binary is compiled with `--features local-gpu-models-cuda`,
+/// which enables mistralrs's CUDA backend. Used by the bake-off startup
+/// guard to refuse `--hardware=a10` / `--hardware=h100` on CPU-only builds
+/// so mistralrs cannot silently fall back to CPU inference.
+#[cfg(feature = "local-gpu-models-cuda")]
+const HAS_CUDA: bool = true;
+#[cfg(not(feature = "local-gpu-models-cuda"))]
+const HAS_CUDA: bool = false;
+
+/// Pure guard predicate exposed for unit testing. Returns the named error
+/// class label when the operator-selected hardware tier requires CUDA but
+/// `has_cuda` is false; returns `None` otherwise. Mock-scorer dry runs
+/// bypass the guard because they never invoke mistralrs.
+fn cuda_hardware_guard(
+    hardware: HardwareTier,
+    mock_scorer: bool,
+    has_cuda: bool,
+) -> Option<&'static str> {
+    if matches!(hardware, HardwareTier::A10 | HardwareTier::H100) && !mock_scorer && !has_cuda {
+        Some("BakeoffCudaHardwareRequiresCudaFeature")
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod cuda_guard_tests {
+    use super::{HAS_CUDA, HardwareTier, cuda_hardware_guard};
+
+    #[test]
+    fn refuses_h100_without_cuda_feature() {
+        assert_eq!(
+            cuda_hardware_guard(HardwareTier::H100, false, false),
+            Some("BakeoffCudaHardwareRequiresCudaFeature"),
+        );
+    }
+
+    #[test]
+    fn refuses_a10_without_cuda_feature() {
+        assert_eq!(
+            cuda_hardware_guard(HardwareTier::A10, false, false),
+            Some("BakeoffCudaHardwareRequiresCudaFeature"),
+        );
+    }
+
+    #[test]
+    fn allows_cpu_without_cuda_feature() {
+        assert_eq!(cuda_hardware_guard(HardwareTier::Cpu, false, false), None);
+    }
+
+    #[test]
+    fn allows_h100_when_cuda_feature_present() {
+        assert_eq!(cuda_hardware_guard(HardwareTier::H100, false, true), None);
+    }
+
+    #[test]
+    fn allows_mock_scorer_dry_run_on_any_hardware() {
+        // --mock-scorer never invokes mistralrs, so the CUDA mismatch
+        // cannot bite. The guard must let dry runs through.
+        assert_eq!(cuda_hardware_guard(HardwareTier::H100, true, false), None);
+    }
+
+    #[test]
+    fn default_feature_build_lacks_cuda() {
+        // The whole point of this guard: under the default feature set
+        // (and the `local-gpu-models` CPU-only build), HAS_CUDA is false
+        // so the silent-CPU-fallback footgun cannot recur. Asserted via
+        // the guard predicate (which clippy doesn't flag as a constant
+        // assertion the way `assert!(!HAS_CUDA)` is).
+        let result = cuda_hardware_guard(HardwareTier::H100, false, HAS_CUDA);
+        #[cfg(not(feature = "local-gpu-models-cuda"))]
+        assert_eq!(result, Some("BakeoffCudaHardwareRequiresCudaFeature"));
+        #[cfg(feature = "local-gpu-models-cuda")]
+        assert_eq!(result, None);
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
@@ -458,6 +535,20 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
             "BakeoffRealScorerRequiresFeature: rebuild with \
              --features local-gpu-models, or pass --mock-scorer for \
              dry runs"
+        );
+    }
+
+    // Refuse CUDA hardware selection when the binary lacks the cuda
+    // backend feature. Without this guard, mistralrs silently falls
+    // back to CPU on `--hardware=h100` / `--hardware=a10`, which (as
+    // of 2026-05-14) burned hours of Lambda time before being aborted.
+    // Fail closed with a named error class so operators see the cause.
+    if let Some(label) = cuda_hardware_guard(args.hardware, args.mock_scorer, HAS_CUDA) {
+        anyhow::bail!(
+            "{label}: --hardware={:?} requires a binary built with \
+             --features local-gpu-models-cuda; rebuild or rerun with \
+             --mock-scorer for a dry run",
+            args.hardware,
         );
     }
 
