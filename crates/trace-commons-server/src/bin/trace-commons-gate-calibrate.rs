@@ -92,6 +92,34 @@ struct BakeOffArgs {
     /// so they cannot be confused with real bake-off results.
     #[arg(long, default_value_t = false)]
     mock_scorer: bool,
+    /// Which scorer(s) to run on this corpus. `perplexity` is the default
+    /// (back-compat with A2.3c / A2.4 / A2.6 reports). `token-rarity` runs
+    /// only the Phase A.5 per-token-rarity scorer. `both` runs both and
+    /// emits per-candidate `metrics.perplexity` + `metrics.token_rarity`
+    /// blocks so AUC curves can be compared on the same corpus.
+    #[arg(long, value_enum, default_value_t = ScorerSelection::Perplexity)]
+    scorer: ScorerSelection,
+    /// K parameter for the per-token rarity scorer. Ignored when
+    /// `--scorer perplexity`. Default 10 matches the Python prototype's
+    /// default; bump only when sweeping K as part of a calibration pass.
+    #[arg(long, default_value_t = 10)]
+    token_rarity_k: usize,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum ScorerSelection {
+    Perplexity,
+    TokenRarity,
+    Both,
+}
+
+impl ScorerSelection {
+    fn use_perplexity(&self) -> bool {
+        matches!(self, ScorerSelection::Perplexity | ScorerSelection::Both)
+    }
+    fn use_token_rarity(&self) -> bool {
+        matches!(self, ScorerSelection::TokenRarity | ScorerSelection::Both)
+    }
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -455,13 +483,32 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
         }
     };
 
-    // Shared mock scorer for the --mock-scorer path; built lazily so the
-    // real-scorer arm doesn't pay for it.
-    let mock_scorer = if args.mock_scorer {
+    // Shared mock scorers for the --mock-scorer path; built lazily so the
+    // real-scorer arm doesn't pay for them. Constructed per-selection so
+    // `--scorer perplexity` doesn't allocate a rarity mock (and vice versa).
+    let mock_perplexity = if args.mock_scorer && args.scorer.use_perplexity() {
         Some(trace_commons_gate_enclave::perplexity::MockPerplexityScorer::new())
     } else {
         None
     };
+    let mock_token_rarity = if args.mock_scorer && args.scorer.use_token_rarity() {
+        Some(trace_commons_gate_enclave::perplexity::MockTokenRarityScorer::new())
+    } else {
+        None
+    };
+
+    // Real scorers only support the perplexity column today. Refuse
+    // `--scorer token-rarity` / `--scorer both` on the real path with a
+    // self-explanatory error class; the mock path supports all three modes
+    // so AUC-curve comparison work can land before the real-scorer rarity
+    // path is wired through (Phase A.5a follow-up).
+    if !args.mock_scorer && args.scorer != ScorerSelection::Perplexity {
+        anyhow::bail!(
+            "BakeoffRealRarityNotImplemented: real-scorer per-token rarity is \
+             not wired through yet; rerun with --scorer perplexity, or pair \
+             your rarity scorer selection with --mock-scorer for a dry run"
+        );
+    }
 
     for (i, c) in manifest.candidates.iter().enumerate() {
         if skip.contains(&c.id) {
@@ -484,15 +531,24 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
         // already-scored candidates in the report when a later one falls
         // over during load.
         let result: Result<bakeoff_report::CandidateResult, (&'static str, anyhow::Error)> = 'eval: {
-            if let Some(scorer) = mock_scorer.as_ref() {
+            if args.mock_scorer {
                 tracing::info!(
                     candidate_id = %c.id,
                     load_elapsed_seconds = load_start.elapsed().as_secs_f64(),
                     "bakeoff_candidate_load_done"
                 );
                 let score_start = std::time::Instant::now();
+                let eval_scorers = run_candidate_eval::EvalScorers {
+                    perplexity: mock_perplexity
+                        .as_ref()
+                        .map(|s| s as &dyn trace_commons_gate_enclave::perplexity::PerplexityScorer),
+                    token_rarity: mock_token_rarity
+                        .as_ref()
+                        .map(|s| s as &dyn trace_commons_gate_enclave::perplexity::TokenRarityScorer),
+                    token_rarity_k: args.token_rarity_k,
+                };
                 match run_candidate_eval::run_candidate_eval(
-                    scorer,
+                    eval_scorers,
                     c,
                     &corpus,
                     args.determinism_repeat_runs,
@@ -557,8 +613,11 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
                     "bakeoff_candidate_load_done"
                 );
                 let score_start = std::time::Instant::now();
+                // Real-scorer path is perplexity-only today; the
+                // BakeoffRealRarityNotImplemented guard above already
+                // refused any other selection.
                 match run_candidate_eval::run_candidate_eval(
-                    &scorer,
+                    run_candidate_eval::EvalScorers::perplexity_only(&scorer),
                     c,
                     &corpus,
                     args.determinism_repeat_runs,

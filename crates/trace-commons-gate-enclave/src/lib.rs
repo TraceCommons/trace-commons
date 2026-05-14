@@ -24,7 +24,10 @@ pub use embedder::{Embedder, MockEmbedder};
 pub use orchestrator::{
     EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig, OrchestrationDecision,
 };
-pub use perplexity::{MockPerplexityScorer, PerplexityResult, PerplexityScorer};
+pub use perplexity::{
+    MockPerplexityScorer, MockTokenRarityScorer, PerplexityResult, PerplexityScorer,
+    TokenRarityResult, TokenRarityScorer,
+};
 pub use vector_index::{MockVectorIndex, NearestNeighbor, VectorIndex};
 #[cfg(feature = "local-gpu-models")]
 pub use vector_index_usearch::UsearchVectorIndex;

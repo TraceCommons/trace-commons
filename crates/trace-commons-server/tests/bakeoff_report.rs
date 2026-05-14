@@ -17,6 +17,7 @@ fn result(id: &str, auc: f64, para: f64, tail: f64, throughput: f64, det: f64) -
         passed_determinism_gate: det < DETERMINISM_GATE,
         release_date_unix: 0,
         load_or_eval_error: None,
+        metrics: None,
     }
 }
 
@@ -208,4 +209,94 @@ fn mock_report_renders_warning_banner() {
         !md.contains('\u{26A0}'),
         "banner contained the warning-sign emoji"
     );
+}
+
+#[test]
+fn rarity_block_omitted_from_json_when_none() {
+    // Default-mode reports (perplexity-only) must serialize without a
+    // `metrics` key so existing report consumers don't see a new field.
+    let r = result("x", 0.9, 0.1, 0.5, 1000.0, 1e-7);
+    let json = serde_json::to_string(&r).unwrap();
+    assert!(
+        !json.contains("\"metrics\""),
+        "unexpected metrics key: {json}"
+    );
+}
+
+#[test]
+fn rarity_table_renders_in_markdown_when_metrics_present() {
+    // When at least one candidate has a rarity metrics block, the markdown
+    // gains a "Per-token rarity" section. The legacy table header still
+    // appears unchanged.
+    let mut r = fixture_report();
+    let mut c = result("rare", 0.7, 0.1, 0.4, 900.0, 1e-7);
+    c.metrics = Some(bakeoff_report::CandidateMetrics {
+        perplexity: Some(bakeoff_report::MetricBlock {
+            discrimination_auc: 0.7,
+            novel_scores: vec![1.0, 2.0],
+            duplicate_scores: vec![0.5, 0.6],
+        }),
+        token_rarity: Some(bakeoff_report::TokenRarityMetricBlock {
+            discrimination_auc: 0.812345,
+            novel_scores: vec![3.0, 4.0],
+            duplicate_scores: vec![1.5, 1.6],
+            k: 12,
+        }),
+    });
+    r.candidates.push(c);
+    let md = bakeoff_report::render_markdown(&r);
+    // Legacy header preserved.
+    assert!(
+        md.contains("| candidate | auc |"),
+        "legacy header missing: {md}"
+    );
+    // New section + the rarity row's value + K column.
+    assert!(
+        md.contains("## Per-token rarity"),
+        "missing rarity header: {md}"
+    );
+    assert!(md.contains("0.812345"), "missing rarity AUC: {md}");
+    assert!(md.contains("| rare |"), "missing rarity row: {md}");
+    // K is emitted verbatim.
+    assert!(md.contains("| 12 |"), "missing K column: {md}");
+}
+
+#[test]
+fn rarity_block_round_trips_through_json() {
+    // The `metrics.token_rarity` sub-object is the canonical wire format
+    // for the new column; serde must round-trip the field names.
+    let c = bakeoff_report::CandidateResult {
+        id: "x".into(),
+        discrimination_auc: 0.7,
+        paraphrase_delta: 0.1,
+        tail_fraction_range: 0.5,
+        determinism_stddev: 1e-7,
+        throughput_tps: 100.0,
+        peak_vram_mib: 0,
+        license: License::Apache2,
+        params_b: 8,
+        passed_determinism_gate: true,
+        release_date_unix: 0,
+        load_or_eval_error: None,
+        metrics: Some(bakeoff_report::CandidateMetrics {
+            perplexity: None,
+            token_rarity: Some(bakeoff_report::TokenRarityMetricBlock {
+                discrimination_auc: 0.65,
+                novel_scores: vec![1.0, 2.0],
+                duplicate_scores: vec![0.5],
+                k: 10,
+            }),
+        }),
+    };
+    let json = serde_json::to_string(&c).unwrap();
+    let back: bakeoff_report::CandidateResult = serde_json::from_str(&json).unwrap();
+    let rarity = back
+        .metrics
+        .as_ref()
+        .and_then(|m| m.token_rarity.as_ref())
+        .expect("rarity sub-object must round-trip");
+    assert!((rarity.discrimination_auc - 0.65).abs() < 1e-12);
+    assert_eq!(rarity.k, 10);
+    assert_eq!(rarity.novel_scores, vec![1.0, 2.0]);
+    assert_eq!(rarity.duplicate_scores, vec![0.5]);
 }

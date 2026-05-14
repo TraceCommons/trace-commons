@@ -17,14 +17,67 @@
 
 use std::time::Instant;
 
-use trace_commons_gate_enclave::perplexity::{PerplexityResult, PerplexityScorer};
+use trace_commons_gate_enclave::perplexity::{
+    PerplexityResult, PerplexityScorer, TokenRarityResult, TokenRarityScorer,
+};
 
 use super::bakeoff_corpus::LoadedCorpus;
 use super::bakeoff_manifest::{Candidate, CandidateArch, CandidateLicense};
 use super::bakeoff_metrics::{
     determinism_stddev, discrimination_auc, paraphrase_delta, tail_fraction_range,
 };
-use super::bakeoff_report::{CandidateResult, DETERMINISM_GATE, License};
+use super::bakeoff_report::{
+    CandidateMetrics, CandidateResult, DETERMINISM_GATE, License, MetricBlock,
+    TokenRarityMetricBlock,
+};
+
+/// Scorer selection for a bake-off pass. The bake-off binary's `--scorer`
+/// flag maps to one of these; the eval loop reads `perplexity` /
+/// `token_rarity` `Option`s to decide which metric columns to populate.
+///
+/// At least one scorer must be present; the eval-loop entry function
+/// asserts that as a fail-closed guard.
+pub struct EvalScorers<'a> {
+    pub perplexity: Option<&'a dyn PerplexityScorer>,
+    pub token_rarity: Option<&'a dyn TokenRarityScorer>,
+    /// K parameter passed to every `score_rarity` call. Ignored when
+    /// `token_rarity` is `None`.
+    pub token_rarity_k: usize,
+}
+
+impl<'a> EvalScorers<'a> {
+    /// Back-compat helper: perplexity-only selection. Matches the pre-A.5
+    /// behavior so existing call sites keep working.
+    ///
+    /// Used by the real-scorer path in the bake-off binary and by the
+    /// integration test suite; the mock-scorer path in the binary builds
+    /// `EvalScorers` directly so it can mix in token-rarity. The
+    /// integration-test usage is in a separate compilation unit (via
+    /// `#[path = ...]`), so `dead_code` analysis on the binary doesn't see
+    /// those callers — hence the allow.
+    #[allow(dead_code)]
+    pub fn perplexity_only(s: &'a dyn PerplexityScorer) -> Self {
+        Self {
+            perplexity: Some(s),
+            token_rarity: None,
+            token_rarity_k: 0,
+        }
+    }
+
+    fn assert_at_least_one(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.perplexity.is_some() || self.token_rarity.is_some(),
+            "EvalScorersEmpty: at least one scorer (perplexity or token_rarity) is required"
+        );
+        if self.token_rarity.is_some() {
+            anyhow::ensure!(
+                self.token_rarity_k > 0,
+                "EvalScorersBadK: token_rarity_k must be greater than zero"
+            );
+        }
+        Ok(())
+    }
+}
 
 /// Conversion of `u64` micros (scorer output) to floating-point. Centralized
 /// so the metric-feeding code reads as one boundary cross rather than a
@@ -148,6 +201,17 @@ fn score_one(scorer: &dyn PerplexityScorer, text: &str) -> anyhow::Result<(f64, 
     ))
 }
 
+/// Score one entry for per-token rarity and convert micros to
+/// (rarity_f64, tokens_scored). Returns `Err` on scorer failure.
+fn score_one_rarity(
+    scorer: &dyn TokenRarityScorer,
+    text: &str,
+    k: usize,
+) -> anyhow::Result<(f64, u64)> {
+    let r: TokenRarityResult = scorer.score_rarity(text.as_bytes(), k)?;
+    Ok((micros_to_f64(r.token_rarity_micros), r.tokens_scored))
+}
+
 /// Run a single candidate over the full corpus and produce its
 /// `CandidateResult` row.
 ///
@@ -166,12 +230,13 @@ fn score_one(scorer: &dyn PerplexityScorer, text: &str) -> anyhow::Result<(f64, 
 /// exceeds 5 %, the candidate is aborted with an error so the caller can
 /// decide whether to surface it or move on.
 pub async fn run_candidate_eval(
-    scorer: &dyn PerplexityScorer,
+    scorers: EvalScorers<'_>,
     candidate: &Candidate,
     corpus: &LoadedCorpus,
     repeat_runs: u32,
     device_kind: DeviceKind,
 ) -> anyhow::Result<CandidateResult> {
+    scorers.assert_at_least_one()?;
     anyhow::ensure!(
         repeat_runs >= 2,
         "RunCandidateEval: repeat_runs must be at least 2 to compute a stddev"
@@ -186,12 +251,25 @@ pub async fn run_candidate_eval(
         "candidate_eval_start"
     );
 
-    // ---- 1. Score every slice; collect per-entry triples. ---------------
+    // ---- 1. Score every slice. The eval loop interleaves scorer calls so
+    // both metrics share the same loop overhead. Per-trace failures from
+    // either scorer count toward one combined failure budget; the slice is
+    // dropped from BOTH metrics if either scorer errors on it, which keeps
+    // novel/duplicate vectors aligned across columns.
+    //
+    // `total_tokens` is sourced from whichever scorer ran first (perplexity
+    // when both are active, else rarity). Token counts from the two scorers
+    // are expected to match for any real implementation since they tokenize
+    // the same input — but only one is added to the budget to avoid double-
+    // counting work that produced two metrics from one forward pass.
     let mut novel_perp: Vec<f64> = Vec::with_capacity(corpus.novel.len());
     let mut dup_perp: Vec<f64> = Vec::with_capacity(corpus.duplicate.len());
     let mut novel_tail: Vec<f64> = Vec::with_capacity(corpus.novel.len());
     let mut dup_tail: Vec<f64> = Vec::with_capacity(corpus.duplicate.len());
     let mut para_pairs: Vec<(f64, f64)> = Vec::with_capacity(corpus.paraphrase.len());
+
+    let mut novel_rarity: Vec<f64> = Vec::with_capacity(corpus.novel.len());
+    let mut dup_rarity: Vec<f64> = Vec::with_capacity(corpus.duplicate.len());
 
     let mut total_tokens: u64 = 0;
     let mut attempts: u64 = 0;
@@ -199,15 +277,45 @@ pub async fn run_candidate_eval(
 
     let start = Instant::now();
 
+    // Per-entry scorer dispatch. Returns Ok((perplexity_opt, rarity_opt,
+    // tokens_scored)) on success; Err on any active-scorer failure.
+    let score_entry = |text: &str| -> anyhow::Result<(Option<(f64, f64)>, Option<f64>, u64)> {
+        let mut tokens = 0u64;
+        let perp = if let Some(p) = scorers.perplexity {
+            let (a, t, tok) = score_one(p, text)?;
+            tokens = tok;
+            Some((a, t))
+        } else {
+            None
+        };
+        let rarity = if let Some(r) = scorers.token_rarity {
+            let (a, tok) = score_one_rarity(r, text, scorers.token_rarity_k)?;
+            if perp.is_none() {
+                // Rarity-only mode: throughput accounting reads from the
+                // rarity scorer.
+                tokens = tok;
+            }
+            Some(a)
+        } else {
+            None
+        };
+        Ok((perp, rarity, tokens))
+    };
+
     let novel_slice_start = Instant::now();
-    let novel_scored_before = novel_perp.len();
+    let novel_scored_before = novel_perp.len().max(novel_rarity.len());
     let novel_failures_before = failures;
     for (i, text) in corpus.novel.iter().enumerate() {
         attempts += 1;
-        match score_one(scorer, text) {
-            Ok((p, t, tok)) => {
-                novel_perp.push(p);
-                novel_tail.push(t);
+        match score_entry(text) {
+            Ok((perp, rarity, tok)) => {
+                if let Some((a, t)) = perp {
+                    novel_perp.push(a);
+                    novel_tail.push(t);
+                }
+                if let Some(a) = rarity {
+                    novel_rarity.push(a);
+                }
                 total_tokens = total_tokens.saturating_add(tok);
             }
             Err(e) => {
@@ -225,21 +333,26 @@ pub async fn run_candidate_eval(
     tracing::info!(
         candidate_id = %candidate.id,
         slice = "novel",
-        scored = novel_perp.len() - novel_scored_before,
+        scored = novel_perp.len().max(novel_rarity.len()) - novel_scored_before,
         failed = failures - novel_failures_before,
         elapsed_seconds = novel_slice_start.elapsed().as_secs_f64(),
         "candidate_slice_done"
     );
 
     let duplicate_slice_start = Instant::now();
-    let dup_scored_before = dup_perp.len();
+    let dup_scored_before = dup_perp.len().max(dup_rarity.len());
     let dup_failures_before = failures;
     for (i, text) in corpus.duplicate.iter().enumerate() {
         attempts += 1;
-        match score_one(scorer, text) {
-            Ok((p, t, tok)) => {
-                dup_perp.push(p);
-                dup_tail.push(t);
+        match score_entry(text) {
+            Ok((perp, rarity, tok)) => {
+                if let Some((a, t)) = perp {
+                    dup_perp.push(a);
+                    dup_tail.push(t);
+                }
+                if let Some(a) = rarity {
+                    dup_rarity.push(a);
+                }
                 total_tokens = total_tokens.saturating_add(tok);
             }
             Err(e) => {
@@ -257,48 +370,54 @@ pub async fn run_candidate_eval(
     tracing::info!(
         candidate_id = %candidate.id,
         slice = "duplicate",
-        scored = dup_perp.len() - dup_scored_before,
+        scored = dup_perp.len().max(dup_rarity.len()) - dup_scored_before,
         failed = failures - dup_failures_before,
         elapsed_seconds = duplicate_slice_start.elapsed().as_secs_f64(),
         "candidate_slice_done"
     );
 
+    // Paraphrase pairs are only used by the legacy paraphrase-delta metric,
+    // which is perplexity-derived. Skip the slice entirely when the
+    // perplexity scorer is absent (rarity-only mode) — paraphrase_delta
+    // collapses to 0.0 for that path, mirroring its empty-input contract.
     let paraphrase_slice_start = Instant::now();
     let para_scored_before = para_pairs.len();
     let para_failures_before = failures;
-    for (i, pair) in corpus.paraphrase.iter().enumerate() {
-        attempts += 2;
-        let orig = score_one(scorer, &pair.original);
-        let para = score_one(scorer, &pair.paraphrase);
-        match (orig, para) {
-            (Ok((op, _, otok)), Ok((pp, _, ptok))) => {
-                total_tokens = total_tokens.saturating_add(otok);
-                total_tokens = total_tokens.saturating_add(ptok);
-                para_pairs.push((op, pp));
-            }
-            (orig_res, para_res) => {
-                if let Err(e) = &orig_res {
-                    failures += 1;
-                    tracing::warn!(
-                        candidate_id = %candidate.id,
-                        slice = "paraphrase_original",
-                        entry_index = i,
-                        err = %hash_err(e),
-                        "score_failed"
-                    );
+    if let Some(scorer) = scorers.perplexity {
+        for (i, pair) in corpus.paraphrase.iter().enumerate() {
+            attempts += 2;
+            let orig = score_one(scorer, &pair.original);
+            let para = score_one(scorer, &pair.paraphrase);
+            match (orig, para) {
+                (Ok((op, _, otok)), Ok((pp, _, ptok))) => {
+                    total_tokens = total_tokens.saturating_add(otok);
+                    total_tokens = total_tokens.saturating_add(ptok);
+                    para_pairs.push((op, pp));
                 }
-                if let Err(e) = &para_res {
-                    failures += 1;
-                    tracing::warn!(
-                        candidate_id = %candidate.id,
-                        slice = "paraphrase",
-                        entry_index = i,
-                        err = %hash_err(e),
-                        "score_failed"
-                    );
+                (orig_res, para_res) => {
+                    if let Err(e) = &orig_res {
+                        failures += 1;
+                        tracing::warn!(
+                            candidate_id = %candidate.id,
+                            slice = "paraphrase_original",
+                            entry_index = i,
+                            err = %hash_err(e),
+                            "score_failed"
+                        );
+                    }
+                    if let Err(e) = &para_res {
+                        failures += 1;
+                        tracing::warn!(
+                            candidate_id = %candidate.id,
+                            slice = "paraphrase",
+                            entry_index = i,
+                            err = %hash_err(e),
+                            "score_failed"
+                        );
+                    }
+                    // Skip the pair entirely; partial pairs aren't meaningful
+                    // for the paraphrase-delta metric.
                 }
-                // Skip the pair entirely; partial pairs aren't meaningful
-                // for the paraphrase-delta metric.
             }
         }
     }
@@ -328,26 +447,81 @@ pub async fn run_candidate_eval(
         }
     }
 
-    // ---- 2. Compute the three primary metrics. --------------------------
+    // ---- 2. Compute primary metrics. ------------------------------------
+    // Perplexity-derived metrics populate the legacy `CandidateResult`
+    // fields. When perplexity is absent (rarity-only mode), AUC is 0.5 (the
+    // empty-input convention) and tail / paraphrase collapse to 0. The
+    // decision rule already requires `passed_determinism_gate = true` to
+    // pick a winner, so a rarity-only run cannot accidentally elect one
+    // through these zeroed fields.
     let auc = discrimination_auc(&novel_perp, &dup_perp);
     let para_delta = paraphrase_delta(&para_pairs);
     let tail_range = tail_fraction_range(&novel_tail, &dup_tail);
 
+    let rarity_auc = if scorers.token_rarity.is_some() {
+        Some(discrimination_auc(&novel_rarity, &dup_rarity))
+    } else {
+        None
+    };
+
+    // Build the per-metric report sub-block when at least one scorer's
+    // metrics need to surface beyond the legacy fields. Perplexity-only
+    // runs skip this block entirely so existing report consumers see the
+    // same JSON shape they saw before A.5.
+    let metrics_block = if scorers.token_rarity.is_some() {
+        let perplexity_block = scorers.perplexity.map(|_| MetricBlock {
+            discrimination_auc: auc,
+            novel_scores: novel_perp.clone(),
+            duplicate_scores: dup_perp.clone(),
+        });
+        let rarity_block = TokenRarityMetricBlock {
+            discrimination_auc: rarity_auc.unwrap_or(0.5),
+            novel_scores: novel_rarity.clone(),
+            duplicate_scores: dup_rarity.clone(),
+            k: scorers.token_rarity_k.min(u32::MAX as usize) as u32,
+        };
+        Some(CandidateMetrics {
+            perplexity: perplexity_block,
+            token_rarity: Some(rarity_block),
+        })
+    } else {
+        None
+    };
+
     // ---- 3. Determinism replay. -----------------------------------------
+    // Use perplexity when available (the production-decision metric); fall
+    // back to rarity only in rarity-only mode. Mixing both in one stddev
+    // would conflate two metric scales; the bake-off decision rule reads
+    // exactly one column so we replay exactly one.
     let sample_n = DETERMINISM_SAMPLE_SIZE.min(corpus.novel.len());
     tracing::info!(
         candidate_id = %candidate.id,
         entries = sample_n,
         repeat_runs,
+        det_scorer = if scorers.perplexity.is_some() {
+            "perplexity"
+        } else {
+            "token_rarity"
+        },
         "determinism_replay_start"
     );
     let mut runs: Vec<Vec<f64>> = Vec::with_capacity(repeat_runs as usize);
     for _ in 0..repeat_runs {
         let mut row: Vec<f64> = Vec::with_capacity(sample_n);
         for text in corpus.novel.iter().take(sample_n) {
-            match score_one(scorer, text) {
-                Ok((p, _, _)) => row.push(p),
-                Err(_) => {
+            let sample: Result<f64, ()> = if let Some(p) = scorers.perplexity {
+                score_one(p, text).map(|(a, _, _)| a).map_err(|_| ())
+            } else if let Some(r) = scorers.token_rarity {
+                score_one_rarity(r, text, scorers.token_rarity_k)
+                    .map(|(a, _)| a)
+                    .map_err(|_| ())
+            } else {
+                // assert_at_least_one above forbids this branch.
+                unreachable!("EvalScorers empty after assert_at_least_one passed");
+            };
+            match sample {
+                Ok(v) => row.push(v),
+                Err(()) => {
                     // Determinism samples that fail leave an NaN-equivalent
                     // hole; we substitute zero so the population stddev
                     // computation doesn't trip over missing entries. A
@@ -402,6 +576,7 @@ pub async fn run_candidate_eval(
         candidate_id = %candidate.id,
         auc, para_delta, tail_range, det_stddev, tokens_per_second, peak_vram,
         passed_det_gate,
+        token_rarity_auc = ?rarity_auc,
         "run_candidate_eval complete"
     );
 
@@ -418,6 +593,7 @@ pub async fn run_candidate_eval(
         passed_determinism_gate: passed_det_gate,
         release_date_unix,
         load_or_eval_error: None,
+        metrics: metrics_block,
     })
 }
 
