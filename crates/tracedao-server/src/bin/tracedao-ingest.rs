@@ -43,6 +43,8 @@ use tracedao_server::trace_artifact_store::{
     LocalEncryptedTraceArtifactStore, ServiceOwnedTraceArtifactStore, TraceArtifactKind,
     TraceArtifactProviderConfig, TraceArtifactStore,
 };
+#[cfg(test)]
+use tracedao_server::trace_corpus_storage::TraceRevocationPropagationTargetKind as StorageTraceRevocationPropagationTargetKind;
 use tracedao_server::trace_corpus_storage::{
     TraceArtifactInvalidationCounts as StorageTraceArtifactInvalidationCounts,
     TraceAuditAction as StorageTraceAuditAction,
@@ -126,7 +128,6 @@ use tracedao_server::trace_corpus_storage::{
     TraceRevocationPropagationItemStatusUpdate as StorageTraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite as StorageTraceRevocationPropagationItemWrite,
     TraceRevocationPropagationTarget as StorageTraceRevocationPropagationTarget,
-    TraceRevocationPropagationTargetKind as StorageTraceRevocationPropagationTargetKind,
     TraceSubmissionRecord as StorageTraceSubmissionRecord,
     TraceSubmissionWrite as StorageTraceSubmissionWrite,
     TraceTenantAccessGrantRecord as StorageTraceTenantAccessGrantRecord,
@@ -14238,6 +14239,7 @@ async fn utility_attestation_handler(
     }))
 }
 
+#[cfg(test)]
 async fn credit_settlement_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
