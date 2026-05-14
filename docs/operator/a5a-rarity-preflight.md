@@ -16,6 +16,22 @@ Authoritative design: `docs/superpowers/specs/2026-05-14-a5a-rarity-real-scorer-
 
 ## When to fire this runbook
 
+> **DEFERRED (2026-05-14, post-A2.6 partial).** Qwen 3.6 27B Dense
+> landed AUC 0.936 on A2.6's agent-traces corpus, well above 0.5. Per
+> the A2.6 outcome map, this triggers A2.7 (perplexity floor
+> recalibration), NOT A.5. **A.5 (and therefore this pre-flight) is
+> DEFERRED.** Gemma 4 31B is still in flight; this runbook would only
+> re-activate if Gemma confirms a categorical failure mode the 27B
+> somehow masked (very unlikely). See
+> `project_perplexity_size_pattern.md` memory for the size-pattern
+> finding (perplexity is not broken — it just needs a model big
+> enough). Do not fire this runbook against current A2.6 evidence.
+> Retained for reference, not execution.
+
+The original activation criteria below remain authoritative for any
+future re-activation (e.g. if Gemma 4 31B's final AUC contradicts the
+27B result):
+
 Only fire after **both** of the following are true:
 
 1. A2.6 final results are recorded in `docs/superpowers/reports/` and the

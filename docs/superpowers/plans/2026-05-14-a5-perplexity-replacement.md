@@ -1,6 +1,18 @@
 # Phase A.5 Perplexity-Replacement Metric Implementation Plan (STUB)
 
-> **Status:** STUB — activated only on A2.6 AUC < 0.4. Until then, do not execute. The spec at `docs/superpowers/specs/2026-05-14-a5-perplexity-replacement-design.md` is authoritative for design intent.
+> **Status:** DEFERRED (2026-05-14, post-A2.6 partial). Qwen 3.6 27B
+> Dense landed AUC 0.936 on A2.6's agent-traces corpus, well above 0.5.
+> Per the A2.6 outcome map, this triggers A2.7 (perplexity floor
+> recalibration), NOT A.5. **A.5 is therefore DEFERRED.** Gemma 4 31B
+> still in flight; A.5 would only re-activate if Gemma confirms a
+> categorical failure mode the 27B somehow masked (very unlikely). See
+> `project_perplexity_size_pattern.md` memory for the size pattern
+> finding (perplexity is not broken — it just needs a model big
+> enough). Artifacts retained for reference, not execution. Do not
+> execute this plan. The original gating language is preserved below
+> for re-activation context.
+>
+> **Original status (pre-A2.6 partial):** STUB — activated only on A2.6 AUC < 0.4. Until then, do not execute. The spec at `docs/superpowers/specs/2026-05-14-a5-perplexity-replacement-design.md` is authoritative for design intent.
 >
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
