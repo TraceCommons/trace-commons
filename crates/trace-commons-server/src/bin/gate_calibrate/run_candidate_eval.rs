@@ -24,7 +24,7 @@ use super::bakeoff_manifest::{Candidate, CandidateArch, CandidateLicense};
 use super::bakeoff_metrics::{
     determinism_stddev, discrimination_auc, paraphrase_delta, tail_fraction_range,
 };
-use super::bakeoff_report::{CandidateResult, License, DETERMINISM_GATE};
+use super::bakeoff_report::{CandidateResult, DETERMINISM_GATE, License};
 
 /// Conversion of `u64` micros (scorer output) to floating-point. Centralized
 /// so the metric-feeding code reads as one boundary cross rather than a
@@ -66,10 +66,7 @@ pub fn peak_vram_mib(device: DeviceKind) -> anyhow::Result<u64> {
         return Ok(0);
     }
     let out = match std::process::Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=memory.used",
-            "--format=csv,noheader,nounits",
-        ])
+        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
         .output()
     {
         Ok(o) => o,
@@ -142,10 +139,7 @@ fn infer_params_b(candidate_path: &std::path::Path) -> Option<u32> {
 /// Score one entry and convert micros to (perplexity_f64, tail_f64,
 /// tokens_scored). Returns `Err` on scorer failure so the caller can count
 /// it toward the failure-rate budget.
-fn score_one(
-    scorer: &dyn PerplexityScorer,
-    text: &str,
-) -> anyhow::Result<(f64, f64, u64)> {
+fn score_one(scorer: &dyn PerplexityScorer, text: &str) -> anyhow::Result<(f64, f64, u64)> {
     let r: PerplexityResult = scorer.score(text.as_bytes())?;
     Ok((
         micros_to_f64(r.aggregate_perplexity_micros),

@@ -84,10 +84,7 @@ impl GcsObjectClient for InMemoryGcsObjectClient {
 
     fn delete_object(&self, key: &str) -> anyhow::Result<bool> {
         if let Some(record) = self.live.lock().unwrap().remove(key) {
-            self.deleted
-                .lock()
-                .unwrap()
-                .insert(key.to_string(), record);
+            self.deleted.lock().unwrap().insert(key.to_string(), record);
             Ok(true)
         } else {
             Ok(false)
@@ -321,9 +318,7 @@ pub mod prod_client {
     use google_cloud_storage::http::objects::get::GetObjectRequest;
     use google_cloud_storage::http::objects::list::ListObjectsRequest;
     use google_cloud_storage::http::objects::rewrite::RewriteObjectRequest;
-    use google_cloud_storage::http::objects::upload::{
-        Media, UploadObjectRequest, UploadType,
-    };
+    use google_cloud_storage::http::objects::upload::{Media, UploadObjectRequest, UploadType};
     use tokio::runtime::Handle;
     use tokio::task::block_in_place;
 
@@ -428,15 +423,10 @@ pub mod prod_client {
             };
             let object = run_blocking(self.client.get_object(&get_req))
                 .map_err(|err| anyhow::anyhow!("GcsGetFailed: {err}"))?;
-            let body = run_blocking(
-                self.client.download_object(&get_req, &Range::default()),
-            )
-            .map_err(|err| anyhow::anyhow!("GcsGetFailed: {err}"))?;
-            let metadata: BTreeMap<String, String> = object
-                .metadata
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
+            let body = run_blocking(self.client.download_object(&get_req, &Range::default()))
+                .map_err(|err| anyhow::anyhow!("GcsGetFailed: {err}"))?;
+            let metadata: BTreeMap<String, String> =
+                object.metadata.unwrap_or_default().into_iter().collect();
             Ok(GcsObjectFetch {
                 body: Bytes::from(body),
                 metadata,

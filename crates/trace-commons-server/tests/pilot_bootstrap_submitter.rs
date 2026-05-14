@@ -41,13 +41,11 @@ async fn submitter_records_accepted_outcomes_in_sidecar() {
     Mock::given(method("POST"))
         .and(path("/v1/traces"))
         .and(header("authorization", "Bearer test-token"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({
-                "status": "accepted",
-                "credit_points_pending": 0.0,
-                "explanation": []
-            })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "accepted",
+            "credit_points_pending": 0.0,
+            "explanation": []
+        })))
         .mount(&server)
         .await;
 

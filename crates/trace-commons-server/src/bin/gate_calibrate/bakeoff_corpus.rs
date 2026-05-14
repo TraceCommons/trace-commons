@@ -34,8 +34,7 @@ struct ParaphraseLine {
 }
 
 pub fn load_corpus(tarball: &Path) -> anyhow::Result<LoadedCorpus> {
-    let file = fs::File::open(tarball)
-        .map_err(|e| anyhow::anyhow!("open corpus tarball: {e}"))?;
+    let file = fs::File::open(tarball).map_err(|e| anyhow::anyhow!("open corpus tarball: {e}"))?;
     let dec = zstd::Decoder::new(BufReader::new(file))
         .map_err(|e| anyhow::anyhow!("zstd decode: {e}"))?;
     let mut archive = tar::Archive::new(dec);
@@ -60,9 +59,12 @@ pub fn load_corpus(tarball: &Path) -> anyhow::Result<LoadedCorpus> {
     verify_sha("duplicate", &dup_sha, &manifest.duplicate_sha256)?;
 
     // Paraphrase slice is a single jsonl file; sha covers the raw bytes.
-    let jsonl_path = extract_dir.path().join("paraphrase").join("paraphrase.jsonl");
-    let jsonl_bytes = fs::read(&jsonl_path)
-        .map_err(|e| anyhow::anyhow!("read paraphrase.jsonl: {e}"))?;
+    let jsonl_path = extract_dir
+        .path()
+        .join("paraphrase")
+        .join("paraphrase.jsonl");
+    let jsonl_bytes =
+        fs::read(&jsonl_path).map_err(|e| anyhow::anyhow!("read paraphrase.jsonl: {e}"))?;
     let para_sha = sha256_label(&[&jsonl_bytes]);
     verify_sha("paraphrase", &para_sha, &manifest.paraphrase_sha256)?;
 
@@ -75,9 +77,8 @@ pub fn load_corpus(tarball: &Path) -> anyhow::Result<LoadedCorpus> {
         if line.trim().is_empty() {
             continue;
         }
-        let pl: ParaphraseLine = serde_json::from_str(line).map_err(|e| {
-            anyhow::anyhow!("paraphrase.jsonl line {lineno} parse error: {e}")
-        })?;
+        let pl: ParaphraseLine = serde_json::from_str(line)
+            .map_err(|e| anyhow::anyhow!("paraphrase.jsonl line {lineno} parse error: {e}"))?;
         paraphrase.push(ParaphrasePair {
             original: pl.original,
             paraphrase: pl.paraphrase,
@@ -106,9 +107,8 @@ fn read_text_slice(dir: &Path) -> anyhow::Result<(Vec<String>, String)> {
     for entry in &entries {
         let bytes = fs::read(entry.path())
             .map_err(|e| anyhow::anyhow!("read slice file {:?}: {e}", entry.file_name()))?;
-        let text = String::from_utf8(bytes.clone()).map_err(|e| {
-            anyhow::anyhow!("slice file {:?} not utf8: {e}", entry.file_name())
-        })?;
+        let text = String::from_utf8(bytes.clone())
+            .map_err(|e| anyhow::anyhow!("slice file {:?} not utf8: {e}", entry.file_name()))?;
         bodies.push(bytes);
         texts.push(text);
     }

@@ -130,8 +130,10 @@ pub fn weighted_score(r: &CandidateResult, tail_norm_max: f64) -> f64 {
 /// 5. Break ties by: license permissiveness DESC, params_b ASC, release_date DESC.
 pub fn pick_winner(results: &[CandidateResult]) -> Option<&CandidateResult> {
     // Step 1: determinism gate.
-    let gated: Vec<&CandidateResult> =
-        results.iter().filter(|r| r.passed_determinism_gate).collect();
+    let gated: Vec<&CandidateResult> = results
+        .iter()
+        .filter(|r| r.passed_determinism_gate)
+        .collect();
     if gated.is_empty() {
         return None;
     }

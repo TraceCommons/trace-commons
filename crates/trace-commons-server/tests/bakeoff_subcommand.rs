@@ -189,8 +189,7 @@ fn bake_off_subcommand_writes_mock_report() {
     );
 
     // Companion markdown must include the loud mock banner.
-    let md_bytes =
-        fs::read(report_json.with_extension("md")).expect("markdown companion exists");
+    let md_bytes = fs::read(report_json.with_extension("md")).expect("markdown companion exists");
     let md = String::from_utf8(md_bytes).expect("markdown utf8");
     assert!(
         md.contains("[MOCK SCORER"),
@@ -361,5 +360,8 @@ fn bake_off_subcommand_respects_skip_models() {
         serde_json::from_slice(&fs::read(&report_json).unwrap()).unwrap();
     let cands = report.get("candidates").unwrap().as_array().unwrap();
     assert_eq!(cands.len(), 1);
-    assert_eq!(cands[0].get("id").unwrap().as_str().unwrap(), "llama-3.1-8b-instruct");
+    assert_eq!(
+        cands[0].get("id").unwrap().as_str().unwrap(),
+        "llama-3.1-8b-instruct"
+    );
 }

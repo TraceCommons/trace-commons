@@ -21,7 +21,7 @@ use trace_commons_gate_enclave::perplexity::{MockPerplexityScorer, PerplexityRes
 
 use bakeoff_corpus::{LoadedCorpus, ParaphrasePair};
 use bakeoff_manifest::{Candidate, CandidateArch, CandidateLicense};
-use run_candidate_eval::{run_candidate_eval, DeviceKind};
+use run_candidate_eval::{DeviceKind, run_candidate_eval};
 
 fn synth_corpus() -> LoadedCorpus {
     LoadedCorpus {

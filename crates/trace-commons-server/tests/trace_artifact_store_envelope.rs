@@ -95,8 +95,11 @@ fn read_refuses_v2_envelope_with_wrapped_dek_stripped() {
         .expect("record has artifact field");
     let obj = artifact.as_object_mut().expect("artifact is object");
     obj.remove("wrapped_dek");
-    std::fs::write(&path, serde_json::to_vec_pretty(&record).expect("reserialize"))
-        .expect("write tampered record");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&record).expect("reserialize"),
+    )
+    .expect("write tampered record");
 
     let err = store
         .read_scoped_artifact(&scope, &receipt.object_ref)
@@ -128,8 +131,11 @@ fn read_refuses_v1_envelope_with_injected_wrapped_dek() {
     let mut record: Value = serde_json::from_str(&body).expect("record parses");
     record["artifact"]["schema_version"] =
         Value::String(TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_VERSION.to_string());
-    std::fs::write(&path, serde_json::to_vec_pretty(&record).expect("reserialize"))
-        .expect("write tampered record");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&record).expect("reserialize"),
+    )
+    .expect("write tampered record");
 
     let err = store
         .read_scoped_artifact(&scope, &receipt.object_ref)
@@ -161,8 +167,11 @@ fn read_refuses_envelope_with_unknown_schema_version() {
     let mut record: Value = serde_json::from_str(&body).expect("record parses");
     record["artifact"]["schema_version"] =
         Value::String("ironclaw.trace_artifact_ciphertext.v3".to_string());
-    std::fs::write(&path, serde_json::to_vec_pretty(&record).expect("reserialize"))
-        .expect("write tampered record");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&record).expect("reserialize"),
+    )
+    .expect("write tampered record");
 
     let err = store
         .read_scoped_artifact(&scope, &receipt.object_ref)

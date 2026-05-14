@@ -591,10 +591,7 @@ mod enclave_gate_service_tests {
     fn fixture_decryptor() -> Arc<dyn KmsKeyWrapper> {
         let crypto = SecretsCrypto::new(SecretString::new("a".repeat(32).into()))
             .expect("fixture SecretsCrypto");
-        Arc::new(LocalMasterKeyWrapper::new(
-            crypto,
-            "enclave-gate-fixture",
-        ))
+        Arc::new(LocalMasterKeyWrapper::new(crypto, "enclave-gate-fixture"))
     }
 
     fn wrap_fixture_dek(
@@ -708,9 +705,8 @@ mod enclave_gate_service_tests {
 
         let tenant = TenantCtx::new("tenant-del-test");
         let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
-        let ciphertext =
-            aead_encrypt_with_dek(&dek, b"delete-restore-novelty-plaintext")
-                .expect("encrypt fixture");
+        let ciphertext = aead_encrypt_with_dek(&dek, b"delete-restore-novelty-plaintext")
+            .expect("encrypt fixture");
 
         // First evaluation — entry should be inserted and entry_id surfaced.
         let first = svc

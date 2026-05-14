@@ -13,7 +13,7 @@ pub mod translators;
 use hf_dataset::{list_parquet_shards, stream_parquet_rows};
 use sidecar::{Sidecar, SidecarRecord};
 use submitter::Submitter;
-use translators::{translator_by_name, Translator};
+use translators::{Translator, translator_by_name};
 
 /// Parsed configuration handed to [`run_pilot_bootstrap`].
 #[derive(Debug, Clone)]
@@ -113,8 +113,7 @@ pub async fn run_pilot_bootstrap(config: PilotBootstrapConfig) -> Result<()> {
         "translator resolved"
     );
 
-    let shards =
-        list_parquet_shards(&config.source, config.cache_dir.as_deref()).await?;
+    let shards = list_parquet_shards(&config.source, config.cache_dir.as_deref()).await?;
     tracing::info!(
         target: "trace_commons_pilot_bootstrap",
         shard_count = shards.len(),

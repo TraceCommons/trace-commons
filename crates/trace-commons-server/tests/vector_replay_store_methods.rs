@@ -14,12 +14,11 @@ use std::collections::BTreeMap;
 use chrono::{Duration, Utc};
 use secrecy::SecretString;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
-use trace_commons_server::db::{postgres::PgBackend, Database};
+use trace_commons_server::db::{Database, postgres::PgBackend};
 use trace_commons_server::trace_corpus_storage::{
-    TraceCorpusStatus, TraceCorpusStore, TraceGateDecisionRow,
-    TraceRevocationPropagationAction, TraceRevocationPropagationItemStatus,
-    TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget,
-    TraceSubmissionWrite,
+    TraceCorpusStatus, TraceCorpusStore, TraceGateDecisionRow, TraceRevocationPropagationAction,
+    TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemWrite,
+    TraceRevocationPropagationTarget, TraceSubmissionWrite,
 };
 use uuid::Uuid;
 
@@ -36,9 +35,7 @@ fn postgres_test_config() -> Option<DatabaseConfig> {
 
 async fn postgres_backend() -> Option<PgBackend> {
     let Some(config) = postgres_test_config() else {
-        eprintln!(
-            "skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured"
-        );
+        eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured");
         return None;
     };
     match PgBackend::new(&config).await {
@@ -95,7 +92,11 @@ fn sample_gate_decision(
         embedding_evidence_hash: "sha256:fixture-evidence".to_string(),
         attestation_chain_hash: "sha256:fixture-attestation".to_string(),
         decided_at: Utc::now() + Duration::seconds(decided_at_offset_seconds),
-        vector_entry_id: if with_vector_entry { Some(Uuid::new_v4()) } else { None },
+        vector_entry_id: if with_vector_entry {
+            Some(Uuid::new_v4())
+        } else {
+            None
+        },
         credit_withheld_reason: None,
     }
 }
@@ -184,9 +185,11 @@ async fn stream_trace_gate_decisions_for_replay_filters_null_vector_entries_and_
         3,
         "exactly the three with-vector-entry alpha rows"
     );
-    assert!(all_alpha
-        .iter()
-        .all(|r| r.decision_id != beta_decision.decision_id));
+    assert!(
+        all_alpha
+            .iter()
+            .all(|r| r.decision_id != beta_decision.decision_id)
+    );
 }
 
 #[tokio::test]
@@ -279,22 +282,30 @@ async fn is_vector_entry_revoked_returns_true_only_for_done_invalidate_vector() 
         .await
         .expect("insert other kind");
 
-    assert!(backend
-        .is_vector_entry_revoked(&tenant_id, entry_done)
-        .await
-        .expect("done"));
-    assert!(!backend
-        .is_vector_entry_revoked(&tenant_id, entry_pending)
-        .await
-        .expect("pending"));
-    assert!(!backend
-        .is_vector_entry_revoked(&tenant_id, entry_other_kind)
-        .await
-        .expect("other kind"));
-    assert!(!backend
-        .is_vector_entry_revoked(&tenant_id, entry_never)
-        .await
-        .expect("never recorded"));
+    assert!(
+        backend
+            .is_vector_entry_revoked(&tenant_id, entry_done)
+            .await
+            .expect("done")
+    );
+    assert!(
+        !backend
+            .is_vector_entry_revoked(&tenant_id, entry_pending)
+            .await
+            .expect("pending")
+    );
+    assert!(
+        !backend
+            .is_vector_entry_revoked(&tenant_id, entry_other_kind)
+            .await
+            .expect("other kind")
+    );
+    assert!(
+        !backend
+            .is_vector_entry_revoked(&tenant_id, entry_never)
+            .await
+            .expect("never recorded")
+    );
 
     // Cross-tenant: a Done row for entry_done under tenant_id must NOT be
     // visible from a different tenant context.
@@ -303,8 +314,10 @@ async fn is_vector_entry_revoked_returns_true_only_for_done_invalidate_vector() 
         .upsert_trace_submission(sample_submission(&other_tenant_id, submission_id))
         .await
         .expect("insert other-tenant submission");
-    assert!(!backend
-        .is_vector_entry_revoked(&other_tenant_id, entry_done)
-        .await
-        .expect("cross-tenant"));
+    assert!(
+        !backend
+            .is_vector_entry_revoked(&other_tenant_id, entry_done)
+            .await
+            .expect("cross-tenant")
+    );
 }

@@ -34,9 +34,7 @@ pub fn l2_normalize_in_place(v: &mut [f32]) -> anyhow::Result<()> {
     let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     let epsilon = f32::EPSILON * (v.len().max(1) as f32);
     if !(norm > epsilon) {
-        anyhow::bail!(
-            "EmbedderDegenerateVector: norm {norm} not above epsilon {epsilon}"
-        );
+        anyhow::bail!("EmbedderDegenerateVector: norm {norm} not above epsilon {epsilon}");
     }
     for x in v.iter_mut() {
         *x /= norm;
@@ -187,13 +185,9 @@ mod fastembed_impl {
             // unrecognized ids at startup; the previous silent fallback to
             // BGE-large could mask a typo and stamp every audit row with
             // the wrong gate version.
-            let model_enum = parse_embedding_model(&model_id)
-                .with_context(|| {
-                    format!(
-                        "EmbedderModelIdUnrecognized: {}",
-                        redact_label(&model_id)
-                    )
-                })?;
+            let model_enum = parse_embedding_model(&model_id).with_context(|| {
+                format!("EmbedderModelIdUnrecognized: {}", redact_label(&model_id))
+            })?;
 
             // Determine the model's native output dimension from fastembed's
             // metadata. We do this before constructing the model so that
@@ -299,8 +293,7 @@ mod fastembed_impl {
                 v.len()
             );
 
-            l2_normalize_in_place(&mut v)
-                .context("EmbedderNormalizationFailed")?;
+            l2_normalize_in_place(&mut v).context("EmbedderNormalizationFailed")?;
             Ok(v)
         }
     }
@@ -379,16 +372,16 @@ mod fastembed_impl {
         #[tokio::test]
         #[ignore]
         async fn fastembed_smoke_determinism_and_similarity() {
-            if std::env::var("TRACE_COMMONS_EMBEDDER_INTEGRATION").ok().as_deref()
+            if std::env::var("TRACE_COMMONS_EMBEDDER_INTEGRATION")
+                .ok()
+                .as_deref()
                 != Some("1")
             {
-                eprintln!(
-                    "skipping: set TRACE_COMMONS_EMBEDDER_INTEGRATION=1 to run"
-                );
+                eprintln!("skipping: set TRACE_COMMONS_EMBEDDER_INTEGRATION=1 to run");
                 return;
             }
-            let cache_dir = std::env::var("TRACE_COMMONS_EMBEDDER_CACHE_DIR")
-                .unwrap_or_else(|_| {
+            let cache_dir =
+                std::env::var("TRACE_COMMONS_EMBEDDER_CACHE_DIR").unwrap_or_else(|_| {
                     std::env::temp_dir()
                         .join("trace-commons-embedder-it")
                         .to_string_lossy()
@@ -396,14 +389,10 @@ mod fastembed_impl {
                 });
             let _ = std::fs::create_dir_all(&cache_dir);
 
-            let embedder = FastEmbedTextEmbedder::try_new(
-                "BAAI/bge-large-en-v1.5",
-                &cache_dir,
-                None,
-                512,
-            )
-            .await
-            .expect("embedder constructs");
+            let embedder =
+                FastEmbedTextEmbedder::try_new("BAAI/bge-large-en-v1.5", &cache_dir, None, 512)
+                    .await
+                    .expect("embedder constructs");
 
             // (1) Smoke: vector is unit-normalized and has the expected dim.
             let v = embedder
@@ -411,10 +400,7 @@ mod fastembed_impl {
                 .expect("embed must succeed");
             assert_eq!(v.len(), embedder.output_dim());
             let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-            assert!(
-                (norm - 1.0).abs() < 1e-3,
-                "expected unit norm, got {norm}"
-            );
+            assert!((norm - 1.0).abs() < 1e-3, "expected unit norm, got {norm}");
 
             // (2) Determinism: same input → exact equality.
             let v2 = embedder

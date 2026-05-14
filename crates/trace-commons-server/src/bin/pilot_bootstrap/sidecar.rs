@@ -56,8 +56,7 @@ impl Sidecar {
     }
 
     pub fn write(&self, record: &SidecarRecord) -> Result<()> {
-        let line = serde_json::to_string(record)
-            .with_context(|| "serialize sidecar record")?;
+        let line = serde_json::to_string(record).with_context(|| "serialize sidecar record")?;
         let mut guard = self
             .inner
             .lock()
@@ -68,9 +67,7 @@ impl Sidecar {
         guard
             .write_all(b"\n")
             .with_context(|| "write sidecar newline")?;
-        guard
-            .flush()
-            .with_context(|| "flush sidecar")?;
+        guard.flush().with_context(|| "flush sidecar")?;
         Ok(())
     }
 

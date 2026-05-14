@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 #[path = "../src/bin/gate_calibrate/bakeoff_manifest.rs"]
 mod bakeoff_manifest;
-use bakeoff_manifest::{parse_manifest_str, CandidateArch, CandidateLicense};
+use bakeoff_manifest::{CandidateArch, CandidateLicense, parse_manifest_str};
 
 #[test]
 fn parses_minimal_two_candidate_manifest() {
@@ -51,9 +51,10 @@ license = "apache-2.0"
 #[test]
 fn rejects_empty_manifest() {
     let err = parse_manifest_str("").unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("manifest must contain at least one candidate"));
+    assert!(
+        err.to_string()
+            .contains("manifest must contain at least one candidate")
+    );
 }
 
 #[test]
