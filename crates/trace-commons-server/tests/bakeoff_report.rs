@@ -18,6 +18,7 @@ fn result(id: &str, auc: f64, para: f64, tail: f64, throughput: f64, det: f64) -
         release_date_unix: 0,
         load_or_eval_error: None,
         metrics: None,
+        per_trace_scores: None,
     }
 }
 
@@ -262,6 +263,48 @@ fn rarity_table_renders_in_markdown_when_metrics_present() {
 }
 
 #[test]
+fn per_trace_scores_omitted_from_json_when_none() {
+    // Default-mode reports (no per-trace block) must serialize without a
+    // `per_trace_scores` key so A2.6 / archived report consumers don't see
+    // a new field unless the bake-off explicitly populated it.
+    let r = result("x", 0.9, 0.1, 0.5, 1000.0, 1e-7);
+    let json = serde_json::to_string(&r).unwrap();
+    assert!(
+        !json.contains("per_trace_scores"),
+        "unexpected per_trace_scores key: {json}"
+    );
+}
+
+#[test]
+fn per_trace_scores_round_trips_through_json_with_nulls() {
+    // The per-trace block is the canonical wire format for the A2.7
+    // calibration consumer; serde must round-trip every slice plus the
+    // `None` markers that flag scorer failures (e.g. Gemma 4 31B's OOMs).
+    let mut c = result("x", 0.9, 0.1, 0.5, 1000.0, 1e-7);
+    c.per_trace_scores = Some(bakeoff_report::PerTraceScores {
+        novel: vec![Some(2.5), None, Some(3.0)],
+        duplicate: vec![Some(1.0), Some(1.1)],
+        paraphrase_original: vec![Some(2.0), None],
+        paraphrase_back_translation: vec![Some(2.1), Some(2.2)],
+    });
+    let json = serde_json::to_string(&c).unwrap();
+    // JSON null is the wire form for a failed entry.
+    assert!(
+        json.contains("\"novel\":[2.5,null,3.0]"),
+        "novel slice should serialize None as JSON null: {json}"
+    );
+    let back: bakeoff_report::CandidateResult = serde_json::from_str(&json).unwrap();
+    let pts = back
+        .per_trace_scores
+        .as_ref()
+        .expect("per_trace_scores must round-trip");
+    assert_eq!(pts.novel, vec![Some(2.5), None, Some(3.0)]);
+    assert_eq!(pts.duplicate, vec![Some(1.0), Some(1.1)]);
+    assert_eq!(pts.paraphrase_original, vec![Some(2.0), None]);
+    assert_eq!(pts.paraphrase_back_translation, vec![Some(2.1), Some(2.2)]);
+}
+
+#[test]
 fn rarity_block_round_trips_through_json() {
     // The `metrics.token_rarity` sub-object is the canonical wire format
     // for the new column; serde must round-trip the field names.
@@ -287,6 +330,7 @@ fn rarity_block_round_trips_through_json() {
                 k: 10,
             }),
         }),
+        per_trace_scores: None,
     };
     let json = serde_json::to_string(&c).unwrap();
     let back: bakeoff_report::CandidateResult = serde_json::from_str(&json).unwrap();

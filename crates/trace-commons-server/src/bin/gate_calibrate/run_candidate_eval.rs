@@ -27,7 +27,7 @@ use super::bakeoff_metrics::{
     determinism_stddev, discrimination_auc, paraphrase_delta, tail_fraction_range,
 };
 use super::bakeoff_report::{
-    CandidateMetrics, CandidateResult, DETERMINISM_GATE, License, MetricBlock,
+    CandidateMetrics, CandidateResult, DETERMINISM_GATE, License, MetricBlock, PerTraceScores,
     TokenRarityMetricBlock,
 };
 
@@ -273,6 +273,16 @@ pub async fn run_candidate_eval(
     let mut novel_rarity: Vec<f64> = Vec::with_capacity(corpus.novel.len());
     let mut dup_rarity: Vec<f64> = Vec::with_capacity(corpus.duplicate.len());
 
+    // Parallel per-trace perplexity vectors for the A2.7-facing
+    // `per_trace_scores` field on the report row. These track every entry
+    // (including failures, which serialize as `None`) so the calibration
+    // consumer can compute Youden's-J / p10 without re-running the bake-off.
+    // Populated only when the perplexity scorer is active.
+    let mut novel_perp_full: Vec<Option<f64>> = Vec::with_capacity(corpus.novel.len());
+    let mut dup_perp_full: Vec<Option<f64>> = Vec::with_capacity(corpus.duplicate.len());
+    let mut para_orig_full: Vec<Option<f64>> = Vec::with_capacity(corpus.paraphrase.len());
+    let mut para_back_full: Vec<Option<f64>> = Vec::with_capacity(corpus.paraphrase.len());
+
     let mut total_tokens: u64 = 0;
     let mut attempts: u64 = 0;
     let mut failures: u64 = 0;
@@ -314,6 +324,12 @@ pub async fn run_candidate_eval(
                 if let Some((a, t)) = perp {
                     novel_perp.push(a);
                     novel_tail.push(t);
+                    novel_perp_full.push(Some(a));
+                } else if scorers.perplexity.is_some() {
+                    // Should not happen — score_entry returns Some(perp) when
+                    // the perplexity scorer is present. Defensive: keep the
+                    // index aligned with the slice length.
+                    novel_perp_full.push(None);
                 }
                 if let Some(a) = rarity {
                     novel_rarity.push(a);
@@ -322,6 +338,9 @@ pub async fn run_candidate_eval(
             }
             Err(e) => {
                 failures += 1;
+                if scorers.perplexity.is_some() {
+                    novel_perp_full.push(None);
+                }
                 tracing::warn!(
                     candidate_id = %candidate.id,
                     slice = "novel",
@@ -351,6 +370,9 @@ pub async fn run_candidate_eval(
                 if let Some((a, t)) = perp {
                     dup_perp.push(a);
                     dup_tail.push(t);
+                    dup_perp_full.push(Some(a));
+                } else if scorers.perplexity.is_some() {
+                    dup_perp_full.push(None);
                 }
                 if let Some(a) = rarity {
                     dup_rarity.push(a);
@@ -359,6 +381,9 @@ pub async fn run_candidate_eval(
             }
             Err(e) => {
                 failures += 1;
+                if scorers.perplexity.is_some() {
+                    dup_perp_full.push(None);
+                }
                 tracing::warn!(
                     candidate_id = %candidate.id,
                     slice = "duplicate",
@@ -390,6 +415,11 @@ pub async fn run_candidate_eval(
             attempts += 2;
             let orig = score_one(scorer, &pair.original);
             let para = score_one(scorer, &pair.paraphrase);
+            // Record each half independently in the per-trace vectors so the
+            // calibration consumer can still see one half of a partial pair;
+            // the legacy paraphrase-delta metric drops partial pairs below.
+            para_orig_full.push(orig.as_ref().ok().map(|(a, _, _)| *a));
+            para_back_full.push(para.as_ref().ok().map(|(a, _, _)| *a));
             match (orig, para) {
                 (Ok((op, _, otok)), Ok((pp, _, ptok))) => {
                     total_tokens = total_tokens.saturating_add(otok);
@@ -582,6 +612,20 @@ pub async fn run_candidate_eval(
         "run_candidate_eval complete"
     );
 
+    // Build the per-trace block from the parallel "with-None" vectors when
+    // the perplexity scorer was active. Rarity-only runs leave it absent
+    // (no perplexity column to record).
+    let per_trace_scores = if scorers.perplexity.is_some() {
+        Some(PerTraceScores {
+            novel: novel_perp_full,
+            duplicate: dup_perp_full,
+            paraphrase_original: para_orig_full,
+            paraphrase_back_translation: para_back_full,
+        })
+    } else {
+        None
+    };
+
     Ok(CandidateResult {
         id: candidate.id.clone(),
         discrimination_auc: auc,
@@ -596,6 +640,7 @@ pub async fn run_candidate_eval(
         release_date_unix,
         load_or_eval_error: None,
         metrics: metrics_block,
+        per_trace_scores,
     })
 }
 
