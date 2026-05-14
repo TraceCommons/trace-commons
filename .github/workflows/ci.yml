@@ -5,8 +5,9 @@
 # The CUDA variant (local-gpu-models-cuda) is operator-tested on GPU hosts
 # only — it requires the CUDA toolkit and is not exercised here.
 #
-# Format and clippy checks are intentionally omitted while the repo baseline
-# is dirty; they will be re-introduced in dedicated cleanup PRs.
+# cargo fmt --check is enforced as of the cargo-fmt cleanup PR. Clippy is
+# still intentionally omitted while the warning baseline is dirty; it will be
+# re-introduced in a dedicated cleanup PR.
 
 name: ci
 
@@ -26,6 +27,17 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  cargo-fmt-check:
+    name: cargo fmt --check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
   cargo-check-default:
     name: cargo check (default features)
     runs-on: ubuntu-latest
