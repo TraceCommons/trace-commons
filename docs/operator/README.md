@@ -14,6 +14,100 @@ the audit-fixes PR merges so the env-var surface is stable.
 
 Use this index as a contents page when the full runbook is filled in.
 
+## Quick links by scenario
+
+Start here. Find the row that matches what you are about to do and follow
+the link.
+
+| If you are... | Start with |
+|---|---|
+| First-time deploying `trace-commons-server` | [`./deployment.md`](./deployment.md) |
+| Setting gate floors or calibrating thresholds | [`./calibration.md`](./calibration.md) |
+| Validating a deployment before promoting | [`./smoke-test.md`](./smoke-test.md) |
+| Running the model bake-off | [`./calibration.md`](./calibration.md) (Phase 0) + [`./agent-traces-bakeoff-run.md`](./agent-traces-bakeoff-run.md) |
+| Running the pilot bootstrap harness | [`./pilot-bootstrap.md`](./pilot-bootstrap.md) |
+| Rotating cloud-KMS keys | [`./key-rotation.md`](./key-rotation.md) |
+| Swapping the gate model or embedder | [`./model-swap.md`](./model-swap.md) |
+| Restoring from backup | [`./backup-restore.md`](./backup-restore.md) |
+| Recovering a corrupted vector index | [`./vector-replay.md`](./vector-replay.md) |
+| Investigating an audit-chain failure | [`./audit-trail-forensics.md`](./audit-trail-forensics.md) |
+| Reading hash-only error classes from logs | [`./hash-only-logging.md`](./hash-only-logging.md) |
+| Interpreting `/v1/admin/operational-summary` | [`./operational-summary.md`](./operational-summary.md) |
+| Running or scheduling admin drills | [`./drills.md`](./drills.md) |
+| Looking up an env var | [`./env-reference.md`](./env-reference.md) |
+| Diagnosing a stuck or failing service | [`./troubleshooting.md`](./troubleshooting.md) |
+| Understanding the deployment topology | [`./architecture.md`](./architecture.md) |
+
+## Alphabetical reference
+
+Every runbook in this directory, with a one-line description.
+
+- [`./agent-traces-bakeoff-run.md`](./agent-traces-bakeoff-run.md) — operator
+  activity for the A2.6 agent-traces bake-off across candidate gate models.
+- [`./architecture.md`](./architecture.md) — one-page deployment topology
+  (KMS, PostgreSQL, GCS, GPU host, ingest binary).
+- [`./audit-trail-forensics.md`](./audit-trail-forensics.md) — how to query
+  and verify the audit chain when investigating a dispute or anomaly.
+- [`./backup-restore.md`](./backup-restore.md) — what is backed up where,
+  restore procedures, and honest RPO/RTO targets.
+- [`./calibration.md`](./calibration.md) — empirical procedure for tuning
+  perplexity, tail-fraction, and novelty floors (dry-run → cutover).
+- [`./deployment.md`](./deployment.md) — end-to-end first-deploy walkthrough;
+  the authoritative top-of-funnel doc.
+- [`./drills.md`](./drills.md) — the full set of `/v1/admin/*-drill`
+  endpoints, what each validates, and cadence guidance.
+- [`./env-reference.md`](./env-reference.md) — table of every
+  `TRACE_COMMONS_*` env, default, required/optional, and surface touched.
+- [`./hash-only-logging.md`](./hash-only-logging.md) — interpreting
+  hash-only error classes in production logs.
+- [`./key-rotation.md`](./key-rotation.md) — Cloud KMS key-version rotation
+  procedure, including drill validation and rollback.
+- [`./model-swap.md`](./model-swap.md) — procedure for upgrading the
+  perplexity model or embedder and the gate-version implications.
+- [`./operational-summary.md`](./operational-summary.md) — field-by-field
+  meaning and alarm guidance for `/v1/admin/operational-summary`.
+- [`./pilot-bootstrap.md`](./pilot-bootstrap.md) — operator runbook for the
+  HF-trace replay harness used to seed pilot calibration data.
+- [`./smoke-test.md`](./smoke-test.md) — post-deploy validation checklist
+  that exercises every required drill plus a fixture gate evaluation.
+- [`./troubleshooting.md`](./troubleshooting.md) — common failure modes by
+  symptom, with hash-only signatures and fixes.
+- [`./vector-replay.md`](./vector-replay.md) — operator reference for the
+  `trace-commons-vector-replay` recovery binary.
+
+## Doc lifecycle and freshness
+
+These runbooks describe how to run the system as of the most recent
+Phase A retrofit. As the system evolves, individual docs can fall behind
+the implementation. When a runbook and the underlying spec disagree, treat
+the spec as authoritative:
+
+- Per-slice design specs live in [`../superpowers/specs/`](../superpowers/specs/).
+- Per-slice implementation plans live in [`../superpowers/plans/`](../superpowers/plans/).
+- Cross-cutting contracts (envelope, storage, threat model) live in
+  [`../trace-commons.md`](../trace-commons.md),
+  [`../trace-commons-storage.md`](../trace-commons-storage.md), and
+  [`../trace-commons-roadmap.md`](../trace-commons-roadmap.md).
+
+If you discover a drift while running a procedure, open an issue or PR
+that updates the affected runbook in the same change set that updates the
+code or spec.
+
+## What is NOT here
+
+This directory holds operator-facing runbooks only. The following live
+elsewhere:
+
+- **Architecture and threat-model design.** See
+  [`../trace-commons.md`](../trace-commons.md),
+  [`../trace-commons-storage.md`](../trace-commons-storage.md), and
+  [`../trace-commons-roadmap.md`](../trace-commons-roadmap.md).
+- **Per-slice spec and plan documents.** See
+  [`../superpowers/specs/`](../superpowers/specs/) and
+  [`../superpowers/plans/`](../superpowers/plans/).
+- **Implementation reports.** See
+  [`../superpowers/reports/`](../superpowers/reports/).
+
 ## Audience
 
 A single deployment operator who:
