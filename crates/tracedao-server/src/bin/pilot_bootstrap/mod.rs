@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 pub mod hf_dataset;
+pub mod translators;
 
 /// Parsed configuration handed to [`run_pilot_bootstrap`].
 #[derive(Debug, Clone)]
