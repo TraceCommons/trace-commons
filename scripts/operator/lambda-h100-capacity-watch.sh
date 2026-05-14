@@ -6,7 +6,17 @@
 # stop refreshing the dashboard.
 #
 # Usage:
-#   LAMBDA_API_KEY=... ./scripts/operator/lambda-h100-capacity-watch.sh
+#   ./scripts/operator/lambda-h100-capacity-watch.sh
+#
+#   Credentials: reads ~/.netrc for cloud.lambdalabs.com via `curl --netrc`.
+#                The script never sees or logs the API key. If you don't
+#                already have a netrc entry, add one like:
+#
+#                    machine cloud.lambdalabs.com
+#                      login api
+#                      password <your-lambda-api-key>
+#
+#                then `chmod 600 ~/.netrc`.
 #
 #   Optional env vars:
 #     LAMBDA_POLL_SECONDS    — interval between polls (default 300 = 5 min)
@@ -23,10 +33,9 @@
 #     exits 0. The operator can then provision via the dashboard or
 #     `lambda-cloud launch ...`.
 #   - On API auth failure: exits 2 with a one-line stderr message.
-#   - Hash-only audit: never logs the API key (uses bash -c
-#     "-H Authorization: ..." indirection so the key doesn't appear in
-#     process listings either; macOS `ps` may still show curl flags, so
-#     prefer running on a single-user host).
+#   - Hash-only audit: credentials live in ~/.netrc; the script's process
+#     listing does not include the key, and the polled payload is never
+#     written to disk.
 #
 # Stop with Ctrl-C.
 
@@ -36,15 +45,15 @@ POLL=${LAMBDA_POLL_SECONDS:-300}
 GLOB=${LAMBDA_INSTANCE_GLOB:-h100}
 API_URL="https://cloud.lambdalabs.com/api/v1/instance-types"
 
-if [[ -z "${LAMBDA_API_KEY:-}" ]]; then
-  echo "error: LAMBDA_API_KEY env var is required" >&2
+if [[ ! -f "${HOME}/.netrc" ]]; then
+  echo "error: ~/.netrc not found — see header comment for the expected entry" >&2
   exit 2
 fi
 
 echo "watching for matching capacity (filter: ${GLOB}, poll: ${POLL}s)..."
 
 while true; do
-  payload=$(curl -sS -H "Authorization: Bearer ${LAMBDA_API_KEY}" "${API_URL}" || true)
+  payload=$(curl -sS --netrc "${API_URL}" || true)
 
   if [[ -z "${payload}" ]]; then
     echo "$(date -u +%H:%M:%S) poll failed (empty response); retrying" >&2
@@ -53,9 +62,9 @@ while true; do
   fi
 
   # Detect auth failures explicitly so the watcher exits instead of
-  # spinning silently on a bad key.
+  # spinning silently on a missing or bad credential.
   if echo "${payload}" | grep -qE '"code"[[:space:]]*:[[:space:]]*"global/invalid-api-key"'; then
-    echo "error: Lambda API rejected the key (set LAMBDA_API_KEY correctly)" >&2
+    echo "error: Lambda API rejected the credential (check ~/.netrc entry for cloud.lambdalabs.com)" >&2
     exit 2
   fi
 
