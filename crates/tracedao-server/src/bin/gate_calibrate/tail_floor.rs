@@ -28,6 +28,21 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// Hash an error's Display text to an 8-byte hex prefix so connection
+/// strings or other operator-secret material embedded in
+/// `tokio_postgres::Error` Display output never reach log sinks.
+fn short_error_hash(text: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(text.as_bytes());
+    let digest = h.finalize();
+    let mut out = String::with_capacity(16);
+    for b in &digest[..8] {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
 
 // ---------------------------------------------------------------------------
 // Sidecar parsing
@@ -222,8 +237,9 @@ impl PgDecisionsFetcher {
         tokio::spawn(async move {
             if let Err(e) = connection.await {
                 tracing::warn!(
-                    err_class = "TailFloorDbConnectionDropped",
-                    "postgres connection dropped: {e}"
+                    error_class = "TailFloorDbConnectionDropped",
+                    error_hash = %short_error_hash(&e.to_string()),
+                    "postgres connection dropped",
                 );
             }
         });
