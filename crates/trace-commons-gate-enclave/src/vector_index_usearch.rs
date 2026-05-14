@@ -322,7 +322,11 @@ impl UsearchVectorIndex {
         let mut first_err: Option<anyhow::Error> = None;
         for handle in snapshot {
             if let Err(e) = flush_handle_arc(&handle) {
-                tracing::warn!(error = ?e, "UsearchVectorIndex flush_all encountered an error");
+                tracing::warn!(
+                    error_class = "UsearchFlushFailed",
+                    error_hash = %short_error_hash(&e.to_string()),
+                    "UsearchVectorIndex flush_all encountered an error",
+                );
                 if first_err.is_none() {
                     first_err = Some(e);
                 }
@@ -339,11 +343,26 @@ impl Drop for UsearchVectorIndex {
     fn drop(&mut self) {
         if let Err(e) = self.flush_all() {
             tracing::warn!(
-                error = ?e,
-                "UsearchVectorIndex drop: best-effort flush_all returned an error"
+                error_class = "UsearchFlushFailedOnDrop",
+                error_hash = %short_error_hash(&e.to_string()),
+                "UsearchVectorIndex drop: best-effort flush_all returned an error",
             );
         }
     }
+}
+
+/// Hash an error's Display text to an 8-byte hex prefix so wrapped
+/// `anyhow::Error` chains (which may embed filesystem paths or other
+/// operator-secret material) never reach log sinks.
+fn short_error_hash(text: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(text.as_bytes());
+    let digest = h.finalize();
+    let mut out = String::with_capacity(16);
+    for b in &digest[..8] {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
 }
 
 fn flush_handle_arc(handle: &Arc<Mutex<TenantHandle>>) -> anyhow::Result<()> {
