@@ -6,8 +6,9 @@
 # only — it requires the CUDA toolkit and is not exercised here.
 #
 # cargo fmt --check is enforced as of the cargo-fmt cleanup PR. Clippy is
-# still intentionally omitted while the warning baseline is dirty; it will be
-# re-introduced in a dedicated cleanup PR.
+# enforced; only the style/perf lints listed in the cargo-clippy job's `-A`
+# flags are allowed (see docs/superpowers/reports/2026-05-14-clippy-baseline.md
+# for the audit that selected that allow-list).
 
 name: ci
 
@@ -37,6 +38,31 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  cargo-clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-clippy-
+      # Allow-list rationale: see
+      # docs/superpowers/reports/2026-05-14-clippy-baseline.md. These five
+      # style/perf lints are the only ones suppressed from the default
+      # clippy gate; everything else fails the build under -D warnings.
+      - run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::type_complexity -A clippy::collapsible_if -A clippy::manual_option_as_slice -A clippy::useless_vec -A clippy::redundant_pattern_matching
 
   cargo-check-default:
     name: cargo check (default features)
