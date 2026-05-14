@@ -88,6 +88,39 @@ pub struct CandidateResult {
     /// promoting per-token rarity is a deliberate, separate change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<CandidateMetrics>,
+    /// Per-trace perplexity scores for every corpus slice. Added to feed the
+    /// A2.7 perplexity-floor calibration math (Youden's-J optimum + 10th-
+    /// percentile of novel slice), which needs the underlying per-trace
+    /// arrays rather than the collapsed summary statistics on this row.
+    ///
+    /// Each vector aligns 1:1 with the corresponding `LoadedCorpus` slice:
+    /// index `i` is the score for the `i`-th entry of that slice. Entries
+    /// where the scorer raised an error (and a `score_failed` warn was
+    /// emitted) serialize as JSON `null` so consumers can distinguish "this
+    /// entry was scored at 0" from "this entry was not scored at all".
+    ///
+    /// The block is perplexity-derived and is therefore absent when the
+    /// bake-off was invoked in `--scorer token-rarity` mode (no perplexity
+    /// column to record). Token-rarity per-trace scores remain in the
+    /// existing `metrics.token_rarity` sub-block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_trace_scores: Option<PerTraceScores>,
+}
+
+/// Per-trace perplexity scores aligned 1:1 with the corpus slices. `None`
+/// entries mark scorer failures so a downstream calibration consumer can
+/// drop them rather than treating them as legitimate zeros.
+///
+/// The paraphrase slice is split into the two halves of each pair so the
+/// calibration consumer can correlate them positionally; index `i` of
+/// `paraphrase_original` and `paraphrase_back_translation` are the two
+/// scores for pair `i`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PerTraceScores {
+    pub novel: Vec<Option<f64>>,
+    pub duplicate: Vec<Option<f64>>,
+    pub paraphrase_original: Vec<Option<f64>>,
+    pub paraphrase_back_translation: Vec<Option<f64>>,
 }
 
 /// Per-metric scoring detail for the Phase A.5 dual-scorer bake-off. Each
@@ -152,6 +185,7 @@ impl CandidateResult {
             release_date_unix,
             load_or_eval_error: Some(error_class.to_string()),
             metrics: None,
+            per_trace_scores: None,
         }
     }
 }
