@@ -72,11 +72,15 @@ privacy is a planned upgrade, not a current property.
    agent-traces datasets through the existing `/v1/traces` ingest API,
    generating realistic submissions for gate-floor calibration, audit-chain
    validation, and embedder + vector-index seeding without requiring real
-   contributors. See `docs/operator/pilot-bootstrap.md` for operator usage.
-   This is not a substitute for Ironclaw — it is a load-generation harness —
-   but it unblocks the calibration and pipeline-validation work that
-   previously required real user traffic, so server-side polish is no longer
-   gated end-to-end on the Ironclaw rewire.
+   contributors. PR #51 adds a local smoke harness for the bootstrap binary,
+   PR #54 fixes the swival schema in the agent-traces corpus builder, and
+   PR #52 indexes the 16 operator runbooks (including
+   `docs/operator/pilot-bootstrap.md`) so the dry-run procedure is reachable
+   from a single entry point. See `docs/operator/pilot-bootstrap.md` for
+   operator usage. This is not a substitute for Ironclaw — it is a
+   load-generation harness — but it unblocks the calibration and
+   pipeline-validation work that previously required real user traffic, so
+   server-side polish is no longer gated end-to-end on the Ironclaw rewire.
 
 ### Phase B — trust upgrade (after pilot)
 
@@ -153,9 +157,13 @@ GitHub Actions runs on every push to `main` and every pull request against
 - `cargo test -p tracedao-server` (default features; the existing integration
   test suite).
 
-Run the same commands locally before pushing. `cargo fmt --check` and
-`cargo clippy -D warnings` are not yet wired into CI — the current baseline
-needs a dedicated cleanup pass before either gate can be turned on.
+`cargo fmt --check` is wired into CI as of PR #56 (repo-wide `cargo fmt --all`
+sweep landed in the same PR). Warnings-as-errors is now green on `main`:
+PR #57 gated dead-code (`ThroughputRecord`, `VramRecord`) in
+`tracedao-gate-calibrate` behind `#[allow(dead_code)]`, and PR #59 gated
+`tracedao-ingest` test-only items behind `#[cfg(test)]`. `cargo clippy -D
+warnings` is still not wired into CI; that remains the next CI gate to
+land. Run the same commands locally before pushing.
 
 ---
 
