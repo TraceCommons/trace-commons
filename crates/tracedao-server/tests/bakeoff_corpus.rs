@@ -161,4 +161,3 @@ fn rejects_corpus_with_mismatched_slice_sha256() {
         "error must mention sha256 or mismatch for operator debug: {msg}"
     );
 }
-

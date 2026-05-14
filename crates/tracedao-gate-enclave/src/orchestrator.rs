@@ -143,7 +143,8 @@ where
         };
         let novelty_score_micros = (novelty_score_f.clamp(0.0, 2.0) * 1_000_000.0) as u64;
 
-        let perplexity_passed = perp.aggregate_perplexity_micros >= self.cfg.perplexity_floor_micros
+        let perplexity_passed = perp.aggregate_perplexity_micros
+            >= self.cfg.perplexity_floor_micros
             && perp.tail_fraction_micros >= self.cfg.tail_fraction_floor_micros;
         let novelty_passed = novelty_score_micros >= self.cfg.novelty_floor_micros;
 
@@ -153,10 +154,8 @@ where
             tenant_storage_ref,
             &embedding,
         );
-        let attestation_chain_hash = hash_attestation_chain(
-            &self.cfg.gate_policy_version,
-            &self.cfg.gate_version_hash,
-        );
+        let attestation_chain_hash =
+            hash_attestation_chain(&self.cfg.gate_policy_version, &self.cfg.gate_version_hash);
 
         let mut inserted_entry_id = None;
         if perplexity_passed && novelty_passed {

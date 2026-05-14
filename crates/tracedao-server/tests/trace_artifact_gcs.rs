@@ -11,12 +11,14 @@ use chrono::Utc;
 use secrecy::SecretString;
 use serde_json::json;
 use tracedao_server::secrets::SecretsCrypto;
-use tracedao_server::trace_artifact_gcs::{GcsRemoteTraceArtifactProvider, InMemoryGcsObjectClient};
+use tracedao_server::trace_artifact_gcs::{
+    GcsRemoteTraceArtifactProvider, InMemoryGcsObjectClient,
+};
 use tracedao_server::trace_artifact_kek::LocalMasterKeyWrapper;
 use tracedao_server::trace_artifact_store::{
-    RemoteTraceArtifactProvider, ServiceOwnedTraceArtifactStore, TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_V2,
-    TraceArtifactInvalidationReason, TraceArtifactKind, TraceArtifactProviderConfig,
-    TraceArtifactScope,
+    RemoteTraceArtifactProvider, ServiceOwnedTraceArtifactStore,
+    TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_V2, TraceArtifactInvalidationReason, TraceArtifactKind,
+    TraceArtifactProviderConfig, TraceArtifactScope,
 };
 
 #[test]

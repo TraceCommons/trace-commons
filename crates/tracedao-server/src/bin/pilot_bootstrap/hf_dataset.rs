@@ -162,16 +162,56 @@ fn array_value_to_json(array: &dyn arrow_array::Array, row: usize) -> Value {
             let a = array.as_boolean();
             Value::Bool(a.value(row))
         }
-        DataType::Int8 => json_num_i64(array.as_primitive::<arrow_array::types::Int8Type>().value(row) as i64),
-        DataType::Int16 => json_num_i64(array.as_primitive::<arrow_array::types::Int16Type>().value(row) as i64),
-        DataType::Int32 => json_num_i64(array.as_primitive::<arrow_array::types::Int32Type>().value(row) as i64),
-        DataType::Int64 => json_num_i64(array.as_primitive::<arrow_array::types::Int64Type>().value(row)),
-        DataType::UInt8 => json_num_u64(array.as_primitive::<arrow_array::types::UInt8Type>().value(row) as u64),
-        DataType::UInt16 => json_num_u64(array.as_primitive::<arrow_array::types::UInt16Type>().value(row) as u64),
-        DataType::UInt32 => json_num_u64(array.as_primitive::<arrow_array::types::UInt32Type>().value(row) as u64),
-        DataType::UInt64 => json_num_u64(array.as_primitive::<arrow_array::types::UInt64Type>().value(row)),
-        DataType::Float32 => json_num_f64(array.as_primitive::<arrow_array::types::Float32Type>().value(row) as f64),
-        DataType::Float64 => json_num_f64(array.as_primitive::<arrow_array::types::Float64Type>().value(row)),
+        DataType::Int8 => json_num_i64(
+            array
+                .as_primitive::<arrow_array::types::Int8Type>()
+                .value(row) as i64,
+        ),
+        DataType::Int16 => json_num_i64(
+            array
+                .as_primitive::<arrow_array::types::Int16Type>()
+                .value(row) as i64,
+        ),
+        DataType::Int32 => json_num_i64(
+            array
+                .as_primitive::<arrow_array::types::Int32Type>()
+                .value(row) as i64,
+        ),
+        DataType::Int64 => json_num_i64(
+            array
+                .as_primitive::<arrow_array::types::Int64Type>()
+                .value(row),
+        ),
+        DataType::UInt8 => json_num_u64(
+            array
+                .as_primitive::<arrow_array::types::UInt8Type>()
+                .value(row) as u64,
+        ),
+        DataType::UInt16 => json_num_u64(
+            array
+                .as_primitive::<arrow_array::types::UInt16Type>()
+                .value(row) as u64,
+        ),
+        DataType::UInt32 => json_num_u64(
+            array
+                .as_primitive::<arrow_array::types::UInt32Type>()
+                .value(row) as u64,
+        ),
+        DataType::UInt64 => json_num_u64(
+            array
+                .as_primitive::<arrow_array::types::UInt64Type>()
+                .value(row),
+        ),
+        DataType::Float32 => json_num_f64(
+            array
+                .as_primitive::<arrow_array::types::Float32Type>()
+                .value(row) as f64,
+        ),
+        DataType::Float64 => json_num_f64(
+            array
+                .as_primitive::<arrow_array::types::Float64Type>()
+                .value(row),
+        ),
         DataType::List(_) | DataType::LargeList(_) => list_to_json(array, row),
         DataType::Struct(_) => struct_to_json(array, row),
         _ => Value::Null,
@@ -187,7 +227,9 @@ fn json_num_u64(v: u64) -> Value {
 }
 
 fn json_num_f64(v: f64) -> Value {
-    serde_json::Number::from_f64(v).map(Value::Number).unwrap_or(Value::Null)
+    serde_json::Number::from_f64(v)
+        .map(Value::Number)
+        .unwrap_or(Value::Null)
 }
 
 fn list_to_json(array: &dyn arrow_array::Array, row: usize) -> Value {
@@ -248,9 +290,8 @@ mod tests {
         let titles = StringArray::from(vec![Some("A"), Some("B")]);
         let counts = Int32Array::from(vec![Some(1), Some(2)]);
 
-        let mut proof_builder = arrow_array::builder::ListBuilder::new(
-            arrow_array::builder::StringBuilder::new(),
-        );
+        let mut proof_builder =
+            arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
         proof_builder.values().append_value("hash:abc");
         proof_builder.values().append_value("hash:def");
         proof_builder.append(true);

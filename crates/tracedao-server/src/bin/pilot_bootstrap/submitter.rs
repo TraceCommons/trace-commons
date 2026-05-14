@@ -103,10 +103,9 @@ impl Submitter {
                 Ok(resp) => {
                     let status = resp.status();
                     if status.is_success() {
-                        let receipt: ReceiptWire = resp
-                            .json()
-                            .await
-                            .unwrap_or(ReceiptWire { status: "accepted".into() });
+                        let receipt: ReceiptWire = resp.json().await.unwrap_or(ReceiptWire {
+                            status: "accepted".into(),
+                        });
                         return Ok(SubmissionOutcome {
                             submission_id: draft.submission_id.clone(),
                             http_status: Some(status.as_u16()),
@@ -170,8 +169,8 @@ impl Submitter {
 /// [`Uuid`]. The id is 32 hex chars = 16 bytes; `Uuid::from_bytes` consumes
 /// exactly that. Any deviation is a programmer error in the translator.
 fn submission_uuid(draft_id: &str) -> Result<Uuid> {
-    let bytes = hex::decode(draft_id)
-        .with_context(|| format!("decode draft submission id {draft_id}"))?;
+    let bytes =
+        hex::decode(draft_id).with_context(|| format!("decode draft submission id {draft_id}"))?;
     let arr: [u8; 16] = bytes
         .as_slice()
         .try_into()
