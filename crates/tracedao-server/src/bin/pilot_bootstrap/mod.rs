@@ -3,6 +3,8 @@
 
 use std::path::PathBuf;
 
+pub mod hf_dataset;
+
 /// Parsed configuration handed to [`run_pilot_bootstrap`].
 #[derive(Debug, Clone)]
 pub struct PilotBootstrapConfig {
