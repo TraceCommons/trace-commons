@@ -82,6 +82,49 @@ pub fn aggregate_perplexity_metrics(
     }
 }
 
+/// Compute the per-token rarity metric in fixed-point micros.
+///
+/// Per-token rarity is the Phase A.5 candidate replacement metric for
+/// aggregate perplexity. It picks the `K` rarest tokens (lowest log-prob =
+/// most surprising) from the trace and returns `exp(-mean(K rarest logprobs))`
+/// — same exponent-of-negative-mean shape as perplexity, but restricted to
+/// the rare-token tail rather than the whole sequence. Higher value means
+/// the trace contains more genuinely-rare tokens, which is the novelty
+/// signal the gate cares about.
+///
+/// The first element of `logprobs` is treated as the BOS-conditioned token
+/// (no predictive context) and dropped, matching
+/// [`aggregate_perplexity_metrics`]'s convention. `k` is capped at the
+/// number of usable tokens; `k == 0` collapses to zero (the caller passed
+/// a meaningless K).
+///
+/// Returns 0 for empty / single-token inputs and for non-finite inputs —
+/// fail-closed, parallel to the aggregate helper.
+///
+/// This function is the unit-tested surface; the mistralrs forward path
+/// builds the same `logprobs` slice that feeds the aggregate helper and
+/// delegates to this function for the rarity column.
+pub fn per_token_rarity_micros(logprobs: &[f32], k: usize) -> u64 {
+    if logprobs.len() < 2 || k == 0 {
+        return 0;
+    }
+    let usable = &logprobs[1..];
+    if usable.iter().any(|lp| !lp.is_finite()) {
+        return 0;
+    }
+    let k_eff = k.min(usable.len());
+    // Sort a local copy ascending; the K lowest entries are the K rarest.
+    // Bake-off traces are at most a few thousand tokens, so a full sort is
+    // fine; partial-sort is an avoidable complexity here.
+    let mut sorted: Vec<f32> = usable.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rarest = &sorted[..k_eff];
+    let mean_lp: f32 = rarest.iter().sum::<f32>() / (k_eff as f32);
+    let mean_nll = -mean_lp;
+    let rarity = mean_nll.exp();
+    saturating_micros(rarity)
+}
+
 /// Scale a non-negative `f32` to fixed-point micros, saturating on overflow
 /// and clamping non-finite / negative inputs to zero (fail-closed).
 fn saturating_micros(v: f32) -> u64 {
@@ -662,6 +705,98 @@ mod tests {
         let r = aggregate_perplexity_metrics(&logprobs, -8.0);
         assert_eq!(r.aggregate_perplexity_micros, 0);
         assert_eq!(r.tail_fraction_micros, 0);
+    }
+
+    // ----- per_token_rarity_micros: Phase A.5 candidate replacement metric.
+    //
+    // The reference formula is `exp(-mean(K rarest logprobs))`, matching the
+    // Python prototype at `scripts/research/per-token-rarity-prototype.py`.
+    // Every test below picks logprobs with hand-computed expected outputs so
+    // any drift between the Rust port and the prototype shows up as a value
+    // mismatch rather than a vague "AUC moved" downstream effect.
+
+    #[test]
+    fn rarity_zero_for_empty_or_single_token_input() {
+        assert_eq!(per_token_rarity_micros(&[], 10), 0);
+        assert_eq!(per_token_rarity_micros(&[-1.5], 10), 0);
+    }
+
+    #[test]
+    fn rarity_zero_when_k_is_zero() {
+        // K = 0 is a meaningless request; collapse to zero rather than
+        // surfacing an exp(0) = 1 artifact that would look like real signal.
+        let logprobs = vec![0.0_f32, -1.0, -2.0, -3.0];
+        assert_eq!(per_token_rarity_micros(&logprobs, 0), 0);
+    }
+
+    #[test]
+    fn rarity_matches_python_prototype_on_synthetic_fixture() {
+        // Fixture: a 6-token "trace" whose usable (post-BOS-drop) logprobs are
+        // [-0.5, -2.0, -1.0, -5.0, -0.1]. With K=2 the rarest are [-5.0,-2.0],
+        // mean_nll = 3.5, rarity = exp(3.5) ≈ 33.1155.
+        let logprobs = vec![0.0_f32, -0.5, -2.0, -1.0, -5.0, -0.1];
+        let got = per_token_rarity_micros(&logprobs, 2);
+        let want = 3.5_f32.exp() * 1_000_000.0;
+        // Tolerance: f32 mean + exp accumulate sub-ULP noise; 1e-3 micros is
+        // tighter than any decision-rule threshold.
+        let diff = (got as f32 - want).abs();
+        assert!(
+            diff < 1.0,
+            "rarity micros mismatch vs python prototype: got {got}, want ~{want}, diff {diff}"
+        );
+    }
+
+    #[test]
+    fn rarity_k_one_equals_exp_of_largest_negative_logprob() {
+        // K=1 picks the single rarest token; rarity = exp(-min_logprob) =
+        // exp(max(-lp)). This is the "task statement's K=1 invariant" test.
+        let logprobs = vec![0.0_f32, -0.5, -2.0, -1.0, -5.0, -0.1];
+        let got = per_token_rarity_micros(&logprobs, 1);
+        let want = 5.0_f32.exp() * 1_000_000.0;
+        let diff = (got as f32 - want).abs();
+        assert!(
+            diff < 1.0,
+            "K=1 rarity should equal exp(-min_logprob): got {got}, want ~{want}"
+        );
+    }
+
+    #[test]
+    fn rarity_k_equals_len_collapses_to_aggregate_perplexity() {
+        // K=len averages all usable logprobs — the same population the
+        // aggregate-perplexity helper averages. So `per_token_rarity_micros`
+        // at K=len equals `aggregate_perplexity_micros` (up to f32 rounding).
+        // This is the "task statement's K=len invariant" expressed in the
+        // prototype's exp-of-mean form, which is the formula we actually
+        // ship; relating it to perplexity is the testable connection.
+        let logprobs = vec![0.0_f32, -0.5, -2.0, -1.0, -5.0, -0.1];
+        let usable_len = logprobs.len() - 1;
+        let r_rarity = per_token_rarity_micros(&logprobs, usable_len);
+        let r_agg = aggregate_perplexity_metrics(&logprobs, -8.0).aggregate_perplexity_micros;
+        // Same f32 path on both sides; allow a single-micro slack.
+        let diff = (r_rarity as i64 - r_agg as i64).abs();
+        assert!(
+            diff <= 1,
+            "K=len rarity should equal aggregate perplexity: got {r_rarity}, want {r_agg}"
+        );
+    }
+
+    #[test]
+    fn rarity_caps_k_at_usable_length() {
+        // K larger than the number of usable tokens caps to len; should NOT
+        // panic or wrap. Result equals K=usable_len.
+        let logprobs = vec![0.0_f32, -1.0, -2.0, -3.0];
+        let capped = per_token_rarity_micros(&logprobs, 999);
+        let at_len = per_token_rarity_micros(&logprobs, 3);
+        assert_eq!(capped, at_len);
+    }
+
+    #[test]
+    fn rarity_rejects_non_finite_logprobs() {
+        // Parallel to the aggregate helper: NaN / Inf collapse to zero.
+        let with_nan = vec![0.0_f32, -1.0, f32::NAN, -2.0];
+        assert_eq!(per_token_rarity_micros(&with_nan, 2), 0);
+        let with_inf = vec![0.0_f32, -1.0, f32::NEG_INFINITY, -2.0];
+        assert_eq!(per_token_rarity_micros(&with_inf, 2), 0);
     }
 
     #[test]
