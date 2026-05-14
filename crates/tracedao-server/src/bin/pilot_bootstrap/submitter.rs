@@ -27,6 +27,9 @@ use super::translators::SubmissionDraft;
 /// Outcome of a single submission attempt. Hash-only fields, no body content.
 #[derive(Debug, Clone)]
 pub struct SubmissionOutcome {
+    // Carried for Debug/tracing parity with the sidecar record; the main loop
+    // reads `draft.submission_id` directly, so this field is currently unread.
+    #[allow(dead_code)]
     pub submission_id: String,
     pub http_status: Option<u16>,
     pub gate_decision: String,
