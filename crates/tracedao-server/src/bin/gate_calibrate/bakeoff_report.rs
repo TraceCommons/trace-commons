@@ -296,6 +296,31 @@ pub fn render_markdown(report: &Report) -> String {
         ));
     }
 
+    // Phase A.5: emit a per-token-rarity summary table when any candidate
+    // carries a `metrics.token_rarity` block. The legacy table above stays
+    // perplexity-only so existing review tooling (which greps for the
+    // "| candidate | auc |" header) is unaffected.
+    let any_rarity = report.candidates.iter().any(|c| {
+        c.metrics
+            .as_ref()
+            .and_then(|m| m.token_rarity.as_ref())
+            .is_some()
+    });
+    if any_rarity {
+        out.push_str("\n## Per-token rarity (Phase A.5)\n\n");
+        out.push_str("| candidate | token_rarity_auc | k |\n");
+        out.push_str("| --- | --- | --- |\n");
+        for c in &report.candidates {
+            let Some(rarity) = c.metrics.as_ref().and_then(|m| m.token_rarity.as_ref()) else {
+                continue;
+            };
+            out.push_str(&format!(
+                "| {} | {:.6} | {} |\n",
+                c.id, rarity.discrimination_auc, rarity.k,
+            ));
+        }
+    }
+
     let failed: Vec<&CandidateResult> = report
         .candidates
         .iter()
