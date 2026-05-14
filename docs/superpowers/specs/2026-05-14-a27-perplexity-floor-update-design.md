@@ -27,11 +27,13 @@ Predecessors:
 A2.6's success-criteria section names three outcome branches. Each maps
 to exactly one A2.7 path. The decision is mechanical:
 
-| A2.6 outcome (per `What success looks like`) | A2.7 path | Spec status header becomes |
+| A2.6 outcome (per `What success looks like`) [^a26-corpus] | A2.7 path | Spec status header becomes |
 |----------------------------------------------|-----------|----------------------------|
-| **Outcome 1.** At least one candidate AUC > 0.5 on the agent-traces novel slice. | **Fires (full).** Recalibrate `TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS` to a non-zero value via the recipe in `Outcome 1 procedure`. Update operator docs. Close Phase A.5. | `ACTIVE — calibration recipe in §Outcome 1.` |
-| **Outcome 2.** All candidates 0.4 < AUC < 0.5. | **Fires (documentation-only).** Floor stays at `0`. A2.5's runbook prose updated to record that A2.6 partially supported the hypothesis. Phase A.5 stays parked with reduced urgency (matches A2.6's own success-criteria language). | `ACTIVE — docs-only; see §Outcome 2.` |
+| **Outcome 1.** At least one candidate AUC > 0.5. | **Fires (full).** Recalibrate `TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS` to a non-zero value via the recipe in `Outcome 1 procedure`. Update operator docs. Close Phase A.5. | `ACTIVE — calibration recipe in §Outcome 1.` |
+| **Outcome 2.** All candidates 0.5 > AUC > 0.4. | **Fires (documentation-only).** Floor stays at `0`. A2.5's runbook prose updated to record that A2.6 partially supported the hypothesis. Phase A.5 stays parked with reduced urgency (matches A2.6's own success-criteria language). | `ACTIVE — docs-only; see §Outcome 2.` |
 | **Outcome 3.** All candidates AUC < 0.4. | **Does NOT fire.** A2.5 stands as the operative pilot-launch recommendation. Phase A.5 activates per its own spec (`2026-05-14-a5-perplexity-replacement-design.md`). | `SUPERSEDED — Phase A.5 activated instead; see §Outcome 3.` |
+
+[^a26-corpus]: A2.6's corpus is fixed as agent-traces (swival) novel + Wikipedia duplicate. The AUC thresholds above are measured against that corpus shape.
 
 The 0.4 / 0.5 boundaries are inherited verbatim from A2.6's spec. A2.7
 does not move them.
