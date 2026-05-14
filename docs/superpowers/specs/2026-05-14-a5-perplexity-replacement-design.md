@@ -209,6 +209,18 @@ compare AUC to the existing absolute-perplexity and tail-fraction columns
 across the A2.6 corpus. Cheap to add; runs as a side computation in the
 same bake-off pass. No new GPU time required.
 
+### Prototype
+
+A standalone Python prototype lives at
+`scripts/research/per-token-rarity-prototype.py` (with a synthetic fixture
+under `scripts/research/fixtures/`). It loads a bake-off corpus `.tar.zst`,
+runs a configurable HF causal LM over the novel and duplicate slices, and
+reports aggregate-perplexity AUC alongside per-token-rarity AUC using the
+same Mann–Whitney U formula as `bakeoff_metrics::discrimination_auc`. Use
+it to validate the metric on a real corpus before committing to the A.5a
+Rust implementation; the prototype is the canonical "did rarity earn its
+keep?" probe referenced in open question 1 below.
+
 ## Approach 3: Learned discriminator
 
 ### Idea
