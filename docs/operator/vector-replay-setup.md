@@ -20,9 +20,16 @@ environment matches the production preconditions the binary expects.
 >   `is_vector_entry_revoked`) — covered by
 >   `crates/tracedao-server/tests/vector_replay_store_methods.rs`,
 >   driven by `TRACEDAO_PG_TEST_DATABASE_URL`.
+> - `--dry-run` against any reachable Postgres. Dry-run shortcircuits
+>   BEFORE the embedder, KEK wrapper, and artifact store are
+>   initialised, so it does **not** require the BGE-large fastembed
+>   cache, `TRACE_COMMONS_ARTIFACT_KEY_HEX`, or a populated artifact
+>   root. The only host prerequisites are `DATABASE_URL` and the
+>   `local-gpu-models` feature build.
 >
-> The end-to-end CLI run — embedder init, KEK unwrap, artifact decrypt,
-> usearch insert — has no hermetic integration harness; it must be
+> The end-to-end CLI run with embedder init, KEK unwrap, artifact
+> decrypt, and usearch insert — i.e. anything that is **not**
+> `--dry-run` — has no hermetic integration harness; it must be
 > rehearsed on a host that already has the gate service's runtime
 > dependencies. See "Rehearsal recipe" below.
 
@@ -46,14 +53,20 @@ the binary starts the replay loop, the wiring is correct.
 
 ## Host prerequisites
 
-| Resource | Notes |
-| --- | --- |
-| PostgreSQL reachable via `DATABASE_URL` | Same instance the gate service writes to (or a clone with the schema + audit history). The binary runs `run_migrations()` on startup; on a clone, this is a no-op if migrations are already at head. |
-| Embedder model on disk under `TRACE_COMMONS_EMBEDDER_CACHE_DIR` | Default model is `BAAI/bge-large-en-v1.5` (~1.3GB on disk). Fastembed will download on first use if the cache is empty and the host has internet; in air-gapped recoveries, pre-stage the cache. |
-| Artifact store mounted at `TRACE_COMMONS_ARTIFACT_DIR` | v1 of the binary supports the file-system provider only. For GCS deployments, see [`vector-replay.md`](vector-replay.md#authentication) for the GCS-mirror workaround. |
-| Vector-index root writable at `TRACE_COMMONS_VECTOR_INDEX_ROOT` | The binary writes `<root>/<tenant_sha256_first16hex>.usearch` (and a sidecar). Must be a real filesystem; tmpfs is fine for rehearsal. |
-| KEK material matching the original artifacts | For `local_master_key` provider: `TRACE_COMMONS_ARTIFACT_KEY_HEX` must be the same key the gate service used to wrap DEKs for the target tenant. Replay cannot recover from KEK rotation alone — that is by design. |
-| `local-gpu-models` feature build | `cargo build -p tracedao-server --bin tracedao-vector-replay --features local-gpu-models`. The default-feature build does not include the binary at all. |
+The table below covers the **full replay path**. `--dry-run` only needs
+`DATABASE_URL` and the `local-gpu-models` feature build; the embedder
+cache, artifact store, vector-index root, and KEK material rows are
+**not** required for dry-run because the binary shortcircuits before
+initialising those subsystems.
+
+| Resource | Required for `--dry-run`? | Notes |
+| --- | --- | --- |
+| PostgreSQL reachable via `DATABASE_URL` | Yes | Same instance the gate service writes to (or a clone with the schema + audit history). The binary runs `run_migrations()` on startup; on a clone, this is a no-op if migrations are already at head. |
+| Embedder model on disk under `TRACE_COMMONS_EMBEDDER_CACHE_DIR` | No (skipped on `--dry-run`) | Default model is `BAAI/bge-large-en-v1.5` (~1.3GB on disk). Fastembed will download on first use if the cache is empty and the host has internet; in air-gapped recoveries, pre-stage the cache. |
+| Artifact store mounted at `TRACE_COMMONS_ARTIFACT_DIR` | No (skipped on `--dry-run`) | v1 of the binary supports the file-system provider only. For GCS deployments, see [`vector-replay.md`](vector-replay.md#authentication) for the GCS-mirror workaround. |
+| Vector-index root writable at `TRACE_COMMONS_VECTOR_INDEX_ROOT` | No (skipped on `--dry-run`) | The binary writes `<root>/<tenant_sha256_first16hex>.usearch` (and a sidecar). Must be a real filesystem; tmpfs is fine for rehearsal. |
+| KEK material matching the original artifacts | No (skipped on `--dry-run`) | For `local_master_key` provider: `TRACE_COMMONS_ARTIFACT_KEY_HEX` must be the same key the gate service used to wrap DEKs for the target tenant. Replay cannot recover from KEK rotation alone — that is by design. |
+| `local-gpu-models` feature build | Yes | `cargo build -p tracedao-server --bin tracedao-vector-replay --features local-gpu-models`. The default-feature build does not include the binary at all. |
 
 ## Fixture shape (what the binary scans)
 
@@ -105,12 +118,16 @@ code path before the real recovery.
 2. Snapshot the current per-tenant usearch file out of band so you can
    diff against the rebuilt file.
 
-3. Run with `--dry-run --limit 50` first. The binary still initialises
-   the embedder, KEK wrapper, and artifact store, so this exercises
-   every dependency except the embed + index-write steps. Expected
-   summary: `replayed == 50`, `errors == 0`, all `skipped_*` counters
-   are zero unless you specifically expect revocations/embedder
-   mismatches for the chosen tenant.
+3. Run with `--dry-run --limit 50` first. Dry-run is a Postgres-only
+   sanity check: it counts the rows that would be replayed and exits 0
+   without touching the embedder, KEK wrapper, or artifact store.
+   Expected summary: `rows_scanned == 50` (or fewer if the tenant has
+   fewer eligible rows), `replayed == 0`, `errors == 0`. Dry-run does
+   **not** apply the per-row liveness / revocation / artifact-existence
+   / embedder-match filters — those run only on the full replay path.
+   To exercise the embedder + KEK + artifact wiring before the real
+   recovery, run with `--limit 50` (no `--dry-run`) against a scratch
+   `TRACE_COMMONS_VECTOR_INDEX_ROOT` as in step 4.
 
 4. Run with `--fresh --limit 50` against a scratch
    `TRACE_COMMONS_VECTOR_INDEX_ROOT` to keep production untouched. Diff
