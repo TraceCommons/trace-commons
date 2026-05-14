@@ -1,5 +1,20 @@
 # A2.7 Perplexity Floor Calibration — Operator Runbook (Outcome 1)
 
+> **2026-05-14 BLOCKED ON BAKE-OFF BINARY GAP.** This runbook assumes
+> the A2.6 report JSON contains per-trace perplexity scores for the
+> calibration candidate. As of A2.6's actual completion the report
+> JSON contains ONLY summary statistics (`discrimination_auc`,
+> `paraphrase_delta`, etc.) — per-trace score arrays are computed
+> internally by the bake-off binary and discarded. Until the binary
+> is modified to persist per-trace scores AND a single-candidate
+> Qwen 3.6 27B Dense re-run is executed, this runbook cannot
+> execute. **Operator action while blocked: ship the pilot with
+> `TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=0` per A2.5's
+> conservative default; the in-pilot tail-fraction subcommand (PR
+> #66) can drive a separate calibration path on real contributor
+> data.** Resume here when the per-trace-score binary mod + re-run
+> ship.
+
 Phase: A.2.7 post-A2.6. Predecessors:
 [`./a26-bakeoff-result-handler.md`](./a26-bakeoff-result-handler.md) (which
 routes the operator here once the bake-off report drops). Spec:
