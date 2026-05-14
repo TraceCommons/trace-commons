@@ -39,8 +39,7 @@ BINARY="${SMOKE_BINARY:-$REPO_ROOT/target/release/tracedao-pilot-bootstrap}"
 MOCK_LOG="${SMOKE_MOCK_LOG:-/tmp/pilot-bootstrap-smoke-mock.log}"
 BINARY_LOG="${SMOKE_BINARY_LOG:-/tmp/pilot-bootstrap-smoke-binary.log}"
 HF_CACHE="${SMOKE_HF_CACHE:-/tmp/pilot-bootstrap-smoke-hf-cache}"
-FIXTURE="$SCRIPT_DIR/fixtures/swival-smoke.parquet"
-FIXTURE_NAME="swival-smoke.parquet"
+FIXTURE_DIR="$SCRIPT_DIR/fixtures/swival-smoke"
 # Fixed pseudo-commit hash so reruns reuse the same snapshot directory.
 FIXTURE_COMMIT="smokecommit0000000000000000000000000001"
 
@@ -60,7 +59,7 @@ trap cleanup EXIT INT TERM
 command -v python3 >/dev/null 2>&1 || bail "python3_not_installed"
 command -v curl    >/dev/null 2>&1 || bail "curl_not_installed"
 [ -x "$BINARY" ]                   || bail "binary_not_built:$BINARY"
-[ -f "$FIXTURE" ]                  || bail "fixture_not_found:$FIXTURE"
+[ -d "$FIXTURE_DIR" ]              || bail "fixture_dir_not_found:$FIXTURE_DIR"
 
 # Make sure the port is free before we bind.
 if curl -sS --max-time 1 "http://$HOST:$PORT/__smoke/stats" >/dev/null 2>&1; then
@@ -86,8 +85,16 @@ refs_dir="$repo_root/refs"
 
 mkdir -p "$snapshot_dir" "$refs_dir"
 printf '%s' "$FIXTURE_COMMIT" > "$refs_dir/main"
-# Use a hardlink/copy so the binary sees a regular file.
-cp -f "$FIXTURE" "$snapshot_dir/$FIXTURE_NAME"
+
+# Copy every .jsonl session into the snapshot dir; advertise each as a
+# sibling so the binary's hf-hub `info().siblings` enumeration sees them.
+sibling_args=()
+for jsonl in "$FIXTURE_DIR"/*.jsonl; do
+  [ -e "$jsonl" ] || bail "fixture_dir_empty:$FIXTURE_DIR"
+  name="$(basename "$jsonl")"
+  cp -f "$jsonl" "$snapshot_dir/$name"
+  sibling_args+=("--hf-sibling" "$name")
+done
 
 echo "SmokePilotBootstrap: hf-hub cache primed at $HF_CACHE"
 echo "SmokePilotBootstrap: starting mock server on $HOST:$PORT"
@@ -95,7 +102,7 @@ python3 "$SCRIPT_DIR/pilot-bootstrap-mock-server.py" \
   --host "$HOST" --port "$PORT" \
   --hf-dataset "$SOURCE" \
   --hf-commit "$FIXTURE_COMMIT" \
-  --hf-sibling "$FIXTURE_NAME" \
+  "${sibling_args[@]}" \
   >"$MOCK_LOG" 2>&1 &
 MOCK_PID=$!
 
