@@ -112,6 +112,11 @@ gate. The deeper perplexity-replacement metric design is parked under
   pending post-first-1000-trace calibration; novelty floor at 500000
   is the active primary gate. Model pick stays Qwen3-8B-Base for
   cost (smallest VRAM footprint; choice no longer load-bearing).
+- A2.6: agent-traces novel-slice bake-off — pending run (corpus
+  builder + runbook merged; awaiting operator bake-off run + report
+  per spec rollout A2.6b). Spec at
+  `docs/superpowers/specs/2026-05-14-agent-traces-bakeoff-design.md`;
+  operator runbook at `docs/operator/agent-traces-bakeoff-run.md`.
 - A3: real `Embedder` (fastembed + BGE-large-en-v1.5) — done
 - A4: real `VectorIndex` (usearch with on-disk persistence) — done
 - A5: `novelty_utility` credit-event emission — done

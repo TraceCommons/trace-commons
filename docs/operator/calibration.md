@@ -213,6 +213,93 @@ Phase 0 is complete when:
 - [ ] The report's SHA256 is recorded somewhere durable.
 - [ ] The corresponding env-var defaults are flipped (or the no-change decision is documented).
 
+## Phase 0.1 — Alternative corpus shapes (A2.6)
+
+Phase 0 above describes the canonical bake-off corpus: OASST2 +
+GAIA novel slice, curated boilerplate or Wikipedia-introductions
+duplicate slice, Qwen3-4B back-translation paraphrase slice. A2.5
+concluded that across both duplicate-slice variants we measured
+(A2.3c boilerplate, A2.4 Wikipedia) **every candidate's AUC stayed
+below 0.5** — so the pilot-launch perplexity floor ships at 0.
+
+A2.6 tests whether the bug is the *novel* slice, not the gate.
+
+### Why this exists
+
+The OASST2 novel slice is exactly what the candidate models were
+RLHF'd on, so they find it predictable. The duplicate-slice rotations
+in A2.3c and A2.4 each gave the models *less*-trained-on material as
+the "duplicate" — backwards from intent. A 2026-05-14 HF survey of
+`format:agent-traces` datasets surfaced multi-turn tool-using sessions
+captured from real OSS work — material structurally closer to Trace
+Commons's intended input shape *and* less in-distribution for the
+candidate models. If swapping the novel slice flips at least one
+candidate AUC above 0.5, the gate-as-designed isn't broken — A2's
+*novel-slice choice* was. See
+`docs/superpowers/specs/2026-05-14-agent-traces-bakeoff-design.md`
+for the full hypothesis.
+
+### Three corpus variants measured so far
+
+| Variant | Novel slice | Duplicate slice | Result |
+|---------|-------------|-----------------|--------|
+| A2.3c boilerplate-duplicate | OASST2 chat | Curated boilerplate | AUC 0.054 – 0.276; all four candidates < 0.5 |
+| A2.4 Wikipedia-duplicate | OASST2 chat | Wikipedia article intros | AUC 0.185 – 0.264; all four candidates < 0.5 |
+| A2.6 agent-traces-novel + Wikipedia-duplicate (pending run) | swival security-audit traces | Wikipedia article intros (reused from A2.4) | Hypothesis: at least one AUC > 0.5 |
+
+A2.6 holds the candidate set, paraphrase pipeline, and duplicate
+slice fixed; only the novel slice changes. Direct A2.4 comparability
+is the point.
+
+### How to build the A2.6 corpus
+
+Use the dedicated builder
+(`scripts/operator/build-agent-traces-corpus.py`). It streams the
+source dataset from the HuggingFace hub, joins each row's narrative
+fields into a single prose body (see the script's module docstring
+for the swival row-to-text mapping), length-filters to 200–2000 words,
+deterministically samples `--count` entries, and reuses the duplicate
++ paraphrase slices from an existing A2.4 `corpus-wiki.tar.zst`. The
+Rust loader is unchanged: the new tarball satisfies the same
+`manifest.json` + slice-directory contract as the canonical builder.
+
+```bash
+pip install datasets zstandard  # one-time on the bake-off host
+python3 scripts/operator/build-agent-traces-corpus.py \
+  --source=jedisct1/agent-traces-swival \
+  --duplicate-corpus=$HOME/bakeoff/corpus-wiki.tar.zst \
+  --count=300 \
+  --seed=42 \
+  --out=$HOME/bakeoff/corpus-a26.tar.zst
+```
+
+The bake-off binary itself takes the new tarball without modification:
+
+```bash
+./target/release/trace-commons-gate-calibrate bake-off \
+  --candidates=$HOME/bakeoff/candidates-4way.toml \
+  --corpus=$HOME/bakeoff/corpus-a26.tar.zst \
+  --hardware=h100 \
+  --report-out=$HOME/bakeoff/report-a26.json
+```
+
+The full operator procedure (provisioning, model staging, teardown)
+lives at `docs/operator/agent-traces-bakeoff-run.md`.
+
+### When to use which corpus
+
+- **A2.6 corpus** — the experiment. Run this once before pilot
+  launch to resolve the open question A2.5 left parked. If at least
+  one candidate AUC > 0.5, file A2.7 to update the floor recommendations.
+- **A2.4 (Wikipedia-duplicate) corpus** — the baseline. If A2.6
+  invalidates the hypothesis (all AUCs still < 0.5), A2.5's
+  recommendation stands and the pilot launches with the perplexity
+  floor disabled. The A2.4 corpus is what a re-bake against the
+  canonical OASST2 + Wikipedia shape uses.
+- **A2.3c (boilerplate-duplicate) corpus** — retired. Boilerplate
+  proved structurally inferior to Wikipedia intros across all four
+  candidates.
+
 ## Phase 1 — Offline HF bootstrap
 
 Goal: get order-of-magnitude floor values before any contributor traffic.
