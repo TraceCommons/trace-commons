@@ -40,9 +40,9 @@ explicitly (no implicit zero defaults).
 | `TRACE_COMMONS_GATE_SERVICE` | R when used | (none) | One of `disabled`, `mock`, `enclave_local_gpu`. Production: `enclave_local_gpu`. |
 | `TRACE_COMMONS_GATE_SERVICE_ENCLAVE_ENDPOINT` | Phase B | (none) | Remote enclave endpoint. Unused in v1. |
 | `TRACE_COMMONS_GATE_SERVICE_ATTESTATION_VERIFIER_LABEL` | Phase B | (none) | Attestation verifier label. Unused in v1. |
-| `TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS` | R when enclave_local_gpu | (none) | Inclusive lower bound on aggregate perplexity (micros). Pass if measured >= floor. |
-| `TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS` | R when enclave_local_gpu | (none) | Inclusive lower bound on tail fraction (micros). |
-| `TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS` | R when enclave_local_gpu | (none) | Inclusive lower bound on novelty score (micros). |
+| `TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS` | R when enclave_local_gpu | (none) | Inclusive lower bound on aggregate perplexity (micros). Pass if measured >= floor. Pilot-launch default: `0` (disabled) — see A2.5 spec / `calibration.md` Phase 1. |
+| `TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS` | R when enclave_local_gpu | (none) | Inclusive lower bound on tail fraction (micros). Pilot-launch default: `0` — calibrate post-first-1000-pilot-traces per A2.5 spec / `calibration.md` Phase 1. |
+| `TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS` | R when enclave_local_gpu | (none) | Inclusive lower bound on novelty score (micros). Pilot-launch recommendation: `500000` (cosine novelty 0.5); primary active floor at launch under A2.5. |
 | `TRACE_COMMONS_GATE_POLICY_VERSION` | R when enclave_local_gpu | (none) | Human label for the policy version (e.g. `pilot-v1`). Stamps audit rows. |
 | `TRACE_COMMONS_GATE_TOP_K` | optional | `5` | Number of nearest neighbors used for novelty. |
 
