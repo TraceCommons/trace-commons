@@ -1,0 +1,65 @@
+{
+  "generated_at": "2026-05-14T02:31:40.164765905+00:00",
+  "corpus_sha256": "sha256:fe461f4aabfccf9d53c0e5261db7100598320d2c55a1c74fef95ad5d54681b0a",
+  "manifest_sha256": "sha256:2e360df9449d81d664caeb0e17ed893ccb28e5998604c4caafd1aa46a13fd0f0",
+  "candidates": [
+    {
+      "id": "llama-3.1-8b-instruct",
+      "discrimination_auc": 0.11974444444444445,
+      "paraphrase_delta": 0.1249158008495719,
+      "tail_fraction_range": 0.1273215,
+      "determinism_stddev": 0.0,
+      "throughput_tps": 288.54674113030916,
+      "peak_vram_mib": 17491,
+      "license": "llama-community",
+      "params_b": 8,
+      "passed_determinism_gate": true,
+      "release_date_unix": 1721692800
+    },
+    {
+      "id": "qwen3-8b-base",
+      "discrimination_auc": 0.235,
+      "paraphrase_delta": 0.14159976209575528,
+      "tail_fraction_range": 0.009901,
+      "determinism_stddev": 4.163336342344337e-17,
+      "throughput_tps": 245.49167391281517,
+      "peak_vram_mib": 17779,
+      "license": "Apache-2.0",
+      "params_b": 8,
+      "passed_determinism_gate": true,
+      "release_date_unix": 1745884800
+    },
+    {
+      "id": "qwen3.6-27b-dense",
+      "discrimination_auc": 0.27592222222222224,
+      "paraphrase_delta": 0.13984306862438572,
+      "tail_fraction_range": 0.0125195,
+      "determinism_stddev": 1.249000902703301e-16,
+      "throughput_tps": 118.2331903666586,
+      "peak_vram_mib": 55607,
+      "license": "Apache-2.0",
+      "params_b": 27,
+      "passed_determinism_gate": true,
+      "release_date_unix": 1776470400
+    },
+    {
+      "id": "gemma-4-31b",
+      "discrimination_auc": 0.0545,
+      "paraphrase_delta": 0.1734078490191651,
+      "tail_fraction_range": 0.2018855,
+      "determinism_stddev": 1.1102230246251565e-16,
+      "throughput_tps": 200.44841049306274,
+      "peak_vram_mib": 72793,
+      "license": "Apache-2.0",
+      "params_b": 31,
+      "passed_determinism_gate": true,
+      "release_date_unix": 1774742400
+    }
+  ],
+  "winner_id": "qwen3-8b-base",
+  "decision_rule_version": 1,
+  "mock_scorer": false,
+  "ctx_max_tokens": 4096,
+  "determinism_gate_value": 0.00001,
+  "partial": false
+}
