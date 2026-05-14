@@ -59,9 +59,13 @@ fn writeback_match_returns_ok() {
 
 #[test]
 fn writeback_rejects_missing_row() {
-    let err =
-        audit_event_matches_writeback(Uuid::new_v4(), Some("sha256:abc"), Some("sha256:genesis"), None)
-            .expect_err("missing row must reject");
+    let err = audit_event_matches_writeback(
+        Uuid::new_v4(),
+        Some("sha256:abc"),
+        Some("sha256:genesis"),
+        None,
+    )
+    .expect_err("missing row must reject");
     assert_eq!(err, AuditChainDriftError::RowMissing);
     let display = err.to_string();
     assert!(
@@ -82,7 +86,10 @@ fn writeback_rejects_tampered_event_hash() {
     )
     .expect_err("tampered event_hash must reject");
     assert_eq!(err, AuditChainDriftError::EventHashMismatch);
-    assert!(err.to_string().starts_with(AUDIT_CHAIN_DRIFT_REJECTED_CLASS));
+    assert!(
+        err.to_string()
+            .starts_with(AUDIT_CHAIN_DRIFT_REJECTED_CLASS)
+    );
 }
 
 #[test]
@@ -97,7 +104,10 @@ fn writeback_rejects_tampered_previous_event_hash() {
     )
     .expect_err("tampered previous_event_hash must reject");
     assert_eq!(err, AuditChainDriftError::PreviousEventHashMismatch);
-    assert!(err.to_string().starts_with(AUDIT_CHAIN_DRIFT_REJECTED_CLASS));
+    assert!(
+        err.to_string()
+            .starts_with(AUDIT_CHAIN_DRIFT_REJECTED_CLASS)
+    );
 }
 
 #[test]

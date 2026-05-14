@@ -65,7 +65,10 @@ pub fn aggregate_perplexity_metrics(
     let perplexity = mean_nll.exp();
     let aggregate_perplexity_micros = saturating_micros(perplexity);
 
-    let tail_count = usable.iter().filter(|&&lp| lp < tail_logprob_cutoff).count();
+    let tail_count = usable
+        .iter()
+        .filter(|&&lp| lp < tail_logprob_cutoff)
+        .count();
     let tail_fraction = tail_count as f32 / n;
     let tail_fraction_micros = saturating_micros(tail_fraction);
 
@@ -140,12 +143,12 @@ impl CandleDeviceKind {
 
 #[cfg(feature = "local-gpu-models")]
 mod local_impl {
-    use super::{aggregate_perplexity_metrics, CandleDeviceKind};
+    use super::{CandleDeviceKind, aggregate_perplexity_metrics};
     use crate::perplexity::{PerplexityResult, PerplexityScorer};
     use anyhow::Context;
     use mistralrs::{
-        Constraint, MistralRs, Model, ModelBuilder, NormalRequest, Request,
-        RequestMessage, ResponseOk, SamplingParams,
+        Constraint, MistralRs, Model, ModelBuilder, NormalRequest, Request, RequestMessage,
+        ResponseOk, SamplingParams,
     };
     use std::path::Path;
     use std::sync::Mutex;
@@ -290,14 +293,12 @@ mod local_impl {
                             return;
                         }
                     };
-                    let model = match rt.block_on(async {
-                        ModelBuilder::new(model_path_str).build().await
-                    }) {
+                    let model = match rt
+                        .block_on(async { ModelBuilder::new(model_path_str).build().await })
+                    {
                         Ok(m) => m,
                         Err(e) => {
-                            let _ = init_tx.send(
-                                Err(e).context("LocalPerplexityScorerLoadFailed"),
-                            );
+                            let _ = init_tx.send(Err(e).context("LocalPerplexityScorerLoadFailed"));
                             return;
                         }
                     };
@@ -513,11 +514,11 @@ mod local_impl {
         let seq_len = dims[0];
         let _vocab = dims[1];
 
-        let lp_tensor = log_softmax_dim1(&logits)
-            .context("LocalPerplexityScorerLogSoftmaxFailed")?;
-        let lp_vec: Vec<Vec<f32>> = lp_tensor.to_vec2::<f32>().map_err(|e| {
-            anyhow::anyhow!("LocalPerplexityScorerToVec2Failed: {}", hash_err(&e))
-        })?;
+        let lp_tensor =
+            log_softmax_dim1(&logits).context("LocalPerplexityScorerLogSoftmaxFailed")?;
+        let lp_vec: Vec<Vec<f32>> = lp_tensor
+            .to_vec2::<f32>()
+            .map_err(|e| anyhow::anyhow!("LocalPerplexityScorerToVec2Failed: {}", hash_err(&e)))?;
         anyhow::ensure!(
             lp_vec.len() == seq_len,
             "LocalPerplexityScorerLogprobShapeMismatch"
@@ -544,9 +545,9 @@ mod local_impl {
     /// (subtract per-row max, exp, sum, log) to avoid overflow. Casts to
     /// f32 first so bf16/f16 pipelines round through a stable space.
     fn log_softmax_dim1(logits: &mistralrs::Tensor) -> anyhow::Result<mistralrs::Tensor> {
-        let logits_f32 = logits.to_dtype(mistralrs::DType::F32).map_err(|e| {
-            anyhow::anyhow!("LocalPerplexityScorerDTypeFailed: {}", hash_err(&e))
-        })?;
+        let logits_f32 = logits
+            .to_dtype(mistralrs::DType::F32)
+            .map_err(|e| anyhow::anyhow!("LocalPerplexityScorerDTypeFailed: {}", hash_err(&e)))?;
         let max = logits_f32
             .max_keepdim(1)
             .map_err(|e| anyhow::anyhow!("LocalPerplexityScorerMaxFailed: {}", hash_err(&e)))?;
@@ -562,9 +563,9 @@ mod local_impl {
         let log_sum = sum
             .log()
             .map_err(|e| anyhow::anyhow!("LocalPerplexityScorerLogFailed: {}", hash_err(&e)))?;
-        shifted.broadcast_sub(&log_sum).map_err(|e| {
-            anyhow::anyhow!("LocalPerplexityScorerSub2Failed: {}", hash_err(&e))
-        })
+        shifted
+            .broadcast_sub(&log_sum)
+            .map_err(|e| anyhow::anyhow!("LocalPerplexityScorerSub2Failed: {}", hash_err(&e)))
     }
 
     /// Stable, low-entropy fingerprint of a borrowed error value. Used so
@@ -627,7 +628,10 @@ mod tests {
         let logprobs = vec![0.0_f32, -1.0, -1.0, -20.0, -1.0];
         let r = aggregate_perplexity_metrics(&logprobs, -8.0);
         let tail_frac = r.tail_fraction_micros as f32 / 1_000_000.0;
-        assert!((tail_frac - 0.25).abs() < 1e-6, "expected 0.25, got {tail_frac}");
+        assert!(
+            (tail_frac - 0.25).abs() < 1e-6,
+            "expected 0.25, got {tail_frac}"
+        );
     }
 
     #[test]
@@ -733,7 +737,11 @@ mod tests {
     fn local_perplexity_smoke_against_real_model() {
         use super::local_impl::LocalPerplexityScorer;
         use crate::perplexity::PerplexityScorer;
-        if std::env::var("TRACEDAO_PERPLEXITY_INTEGRATION").ok().as_deref() != Some("1") {
+        if std::env::var("TRACEDAO_PERPLEXITY_INTEGRATION")
+            .ok()
+            .as_deref()
+            != Some("1")
+        {
             eprintln!(
                 "skip: TRACEDAO_PERPLEXITY_INTEGRATION not set; this test requires a GPU + staged model"
             );

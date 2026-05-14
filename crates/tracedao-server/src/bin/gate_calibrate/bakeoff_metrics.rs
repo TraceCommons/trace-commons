@@ -75,8 +75,7 @@ pub fn determinism_stddev(runs: &[Vec<f64>]) -> f64 {
     for i in 0..n_traces {
         let samples: Vec<f64> = runs.iter().map(|r| r[i]).collect();
         let mean = samples.iter().sum::<f64>() / samples.len() as f64;
-        let var = samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
-            / samples.len() as f64;
+        let var = samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / samples.len() as f64;
         total += var.sqrt();
     }
     total / n_traces as f64

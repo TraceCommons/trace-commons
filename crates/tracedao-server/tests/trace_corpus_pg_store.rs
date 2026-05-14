@@ -15,8 +15,8 @@ use tracedao_server::trace_corpus_storage::{
     TraceDerivedRecordWrite, TraceDerivedStatus, TraceExportAccessGrantStatus,
     TraceExportAccessGrantWrite, TraceExportJobStatus, TraceExportJobStatusUpdate,
     TraceExportJobWrite, TraceExportManifestItemWrite, TraceExportManifestMirrorWrite,
-    TraceExportManifestWrite, TraceNearCreditOutboxItemWrite, TraceObjectArtifactKind,
-    TraceObjectRefWrite, TraceRankingCalibrationDatasetStatus,
+    TraceExportManifestWrite, TraceGateDecisionRow, TraceNearCreditOutboxItemWrite,
+    TraceObjectArtifactKind, TraceObjectRefWrite, TraceRankingCalibrationDatasetStatus,
     TraceRankingCalibrationDatasetStatusUpdate, TraceRankingCalibrationDatasetWrite,
     TraceRankingCalibrationRunWrite, TraceRankingFeatureWrite, TraceRankingLabelOutcome,
     TraceRankingLabelSource, TraceRankingLabelWrite, TraceRankingModelStatus,
@@ -26,11 +26,10 @@ use tracedao_server::trace_corpus_storage::{
     TraceRetentionJobItemWrite, TraceRetentionJobStatus, TraceRetentionJobWrite,
     TraceRevocationPropagationAction, TraceRevocationPropagationItemStatus,
     TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget,
-    TraceRevocationPropagationTargetKind, TraceSubmissionWrite,
-    TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus, TraceTenantAccessGrantWrite,
-    TraceTenantPolicyWrite, TraceTombstoneWrite, TraceUtilityAttestationWrite,
-    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-    TraceGateDecisionRow, TraceWorkerKind,
+    TraceRevocationPropagationTargetKind, TraceSubmissionWrite, TraceTenantAccessGrantRole,
+    TraceTenantAccessGrantStatus, TraceTenantAccessGrantWrite, TraceTenantPolicyWrite,
+    TraceTombstoneWrite, TraceUtilityAttestationWrite, TraceVectorEntrySourceProjection,
+    TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWorkerKind,
 };
 use uuid::Uuid;
 
@@ -2562,8 +2561,7 @@ async fn pg_store_update_trace_submission_status_drives_transitions_and_audit() 
     let review_events: Vec<_> = recent_audit
         .iter()
         .filter(|event| {
-            event.submission_id == Some(submission_id)
-                && event.action == TraceAuditAction::Review
+            event.submission_id == Some(submission_id) && event.action == TraceAuditAction::Review
         })
         .collect();
     assert!(
@@ -2817,8 +2815,7 @@ async fn pg_store_list_recent_trace_audit_events_returns_limit_in_descending_ord
 
     // The most recent (last inserted) events must come first.
     let returned_ids: Vec<Uuid> = recent.iter().map(|event| event.audit_event_id).collect();
-    let expected_first_ten: Vec<Uuid> =
-        inserted_ids.iter().rev().take(10).copied().collect();
+    let expected_first_ten: Vec<Uuid> = inserted_ids.iter().rev().take(10).copied().collect();
     assert_eq!(
         returned_ids, expected_first_ten,
         "list_recent_trace_audit_events must return rows in audit_sequence DESC order"

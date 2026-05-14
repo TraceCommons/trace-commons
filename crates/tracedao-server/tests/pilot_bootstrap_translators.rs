@@ -12,10 +12,10 @@ mod translators;
 use std::collections::BTreeMap;
 
 use hf_dataset::Row;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use translators::{
-    submission_id_from_body, DeepSeekAgentTranslator, PiMonoTranslator, SubmissionDraft,
-    SwivalTranslator, Translator, SWIVAL_SOURCE_CODE_CAP,
+    DeepSeekAgentTranslator, PiMonoTranslator, SWIVAL_SOURCE_CODE_CAP, SubmissionDraft,
+    SwivalTranslator, Translator, submission_id_from_body,
 };
 
 fn row_from(fields: &[(&str, Value)]) -> Row {
@@ -33,7 +33,13 @@ fn swival_translator_produces_deterministic_id_for_same_input() {
         ("title", json!("Reentrancy in withdraw")),
         ("severity", json!("high")),
         ("finding_type", json!("reentrancy")),
-        ("proof", json!(["external call before state update", "ETH balance left mutable"])),
+        (
+            "proof",
+            json!([
+                "external call before state update",
+                "ETH balance left mutable"
+            ]),
+        ),
         ("fix_outline", json!("apply checks-effects-interactions")),
         ("source_code", json!("function withdraw() { ... }")),
     ]);
@@ -96,17 +102,20 @@ fn pi_mono_translator_picks_longest_chain() {
     //     b
     //       c
     //         d (longest chain: root2 -> b -> c -> d)
-    let row = row_from(&[(
-        "messages",
-        json!([
-            {"id": "root1", "content": "root1-text"},
-            {"id": "a", "parentId": "root1", "content": "a-text"},
-            {"id": "root2", "content": "root2-text"},
-            {"id": "b", "parentId": "root2", "content": "b-text"},
-            {"id": "c", "parentId": "b", "content": "c-text"},
-            {"id": "d", "parentId": "c", "content": "d-text"},
-        ]),
-    ), ("session_id", json!("S1"))]);
+    let row = row_from(&[
+        (
+            "messages",
+            json!([
+                {"id": "root1", "content": "root1-text"},
+                {"id": "a", "parentId": "root1", "content": "a-text"},
+                {"id": "root2", "content": "root2-text"},
+                {"id": "b", "parentId": "root2", "content": "b-text"},
+                {"id": "c", "parentId": "b", "content": "c-text"},
+                {"id": "d", "parentId": "c", "content": "d-text"},
+            ]),
+        ),
+        ("session_id", json!("S1")),
+    ]);
 
     let draft = t.translate(&row).expect("translate ok");
     assert!(draft.trace_body.contains("root2-text"));

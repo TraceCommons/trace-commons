@@ -622,7 +622,12 @@ impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> ServiceOwnedTraceArtifact
         object_ref: &TraceArtifactObjectRef,
     ) -> anyhow::Result<T> {
         let artifact = self.read_scoped_artifact(expected_scope, object_ref)?;
-        decrypt_artifact_json_with_kek(&self.crypto, &self.kek, &artifact, &object_ref.artifact_kind)
+        decrypt_artifact_json_with_kek(
+            &self.crypto,
+            &self.kek,
+            &artifact,
+            &object_ref.artifact_kind,
+        )
     }
 
     pub fn invalidate_scoped_artifact(
@@ -909,7 +914,11 @@ impl LocalEncryptedTraceArtifactStore {
             sha256_hex(&ciphertext) == expected_ciphertext_sha256,
             "trace artifact ciphertext hash mismatch"
         );
-        verify_kek_binding(&artifact, expected_tenant_storage_ref, &expected_artifact_kind)?;
+        verify_kek_binding(
+            &artifact,
+            expected_tenant_storage_ref,
+            &expected_artifact_kind,
+        )?;
         Ok(artifact)
     }
 
@@ -942,7 +951,11 @@ impl LocalEncryptedTraceArtifactStore {
             sha256_hex(&ciphertext) == receipt.ciphertext_sha256,
             "trace artifact ciphertext hash mismatch"
         );
-        verify_kek_binding(&artifact, expected_tenant_storage_ref, &receipt.artifact_kind)?;
+        verify_kek_binding(
+            &artifact,
+            expected_tenant_storage_ref,
+            &receipt.artifact_kind,
+        )?;
         Ok(artifact)
     }
 
@@ -1096,7 +1109,11 @@ pub(crate) fn verify_encrypted_artifact(
         sha256_hex(&ciphertext) == expected_ciphertext_sha256,
         "trace artifact ciphertext hash mismatch"
     );
-    verify_kek_binding(artifact, expected_tenant_storage_ref, expected_artifact_kind)?;
+    verify_kek_binding(
+        artifact,
+        expected_tenant_storage_ref,
+        expected_artifact_kind,
+    )?;
     Ok(())
 }
 
@@ -1669,8 +1686,7 @@ mod tests {
         crate::trace_artifact_kek::LocalMasterKeyWrapper,
     > {
         let key = crate::secrets::keychain::generate_master_key_hex();
-        let crypto =
-            SecretsCrypto::new(SecretString::from(key.clone())).expect("test crypto");
+        let crypto = SecretsCrypto::new(SecretString::from(key.clone())).expect("test crypto");
         let kek = test_kek(&key);
         let config = TraceArtifactProviderConfig::service_owned_remote("trace-commons-prod")
             .expect("remote provider config");
@@ -1805,8 +1821,7 @@ mod tests {
     #[test]
     fn service_owned_remote_store_binds_refs_to_tenant_and_submission() {
         let key = crate::secrets::keychain::generate_master_key_hex();
-        let crypto =
-            SecretsCrypto::new(SecretString::from(key.clone())).expect("test crypto");
+        let crypto = SecretsCrypto::new(SecretString::from(key.clone())).expect("test crypto");
         let kek = test_kek(&key);
         let config = TraceArtifactProviderConfig::service_owned_remote("trace-commons-prod")
             .expect("remote provider config");
@@ -1867,8 +1882,7 @@ mod tests {
     #[test]
     fn service_owned_remote_store_returns_invalidate_and_delete_receipts() {
         let key = crate::secrets::keychain::generate_master_key_hex();
-        let crypto =
-            SecretsCrypto::new(SecretString::from(key.clone())).expect("test crypto");
+        let crypto = SecretsCrypto::new(SecretString::from(key.clone())).expect("test crypto");
         let kek = test_kek(&key);
         let config = TraceArtifactProviderConfig::service_owned_remote("trace-commons-prod")
             .expect("remote provider config");

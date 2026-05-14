@@ -27,14 +27,13 @@ mod gcs_integration {
     use serde_json::json;
     use tracedao_server::secrets::SecretsCrypto;
     use tracedao_server::trace_artifact_gcs::{
-        GcsRemoteTraceArtifactProvider,
-        prod_client::ProdGcsObjectClient,
+        GcsRemoteTraceArtifactProvider, prod_client::ProdGcsObjectClient,
     };
     use tracedao_server::trace_artifact_kek::LocalMasterKeyWrapper;
     use tracedao_server::trace_artifact_store::{
         RemoteTraceArtifactProvider, ServiceOwnedTraceArtifactStore,
-        TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_V2, TraceArtifactInvalidationReason,
-        TraceArtifactKind, TraceArtifactProviderConfig, TraceArtifactScope,
+        TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_V2, TraceArtifactInvalidationReason, TraceArtifactKind,
+        TraceArtifactProviderConfig, TraceArtifactScope,
     };
 
     /// Read the fake-gcs-server endpoint from the environment. Returns `None`
@@ -60,11 +59,7 @@ mod gcs_integration {
             .expect("ProdGcsObjectClient::try_new_with_endpoint");
         let client = Arc::new(client);
         if versioned {
-            GcsRemoteTraceArtifactProvider::versioned(
-                client,
-                EMULATOR_BUCKET,
-                OBJECT_ALIAS,
-            )
+            GcsRemoteTraceArtifactProvider::versioned(client, EMULATOR_BUCKET, OBJECT_ALIAS)
         } else {
             GcsRemoteTraceArtifactProvider::new(client, EMULATOR_BUCKET, OBJECT_ALIAS)
         }
@@ -79,8 +74,7 @@ mod gcs_integration {
         LocalMasterKeyWrapper,
     > {
         let key = tracedao_server::secrets::keychain::generate_master_key_hex();
-        let crypto =
-            SecretsCrypto::new(SecretString::from(key.clone())).expect("store crypto");
+        let crypto = SecretsCrypto::new(SecretString::from(key.clone())).expect("store crypto");
         let kek_crypto = SecretsCrypto::new(SecretString::from(key)).expect("kek crypto");
         let kek = LocalMasterKeyWrapper::new(kek_crypto, OBJECT_ALIAS);
         let config = TraceArtifactProviderConfig::service_owned_remote(OBJECT_ALIAS)
@@ -113,11 +107,8 @@ mod gcs_integration {
         // without going through the store layer.
         let client = ProdGcsObjectClient::try_new_with_endpoint(EMULATOR_BUCKET, &endpoint)
             .expect("second ProdGcsObjectClient");
-        let direct_provider = GcsRemoteTraceArtifactProvider::new(
-            Arc::new(client),
-            EMULATOR_BUCKET,
-            OBJECT_ALIAS,
-        );
+        let direct_provider =
+            GcsRemoteTraceArtifactProvider::new(Arc::new(client), EMULATOR_BUCKET, OBJECT_ALIAS);
 
         let store = make_store(provider);
         let scope = TraceArtifactScope::new("tenant:sha256:integration", "submission-emulator");
@@ -305,7 +296,10 @@ mod gcs_integration {
             let again = standalone
                 .restore_deleted_encrypted_artifact(&receipt.object_ref)
                 .expect("second restore returns false, not an error");
-            assert!(!again, "second restore returns false when nothing left to restore");
+            assert!(
+                !again,
+                "second restore returns false when nothing left to restore"
+            );
         } else {
             // Bucket versioning not enabled on this emulator run — the
             // restore path returns Ok(false) rather than an error. That is

@@ -2,7 +2,7 @@
 mod bakeoff_metrics;
 
 use bakeoff_metrics::{
-    discrimination_auc, paraphrase_delta, tail_fraction_range, ThroughputRecord, VramRecord,
+    ThroughputRecord, VramRecord, discrimination_auc, paraphrase_delta, tail_fraction_range,
 };
 
 #[test]
@@ -62,11 +62,7 @@ fn determinism_zero_for_identical_runs() {
 
 #[test]
 fn determinism_nonzero_when_runs_drift() {
-    let runs = vec![
-        vec![10.0, 20.0],
-        vec![10.000001, 20.0],
-        vec![10.0, 20.0],
-    ];
+    let runs = vec![vec![10.0, 20.0], vec![10.000001, 20.0], vec![10.0, 20.0]];
     assert!(bakeoff_metrics::determinism_stddev(&runs) > 0.0);
 }
 

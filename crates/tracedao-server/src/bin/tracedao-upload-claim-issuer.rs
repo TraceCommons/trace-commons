@@ -1,8 +1,7 @@
 use tracedao_server::trace_upload_claim_issuer::{
     TraceUploadClaimIssuerConfig, UploadClaimIssuerHealthCheck,
-    configure_tenant_access_grants_from_env, generate_upload_claim_keypair,
-    mint_test_upload_claim, run_upload_claim_issuer_health_check,
-    serve_trace_upload_claim_issuer,
+    configure_tenant_access_grants_from_env, generate_upload_claim_keypair, mint_test_upload_claim,
+    run_upload_claim_issuer_health_check, serve_trace_upload_claim_issuer,
 };
 
 const HELP_TEXT: &str = "tracedao-upload-claim-issuer

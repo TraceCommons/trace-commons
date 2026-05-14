@@ -115,9 +115,9 @@ impl TraceUploadClaimIssuerConfig {
         let shutdown_grace_seconds =
             optional_env("TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_SHUTDOWN_GRACE_SECONDS")?
                 .map(|value| {
-                    value.parse::<u64>().context(
-                        "invalid TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_SHUTDOWN_GRACE_SECONDS",
-                    )
+                    value
+                        .parse::<u64>()
+                        .context("invalid TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_SHUTDOWN_GRACE_SECONDS")
                 })
                 .transpose()?
                 .unwrap_or(DEFAULT_SHUTDOWN_GRACE_SECONDS);
@@ -250,20 +250,26 @@ impl TraceUploadClaimIssuerState {
         let signing_ok = self.sign_health_probe().is_ok();
         checks.insert(
             "signing_key".to_string(),
-            serde_json::Value::String(if signing_ok { "ok".into() } else { "fail".into() }),
+            serde_json::Value::String(if signing_ok {
+                "ok".into()
+            } else {
+                "fail".into()
+            }),
         );
         let workload_ok = self.workload_key_health().is_ok();
         checks.insert(
             "workload_public_key".to_string(),
-            serde_json::Value::String(if workload_ok { "ok".into() } else { "fail".into() }),
+            serde_json::Value::String(if workload_ok {
+                "ok".into()
+            } else {
+                "fail".into()
+            }),
         );
         if self.require_tenant_access_grants {
             let configured = self.tenant_access_grant_db.is_some();
             checks.insert(
                 "tenant_access_grant_db".to_string(),
-                serde_json::Value::String(
-                    if configured { "configured" } else { "missing" }.into(),
-                ),
+                serde_json::Value::String(if configured { "configured" } else { "missing" }.into()),
             );
         }
         serde_json::Value::Object(checks)
@@ -498,8 +504,9 @@ async fn serve_router_with_graceful_shutdown(
             Err(anyhow::Error::from(error)).context("Trace Commons upload claim issuer failed")
         }
         Err(error) if error.is_cancelled() => Ok(()),
-        Err(error) => Err(anyhow::Error::from(error))
-            .context("Trace Commons upload claim issuer task failed"),
+        Err(error) => {
+            Err(anyhow::Error::from(error)).context("Trace Commons upload claim issuer task failed")
+        }
     }
 }
 
@@ -578,7 +585,10 @@ pub async fn run_upload_claim_issuer_health_check() -> UploadClaimIssuerHealthCh
         Ok(config) => config,
         Err(_) => return UploadClaimIssuerHealthCheck::Fail("config-missing"),
     };
-    if configure_tenant_access_grants_from_env(&mut config).await.is_err() {
+    if configure_tenant_access_grants_from_env(&mut config)
+        .await
+        .is_err()
+    {
         return UploadClaimIssuerHealthCheck::Fail("tenant-grant-db-unavailable");
     }
     let state = match config.build_state() {
@@ -1458,9 +1468,21 @@ mod tests {
     #[test]
     fn generate_keypair_produces_parseable_ed25519_material() {
         let keypair = generate_upload_claim_keypair().expect("keygen succeeds");
-        assert!(keypair.private_key_pem.starts_with("-----BEGIN PRIVATE KEY-----"));
-        assert!(keypair.private_key_pem.contains("-----END PRIVATE KEY-----"));
-        assert!(keypair.public_key_pem.starts_with("-----BEGIN PUBLIC KEY-----"));
+        assert!(
+            keypair
+                .private_key_pem
+                .starts_with("-----BEGIN PRIVATE KEY-----")
+        );
+        assert!(
+            keypair
+                .private_key_pem
+                .contains("-----END PRIVATE KEY-----")
+        );
+        assert!(
+            keypair
+                .public_key_pem
+                .starts_with("-----BEGIN PUBLIC KEY-----")
+        );
         assert!(keypair.public_key_pem.contains("-----END PUBLIC KEY-----"));
         assert!(Uuid::parse_str(&keypair.suggested_kid).is_ok());
         // Round-trip through the same code path the server uses at startup.

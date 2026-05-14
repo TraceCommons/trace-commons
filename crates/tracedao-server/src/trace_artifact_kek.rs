@@ -498,7 +498,13 @@ impl CloudKmsClient for InMemoryCloudKmsClient {
             .map_err(|e| anyhow::anyhow!("InMemoryCloudKms: cipher init failed: {e}"))?;
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
         let ciphertext = cipher
-            .encrypt(&nonce, Payload { msg: plaintext, aad })
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
             .map_err(|e| anyhow::anyhow!("InMemoryCloudKms: encrypt failed: {e}"))?;
         let mut out = Vec::with_capacity(nonce.len() + ciphertext.len());
         out.extend_from_slice(&nonce);

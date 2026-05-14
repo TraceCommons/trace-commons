@@ -27,16 +27,15 @@ use tracedao_gate_enclave::embedder_fastembed::FastEmbedTextEmbedder;
 use tracedao_gate_enclave::vector_index::VectorIndex;
 use tracedao_gate_enclave::vector_index_usearch::UsearchVectorIndex;
 use tracedao_server::config::DatabaseConfig;
-use tracedao_server::db::postgres::PgBackend;
 use tracedao_server::db::Database;
+use tracedao_server::db::postgres::PgBackend;
 use tracedao_server::secrets::SecretsCrypto;
 use tracedao_server::trace_artifact_kek::{
     DstackKekWrapper, KekContext, KmsKeyWrapper, LocalMasterKeyWrapper,
 };
 use tracedao_server::trace_artifact_store::{
-    aead_decrypt_with_dek, EncryptedTraceArtifactReceipt, FileRemoteTraceArtifactProvider,
-    ServiceOwnedTraceArtifactStore, TraceArtifactKind, TraceArtifactProviderConfig,
-    TraceArtifactStore,
+    EncryptedTraceArtifactReceipt, FileRemoteTraceArtifactProvider, ServiceOwnedTraceArtifactStore,
+    TraceArtifactKind, TraceArtifactProviderConfig, TraceArtifactStore, aead_decrypt_with_dek,
 };
 use tracedao_server::trace_corpus_storage::{
     TraceCorpusStatus, TraceCorpusStore, TraceGateDecisionRow, TraceObjectArtifactKind,
@@ -159,9 +158,9 @@ fn parse_args(argv: &[String]) -> Result<ReplayArgs> {
                 std::process::exit(0);
             }
             "--tenant-id" => {
-                let value = argv.get(i + 1).context(
-                    "VectorReplayArgs: --tenant-id requires a value",
-                )?;
+                let value = argv
+                    .get(i + 1)
+                    .context("VectorReplayArgs: --tenant-id requires a value")?;
                 tenant_id = Some(
                     Uuid::parse_str(value)
                         .context("VectorReplayArgs: --tenant-id must be a valid UUID")?,
@@ -279,9 +278,7 @@ fn parse_usize_env(name: &str, default: usize) -> Result<usize> {
                 Ok(default)
             } else {
                 trimmed.parse::<usize>().map_err(|_| {
-                    anyhow::anyhow!(
-                        "VectorReplayInit: {name} must be a non-negative integer"
-                    )
+                    anyhow::anyhow!("VectorReplayInit: {name} must be a non-negative integer")
                 })
             }
         }
@@ -383,12 +380,8 @@ async fn run_replay(args: ReplayArgs) -> Result<ReplaySummary> {
     )
     .context("VectorReplayInit: provider config init failed")?;
     let provider = FileRemoteTraceArtifactProvider::new(std::path::PathBuf::from(&artifact_root));
-    let artifact_store = ServiceOwnedTraceArtifactStore::new(
-        provider_config,
-        crypto,
-        Arc::clone(&kek),
-        provider,
-    );
+    let artifact_store =
+        ServiceOwnedTraceArtifactStore::new(provider_config, crypto, Arc::clone(&kek), provider);
 
     // Build the embedder.
     let embedder_model_id = std::env::var(TRACE_COMMONS_EMBEDDER_MODEL_ID)
@@ -396,12 +389,11 @@ async fn run_replay(args: ReplayArgs) -> Result<ReplaySummary> {
     let embedder_cache_dir = std::env::var(TRACE_COMMONS_EMBEDDER_CACHE_DIR)
         .unwrap_or_else(|_| TRACE_COMMONS_EMBEDDER_DEFAULT_CACHE_DIR.to_string());
     let embedder_max_tokens = match std::env::var(TRACE_COMMONS_EMBEDDER_MAX_TOKENS) {
-        Ok(raw) => raw
-            .trim()
-            .parse::<usize>()
-            .map_err(|_| anyhow::anyhow!(
+        Ok(raw) => raw.trim().parse::<usize>().map_err(|_| {
+            anyhow::anyhow!(
                 "VectorReplayInit: {TRACE_COMMONS_EMBEDDER_MAX_TOKENS} must be a positive integer"
-            ))?,
+            )
+        })?,
         Err(_) => TRACE_COMMONS_EMBEDDER_DEFAULT_MAX_TOKENS,
     };
     anyhow::ensure!(
@@ -492,11 +484,7 @@ async fn run_replay(args: ReplayArgs) -> Result<ReplaySummary> {
     let mut after_cursor: Option<(DateTime<Utc>, Uuid)> = None;
     'outer: loop {
         let rows = store
-            .stream_trace_gate_decisions_for_replay(
-                &tenant_id_str,
-                args.page_size,
-                after_cursor,
-            )
+            .stream_trace_gate_decisions_for_replay(&tenant_id_str, args.page_size, after_cursor)
             .await
             .map_err(|e| anyhow::anyhow!("VectorReplayPgQueryFailed: {e}"))?;
         if rows.is_empty() {
@@ -534,18 +522,12 @@ async fn run_replay(args: ReplayArgs) -> Result<ReplaySummary> {
             match outcome {
                 Ok(RowOutcome::Replayed) => summary.replayed += 1,
                 Ok(RowOutcome::SkippedRevoked) => summary.skipped_revoked += 1,
-                Ok(RowOutcome::SkippedEmbedderMismatch) => {
-                    summary.skipped_embedder_mismatch += 1
-                }
-                Ok(RowOutcome::SkippedAlreadyPresent) => {
-                    summary.skipped_already_present += 1
-                }
+                Ok(RowOutcome::SkippedEmbedderMismatch) => summary.skipped_embedder_mismatch += 1,
+                Ok(RowOutcome::SkippedAlreadyPresent) => summary.skipped_already_present += 1,
                 Ok(RowOutcome::SkippedSubmissionNotAccepted) => {
                     summary.skipped_submission_not_accepted += 1
                 }
-                Ok(RowOutcome::SkippedMissingArtifact) => {
-                    summary.skipped_missing_artifact += 1
-                }
+                Ok(RowOutcome::SkippedMissingArtifact) => summary.skipped_missing_artifact += 1,
                 Err(class) => {
                     summary.errors += 1;
                     tracing::error!(
@@ -898,8 +880,7 @@ mod tests {
 
     #[test]
     fn parse_args_bad_tenant_uuid_errors() {
-        let err = parse_args(&argv(&["--tenant-id", "not-a-uuid"]))
-            .expect_err("bad uuid");
+        let err = parse_args(&argv(&["--tenant-id", "not-a-uuid"])).expect_err("bad uuid");
         let msg = format!("{err:#}");
         assert!(msg.contains("VectorReplayArgs"), "got {msg}");
     }
@@ -914,10 +895,7 @@ mod tests {
         ]))
         .expect_err("conflict");
         let msg = format!("{err:#}");
-        assert!(
-            msg.contains("mutually exclusive"),
-            "got {msg}"
-        );
+        assert!(msg.contains("mutually exclusive"), "got {msg}");
     }
 
     #[test]

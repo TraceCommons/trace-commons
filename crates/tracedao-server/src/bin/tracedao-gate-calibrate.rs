@@ -117,9 +117,8 @@ async fn main() -> anyhow::Result<()> {
 /// overrides. `try_init` is used so a parent process that already installed
 /// a subscriber (e.g. an integration test harness) wins.
 fn init_tracing() {
-    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| {
-        "info,tracedao_gate_calibrate=info,tracedao_server=info".into()
-    });
+    let filter = std::env::var("RUST_LOG")
+        .unwrap_or_else(|_| "info,tracedao_gate_calibrate=info,tracedao_server=info".into());
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -151,9 +150,7 @@ mod calibrate_impl {
     use anyhow::Context;
     use serde::{Deserialize, Serialize};
     use tracedao_gate_enclave::embedder_fastembed::FastEmbedTextEmbedder;
-    use tracedao_gate_enclave::perplexity_local::{
-        CandleDeviceKind, LocalPerplexityScorer,
-    };
+    use tracedao_gate_enclave::perplexity_local::{CandleDeviceKind, LocalPerplexityScorer};
     use tracedao_gate_enclave::vector_index::{MockVectorIndex, VectorIndex};
     use tracedao_gate_enclave::{
         EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig, OrchestrationDecision,
@@ -179,8 +176,7 @@ mod calibrate_impl {
     /// still sets it, the calibrate path emits a deprecation warning at
     /// startup and continues with auto-detection.
     const TRACE_COMMONS_PERPLEXITY_MODEL_ARCH: &str = "TRACE_COMMONS_PERPLEXITY_MODEL_ARCH";
-    const TRACE_COMMONS_PERPLEXITY_DEFAULT_MODEL_ID: &str =
-        "meta-llama/Llama-3.1-8B-Instruct";
+    const TRACE_COMMONS_PERPLEXITY_DEFAULT_MODEL_ID: &str = "meta-llama/Llama-3.1-8B-Instruct";
     const TRACE_COMMONS_PERPLEXITY_DEFAULT_MAX_TOKENS: usize = 16_384;
     const TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF: f32 = -8.0;
     const TRACE_COMMONS_EMBEDDER_MODEL_ID: &str = "TRACE_COMMONS_EMBEDDER_MODEL_ID";
@@ -211,8 +207,8 @@ mod calibrate_impl {
             .unwrap_or_else(|_| TRACE_COMMONS_PERPLEXITY_DEFAULT_MODEL_ID.to_string());
         let model_path = std::env::var(TRACE_COMMONS_PERPLEXITY_MODEL_PATH)
             .context("CalibrateMissingEnv: TRACE_COMMONS_PERPLEXITY_MODEL_PATH")?;
-        let device_raw = std::env::var(TRACE_COMMONS_PERPLEXITY_DEVICE)
-            .unwrap_or_else(|_| "cuda".to_string());
+        let device_raw =
+            std::env::var(TRACE_COMMONS_PERPLEXITY_DEVICE).unwrap_or_else(|_| "cuda".to_string());
         let device = CandleDeviceKind::from_env_str(&device_raw)
             .context("CalibrateBadEnv: TRACE_COMMONS_PERPLEXITY_DEVICE")?;
         let max_tokens = match std::env::var(TRACE_COMMONS_PERPLEXITY_MAX_TOKENS) {
@@ -254,9 +250,8 @@ mod calibrate_impl {
                     None
                 } else {
                     Some(
-                        t.parse::<usize>().context(
-                            "CalibrateBadEnv: TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM",
-                        )?,
+                        t.parse::<usize>()
+                            .context("CalibrateBadEnv: TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM")?,
                     )
                 }
             }
@@ -287,14 +282,9 @@ mod calibrate_impl {
         }
 
         // ----------------------------- build -----------------------------
-        let scorer = LocalPerplexityScorer::try_new(
-            model_id,
-            &model_path,
-            device,
-            tail_cutoff,
-            max_tokens,
-        )
-        .context("CalibrateInit: LocalPerplexityScorerInitFailed")?;
+        let scorer =
+            LocalPerplexityScorer::try_new(model_id, &model_path, device, tail_cutoff, max_tokens)
+                .context("CalibrateInit: LocalPerplexityScorerInitFailed")?;
 
         let embedder = FastEmbedTextEmbedder::try_new(
             embedder_model_id,
@@ -727,9 +717,15 @@ mod tests {
         ]);
         match cli.cmd {
             Some(Cmd::BakeOff(args)) => {
-                assert_eq!(args.candidates, std::path::PathBuf::from("/tmp/manifest.toml"));
+                assert_eq!(
+                    args.candidates,
+                    std::path::PathBuf::from("/tmp/manifest.toml")
+                );
                 assert_eq!(args.corpus, std::path::PathBuf::from("/tmp/corpus.tar.zst"));
-                assert_eq!(args.report_out, std::path::PathBuf::from("/tmp/report.json"));
+                assert_eq!(
+                    args.report_out,
+                    std::path::PathBuf::from("/tmp/report.json")
+                );
                 assert!(args.mock_scorer);
                 assert_eq!(args.determinism_repeat_runs, 3);
             }
@@ -773,15 +769,21 @@ mod tests {
             };
             let s = serde_json::to_string(&out).expect("serialize");
             let v: serde_json::Value = serde_json::from_str(&s).expect("parse");
-            assert!(v.get("perplexity_micros").and_then(|x| x.as_u64()).is_some());
-            assert!(v
-                .get("tail_fraction_micros")
-                .and_then(|x| x.as_u64())
-                .is_some());
-            assert!(v
-                .get("novelty_score_micros")
-                .and_then(|x| x.as_u64())
-                .is_some());
+            assert!(
+                v.get("perplexity_micros")
+                    .and_then(|x| x.as_u64())
+                    .is_some()
+            );
+            assert!(
+                v.get("tail_fraction_micros")
+                    .and_then(|x| x.as_u64())
+                    .is_some()
+            );
+            assert!(
+                v.get("novelty_score_micros")
+                    .and_then(|x| x.as_u64())
+                    .is_some()
+            );
             let obj = v.as_object().expect("object");
             assert_eq!(obj.len(), 3, "exactly three calibration metrics");
         }

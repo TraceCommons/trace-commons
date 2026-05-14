@@ -1,7 +1,7 @@
 #[path = "../src/bin/gate_calibrate/bakeoff_report.rs"]
 mod bakeoff_report;
 
-use bakeoff_report::{pick_winner, weighted_score, CandidateResult, License, DETERMINISM_GATE};
+use bakeoff_report::{CandidateResult, DETERMINISM_GATE, License, pick_winner, weighted_score};
 
 fn result(id: &str, auc: f64, para: f64, tail: f64, throughput: f64, det: f64) -> CandidateResult {
     CandidateResult {
@@ -175,8 +175,14 @@ fn failed_candidate_renders_in_markdown_failed_section() {
         "LocalPerplexityScorerLoadFailed",
     ));
     let md = bakeoff_report::render_markdown(&r);
-    assert!(md.contains("## Failed candidates"), "missing failed section: {md}");
-    assert!(md.contains("LocalPerplexityScorerLoadFailed"), "missing class: {md}");
+    assert!(
+        md.contains("## Failed candidates"),
+        "missing failed section: {md}"
+    );
+    assert!(
+        md.contains("LocalPerplexityScorerLoadFailed"),
+        "missing class: {md}"
+    );
     assert!(md.contains("broken"), "missing id: {md}");
 }
 
@@ -186,7 +192,10 @@ fn failed_candidate_json_omits_field_when_none() {
     // serialized JSON so existing report consumers don't see a new key.
     let r = result("x", 0.9, 0.1, 0.5, 1000.0, 1e-7);
     let json = serde_json::to_string(&r).unwrap();
-    assert!(!json.contains("load_or_eval_error"), "unexpected key: {json}");
+    assert!(
+        !json.contains("load_or_eval_error"),
+        "unexpected key: {json}"
+    );
 }
 
 #[test]

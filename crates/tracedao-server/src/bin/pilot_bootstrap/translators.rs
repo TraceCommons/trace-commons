@@ -335,7 +335,6 @@ pub fn translator_by_name(name: &str) -> Result<Box<dyn Translator>> {
         "swival" => Ok(Box::new(SwivalTranslator::new())),
         "pi-mono" => Ok(Box::new(PiMonoTranslator::new())),
         "deepseek-agent" => Ok(Box::new(DeepSeekAgentTranslator::new())),
-        other => Err(anyhow::anyhow!("unknown translator: {other}"))
-            .context("translator_by_name"),
+        other => Err(anyhow::anyhow!("unknown translator: {other}")).context("translator_by_name"),
     }
 }

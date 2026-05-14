@@ -42,11 +42,11 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use lru::LruCache;
 use sha2::{Digest, Sha256};
-use usearch::ffi::{IndexOptions, MetricKind, ScalarKind};
 use usearch::Index;
+use usearch::ffi::{IndexOptions, MetricKind, ScalarKind};
 use uuid::Uuid;
 
 use crate::vector_index::{NearestNeighbor, VectorIndex};
@@ -162,8 +162,8 @@ impl UsearchVectorIndex {
 
         let file_path = self.tenant_file_path(tenant_storage_ref);
         let opts = self.build_index_options();
-        let index = Index::new(&opts)
-            .map_err(|e| anyhow!("failed to construct usearch index: {e}"))?;
+        let index =
+            Index::new(&opts).map_err(|e| anyhow!("failed to construct usearch index: {e}"))?;
         if file_path.is_file() {
             index
                 .load(file_path.to_str().ok_or_else(|| {
@@ -212,8 +212,9 @@ impl UsearchVectorIndex {
                         );
                     }
                 }
-                return Err(flush_err
-                    .context("UsearchVectorIndex eviction flush failed; victim re-cached"));
+                return Err(
+                    flush_err.context("UsearchVectorIndex eviction flush failed; victim re-cached")
+                );
             }
         }
 
@@ -595,16 +596,10 @@ mod tests {
 
         let key_a = UsearchVectorIndex::uuid_to_key(id_a);
         let key_b = UsearchVectorIndex::uuid_to_key(id_b);
-        let neighbor_a_key = u64::from_be_bytes(
-            neighbors_a[0].entry_id.as_bytes()[0..8]
-                .try_into()
-                .unwrap(),
-        );
-        let neighbor_b_key = u64::from_be_bytes(
-            neighbors_b[0].entry_id.as_bytes()[0..8]
-                .try_into()
-                .unwrap(),
-        );
+        let neighbor_a_key =
+            u64::from_be_bytes(neighbors_a[0].entry_id.as_bytes()[0..8].try_into().unwrap());
+        let neighbor_b_key =
+            u64::from_be_bytes(neighbors_b[0].entry_id.as_bytes()[0..8].try_into().unwrap());
         assert_eq!(neighbor_a_key, key_a, "tenant A must see its own entry");
         assert_eq!(neighbor_b_key, key_b, "tenant B must see its own entry");
         assert_ne!(
@@ -628,11 +623,8 @@ mod tests {
         let idx2 = build_index(tmp.path(), dim);
         let neighbors = idx2.nearest("tenant", &v, 5).unwrap();
         assert_eq!(neighbors.len(), 1);
-        let recovered_key = u64::from_be_bytes(
-            neighbors[0].entry_id.as_bytes()[0..8]
-                .try_into()
-                .unwrap(),
-        );
+        let recovered_key =
+            u64::from_be_bytes(neighbors[0].entry_id.as_bytes()[0..8].try_into().unwrap());
         assert_eq!(recovered_key, UsearchVectorIndex::uuid_to_key(id));
     }
 
@@ -671,11 +663,8 @@ mod tests {
         // Now query tenant_a — its handle must be reloaded from disk.
         let neighbors_a = idx.nearest("tenant_a", &v_a, 5).unwrap();
         assert_eq!(neighbors_a.len(), 1, "tenant_a must reload from disk");
-        let recovered_key = u64::from_be_bytes(
-            neighbors_a[0].entry_id.as_bytes()[0..8]
-                .try_into()
-                .unwrap(),
-        );
+        let recovered_key =
+            u64::from_be_bytes(neighbors_a[0].entry_id.as_bytes()[0..8].try_into().unwrap());
         assert_eq!(recovered_key, UsearchVectorIndex::uuid_to_key(id_a));
     }
 
@@ -726,7 +715,10 @@ mod tests {
         // empty index for this tenant.
         assert!(!idx.contains_entry("tenant", id).unwrap());
         let neighbors = idx.nearest("tenant", &v, 5).unwrap();
-        assert!(neighbors.is_empty(), "fresh index must be empty: {neighbors:?}");
+        assert!(
+            neighbors.is_empty(),
+            "fresh index must be empty: {neighbors:?}"
+        );
 
         // No-op when the file doesn't exist.
         idx.delete_tenant_index_file("never_seen_tenant").unwrap();

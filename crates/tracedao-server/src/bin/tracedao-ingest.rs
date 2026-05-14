@@ -8,12 +8,12 @@ use std::time::Duration as StdDuration;
 
 use anyhow::Context;
 use axum::extract::{DefaultBodyLimit, Query};
-use base64::Engine as _;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router, extract::Path as AxumPath, extract::State};
+use base64::Engine as _;
 use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::errors::ErrorKind as JwtErrorKind;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
@@ -37,17 +37,11 @@ use tracedao_server::db::{Database, TraceCorpusRlsDiagnostics};
 use tracedao_server::error::DatabaseError;
 use tracedao_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
 use tracedao_server::secrets::SecretsCrypto;
-use tracedao_server::trace_artifact_kek::{
-    KekWrapperStatus, KmsKeyWrapper, LocalMasterKeyWrapper,
-};
+use tracedao_server::trace_artifact_kek::{KekWrapperStatus, KmsKeyWrapper, LocalMasterKeyWrapper};
 use tracedao_server::trace_artifact_store::{
     EncryptedTraceArtifactReceipt, FileRemoteTraceArtifactProvider,
     LocalEncryptedTraceArtifactStore, ServiceOwnedTraceArtifactStore, TraceArtifactKind,
     TraceArtifactProviderConfig, TraceArtifactStore,
-};
-use tracedao_server::trace_gate_service::{
-    DstackGateService, EnclaveGateService, GateDecision, GateServiceStatus, InMemoryGateService,
-    TenantCtx as GateTenantCtx, TraceGateService,
 };
 use tracedao_server::trace_corpus_storage::{
     TraceArtifactInvalidationCounts as StorageTraceArtifactInvalidationCounts,
@@ -151,6 +145,10 @@ use tracedao_server::trace_corpus_storage::{
     TraceVectorEntryWrite as StorageTraceVectorEntryWrite,
     TraceWorkerKind as StorageTraceWorkerKind,
 };
+use tracedao_server::trace_gate_service::{
+    DstackGateService, EnclaveGateService, GateDecision, GateServiceStatus, InMemoryGateService,
+    TenantCtx as GateTenantCtx, TraceGateService,
+};
 use uuid::Uuid;
 
 const DEFAULT_BIND: &str = "127.0.0.1:3907";
@@ -198,8 +196,7 @@ const TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS: &str =
 const TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS: &str =
     "TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS";
 #[allow(dead_code)]
-const TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS: &str =
-    "TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS";
+const TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS: &str = "TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS";
 #[allow(dead_code)]
 const TRACE_COMMONS_GATE_POLICY_VERSION: &str = "TRACE_COMMONS_GATE_POLICY_VERSION";
 #[allow(dead_code)]
@@ -1787,9 +1784,11 @@ impl TraceRemoteObjectStoreConfig {
         config.file_system_versioning =
             env_truthy(TRACE_COMMONS_REMOTE_OBJECT_STORE_FILE_SYSTEM_VERSIONING);
         config.require_versioning = env_truthy(TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING);
-        config.region =
-            optional_remote_object_store_env(TRACE_COMMONS_REMOTE_OBJECT_STORE_REGION, region.as_deref())?
-                .map(str::to_string);
+        config.region = optional_remote_object_store_env(
+            TRACE_COMMONS_REMOTE_OBJECT_STORE_REGION,
+            region.as_deref(),
+        )?
+        .map(str::to_string);
         config.endpoint = optional_remote_object_store_env(
             TRACE_COMMONS_REMOTE_OBJECT_STORE_ENDPOINT,
             endpoint.as_deref(),
@@ -3075,7 +3074,8 @@ impl AppState {
             gate_service: build_trace_gate_service_from_env().await?,
             revocation_propagation_max_attempts:
                 parse_revocation_propagation_max_attempts_from_env()?,
-            novelty_utility_credit_points_delta: parse_novelty_utility_credit_points_delta_from_env()?,
+            novelty_utility_credit_points_delta:
+                parse_novelty_utility_credit_points_delta_from_env()?,
             novelty_utility_require_production_gate: env_truthy(
                 TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE,
             ),
@@ -4222,12 +4222,10 @@ async fn build_trace_gate_service_from_env() -> anyhow::Result<Arc<dyn TraceGate
 /// perplexity on a known input and a unit-normalized embedding before the
 /// gate is allowed to drive credit emission.
 #[cfg(feature = "local-gpu-models")]
-async fn build_enclave_local_gpu_gate_service_from_env(
-) -> anyhow::Result<Arc<dyn TraceGateService>> {
+async fn build_enclave_local_gpu_gate_service_from_env() -> anyhow::Result<Arc<dyn TraceGateService>>
+{
     use tracedao_gate_enclave::embedder_fastembed::FastEmbedTextEmbedder;
-    use tracedao_gate_enclave::perplexity_local::{
-        CandleDeviceKind, LocalPerplexityScorer,
-    };
+    use tracedao_gate_enclave::perplexity_local::{CandleDeviceKind, LocalPerplexityScorer};
     use tracedao_gate_enclave::vector_index_usearch::UsearchVectorIndex;
     use tracedao_gate_enclave::{EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig};
 
@@ -4250,8 +4248,8 @@ async fn build_enclave_local_gpu_gate_service_from_env(
     })?;
     let model_id = std::env::var(TRACE_COMMONS_PERPLEXITY_MODEL_ID)
         .unwrap_or_else(|_| TRACE_COMMONS_PERPLEXITY_DEFAULT_MODEL_ID.to_string());
-    let device_raw = std::env::var(TRACE_COMMONS_PERPLEXITY_DEVICE)
-        .unwrap_or_else(|_| "cuda".to_string());
+    let device_raw =
+        std::env::var(TRACE_COMMONS_PERPLEXITY_DEVICE).unwrap_or_else(|_| "cuda".to_string());
     let device = CandleDeviceKind::from_env_str(&device_raw).with_context(|| {
         format!("{TRACE_COMMONS_PERPLEXITY_DEVICE} must be one of: cuda, cuda:N, metal, cpu")
     })?;
@@ -4290,14 +4288,9 @@ async fn build_enclave_local_gpu_gate_service_from_env(
         );
     }
 
-    let scorer = LocalPerplexityScorer::try_new(
-        model_id,
-        &model_path,
-        device,
-        tail_cutoff,
-        max_tokens,
-    )
-    .context("LocalPerplexityScorerInitFailed")?;
+    let scorer =
+        LocalPerplexityScorer::try_new(model_id, &model_path, device, tail_cutoff, max_tokens)
+            .context("LocalPerplexityScorerInitFailed")?;
 
     // fastembed-rs embedder (Phase A3). Loads the configured sentence
     // embedder once at startup; same H100 hosts both this and the candle
@@ -4323,9 +4316,7 @@ async fn build_enclave_local_gpu_gate_service_from_env(
                 None
             } else {
                 Some(trimmed.parse::<usize>().with_context(|| {
-                    format!(
-                        "{TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM} must be a positive integer"
-                    )
+                    format!("{TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM} must be a positive integer")
                 })?)
             }
         }
@@ -4404,25 +4395,20 @@ async fn build_enclave_local_gpu_gate_service_from_env(
     // those settings every trace passes the gate trivially and every credit
     // event is stamped with a placeholder version hash. Both are blocked at
     // startup here.
-    let perplexity_floor_micros = parse_required_u64_env(
-        TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS,
-    )?;
-    let tail_fraction_floor_micros = parse_required_u64_env(
-        TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS,
-    )?;
-    let novelty_floor_micros =
-        parse_required_u64_env(TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS)?;
+    let perplexity_floor_micros =
+        parse_required_u64_env(TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS)?;
+    let tail_fraction_floor_micros =
+        parse_required_u64_env(TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS)?;
+    let novelty_floor_micros = parse_required_u64_env(TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS)?;
     anyhow::ensure!(
-        perplexity_floor_micros > 0
-            || tail_fraction_floor_micros > 0
-            || novelty_floor_micros > 0,
+        perplexity_floor_micros > 0 || tail_fraction_floor_micros > 0 || novelty_floor_micros > 0,
         "{}/{}/{} cannot all be zero — at least one gate floor must be positive",
         TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS,
         TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS,
         TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS,
     );
-    let gate_policy_version = std::env::var(TRACE_COMMONS_GATE_POLICY_VERSION)
-        .with_context(|| {
+    let gate_policy_version =
+        std::env::var(TRACE_COMMONS_GATE_POLICY_VERSION).with_context(|| {
             format!(
                 "{} must be set when {}=\"enclave_local_gpu\"",
                 TRACE_COMMONS_GATE_POLICY_VERSION, TRACE_COMMONS_GATE_SERVICE,
@@ -4460,8 +4446,7 @@ async fn build_enclave_local_gpu_gate_service_from_env(
         novelty_floor_micros,
         top_k,
     };
-    let orchestrator =
-        EnclaveGateOrchestrator::new(scorer, embedder, vector_index, cfg);
+    let orchestrator = EnclaveGateOrchestrator::new(scorer, embedder, vector_index, cfg);
     Ok(Arc::new(EnclaveGateService::new(
         orchestrator,
         wrapper,
@@ -4474,8 +4459,9 @@ async fn build_enclave_local_gpu_gate_service_from_env(
 /// orchestrator config refuses to default.
 #[cfg(feature = "local-gpu-models")]
 fn parse_required_u64_env(var: &'static str) -> anyhow::Result<u64> {
-    let raw = std::env::var(var)
-        .with_context(|| format!("{var} must be set when TRACE_COMMONS_GATE_SERVICE=\"enclave_local_gpu\""))?;
+    let raw = std::env::var(var).with_context(|| {
+        format!("{var} must be set when TRACE_COMMONS_GATE_SERVICE=\"enclave_local_gpu\"")
+    })?;
     let trimmed = raw.trim();
     anyhow::ensure!(!trimmed.is_empty(), "{var} must not be empty");
     trimmed
@@ -5871,7 +5857,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(revocation_propagation_worker_handler),
         )
         .route("/v1/workers/vector-index", post(vector_index_handler))
-        .route("/v1/workers/gate/evaluate", post(gate_evaluate_worker_handler))
+        .route(
+            "/v1/workers/gate/evaluate",
+            post(gate_evaluate_worker_handler),
+        )
         .route("/v1/workers/utility-credit", post(utility_credit_handler))
         .route(
             "/v1/workers/utility-attestations",
@@ -8496,8 +8485,7 @@ fn parse_novelty_utility_credit_points_delta_from_env() -> anyhow::Result<f32> {
 /// clamped to at least 1 — a zero cap would terminal-fail every item on first
 /// attempt, which the spec does not contemplate.
 fn parse_revocation_propagation_max_attempts_from_env() -> anyhow::Result<u32> {
-    let Some(raw) = optional_trimmed_env(TRACE_COMMONS_REVOCATION_PROPAGATION_MAX_ATTEMPTS)?
-    else {
+    let Some(raw) = optional_trimmed_env(TRACE_COMMONS_REVOCATION_PROPAGATION_MAX_ATTEMPTS)? else {
         return Ok(DEFAULT_REVOCATION_PROPAGATION_MAX_ATTEMPTS);
     };
     let parsed = raw.parse::<u32>().with_context(|| {
@@ -9715,8 +9703,7 @@ async fn put_tenant_policy_handler(
     require_admin(&tenant)?;
     let target_scopes: BTreeSet<ConsentScope> =
         request.allowed_consent_scopes.iter().copied().collect();
-    let target_uses: BTreeSet<TraceAllowedUse> =
-        request.allowed_uses.iter().copied().collect();
+    let target_uses: BTreeSet<TraceAllowedUse> = request.allowed_uses.iter().copied().collect();
     let privileged_policy = tenant_privileged_action_policy_for_request(
         state.as_ref(),
         &tenant,
@@ -9836,8 +9823,7 @@ async fn create_tenant_access_grant_handler(
     require_admin(&tenant)?;
     let target_scopes: BTreeSet<ConsentScope> =
         request.allowed_consent_scopes.iter().copied().collect();
-    let target_uses: BTreeSet<TraceAllowedUse> =
-        request.allowed_uses.iter().copied().collect();
+    let target_uses: BTreeSet<TraceAllowedUse> = request.allowed_uses.iter().copied().collect();
     let privileged_policy = tenant_privileged_action_policy_for_request(
         state.as_ref(),
         &tenant,
@@ -39740,7 +39726,10 @@ async fn gate_evaluate_worker_handler(
         .await
         .map_err(internal_error)?
         .ok_or_else(|| {
-            api_error(StatusCode::NOT_FOUND, TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF)
+            api_error(
+                StatusCode::NOT_FOUND,
+                TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF,
+            )
         })?;
 
     let artifact_store = state.artifact_store.as_ref().ok_or_else(|| {
@@ -39816,13 +39805,8 @@ async fn gate_evaluate_worker_handler(
     let (credit_emitted, credit_withheld_reason) = if decision.perplexity_passed
         && decision.novelty_passed
     {
-        attempt_emit_novelty_utility_credit(
-            state.as_ref(),
-            &tenant,
-            &decision,
-            body.submission_id,
-        )
-        .await?
+        attempt_emit_novelty_utility_credit(state.as_ref(), &tenant, &decision, body.submission_id)
+            .await?
     } else {
         (false, None)
     };
@@ -39908,17 +39892,16 @@ async fn attempt_emit_novelty_utility_credit(
 
     // (3) Tenant policy fetch. Errors here are surfaced as ApiErrors (e.g.,
     // scoped-token claim mismatch is a hard rejection, not a withheld reason).
-    let tenant_policy = tenant_utility_credit_policy_for_request(state, tenant, required_uses)
-        .await?;
+    let tenant_policy =
+        tenant_utility_credit_policy_for_request(state, tenant, required_uses).await?;
 
     // (4) Load the submission record. Treat a missing record as a real not-found
     // failure rather than withholding silently — the gate route already loaded
     // the storage row from the same backend earlier in the handler, so this
     // path should normally succeed.
-    let Some(submission_record) =
-        read_utility_submission_record(state, tenant, submission_id)
-            .await
-            .map_err(internal_error)?
+    let Some(submission_record) = read_utility_submission_record(state, tenant, submission_id)
+        .await
+        .map_err(internal_error)?
     else {
         return Err(api_error(
             StatusCode::NOT_FOUND,
@@ -41850,7 +41833,10 @@ fn target_subset_of_use_allowlist(
     target: &BTreeSet<TraceAllowedUse>,
     allowlist: &BTreeSet<TraceAllowedUse>,
 ) -> bool {
-    allowlist.is_empty() || target.iter().all(|allowed_use| allowlist.contains(allowed_use))
+    allowlist.is_empty()
+        || target
+            .iter()
+            .all(|allowed_use| allowlist.contains(allowed_use))
 }
 
 fn trace_revocation_reason_for_request(
@@ -44898,8 +44884,7 @@ async fn apply_revocation_propagation_item(
             // worker used at insertion time, otherwise UsearchVectorIndex
             // would route the deletion to a different shard than the one
             // holding the entry.
-            let tenant_ctx =
-                GateTenantCtx::from_canonical(tenant_storage_ref(&tenant.tenant_id));
+            let tenant_ctx = GateTenantCtx::from_canonical(tenant_storage_ref(&tenant.tenant_id));
             state
                 .gate_service
                 .invalidate_vector_entry(&tenant_ctx, *vector_entry_id)
@@ -59391,9 +59376,8 @@ impl TraceOperationalRevocationPropagationSummary {
                     .insert(item_id.to_string());
             }
         }
-        let count = |bucket: &str| -> u64 {
-            per_kind.get(bucket).map(|s| s.len() as u64).unwrap_or(0)
-        };
+        let count =
+            |bucket: &str| -> u64 { per_kind.get(bucket).map(|s| s.len() as u64).unwrap_or(0) };
         summary.revocation_propagation_terminal_failed_vector_entries = count("vector_entry");
         summary.revocation_propagation_terminal_failed_object_refs = count("object_ref");
         summary.revocation_propagation_terminal_failed_export_manifests = count("export_manifest");
@@ -62480,8 +62464,7 @@ mod tests {
         .await
         .expect("per-source variant writes rows");
 
-        let events =
-            read_raw_audit_events(temp.path(), "tenant-a").expect("audit events parse");
+        let events = read_raw_audit_events(temp.path(), "tenant-a").expect("audit events parse");
         assert_eq!(events.len(), object_refs.len());
         for event in &events {
             assert_eq!(event.submission_id, submission_id);
@@ -62515,8 +62498,7 @@ mod tests {
         .await
         .expect("empty slice falls back to a single row");
 
-        let events =
-            read_raw_audit_events(temp.path(), "tenant-a").expect("audit events parse");
+        let events = read_raw_audit_events(temp.path(), "tenant-a").expect("audit events parse");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].submission_id, submission_id);
     }
@@ -67984,11 +67966,9 @@ mod tests {
         assert!(endpoint_message.contains("control"));
         assert!(!endpoint_message.contains("leaked-endpoint-secret"));
 
-        let none = optional_remote_object_store_env(
-            TRACE_COMMONS_REMOTE_OBJECT_STORE_REGION,
-            Some("   "),
-        )
-        .expect("blank optional value is treated as unset");
+        let none =
+            optional_remote_object_store_env(TRACE_COMMONS_REMOTE_OBJECT_STORE_REGION, Some("   "))
+                .expect("blank optional value is treated as unset");
         assert!(none.is_none());
     }
 
@@ -68176,7 +68156,10 @@ mod tests {
             key_ref_hash.starts_with("sha256:"),
             "key_ref_hash must be a sha256-prefixed hash, got: {key_ref_hash}"
         );
-        assert_eq!(kek["is_production_trust_boundary"], serde_json::json!(false));
+        assert_eq!(
+            kek["is_production_trust_boundary"],
+            serde_json::json!(false)
+        );
 
         // Hash-only / label-only discipline: raw key refs and sentinel values
         // must not appear anywhere in the response body.
@@ -82791,9 +82774,7 @@ mod tests {
         }
     }
 
-    impl tracedao_server::trace_gate_service::TraceGateService
-        for RecordingInvalidationGateService
-    {
+    impl tracedao_server::trace_gate_service::TraceGateService for RecordingInvalidationGateService {
         fn evaluate_trace(
             &self,
             tenant_ctx: &tracedao_server::trace_gate_service::TenantCtx,
@@ -82837,28 +82818,24 @@ mod tests {
         let propagation_item_id = Uuid::new_v4();
         let vector_entry_id = Uuid::new_v4();
         backend
-            .upsert_trace_revocation_propagation_item(
-                StorageTraceRevocationPropagationItemWrite {
-                    tenant_id: tenant_id.to_string(),
-                    propagation_item_id,
-                    source_submission_id,
-                    target: StorageTraceRevocationPropagationTarget::VectorEntry {
-                        vector_entry_id,
-                    },
-                    action: StorageTraceRevocationPropagationAction::InvalidateVector,
-                    status: StorageTraceRevocationPropagationItemStatus::Pending,
-                    idempotency_key: sha256_prefixed(&format!(
-                        "phase-a6-vector-entry-{propagation_item_id}"
-                    )),
-                    reason: "phase a6 vector invalidation test".to_string(),
-                    attempt_count,
-                    last_error: None,
-                    next_attempt_at: None,
-                    completed_at: None,
-                    evidence_hash: None,
-                    metadata: BTreeMap::new(),
-                },
-            )
+            .upsert_trace_revocation_propagation_item(StorageTraceRevocationPropagationItemWrite {
+                tenant_id: tenant_id.to_string(),
+                propagation_item_id,
+                source_submission_id,
+                target: StorageTraceRevocationPropagationTarget::VectorEntry { vector_entry_id },
+                action: StorageTraceRevocationPropagationAction::InvalidateVector,
+                status: StorageTraceRevocationPropagationItemStatus::Pending,
+                idempotency_key: sha256_prefixed(&format!(
+                    "phase-a6-vector-entry-{propagation_item_id}"
+                )),
+                reason: "phase a6 vector invalidation test".to_string(),
+                attempt_count,
+                last_error: None,
+                next_attempt_at: None,
+                completed_at: None,
+                evidence_hash: None,
+                metadata: BTreeMap::new(),
+            })
             .await
             .expect("upsert vector-entry propagation item");
         let _ = trace_id;
@@ -82869,9 +82846,7 @@ mod tests {
         TenantAuth {
             tenant_id: tenant_id.to_string(),
             role: TokenRole::RevocationWorker,
-            principal_ref: principal_storage_ref(&format!(
-                "revocation-worker-token-{tenant_id}"
-            )),
+            principal_ref: principal_storage_ref(&format!("revocation-worker-token-{tenant_id}")),
             expires_at: None,
             auth_method: TraceAuthMethod::StaticToken,
             signed_claim_issuer: None,
@@ -83061,8 +83036,7 @@ mod tests {
         assert!(items[0].last_error.is_some());
         assert!(items[0].next_attempt_at.is_some());
 
-        let audit_events =
-            read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
         let failure_audit = audit_events
             .iter()
             .find(|event| event.kind == "revocation_propagation_failure")
@@ -83145,8 +83119,7 @@ mod tests {
             "terminal-failed items must not be re-scheduled"
         );
 
-        let audit_events =
-            read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
+        let audit_events = read_all_audit_events(temp.path(), "tenant-a").expect("audit reads");
         let failure_audit = audit_events
             .iter()
             .find(|event| event.kind == "revocation_propagation_failure")
@@ -83283,47 +83256,40 @@ mod tests {
     /// one. Non-terminal events must not be counted.
     #[test]
     fn revocation_propagation_terminal_failed_buckets_each_target_kind() {
-        let kinds: [(&str, fn(&TraceOperationalRevocationPropagationSummary) -> u64); 10] = [
-            (
-                "VectorEntry",
-                |s| s.revocation_propagation_terminal_failed_vector_entries,
-            ),
-            (
-                "ObjectRef",
-                |s| s.revocation_propagation_terminal_failed_object_refs,
-            ),
-            (
-                "ExportManifest",
-                |s| s.revocation_propagation_terminal_failed_export_manifests,
-            ),
-            (
-                "ExportManifestItem",
-                |s| s.revocation_propagation_terminal_failed_export_manifest_items,
-            ),
-            (
-                "DerivedRecord",
-                |s| s.revocation_propagation_terminal_failed_derived_records,
-            ),
-            (
-                "BenchmarkArtifact",
-                |s| s.revocation_propagation_terminal_failed_benchmark_artifacts,
-            ),
-            (
-                "RankerArtifact",
-                |s| s.revocation_propagation_terminal_failed_ranker_artifacts,
-            ),
-            (
-                "CreditSettlement",
-                |s| s.revocation_propagation_terminal_failed_credit_settlements,
-            ),
-            (
-                "WorkerQueue",
-                |s| s.revocation_propagation_terminal_failed_worker_queues,
-            ),
-            (
-                "PhysicalDeleteReceipt",
-                |s| s.revocation_propagation_terminal_failed_physical_delete_receipts,
-            ),
+        let kinds: [(
+            &str,
+            fn(&TraceOperationalRevocationPropagationSummary) -> u64,
+        ); 10] = [
+            ("VectorEntry", |s| {
+                s.revocation_propagation_terminal_failed_vector_entries
+            }),
+            ("ObjectRef", |s| {
+                s.revocation_propagation_terminal_failed_object_refs
+            }),
+            ("ExportManifest", |s| {
+                s.revocation_propagation_terminal_failed_export_manifests
+            }),
+            ("ExportManifestItem", |s| {
+                s.revocation_propagation_terminal_failed_export_manifest_items
+            }),
+            ("DerivedRecord", |s| {
+                s.revocation_propagation_terminal_failed_derived_records
+            }),
+            ("BenchmarkArtifact", |s| {
+                s.revocation_propagation_terminal_failed_benchmark_artifacts
+            }),
+            ("RankerArtifact", |s| {
+                s.revocation_propagation_terminal_failed_ranker_artifacts
+            }),
+            ("CreditSettlement", |s| {
+                s.revocation_propagation_terminal_failed_credit_settlements
+            }),
+            ("WorkerQueue", |s| {
+                s.revocation_propagation_terminal_failed_worker_queues
+            }),
+            ("PhysicalDeleteReceipt", |s| {
+                s.revocation_propagation_terminal_failed_physical_delete_receipts
+            }),
         ];
 
         let mut events = Vec::new();
@@ -83365,27 +83331,9 @@ mod tests {
     fn revocation_propagation_terminal_failed_dedupes_per_item() {
         let item_id = Uuid::new_v4();
         let events = vec![
-            revocation_propagation_failure_audit_event(
-                "tenant-a",
-                "ObjectRef",
-                item_id,
-                4,
-                false,
-            ),
-            revocation_propagation_failure_audit_event(
-                "tenant-a",
-                "ObjectRef",
-                item_id,
-                5,
-                true,
-            ),
-            revocation_propagation_failure_audit_event(
-                "tenant-a",
-                "ObjectRef",
-                item_id,
-                5,
-                true,
-            ),
+            revocation_propagation_failure_audit_event("tenant-a", "ObjectRef", item_id, 4, false),
+            revocation_propagation_failure_audit_event("tenant-a", "ObjectRef", item_id, 5, true),
+            revocation_propagation_failure_audit_event("tenant-a", "ObjectRef", item_id, 5, true),
         ];
 
         let summary = TraceOperationalRevocationPropagationSummary::from_audit_events(&events)
@@ -83446,35 +83394,30 @@ mod tests {
         let source_submission_id = Uuid::new_v4();
         let propagation_item_id = Uuid::new_v4();
         let queue_surface = "process_evaluation_queue".to_string();
-        let queue_key_hash = trace_revocation_worker_queue_key_hash(
-            tenant_id,
-            source_submission_id,
-            &queue_surface,
-        );
+        let queue_key_hash =
+            trace_revocation_worker_queue_key_hash(tenant_id, source_submission_id, &queue_surface);
         backend
-            .upsert_trace_revocation_propagation_item(
-                StorageTraceRevocationPropagationItemWrite {
-                    tenant_id: tenant_id.to_string(),
-                    propagation_item_id,
-                    source_submission_id,
-                    target: StorageTraceRevocationPropagationTarget::WorkerQueue {
-                        queue_surface,
-                        queue_key_hash,
-                    },
-                    action: StorageTraceRevocationPropagationAction::InvalidateWorkerQueue,
-                    status: StorageTraceRevocationPropagationItemStatus::Pending,
-                    idempotency_key: sha256_prefixed(&format!(
-                        "phase-a6-retrofit-worker-queue-{propagation_item_id}"
-                    )),
-                    reason: "phase a6 retrofit worker queue invalidation test".to_string(),
-                    attempt_count,
-                    last_error: None,
-                    next_attempt_at: None,
-                    completed_at: None,
-                    evidence_hash: None,
-                    metadata: BTreeMap::new(),
+            .upsert_trace_revocation_propagation_item(StorageTraceRevocationPropagationItemWrite {
+                tenant_id: tenant_id.to_string(),
+                propagation_item_id,
+                source_submission_id,
+                target: StorageTraceRevocationPropagationTarget::WorkerQueue {
+                    queue_surface,
+                    queue_key_hash,
                 },
-            )
+                action: StorageTraceRevocationPropagationAction::InvalidateWorkerQueue,
+                status: StorageTraceRevocationPropagationItemStatus::Pending,
+                idempotency_key: sha256_prefixed(&format!(
+                    "phase-a6-retrofit-worker-queue-{propagation_item_id}"
+                )),
+                reason: "phase a6 retrofit worker queue invalidation test".to_string(),
+                attempt_count,
+                last_error: None,
+                next_attempt_at: None,
+                completed_at: None,
+                evidence_hash: None,
+                metadata: BTreeMap::new(),
+            })
             .await
             .expect("upsert worker-queue propagation item");
         (propagation_item_id, source_submission_id)
@@ -120836,10 +120779,7 @@ mod tests {
             ConsentScope::DebuggingEvaluation,
             ConsentScope::ModelTraining,
         ]);
-        let target_uses = BTreeSet::from([
-            TraceAllowedUse::Debugging,
-            TraceAllowedUse::Evaluation,
-        ]);
+        let target_uses = BTreeSet::from([TraceAllowedUse::Debugging, TraceAllowedUse::Evaluation]);
         ensure_action_target_matches_privileged_action_policy_abac(
             &target_scopes,
             &target_uses,
@@ -120955,8 +120895,7 @@ mod tests {
     ) -> (ConfiguredTraceArtifactStore, String) {
         let object_store = TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE.to_string();
         let key = tracedao_server::secrets::keychain::generate_master_key_hex();
-        let crypto =
-            SecretsCrypto::new(SecretString::from(key.clone())).expect("fixture crypto");
+        let crypto = SecretsCrypto::new(SecretString::from(key.clone())).expect("fixture crypto");
         let kek_crypto = SecretsCrypto::new(SecretString::from(key)).expect("fixture kek crypto");
         let kek = LocalMasterKeyWrapper::new(kek_crypto, "trace-commons-gate-worker-test-v1");
         let provider_config =
@@ -121104,7 +121043,8 @@ mod tests {
             "sha256:in_memory_default",
         ));
 
-        let submission_id = seed_gate_worker_fixture(backend.as_ref(), state.as_ref(), "tenant-a").await;
+        let submission_id =
+            seed_gate_worker_fixture(backend.as_ref(), state.as_ref(), "tenant-a").await;
 
         let Json(response) = gate_evaluate_worker_handler(
             State(state.clone()),
@@ -121136,7 +121076,10 @@ mod tests {
             .expect("raw pool client");
         let tenant_a = "tenant-a".to_string();
         client
-            .execute("SELECT set_config('trace.tenant_id', $1, true)", &[&tenant_a])
+            .execute(
+                "SELECT set_config('trace.tenant_id', $1, true)",
+                &[&tenant_a],
+            )
             .await
             .expect("set tenant context");
         let rows = client
@@ -121193,7 +121136,8 @@ mod tests {
             "fixture-attestation-verifier",
         ));
 
-        let submission_id = seed_gate_worker_fixture(backend.as_ref(), state.as_ref(), "tenant-a").await;
+        let submission_id =
+            seed_gate_worker_fixture(backend.as_ref(), state.as_ref(), "tenant-a").await;
 
         let err = gate_evaluate_worker_handler(
             State(state.clone()),
@@ -121217,7 +121161,10 @@ mod tests {
             .expect("raw pool client");
         let tenant_a = "tenant-a".to_string();
         client
-            .execute("SELECT set_config('trace.tenant_id', $1, true)", &[&tenant_a])
+            .execute(
+                "SELECT set_config('trace.tenant_id', $1, true)",
+                &[&tenant_a],
+            )
             .await
             .expect("set tenant context");
         let rows = client
@@ -121227,7 +121174,10 @@ mod tests {
             )
             .await
             .expect("gate decision rows query");
-        assert!(rows.is_empty(), "no gate decision row written on dstack failure");
+        assert!(
+            rows.is_empty(),
+            "no gate decision row written on dstack failure"
+        );
 
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     }
@@ -121322,8 +121272,11 @@ mod tests {
             wrapped_dek: &tracedao_server::trace_artifact_kek::WrappedDek,
             object_kind: TraceArtifactKind,
         ) -> anyhow::Result<GateDecision> {
-            InMemoryGateService::new("production_like_for_tests", "sha256:production_like_for_tests")
-                .evaluate_trace(tenant_ctx, envelope_ciphertext, wrapped_dek, object_kind)
+            InMemoryGateService::new(
+                "production_like_for_tests",
+                "sha256:production_like_for_tests",
+            )
+            .evaluate_trace(tenant_ctx, envelope_ciphertext, wrapped_dek, object_kind)
         }
 
         fn invalidate_vector_entry(
@@ -121429,13 +121382,22 @@ mod tests {
 
         assert!(response.perplexity_passed);
         assert!(response.novelty_passed);
-        assert!(response.credit_emitted, "expected novelty_utility credit to be emitted");
+        assert!(
+            response.credit_emitted,
+            "expected novelty_utility credit to be emitted"
+        );
         assert!(response.credit_withheld_reason.is_none());
 
         let external_refs = read_novelty_credit_events_for_test(temp.path(), "tenant-a");
-        assert_eq!(external_refs.len(), 1, "exactly one novelty_utility ledger row");
-        let expected_external_ref =
-            format!("novelty_utility:{}:{}", response.gate_version_hash, submission_id);
+        assert_eq!(
+            external_refs.len(),
+            1,
+            "exactly one novelty_utility ledger row"
+        );
+        let expected_external_ref = format!(
+            "novelty_utility:{}:{}",
+            response.gate_version_hash, submission_id
+        );
         assert_eq!(
             external_refs[0], expected_external_ref,
             "external_ref must encode (gate_version_hash, submission_id) for retry idempotency"
@@ -121638,8 +121600,10 @@ mod tests {
             "idempotent retry is not a withheld-reason case — credit already exists"
         );
 
-        let expected_external_ref =
-            format!("novelty_utility:{}:{}", first.gate_version_hash, submission_id);
+        let expected_external_ref = format!(
+            "novelty_utility:{}:{}",
+            first.gate_version_hash, submission_id
+        );
         let refs = read_novelty_credit_events_for_test(temp.path(), "tenant-a");
         assert_eq!(
             refs.len(),
@@ -121744,28 +121708,116 @@ mod tests {
         // baseline + permutations differ. Previously the mock_default path
         // stamped every audit row with a fixed `"sha256:enclave_mock_v1"`.
         let base = compute_gate_version_hash(
-            "policy-1", 10, 20, 30, 5, "p-model", 1024, -8.0, "e-model", 512, Some(256), 1024,
+            "policy-1",
+            10,
+            20,
+            30,
+            5,
+            "p-model",
+            1024,
+            -8.0,
+            "e-model",
+            512,
+            Some(256),
+            1024,
         );
         let diff_policy = compute_gate_version_hash(
-            "policy-2", 10, 20, 30, 5, "p-model", 1024, -8.0, "e-model", 512, Some(256), 1024,
+            "policy-2",
+            10,
+            20,
+            30,
+            5,
+            "p-model",
+            1024,
+            -8.0,
+            "e-model",
+            512,
+            Some(256),
+            1024,
         );
         let diff_floor = compute_gate_version_hash(
-            "policy-1", 11, 20, 30, 5, "p-model", 1024, -8.0, "e-model", 512, Some(256), 1024,
+            "policy-1",
+            11,
+            20,
+            30,
+            5,
+            "p-model",
+            1024,
+            -8.0,
+            "e-model",
+            512,
+            Some(256),
+            1024,
         );
         let diff_topk = compute_gate_version_hash(
-            "policy-1", 10, 20, 30, 6, "p-model", 1024, -8.0, "e-model", 512, Some(256), 1024,
+            "policy-1",
+            10,
+            20,
+            30,
+            6,
+            "p-model",
+            1024,
+            -8.0,
+            "e-model",
+            512,
+            Some(256),
+            1024,
         );
         let diff_pmodel = compute_gate_version_hash(
-            "policy-1", 10, 20, 30, 5, "p-model-2", 1024, -8.0, "e-model", 512, Some(256), 1024,
+            "policy-1",
+            10,
+            20,
+            30,
+            5,
+            "p-model-2",
+            1024,
+            -8.0,
+            "e-model",
+            512,
+            Some(256),
+            1024,
         );
         let diff_emodel = compute_gate_version_hash(
-            "policy-1", 10, 20, 30, 5, "p-model", 1024, -8.0, "e-model-2", 512, Some(256), 1024,
+            "policy-1",
+            10,
+            20,
+            30,
+            5,
+            "p-model",
+            1024,
+            -8.0,
+            "e-model-2",
+            512,
+            Some(256),
+            1024,
         );
         let diff_matry = compute_gate_version_hash(
-            "policy-1", 10, 20, 30, 5, "p-model", 1024, -8.0, "e-model", 512, Some(128), 1024,
+            "policy-1",
+            10,
+            20,
+            30,
+            5,
+            "p-model",
+            1024,
+            -8.0,
+            "e-model",
+            512,
+            Some(128),
+            1024,
         );
         let diff_vdim = compute_gate_version_hash(
-            "policy-1", 10, 20, 30, 5, "p-model", 1024, -8.0, "e-model", 512, Some(256), 512,
+            "policy-1",
+            10,
+            20,
+            30,
+            5,
+            "p-model",
+            1024,
+            -8.0,
+            "e-model",
+            512,
+            Some(256),
+            512,
         );
         assert!(base.starts_with("sha256:"));
         for (label, other) in &[
