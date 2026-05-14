@@ -122,6 +122,13 @@ gate. The deeper perplexity-replacement metric design is parked under
 - A5: `novelty_utility` credit-event emission — done
 - A6: revocation worker hook (`invalidate_vector_entry`) plus typed
   propagation-failure audit retrofit for non-vector targets — done
+- A.6: pilot-bootstrap HF-trace replay harness
+  (`tracedao-pilot-bootstrap` binary) — done (binary; awaits operator
+  run for the first 30k submissions per A.6's "What success looks like"
+  criteria). Spec:
+  `docs/superpowers/specs/2026-05-14-pilot-bootstrap-harness-design.md`.
+  Plan: `docs/superpowers/plans/2026-05-14-pilot-bootstrap-harness.md`.
+  Runbook: `docs/operator/pilot-bootstrap.md`.
 
 The current standalone foundation (PRs #9–#12) already has:
 
