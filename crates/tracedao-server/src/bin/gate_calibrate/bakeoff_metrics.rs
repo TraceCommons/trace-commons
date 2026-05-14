@@ -84,6 +84,9 @@ pub fn determinism_stddev(runs: &[Vec<f64>]) -> f64 {
 /// Reported throughput for a single candidate run. Pure data wrapper — the
 /// bake-off harness fills this in from wallclock + token accounting, the
 /// report module reads it back to weight against accuracy.
+// Serialized into the bake-off report JSON for external tooling; constructed
+// by the metrics test suite. No in-binary callers yet, so allow dead_code.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThroughputRecord {
     pub tokens_per_second: f64,
@@ -94,6 +97,9 @@ pub struct ThroughputRecord {
 /// Reported peak and steady-state VRAM for a single candidate. Pure data
 /// wrapper — `peak_mib` is the high-water mark over the whole eval, while
 /// `model_mib` is the load-time footprint we use for fits-on-GPU planning.
+// Serialized into the bake-off report JSON for external tooling; constructed
+// by the metrics test suite. No in-binary callers yet, so allow dead_code.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VramRecord {
     pub peak_mib: u64,
