@@ -9,6 +9,13 @@
 # enforced; only the style/perf lints listed in the cargo-clippy job's `-A`
 # flags are allowed (see docs/superpowers/reports/2026-05-14-clippy-baseline.md
 # for the audit that selected that allow-list).
+#
+# Action pinning (last reviewed 2026-05-14): actions/checkout is pinned to v6
+# and actions/cache to v5 because those are the first major releases that run
+# on the Node.js 24 runtime. GitHub force-upgrades older v4 pins to Node 24
+# starting 2026-06-02, so pinning forward now avoids a silent runtime swap.
+# dtolnay/rust-toolchain is a composite action and is not affected by the
+# Node.js runtime change.
 
 name: ci
 
@@ -33,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -44,11 +51,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/index
@@ -69,9 +76,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/index
@@ -88,9 +95,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/index
@@ -110,9 +117,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/index
@@ -123,3 +130,38 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-test-default-
       - run: cargo test -p tracedao-server
+
+  pilot-bootstrap-smoke:
+    name: pilot-bootstrap smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-pilot-bootstrap-smoke-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-pilot-bootstrap-smoke-
+      - name: Setup Python 3
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      # Build the smoke binary (and tracedao-ingest, which shares the workspace
+      # so most artifacts are reused). The smoke harness asserts the binary
+      # exists at target/release/tracedao-pilot-bootstrap.
+      - name: Build pilot-bootstrap binary
+        run: cargo build --release -p tracedao-server --bin tracedao-pilot-bootstrap --bin tracedao-ingest
+      # Runs scripts/operator/pilot-bootstrap-smoke.sh against the checked-in
+      # JSONL fixture under scripts/operator/fixtures/swival-smoke/. The smoke
+      # uses a Python stdlib mock for both HF Hub and the tracedao-ingest
+      # /v1/traces endpoint, so no Postgres or HF network access is needed.
+      # Success line is `SmokePilotBootstrapOK: ...`; any failure exits non-zero
+      # with a `SmokePilotBootstrapFailure:<label>` diagnostic.
+      - name: Run pilot-bootstrap smoke
+        run: bash scripts/operator/pilot-bootstrap-smoke.sh
