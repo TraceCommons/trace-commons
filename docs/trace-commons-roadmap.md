@@ -51,49 +51,66 @@ What it does not have:
 These are the only items that need to land before someone could actually
 deploy this for real. Everything else is polish.
 
-### Production Gap Queue (2026-05-14, post second merge wave)
+### Production Gap Queue (2026-05-14, post A2.6 outcome routing)
 
 Ordered. Top item is the active blocker.
 
-1. **A2.6 result + outcome-branch decision.** Bake-off running on
-   Lambda H100 (started 11:11 UTC; ETA ~18:00 UTC). First candidate
-   (Llama-3.1-8B-Instruct) completed at 12:34 UTC with AUC 0.342; three
-   candidates remaining (Qwen3-8B-Base, Qwen 3.6 27B Dense, Gemma 4
-   31B). Once all four land, route per the A2.7 spec (PRs #50, #58):
-   winner-promotion path, do-nothing (existing floors hold), or
-   metric-replacement escalation into Phase A.5 if final AUC < 0.4.
-   Report skeleton is pre-written with placeholder AUC slots and
-   A2.3c/A2.4 historical comparison rows pre-filled (PR #64). Phase A.5
-   plan stub is pre-written and activates only on the AUC < 0.4 branch
-   (PR #65).
-2. **Pilot launch.** Server side is code-complete + smoke-validated and
-   the pilot-bootstrap binary is now real-data-capable (PR #67):
-   JSONL session loader, three working translators (swival, pi-mono,
-   deepseek), 5/5 idempotent submissions verified against real swival,
-   parquet/arrow deps dropped. Pilot-bootstrap local smoke harness
-   (PR #51), swival corpus-builder schema fix (PR #54), and operator
-   runbook index (PR #52) already on `main`. Remaining blocker is
-   operator-side execution: provision host, run binary, watch sidecar.
-3. **Tail-fraction floor calibration.** Currently 0 (disabled) per
-   A2.5. Subcommand now landed (PR #66):
-   `trace-commons-gate-calibrate tail-floor --sidecar <path> --db-url <url>
-   --percentile <n>` — consumes the pilot-bootstrap sidecar JSONL plus
-   the decisions table, uses nearest-rank percentile + headroom-micros.
-   Capability-complete; awaits the first pilot run's data to produce a
-   real floor.
-4. **Phase A.5 perplexity-replacement metric.** Conditional on A2.6
-   AUC < 0.4 branch. Per-token rarity scorer now landed in the Rust
-   bake-off binary (PR #63) on the mock-scorer path; real-scorer
-   rarity wiring deferred at `BakeoffRealRarityNotImplemented`. Phase
-   A.5 plan stub on `main` (PR #65).
+1. **A2.7 perplexity floor calibration.** A2.6 trends toward Outcome 1
+   ("at least one candidate AUC > 0.5") with three of four candidates
+   complete: Llama-3.1-8B-Instruct AUC 0.342, Qwen3-8B-Base AUC 0.243,
+   **Qwen 3.6 27B Dense AUC 0.936** (crosses the 0.5 threshold).
+   Outcome 1 fires the full A2.7 path per the A2.6 spec's outcome map.
+   The A2.7 plan stub (PR #74) is ready to promote to the active plan
+   pending the final Gemma 4 31B candidate. Calibration targets a
+   pilot-deployable perplexity floor from the winning model's
+   distribution against the agent-traces novel slice.
+2. **Gemma 4 31B Base bake-off run.** The fourth candidate is still in
+   flight on Lambda H100; expected completion ~21:00 UTC. Result is
+   informational for A2.7 — the Outcome 1 branch is already locked in
+   by Qwen 3.6 27B's 0.936 — but the row is needed to finalize the
+   report and to inform model selection if Gemma's AUC also crosses 0.5.
+3. **Pilot launch with a 27B-class gate-service deployment.** Server
+   side is code-complete + smoke-validated; pilot-bootstrap is real-
+   data-capable (PR #67); the `pilot-bootstrap-first-100` runbook
+   (PR #70) walks the operator path; the tail_floor credentials-leak
+   blocker is resolved (PR #86). Remaining work is operator-side:
+   provision a 27B-class GPU host, load the winning model (Qwen 3.6
+   27B Dense unless Gemma 4 31B overtakes it), apply the A2.7-calibrated
+   perplexity floor, then run the bootstrap. The size-pattern finding
+   (small models flunk, 27B-class passes) means the pilot deployment
+   goal now requires 27B-class hardware — not the 8B-class footprint
+   A2.5 had assumed.
+4. **Tail-fraction floor calibration.** Currently 0 (disabled) per
+   A2.5. Subcommand landed in PR #66 (`trace-commons-gate-calibrate
+   tail-floor`). Capability-complete; awaits the first pilot run's data
+   to produce a real floor. Unblocks after the pilot run starts emitting
+   decision rows.
 5. **Ironclaw client wiring.** Still the eventual unblock for real
    contributor traffic; out of this repo's control. Pilot-bootstrap
    harness is the work-around for everything that previously required
    real users.
 
-Recently closed: real-data pilot-bootstrap defects (parquet-only loader,
-fictional translator schemas surfaced by the PR #62 dry-run) — closed
-by PR #67 with end-to-end verification against real HF swival.
+Recently closed: A2.6 outcome-routing question (settled by Qwen 3.6
+27B's AUC 0.936 — see "Deferred" below for the parked Phase A.5 work);
+tail_floor credentials-leak pilot blocker (PR #86); CI clippy
+enforcement (PR #78); Actions Node 24 + pilot-bootstrap smoke job
+(PR #79); A2.6 corpus archived for A.5a reuse (PR #83); A.5a rarity
+pre-flight tool (PR #84).
+
+### Deferred
+
+- **Phase A.5 perplexity-replacement metric.** A2.6's Outcome 1 fired
+  on Qwen 3.6 27B Dense (AUC 0.936), so the metric-replacement
+  escalation branch did not trigger. The size-pattern finding — see
+  the memory note `project_perplexity_size_pattern.md` — explains
+  why: aggregate perplexity discriminates novel reasoning only at
+  27B-class capacity. The 8B-class candidates we measured remained
+  inverted (Llama-3.1-8B-Instruct 0.342, Qwen3-8B-Base 0.243),
+  consistent with the A2.3c/A2.4 results. The Phase A.5 plan stub
+  (PR #65) and the per-token rarity bake-off path (PR #63 + A.5a
+  pre-flight in PR #84) stay on `main` as an option for a future
+  cost-driven retreat to an 8B gate, but are no longer on the
+  critical pilot path.
 
 ### 1. Phase A — real gate service on regular hardware with cloud KMS
 
@@ -104,30 +121,41 @@ service on regular GPU hardware with **cloud KMS as the KEK**, accepting
 that the operator and cloud provider can read user content via KMS
 `Decrypt`. Phase B (below) does the trust upgrade once dstack is ready.
 
-**Phase A status (2026-05-14, post second merge wave): code-complete +
-smoke-validated; pilot-bootstrap real-data-capable.** All A1–A6 work
-items below plus four bake-off retrofits (A2.1, A2.2, A2.3, A2.5) and
-two real bake-off runs (A2.3c + A2.4) are merged on `main`. The
-per-token rarity scorer landed in the Rust bake-off binary (PR #63) on
-the mock-scorer path under a `--scorer perplexity|token-rarity|both`
-flag; real-scorer rarity wiring is deferred at
-`BakeoffRealRarityNotImplemented`. The A2.6 report skeleton (PR #64) and
-a conditional Phase A.5 implementation plan stub (PR #65) are also on
-`main`. The pilot-bootstrap binary was rewritten end-to-end against the
-real HF agent-traces schema in PR #67 — JSONL session loader replaces
-parquet, three working translators (swival, pi-mono, deepseek), 5/5
-idempotent submissions verified against real swival, parquet/arrow deps
-dropped. The tail-fraction floor calibration subcommand landed in
-PR #66 (`trace-commons-gate-calibrate tail-floor`).
+**Phase A status (2026-05-14, post A2.6 outcome routing): code-complete
++ smoke-validated; pilot-bootstrap real-data-capable; A2.6 Outcome 1
+trending.** All A1–A6 work items below plus four bake-off retrofits
+(A2.1, A2.2, A2.3, A2.5) and two real bake-off runs (A2.3c + A2.4)
+are merged on `main`. The per-token rarity scorer landed in the Rust
+bake-off binary (PR #63) on the mock-scorer path under a `--scorer
+perplexity|token-rarity|both` flag; real-scorer rarity wiring is
+deferred at `BakeoffRealRarityNotImplemented`. The A2.6 report skeleton
+(PR #64) and a conditional Phase A.5 implementation plan stub (PR #65)
+are on `main`. The pilot-bootstrap binary was rewritten end-to-end
+against the real HF agent-traces schema in PR #67. The tail-fraction
+floor calibration subcommand landed in PR #66 (`trace-commons-gate-calibrate
+tail-floor`). CI clippy enforcement landed in PR #78, the Actions
+Node-24 + pilot-bootstrap smoke job in PR #79, the A2.6 corpus archive
+in PR #83, the A.5a rarity pre-flight tool in PR #84, and the
+tail_floor credentials-leak fix (critical pilot blocker) in PR #86.
 
-In flight: A2.6 (agent-traces novel-slice 4-way bake-off) is **running
-on Lambda H100** — started 11:11 UTC; Llama-3.1-8B-Instruct completed
-at 12:34 UTC with AUC 0.342 (first concrete A2.6 result; informational
-until the remaining three candidates land). Qwen3-8B-Base, Qwen 3.6
-27B Dense, and Gemma 4 31B pending; full report ETA ~18:00 UTC.
-Pilot launch is the next gate, blocked on A2.6 result review,
+In flight: **A2.6 agent-traces novel-slice 4-way bake-off has three of
+four candidates complete and is trending Outcome 1** (at least one
+candidate AUC > 0.5):
+
+- Llama-3.1-8B-Instruct: AUC 0.342
+- Qwen3-8B-Base: AUC 0.243
+- **Qwen 3.6 27B Dense: AUC 0.936** (crosses the 0.5 threshold)
+- Gemma 4 31B Base: in flight, ETA ~21:00 UTC
+
+Per the A2.6 spec's outcome map, "at least one candidate AUC > 0.5"
+fires the full A2.7 path. The A2.7 plan stub (PR #74) is ready to
+promote pending the Gemma 4 31B row. The size-pattern finding — 8B
+candidates flunk, 27B candidates pass — has a direct deployment
+implication: the pilot now needs a 27B-class GPU host. Pilot launch
+is the next gate, blocked on Gemma 4 31B completion, A2.7 promotion,
 operator-side pilot-bootstrap execution, and post-pilot tail-fraction
-calibration.
+calibration. Phase A.5 (perplexity replacement) is deferred — see the
+Production Gap Queue "Deferred" subsection.
 The binary boots green on Lambda Cloud GPU hardware
 (A10 / A100 / H100); `audit-chain-drill` returns `ready: true`. The
 empirical model bake-off ran four candidates (Llama-3.1-8B-Instruct,
@@ -177,20 +205,23 @@ gate. The deeper perplexity-replacement metric design is parked under
   pending post-first-1000-trace calibration; novelty floor at 500000
   is the active primary gate. Model pick stays Qwen3-8B-Base for
   cost (smallest VRAM footprint; choice no longer load-bearing).
-- A2.6: agent-traces novel-slice bake-off — **in progress today**.
-  Run started on Lambda H100 at 11:11 UTC against the 4-way candidate
-  set (Llama-3.1-8B-Instruct, Qwen3-8B-Base, Qwen 3.6 27B Dense,
-  Gemma 4 31B). Llama-3.1-8B-Instruct completed at 12:34 UTC with
-  AUC 0.342 (first concrete result); three candidates pending. Full
-  report ETA ~18:00 UTC. Report skeleton pre-written with placeholder
-  AUC slots and A2.3c/A2.4 historical comparison rows pre-filled
-  (PR #64). PR #50 landed the A2.7 follow-up spec stub; PR #58
-  refined that spec with outcome-branch decision recipes so the
-  post-run routing (winner promotion, do-nothing, or
-  metric-replacement escalation to Phase A.5) is pre-specified.
-  Corpus builder + runbook merged previously. Spec:
+- A2.6: agent-traces novel-slice bake-off — **largely done, trending
+  Outcome 1**. Three of four candidates complete on Lambda H100:
+  Llama-3.1-8B-Instruct AUC 0.342, Qwen3-8B-Base AUC 0.243, and
+  **Qwen 3.6 27B Dense AUC 0.936** (crosses 0.5). Gemma 4 31B Base
+  remains in flight, ETA ~21:00 UTC. Per the A2.6 spec's outcome map,
+  "at least one candidate AUC > 0.5" fires the full A2.7 path; A.5
+  (perplexity replacement) is deferred since the 27B run cleared the
+  threshold. Report skeleton pre-written (PR #64). PR #50 landed the
+  A2.7 follow-up spec stub; PR #58 refined it with outcome-branch
+  decision recipes; PR #74 stubs the A2.7 plan, ready to promote
+  pending the Gemma row. PR #83 archived the A2.6 corpus for A.5a
+  pre-flight reuse. Spec:
   `docs/superpowers/specs/2026-05-14-agent-traces-bakeoff-design.md`;
   operator runbook: `docs/operator/agent-traces-bakeoff-run.md`.
+- A2.7: perplexity floor calibration from the A2.6 winning model —
+  plan stub on `main` (PR #74), ready to promote to the active plan
+  once Gemma 4 31B completes. This is the next-gate work after A2.6.
 - A3: real `Embedder` (fastembed + BGE-large-en-v1.5) — done
 - A4: real `VectorIndex` (usearch with on-disk persistence) — done
 - A5: `novelty_utility` credit-event emission — done
@@ -251,16 +282,23 @@ Full design: `docs/superpowers/specs/2026-05-11-private-vector-system-design.md`
 (applies to Phase A with the enclave-resident framing relaxed; the same
 components run on regular hardware).
 
-### 1.5. Phase A.5 — perplexity-replacement metric (deferred)
+### 1.5. Phase A.5 — perplexity-replacement metric (deferred per A2.6 Outcome 1)
 
 A2.3c + A2.4 showed that aggregate perplexity does not discriminate
-novel reasoning from duplicate content on any of the four candidate
-LLMs we measured (AUC < 0.5 across the board; the metric is
-inverted, not noisy). A2.5 ships the pilot with the perplexity floor
-disabled and the novelty-embedder floor as the only active gate.
-Phase A.5 is the eventual gate-design follow-up: pick and implement
-a replacement metric once we have ~1000 labeled pilot traces from
-the real contributor distribution to design against.
+novel reasoning from duplicate content on any of the four 8B-class
+candidates we measured (AUC < 0.5 across the board; the metric was
+inverted, not noisy). A2.6 then re-ran the same four-way comparison
+against the agent-traces novel slice and found a clean size pattern:
+the 8B candidates remained inverted (Llama 0.342, Qwen3 0.243), but
+Qwen 3.6 27B Dense scored AUC 0.936. The A2.6 outcome map routes that
+to the A2.7 perplexity-floor-calibration path, not to the
+metric-replacement path. Phase A.5 is therefore deferred: it remains
+a documented option for a future cost-driven retreat from a 27B-class
+gate, but it is no longer on the critical pilot path. The Phase A.5
+plan stub (PR #65), the per-token rarity bake-off path (PR #63), and
+the A.5a pre-flight tool (PR #84) stay on `main` so that an 8B-class
+replacement metric can be picked up later without re-spinning the
+scaffolding.
 
 Three candidate approaches recorded in
 `docs/superpowers/reports/2026-05-14-gate-floor-recalibration-findings.md`:

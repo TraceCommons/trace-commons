@@ -1,8 +1,31 @@
 # Phase A.5 Perplexity Replacement — Design (Three Candidate Approaches)
 
 Date: 2026-05-14
-Status: **DRAFT — pending A2.6 outcome confirmation.**
+Status: **DEFERRED — A2.6 trending toward A2.7, not A.5.** See "2026-05-14 status update" below. Original drafting status was "DRAFT — pending A2.6 outcome confirmation."
 Owner: Trace Commons / Datasets lane
+
+## 2026-05-14 status update (post-A2.6 partial)
+
+Qwen 3.6 27B Dense landed AUC 0.936 on A2.6's agent-traces corpus, well
+above 0.5. Per the A2.6 outcome map, this triggers A2.7 (perplexity
+floor recalibration), NOT A.5. **A.5 is therefore DEFERRED.** Gemma 4
+31B is still in flight; A.5 would only re-activate if Gemma confirms a
+categorical failure mode the 27B somehow masked (very unlikely). The
+size-pattern finding — small models flunked perplexity-as-novelty
+across every corpus, but the 27B passed dramatically — is captured in
+the `project_perplexity_size_pattern.md` memory: perplexity is not
+broken, it just needs a model large enough.
+
+Artifacts in this track (this spec, the implementation plan stub at
+`docs/superpowers/plans/2026-05-14-a5-perplexity-replacement.md`, the
+sub-spec at `docs/superpowers/specs/2026-05-14-a5a-rarity-real-scorer-design.md`,
+the operator runbook at `docs/operator/a5a-rarity-preflight.md`, and
+the pre-flight script at `scripts/research/a5a_rarity_preflight.py`)
+are retained for reference, not execution. Do not implement against
+them. Re-activate only if Gemma 4 31B's final AUC contradicts the 27B
+result.
+
+
 Predecessors:
 - `2026-05-14-gate-floor-recalibration-design.md` (A2.5 — the finding that put Phase A.5 on the roadmap)
 - `2026-05-14-agent-traces-bakeoff-design.md` (A2.6 — the bake-off whose outcome triggers this spec)
