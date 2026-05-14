@@ -7,6 +7,6 @@
 id = "qwen3.6-27b-dense"
 path = "/home/ubuntu/models/qwen3.6-27b-dense"
 arch = "qwen3"
-license = "Apache-2.0"
+license = "apache-2.0"
 params_b = 27
 release_date_unix = 1745452800
