@@ -1,0 +1,16 @@
+2026-05-14T11:11:37.001234Z  INFO tracedao_bakeoff: bakeoff_start candidate_count=4 corpus_sha256=abcdef0123456789 hardware=H100 mock_scorer=false
+2026-05-14T11:11:37.500000Z  INFO tracedao_bakeoff: bakeoff_candidate_load_start candidate_id=llama-3.1-8b-instruct candidate_index=1 total=4
+2026-05-14T11:14:12.000000Z  INFO tracedao_bakeoff: bakeoff_candidate_load_done candidate_id=llama-3.1-8b-instruct load_elapsed_seconds=154.5
+2026-05-14T11:14:12.100000Z  INFO tracedao_bakeoff: candidate_eval_start candidate_id=llama-3.1-8b-instruct ctx_max_tokens=4096 novel_count=300 duplicate_count=300 paraphrase_count=300
+2026-05-14T11:15:00.000000Z  WARN tracedao_bakeoff: input_truncation_warn candidate_id=llama-3.1-8b-instruct tokens=4097
+2026-05-14T12:37:18.000000Z  INFO tracedao_bakeoff: run_candidate_eval complete candidate_id=llama-3.1-8b-instruct auc=0.342 para_delta=0.829 tail_range=0.18 det_stddev=0.004 tokens_per_second=292.0 peak_vram=20534456320 passed_det_gate=true
+2026-05-14T12:37:18.500000Z  INFO tracedao_bakeoff: bakeoff_candidate_done candidate_id=llama-3.1-8b-instruct score_elapsed_seconds=4986.4 auc=0.342 throughput_tps=292.0
+2026-05-14T12:37:19.000000Z  INFO tracedao_bakeoff: bakeoff_candidate_load_start candidate_id=qwen3-8b-base candidate_index=2 total=4
+2026-05-14T12:39:50.000000Z  INFO tracedao_bakeoff: bakeoff_candidate_load_done candidate_id=qwen3-8b-base load_elapsed_seconds=151.0
+2026-05-14T12:39:50.500000Z  INFO tracedao_bakeoff: candidate_eval_start candidate_id=qwen3-8b-base ctx_max_tokens=4096 novel_count=300 duplicate_count=300 paraphrase_count=300
+2026-05-14T13:55:21.000000Z  INFO tracedao_bakeoff: run_candidate_eval complete candidate_id=qwen3-8b-base auc=0.355 para_delta=0.811 tail_range=0.17 det_stddev=0.005 tokens_per_second=305.4 peak_vram=19872432128 passed_det_gate=true
+2026-05-14T13:55:21.300000Z  INFO tracedao_bakeoff: bakeoff_candidate_done candidate_id=qwen3-8b-base score_elapsed_seconds=4530.5 auc=0.355 throughput_tps=305.4
+2026-05-14T13:55:22.000000Z  INFO tracedao_bakeoff: bakeoff_candidate_load_start candidate_id=qwen3.6-27b-dense candidate_index=3 total=4
+2026-05-14T14:02:48.000000Z  INFO tracedao_bakeoff: bakeoff_candidate_load_done candidate_id=qwen3.6-27b-dense load_elapsed_seconds=446.0
+2026-05-14T14:02:48.400000Z  INFO tracedao_bakeoff: candidate_eval_start candidate_id=qwen3.6-27b-dense ctx_max_tokens=4096 novel_count=300 duplicate_count=300 paraphrase_count=300
+2026-05-14T14:30:00.000000Z  WARN tracedao_bakeoff: input_truncation_warn candidate_id=qwen3.6-27b-dense tokens=4099
