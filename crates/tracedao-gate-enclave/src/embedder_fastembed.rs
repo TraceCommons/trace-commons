@@ -33,7 +33,9 @@ pub fn l2_normalize_in_place(v: &mut [f32]) -> anyhow::Result<()> {
     }
     let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     let epsilon = f32::EPSILON * (v.len().max(1) as f32);
-    if !(norm > epsilon) {
+    // Inputs are guaranteed finite above, so a direct comparison is safe and
+    // equivalent to the prior `!(norm > epsilon)` form.
+    if norm <= epsilon {
         anyhow::bail!("EmbedderDegenerateVector: norm {norm} not above epsilon {epsilon}");
     }
     for x in v.iter_mut() {
