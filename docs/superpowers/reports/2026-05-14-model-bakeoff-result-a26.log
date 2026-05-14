@@ -1,0 +1,558 @@
+[2m2026-05-14T11:11:37.853958Z[0m [32m INFO[0m bakeoff_start [3mcandidate_count[0m[2m=[0m4 [3mcorpus_sha256[0m[2m=[0msha256:46e0eef8a52e309ce695ad20d1e242ce43eb210c11e02764beeaf7fa3d341bb5 [3mmanifest_sha256[0m[2m=[0msha256:2e360df9449d81d664caeb0e17ed893ccb28e5998604c4caafd1aa46a13fd0f0 [3mhardware[0m[2m=[0mH100 [3mmock_scorer[0m[2m=[0mfalse
+[2m2026-05-14T11:11:37.853985Z[0m [32m INFO[0m bakeoff_candidate_load_start [3mcandidate_id[0m[2m=[0mllama-3.1-8b-instruct [3mcandidate_index[0m[2m=[0m0 [3mtotal[0m[2m=[0m4
+[2m2026-05-14T11:11:38.185710Z[0m [32m INFO[0m Could not load token at "/home/ubuntu/.cache/huggingface/token", using no HF token.
+[2m2026-05-14T11:11:38.221309Z[0m [32m INFO[0m Loading `config.json` locally at `/home/ubuntu/models/llama-3.1-8b-instruct/config.json`
+[2m2026-05-14T11:11:38.222595Z[0m [32m INFO[0m Could not load token at "/home/ubuntu/.cache/huggingface/token", using no HF token.
+[2m2026-05-14T11:11:38.255622Z[0m [32m INFO[0m Loading `tokenizer.json` at `/home/ubuntu/models/llama-3.1-8b-instruct`
+[2m2026-05-14T11:11:38.255635Z[0m [32m INFO[0m Loading `tokenizer.json` locally at `/home/ubuntu/models/llama-3.1-8b-instruct/tokenizer.json`
+[2m2026-05-14T11:11:38.255639Z[0m [32m INFO[0m Loading `config.json` at `/home/ubuntu/models/llama-3.1-8b-instruct`
+[2m2026-05-14T11:11:38.255642Z[0m [32m INFO[0m Loading `config.json` locally at `/home/ubuntu/models/llama-3.1-8b-instruct/config.json`
+[2m2026-05-14T11:11:38.256505Z[0m [32m INFO[0m Found model weight filenames ["model-00002-of-00004.safetensors", "model-00003-of-00004.safetensors", "model-00001-of-00004.safetensors", "model-00004-of-00004.safetensors"]
+[2m2026-05-14T11:11:38.256515Z[0m [32m INFO[0m Loading `model-00002-of-00004.safetensors` locally at `/home/ubuntu/models/llama-3.1-8b-instruct/model-00002-of-00004.safetensors`
+[2m2026-05-14T11:11:38.256519Z[0m [32m INFO[0m Loading `model-00003-of-00004.safetensors` locally at `/home/ubuntu/models/llama-3.1-8b-instruct/model-00003-of-00004.safetensors`
+[2m2026-05-14T11:11:38.256522Z[0m [32m INFO[0m Loading `model-00001-of-00004.safetensors` locally at `/home/ubuntu/models/llama-3.1-8b-instruct/model-00001-of-00004.safetensors`
+[2m2026-05-14T11:11:38.256525Z[0m [32m INFO[0m Loading `model-00004-of-00004.safetensors` locally at `/home/ubuntu/models/llama-3.1-8b-instruct/model-00004-of-00004.safetensors`
+[2m2026-05-14T11:11:38.256551Z[0m [32m INFO[0m Loading `generation_config.json` at `/home/ubuntu/models/llama-3.1-8b-instruct`
+[2m2026-05-14T11:11:38.256554Z[0m [32m INFO[0m Loading `generation_config.json` locally at `/home/ubuntu/models/llama-3.1-8b-instruct/generation_config.json`
+[2m2026-05-14T11:11:38.256557Z[0m [32m INFO[0m Loading `tokenizer_config.json` at `/home/ubuntu/models/llama-3.1-8b-instruct`
+[2m2026-05-14T11:11:38.256560Z[0m [32m INFO[0m Loading `tokenizer_config.json` locally at `/home/ubuntu/models/llama-3.1-8b-instruct/tokenizer_config.json`
+[2m2026-05-14T11:11:38.256922Z[0m [32m INFO[0m Prompt chunk size is 1024.
+[2m2026-05-14T11:11:38.274511Z[0m [32m INFO[0m Detected minimum CUDA compute capability 9
+[2m2026-05-14T11:11:38.345920Z[0m [32m INFO[0m DType selected is BF16.
+[2m2026-05-14T11:11:38.402218Z[0m [32m INFO[0m Using automatic device mapping parameters: text[max_seq_len: 4096, max_batch_size: 1].
+[2m2026-05-14T11:11:38.402276Z[0m [32m INFO[0m Model has 32 repeating layers.
+[2m2026-05-14T11:11:38.402314Z[0m [32m INFO[0m Loading model according to the following repeating layer mappings:
+[2m2026-05-14T11:11:38.402356Z[0m [32m INFO[0m Layers 0-31: cuda[0] (80 GB)
+[2m2026-05-14T11:11:38.419711Z[0m [32m INFO[0m Detected minimum CUDA compute capability 9
+[2m2026-05-14T11:11:38.420122Z[0m [32m INFO[0m DType selected is BF16.
+[2m2026-05-14T11:11:38.420131Z[0m [32m INFO[0m Model config: Config { hidden_act: Silu, hidden_size: 4096, intermediate_size: 14336, vocab_size: 128256, num_hidden_layers: 32, num_attention_heads: 32, num_key_value_heads: 8, rms_norm_eps: 1e-5, rope_theta: 500000.0, max_position_embeddings: 131072, rope_scaling: Some(Llama3RopeConfig { factor: 8.0, low_freq_factor: Some(1.0), high_freq_factor: Some(4.0), original_max_position_embeddings: Some(8192), rope_type: Llama3 }), quantization_config: None, tie_word_embeddings: false }
+[2m2026-05-14T11:11:44.416535Z[0m [32m INFO[0m bos_toks = "<|begin_of_text|>", eos_toks = "<|eot_id|>", "<|end_of_text|>", "<|eom_id|>", unk_tok = `None`
+[2m2026-05-14T11:11:44.459241Z[0m [32m INFO[0m git revision: 2d4ba4f16f61e5e18be085d0dd137bc95cba038a
+[2m2026-05-14T11:11:44.459668Z[0m [32m INFO[0m Pipeline input modalities are [📝 Text]
+[2m2026-05-14T11:11:44.459682Z[0m [32m INFO[0m Pipeline output modalities are [📝 Text]
+[2m2026-05-14T11:11:44.460012Z[0m [32m INFO[0m bakeoff_candidate_load_done [3mcandidate_id[0m[2m=[0mllama-3.1-8b-instruct [3mload_elapsed_seconds[0m[2m=[0m6.60601758
+[2m2026-05-14T11:11:44.460048Z[0m [32m INFO[0m candidate_eval_start [3mcandidate_id[0m[2m=[0mllama-3.1-8b-instruct [3mctx_max_tokens[0m[2m=[0m4096 [3mnovel_count[0m[2m=[0m300 [3mduplicate_count[0m[2m=[0m300 [3mparaphrase_count[0m[2m=[0m300
+[2m2026-05-14T11:11:44.462652Z[0m [32m INFO[0m Prefix caching enabled (sequence-level, non-paged attention). Expect higher multi-turn throughput for both text and multimodal.
+[2m2026-05-14T11:13:08.762770Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:13:26.662336Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:13:54.853775Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:14:48.696409Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:15:06.951608Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:15:43.109190Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:16:18.589768Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:17:24.626009Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:18:25.395233Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:20:41.930325Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:22:14.302029Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:23:46.118325Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:24:29.053375Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:24:50.197829Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:25:32.352958Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:25:50.489731Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:31:07.432791Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:31:30.860129Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:33:42.164863Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:34:14.522219Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:35:41.807337Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:36:35.253471Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:36:56.969004Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:37:15.446079Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:38:48.415985Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:39:54.811590Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:40:13.253645Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:41:44.261006Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:45:12.356894Z[0m [32m INFO[0m candidate_slice_done [3mcandidate_id[0m[2m=[0mllama-3.1-8b-instruct [3mslice[0m[2m=[0m"novel" [3mscored[0m[2m=[0m300 [3mfailed[0m[2m=[0m0 [3melapsed_seconds[0m[2m=[0m2007.896834451
+[2m2026-05-14T11:50:31.056163Z[0m [32m INFO[0m candidate_slice_done [3mcandidate_id[0m[2m=[0mllama-3.1-8b-instruct [3mslice[0m[2m=[0m"duplicate" [3mscored[0m[2m=[0m300 [3mfailed[0m[2m=[0m0 [3melapsed_seconds[0m[2m=[0m318.699210439
+[2m2026-05-14T11:52:02.801021Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:52:21.954444Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:52:53.760371Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:53:54.755351Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:54:15.085105Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:54:56.453993Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:55:36.619755Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:56:55.100696Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T11:58:04.857868Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:00:47.347456Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:02:33.891759Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:04:25.242102Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:05:14.585647Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:05:38.635191Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:06:24.769587Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:06:44.720772Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:13:00.087698Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:13:25.698283Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:15:58.468721Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:16:34.227395Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:18:17.879406Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:19:16.780904Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:19:40.827171Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:19:59.239021Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:21:48.603877Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:23:07.543303Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:23:27.528785Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:25:11.414590Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:29:13.499080Z[0m [32m INFO[0m candidate_slice_done [3mcandidate_id[0m[2m=[0mllama-3.1-8b-instruct [3mslice[0m[2m=[0m"paraphrase" [3mscored[0m[2m=[0m300 [3mfailed[0m[2m=[0m0 [3melapsed_seconds[0m[2m=[0m2322.442872216
+[2m2026-05-14T12:29:13.499270Z[0m [32m INFO[0m determinism_replay_start [3mcandidate_id[0m[2m=[0mllama-3.1-8b-instruct [3mentries[0m[2m=[0m16 [3mrepeat_runs[0m[2m=[0m3
+[2m2026-05-14T12:30:30.231090Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:30:48.678784Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:32:23.718584Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:32:42.204070Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:34:17.132693Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:34:35.477435Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:34:53.668063Z[0m [32m INFO[0m determinism_replay_done [3mcandidate_id[0m[2m=[0mllama-3.1-8b-instruct [3mstddev[0m[2m=[0m1.1102230246251565e-16 [3mpassed[0m[2m=[0mtrue
+[2m2026-05-14T12:34:53.685925Z[0m [32m INFO[0m run_candidate_eval complete [3mcandidate_id[0m[2m=[0mllama-3.1-8b-instruct [3mauc[0m[2m=[0m0.34253333333333336 [3mpara_delta[0m[2m=[0m0.8291336223450885 [3mtail_range[0m[2m=[0m0.015259500000000002 [3mdet_stddev[0m[2m=[0m1.1102230246251565e-16 [3mtokens_per_second[0m[2m=[0m291.7555607226632 [3mpeak_vram[0m[2m=[0m19123 [3mpassed_det_gate[0m[2m=[0mtrue
+[2m2026-05-14T12:34:53.685941Z[0m [32m INFO[0m bakeoff_candidate_done [3mcandidate_id[0m[2m=[0mllama-3.1-8b-instruct [3mscore_elapsed_seconds[0m[2m=[0m4989.225894351 [3mauc[0m[2m=[0m0.34253333333333336 [3mthroughput_tps[0m[2m=[0m291.7555607226632
+[2m2026-05-14T12:34:53.688939Z[0m [32m INFO[0m bakeoff_candidate_load_start [3mcandidate_id[0m[2m=[0mqwen3-8b-base [3mcandidate_index[0m[2m=[0m1 [3mtotal[0m[2m=[0m4
+[2m2026-05-14T12:34:53.693001Z[0m [32m INFO[0m Could not load token at "/home/ubuntu/.cache/huggingface/token", using no HF token.
+[2m2026-05-14T12:34:53.756792Z[0m [32m INFO[0m Loading `config.json` locally at `/home/ubuntu/models/qwen3-8b-base/config.json`
+[2m2026-05-14T12:34:53.757905Z[0m [32m INFO[0m Could not load token at "/home/ubuntu/.cache/huggingface/token", using no HF token.
+[2m2026-05-14T12:34:53.793517Z[0m [32m INFO[0m Loading `tokenizer.json` at `/home/ubuntu/models/qwen3-8b-base`
+[2m2026-05-14T12:34:53.793530Z[0m [32m INFO[0m Loading `tokenizer.json` locally at `/home/ubuntu/models/qwen3-8b-base/tokenizer.json`
+[2m2026-05-14T12:34:53.793535Z[0m [32m INFO[0m Loading `config.json` at `/home/ubuntu/models/qwen3-8b-base`
+[2m2026-05-14T12:34:53.793538Z[0m [32m INFO[0m Loading `config.json` locally at `/home/ubuntu/models/qwen3-8b-base/config.json`
+[2m2026-05-14T12:34:53.794453Z[0m [32m INFO[0m Found model weight filenames ["model-00004-of-00005.safetensors", "model-00002-of-00005.safetensors", "model-00001-of-00005.safetensors", "model-00003-of-00005.safetensors", "model-00005-of-00005.safetensors"]
+[2m2026-05-14T12:34:53.794464Z[0m [32m INFO[0m Loading `model-00004-of-00005.safetensors` locally at `/home/ubuntu/models/qwen3-8b-base/model-00004-of-00005.safetensors`
+[2m2026-05-14T12:34:53.794469Z[0m [32m INFO[0m Loading `model-00002-of-00005.safetensors` locally at `/home/ubuntu/models/qwen3-8b-base/model-00002-of-00005.safetensors`
+[2m2026-05-14T12:34:53.794473Z[0m [32m INFO[0m Loading `model-00001-of-00005.safetensors` locally at `/home/ubuntu/models/qwen3-8b-base/model-00001-of-00005.safetensors`
+[2m2026-05-14T12:34:53.794476Z[0m [32m INFO[0m Loading `model-00003-of-00005.safetensors` locally at `/home/ubuntu/models/qwen3-8b-base/model-00003-of-00005.safetensors`
+[2m2026-05-14T12:34:53.794486Z[0m [32m INFO[0m Loading `model-00005-of-00005.safetensors` locally at `/home/ubuntu/models/qwen3-8b-base/model-00005-of-00005.safetensors`
+[2m2026-05-14T12:34:53.794505Z[0m [32m INFO[0m Loading `generation_config.json` at `/home/ubuntu/models/qwen3-8b-base`
+[2m2026-05-14T12:34:53.794508Z[0m [32m INFO[0m Loading `generation_config.json` locally at `/home/ubuntu/models/qwen3-8b-base/generation_config.json`
+[2m2026-05-14T12:34:53.794510Z[0m [32m INFO[0m Loading `tokenizer_config.json` at `/home/ubuntu/models/qwen3-8b-base`
+[2m2026-05-14T12:34:53.794513Z[0m [32m INFO[0m Loading `tokenizer_config.json` locally at `/home/ubuntu/models/qwen3-8b-base/tokenizer_config.json`
+[2m2026-05-14T12:34:53.795042Z[0m [32m INFO[0m Prompt chunk size is 1024.
+[2m2026-05-14T12:34:53.813194Z[0m [32m INFO[0m Detected minimum CUDA compute capability 9
+[2m2026-05-14T12:34:53.815339Z[0m [32m INFO[0m DType selected is BF16.
+[2m2026-05-14T12:34:53.843231Z[0m [32m INFO[0m Using automatic device mapping parameters: text[max_seq_len: 4096, max_batch_size: 1].
+[2m2026-05-14T12:34:53.843255Z[0m [32m INFO[0m Model has 36 repeating layers.
+[2m2026-05-14T12:34:53.843299Z[0m [32m INFO[0m Layers 0-35: cuda[0] (80 GB)
+[2m2026-05-14T12:34:53.859069Z[0m [32m INFO[0m Detected minimum CUDA compute capability 9
+[2m2026-05-14T12:34:53.859523Z[0m [32m INFO[0m DType selected is BF16.
+[2m2026-05-14T12:34:53.859536Z[0m [32m INFO[0m Model config: Config { vocab_size: 151936, hidden_size: 4096, intermediate_size: 12288, num_hidden_layers: 36, num_attention_heads: 32, num_key_value_heads: 8, hidden_act: Silu, max_position_embeddings: 32768, rms_norm_eps: 1e-6, rope_theta: 1000000.0, sliding_window: None, head_dim: Some(128), quantization_config: None, tie_word_embeddings: false, max_window_layers: 36, use_sliding_window: false }
+[2m2026-05-14T12:34:57.151618Z[0m [32m INFO[0m bos_toks = "<|endoftext|>", eos_toks = "<|endoftext|>", "<|im_end|>", unk_tok = `None`
+[2m2026-05-14T12:34:57.186411Z[0m [32m INFO[0m git revision: 2d4ba4f16f61e5e18be085d0dd137bc95cba038a
+[2m2026-05-14T12:34:57.186522Z[0m [32m INFO[0m Pipeline input modalities are [📝 Text]
+[2m2026-05-14T12:34:57.186527Z[0m [32m INFO[0m Pipeline output modalities are [📝 Text]
+[2m2026-05-14T12:34:57.186745Z[0m [32m INFO[0m bakeoff_candidate_load_done [3mcandidate_id[0m[2m=[0mqwen3-8b-base [3mload_elapsed_seconds[0m[2m=[0m3.497798298
+[2m2026-05-14T12:34:57.186763Z[0m [32m INFO[0m candidate_eval_start [3mcandidate_id[0m[2m=[0mqwen3-8b-base [3mctx_max_tokens[0m[2m=[0m4096 [3mnovel_count[0m[2m=[0m300 [3mduplicate_count[0m[2m=[0m300 [3mparaphrase_count[0m[2m=[0m300
+[2m2026-05-14T12:34:57.188648Z[0m [32m INFO[0m Prefix caching enabled (sequence-level, non-paged attention). Expect higher multi-turn throughput for both text and multimodal.
+[2m2026-05-14T12:36:27.478147Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:36:49.146029Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:37:21.949093Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:38:26.672039Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:38:48.055910Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:39:31.038231Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:40:14.335348Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:41:32.980853Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:42:45.985466Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:45:29.336878Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:47:17.452525Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:49:05.728673Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:49:56.139130Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:50:21.157183Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:51:11.047466Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:51:32.611521Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:57:55.024715Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T12:58:22.591129Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:00:58.228886Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:01:36.943233Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:03:20.199594Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:04:22.901398Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:04:48.588762Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:05:10.399435Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:07:01.658520Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:08:20.685910Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:08:42.420436Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:10:32.073047Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:14:43.583578Z[0m [32m INFO[0m candidate_slice_done [3mcandidate_id[0m[2m=[0mqwen3-8b-base [3mslice[0m[2m=[0m"novel" [3mscored[0m[2m=[0m300 [3mfailed[0m[2m=[0m0 [3melapsed_seconds[0m[2m=[0m2386.396800213
+[2m2026-05-14T13:21:09.501771Z[0m [32m INFO[0m candidate_slice_done [3mcandidate_id[0m[2m=[0mqwen3-8b-base [3mslice[0m[2m=[0m"duplicate" [3mscored[0m[2m=[0m300 [3mfailed[0m[2m=[0m0 [3melapsed_seconds[0m[2m=[0m385.918130013
+[2m2026-05-14T13:22:59.773376Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:23:22.756873Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:24:00.967851Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:25:16.646454Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:25:40.425605Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:26:30.470666Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:27:19.860460Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:28:55.363206Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:30:20.336041Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:33:37.257071Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:35:45.644556Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:37:58.437682Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:38:57.078543Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:39:25.529665Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:40:20.120879Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:40:43.958248Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:48:16.745421Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:48:48.167864Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:51:47.211539Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:52:29.529726Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:54:32.137318Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:55:42.111117Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:56:10.493428Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:56:32.102315Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T13:58:43.411658Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:00:16.263957Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:00:39.724184Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:02:44.724400Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:07:37.279146Z[0m [32m INFO[0m candidate_slice_done [3mcandidate_id[0m[2m=[0mqwen3-8b-base [3mslice[0m[2m=[0m"paraphrase" [3mscored[0m[2m=[0m300 [3mfailed[0m[2m=[0m0 [3melapsed_seconds[0m[2m=[0m2787.777325939
+[2m2026-05-14T14:07:37.279315Z[0m [32m INFO[0m determinism_replay_start [3mcandidate_id[0m[2m=[0mqwen3-8b-base [3mentries[0m[2m=[0m16 [3mrepeat_runs[0m[2m=[0m3
+[2m2026-05-14T14:09:08.126269Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:09:29.785584Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:11:21.879996Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:11:43.345425Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:13:35.743859Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:13:57.350911Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:14:18.958309Z[0m [32m INFO[0m determinism_replay_done [3mcandidate_id[0m[2m=[0mqwen3-8b-base [3mstddev[0m[2m=[0m1.1102230246251565e-16 [3mpassed[0m[2m=[0mtrue
+[2m2026-05-14T14:14:18.975346Z[0m [32m INFO[0m run_candidate_eval complete [3mcandidate_id[0m[2m=[0mqwen3-8b-base [3mauc[0m[2m=[0m0.2431111111111111 [3mpara_delta[0m[2m=[0m0.8233920956679962 [3mtail_range[0m[2m=[0m0.007072000000000002 [3mdet_stddev[0m[2m=[0m1.1102230246251565e-16 [3mtokens_per_second[0m[2m=[0m248.4598989824905 [3mpeak_vram[0m[2m=[0m19413 [3mpassed_det_gate[0m[2m=[0mtrue
+[2m2026-05-14T14:14:18.975363Z[0m [32m INFO[0m bakeoff_candidate_done [3mcandidate_id[0m[2m=[0mqwen3-8b-base [3mscore_elapsed_seconds[0m[2m=[0m5961.788599571 [3mauc[0m[2m=[0m0.2431111111111111 [3mthroughput_tps[0m[2m=[0m248.4598989824905
+[2m2026-05-14T14:14:18.978166Z[0m [32m INFO[0m bakeoff_candidate_load_start [3mcandidate_id[0m[2m=[0mqwen3.6-27b-dense [3mcandidate_index[0m[2m=[0m2 [3mtotal[0m[2m=[0m4
+[2m2026-05-14T14:14:18.982241Z[0m [32m INFO[0m Could not load token at "/home/ubuntu/.cache/huggingface/token", using no HF token.
+[2m2026-05-14T14:14:19.051192Z[0m [32m INFO[0m Loading `config.json` locally at `/home/ubuntu/models/qwen3.6-27b/config.json`
+[2m2026-05-14T14:14:19.052465Z[0m [32m INFO[0m Could not load token at "/home/ubuntu/.cache/huggingface/token", using no HF token.
+[2m2026-05-14T14:14:19.085749Z[0m [32m INFO[0m Loading `tokenizer.json` at `/home/ubuntu/models/qwen3.6-27b`
+[2m2026-05-14T14:14:19.085763Z[0m [32m INFO[0m Loading `tokenizer.json` locally at `/home/ubuntu/models/qwen3.6-27b/tokenizer.json`
+[2m2026-05-14T14:14:19.085767Z[0m [32m INFO[0m Loading `config.json` at `/home/ubuntu/models/qwen3.6-27b`
+[2m2026-05-14T14:14:19.085770Z[0m [32m INFO[0m Loading `config.json` locally at `/home/ubuntu/models/qwen3.6-27b/config.json`
+[2m2026-05-14T14:14:19.086697Z[0m [32m INFO[0m Found model weight filenames ["model-00014-of-00015.safetensors", "model-00012-of-00015.safetensors", "model-00009-of-00015.safetensors", "model-00008-of-00015.safetensors", "model-00005-of-00015.safetensors", "model-00001-of-00015.safetensors", "model-00006-of-00015.safetensors", "model-00002-of-00015.safetensors", "model-00015-of-00015.safetensors", "model-00004-of-00015.safetensors", "model-00011-of-00015.safetensors", "model-00010-of-00015.safetensors", "model-00003-of-00015.safetensors", "model-00007-of-00015.safetensors", "model-00013-of-00015.safetensors"]
+[2m2026-05-14T14:14:19.086721Z[0m [32m INFO[0m Loading `model-00014-of-00015.safetensors` locally at `/home/ubuntu/models/qwen3.6-27b/model-00014-of-00015.safetensors`
+[2m2026-05-14T14:14:19.086726Z[0m [32m INFO[0m Loading `model-00012-of-00015.safetensors` locally at `/home/ubuntu/models/qwen3.6-27b/model-00012-of-00015.safetensors`
+[2m2026-05-14T14:14:19.086729Z[0m [32m INFO[0m Loading `model-00009-of-00015.safetensors` locally at `/home/ubuntu/models/qwen3.6-27b/model-00009-of-00015.safetensors`
+[2m2026-05-14T14:14:19.086732Z[0m [32m INFO[0m Loading `model-00008-of-00015.safetensors` locally at `/home/ubuntu/models/qwen3.6-27b/model-00008-of-00015.safetensors`
+[2m2026-05-14T14:14:19.086736Z[0m [32m INFO[0m Loading `model-00005-of-00015.safetensors` locally at `/home/ubuntu/models/qwen3.6-27b/model-00005-of-00015.safetensors`
+[2m2026-05-14T14:14:19.086739Z[0m [32m INFO[0m Loading `model-00001-of-00015.safetensors` locally at `/home/ubuntu/models/qwen3.6-27b/model-00001-of-00015.safetensors`
+[2m2026-05-14T14:14:19.086742Z[0m [32m INFO[0m Loading `model-00006-of-00015.safetensors` locally at `/home/ubuntu/models/qwen3.6-27b/model-00006-of-00015.safetensors`
+[2m2026-05-14T14:14:19.086745Z[0m [32m INFO[0m Loading `model-00002-of-00015.safetensors` locally at `/home/ubuntu/models/qwen3.6-27b/model-00002-of-00015.safetensors`
+[2m2026-05-14T14:14:19.086748Z[0m [32m INFO[0m Loading `model-00015-of-00015.safetensors` locally at `/home/ubuntu/models/qwen3.6-27b/model-00015-of-00015.safetensors`
+[2m2026-05-14T14:14:19.086751Z[0m [32m INFO[0m Loading `model-00004-of-00015.safetensors` locally at `/home/ubuntu/models/qwen3.6-27b/model-00004-of-00015.safetensors`
+[2m2026-05-14T14:14:19.086754Z[0m [32m INFO[0m Loading `model-00011-of-00015.safetensors` locally at `/home/ubuntu/models/qwen3.6-27b/model-00011-of-00015.safetensors`
+[2m2026-05-14T14:14:19.086757Z[0m [32m INFO[0m Loading `model-00010-of-00015.safetensors` locally at `/home/ubuntu/models/qwen3.6-27b/model-00010-of-00015.safetensors`
+[2m2026-05-14T14:14:19.086760Z[0m [32m INFO[0m Loading `model-00003-of-00015.safetensors` locally at `/home/ubuntu/models/qwen3.6-27b/model-00003-of-00015.safetensors`
+[2m2026-05-14T14:14:19.086763Z[0m [32m INFO[0m Loading `model-00007-of-00015.safetensors` locally at `/home/ubuntu/models/qwen3.6-27b/model-00007-of-00015.safetensors`
+[2m2026-05-14T14:14:19.086766Z[0m [32m INFO[0m Loading `model-00013-of-00015.safetensors` locally at `/home/ubuntu/models/qwen3.6-27b/model-00013-of-00015.safetensors`
+[2m2026-05-14T14:14:19.086785Z[0m [32m INFO[0m Loading `generation_config.json` at `/home/ubuntu/models/qwen3.6-27b`
+[2m2026-05-14T14:14:19.086788Z[0m [32m INFO[0m Loading `generation_config.json` locally at `/home/ubuntu/models/qwen3.6-27b/generation_config.json`
+[2m2026-05-14T14:14:19.086790Z[0m [32m INFO[0m Loading `preprocessor_config.json` at `/home/ubuntu/models/qwen3.6-27b`
+[2m2026-05-14T14:14:19.086798Z[0m [32m INFO[0m Loading `preprocessor_config.json` locally at `/home/ubuntu/models/qwen3.6-27b/preprocessor_config.json`
+[2m2026-05-14T14:14:19.086801Z[0m [32m INFO[0m Loading `chat_template.jinja` at `/home/ubuntu/models/qwen3.6-27b`
+[2m2026-05-14T14:14:19.086803Z[0m [32m INFO[0m Loading `chat_template.jinja` locally at `/home/ubuntu/models/qwen3.6-27b/chat_template.jinja`
+[2m2026-05-14T14:14:19.087371Z[0m [32m INFO[0m Prompt chunk size is 1024.
+[2m2026-05-14T14:14:19.104835Z[0m [32m INFO[0m Detected minimum CUDA compute capability 9
+[2m2026-05-14T14:14:19.106506Z[0m [32m INFO[0m DType selected is BF16.
+[2m2026-05-14T14:14:19.133803Z[0m [32m INFO[0m Using automatic device mapping parameters: multimodal[max_seq_len: 4096, max_batch_size: 1, max_image_shape: (1024, 1024), max_num_images: 1].
+[2m2026-05-14T14:14:19.133824Z[0m [32m INFO[0m The following sub-models will not be device mapped and will be loaded on cuda[0]: vision
+[2m2026-05-14T14:14:19.133850Z[0m [32m INFO[0m Model has 64 repeating layers.
+[2m2026-05-14T14:14:19.133898Z[0m [32m INFO[0m Layers 0-63: cuda[0] (80 GB)
+[2m2026-05-14T14:14:19.148448Z[0m [32m INFO[0m Detected minimum CUDA compute capability 9
+[2m2026-05-14T14:14:19.149139Z[0m [32m INFO[0m DType selected is BF16.
+[2m2026-05-14T14:14:19.149170Z[0m [32m INFO[0m Model config: Config { text_config: TextConfig { head_dim: 256, vocab_size: 248320, hidden_size: 5120, intermediate_size: 17408, num_hidden_layers: 64, num_attention_heads: 24, num_key_value_heads: 4, hidden_act: Silu, max_position_embeddings: 262144, rms_norm_eps: 1e-6, rope_parameters: RopeParameters { rope_theta: 10000000.0, mrope_section: [11, 11, 10], partial_rotary_factor: 0.25 }, full_attention_interval: 4, linear_conv_kernel_dim: 4, linear_key_head_dim: 128, linear_value_head_dim: 128, linear_num_key_heads: 16, linear_num_value_heads: 48, tie_word_embeddings: false, quantization_config: None }, vision_config: VisionConfig { depth: 27, hidden_size: 1152, out_hidden_size: 5120, hidden_act: GeluPytorchTanh, intermediate_size: 4304, num_heads: 16, in_chans: 3, patch_size: 16, spatial_merge_size: 2, temporal_patch_size: 2, num_position_embeddings: 2304, deepstack_visual_indexes: [] }, image_token_id: 248056, video_token_id: 248057, vision_start_token_id: 248053, vision_end_token_id: 248054, tie_word_embeddings: false, quantization_config: None }
+[2m2026-05-14T14:14:28.044213Z[0m [32m INFO[0m Using chat template from .jinja file.
+[2m2026-05-14T14:14:29.174589Z[0m [32m INFO[0m bos_toks = "<|endoftext|>", eos_toks = "<|im_end|>", "<|endoftext|>", unk_tok = `None`
+[2m2026-05-14T14:14:29.255667Z[0m [32m INFO[0m git revision: 2d4ba4f16f61e5e18be085d0dd137bc95cba038a
+[2m2026-05-14T14:14:29.255792Z[0m [32m INFO[0m Pipeline input modalities are [📝 Text, 🖼️ Vision]
+[2m2026-05-14T14:14:29.255798Z[0m [32m INFO[0m Pipeline output modalities are [📝 Text]
+[2m2026-05-14T14:14:29.255911Z[0m [32m INFO[0m bakeoff_candidate_load_done [3mcandidate_id[0m[2m=[0mqwen3.6-27b-dense [3mload_elapsed_seconds[0m[2m=[0m10.277731242
+[2m2026-05-14T14:14:29.255951Z[0m [32m INFO[0m candidate_eval_start [3mcandidate_id[0m[2m=[0mqwen3.6-27b-dense [3mctx_max_tokens[0m[2m=[0m4096 [3mnovel_count[0m[2m=[0m300 [3mduplicate_count[0m[2m=[0m300 [3mparaphrase_count[0m[2m=[0m300
+[2m2026-05-14T14:14:29.257865Z[0m [32m INFO[0m Prefix caching enabled (sequence-level, non-paged attention). Expect higher multi-turn throughput for both text and multimodal.
+[2m2026-05-14T14:17:54.818658Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:18:36.911575Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:19:45.078965Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:21:32.483252Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:22:14.565233Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:22:56.517059Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:24:26.043271Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:25:21.933191Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:26:04.194940Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:28:54.521452Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:31:34.727635Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:37:37.286810Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:41:36.933341Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:44:19.808001Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:45:49.650905Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:47:38.980010Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:48:29.223107Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:50:13.280059Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T14:50:55.215291Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T15:01:50.323092Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T15:05:14.361720Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T15:06:09.783387Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T15:11:55.196591Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T15:13:14.575931Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T15:17:00.354962Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T15:17:52.668638Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T15:18:45.758972Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T15:19:27.516991Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T15:20:17.901750Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T15:20:59.513668Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T15:25:00.368643Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T15:27:52.746999Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T15:28:34.926461Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T15:32:36.558021Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T15:41:54.997893Z[0m [32m INFO[0m candidate_slice_done [3mcandidate_id[0m[2m=[0mqwen3.6-27b-dense [3mslice[0m[2m=[0m"novel" [3mscored[0m[2m=[0m300 [3mfailed[0m[2m=[0m0 [3melapsed_seconds[0m[2m=[0m5245.741928144
+[2m2026-05-14T15:55:50.088809Z[0m [32m INFO[0m candidate_slice_done [3mcandidate_id[0m[2m=[0mqwen3.6-27b-dense [3mslice[0m[2m=[0m"duplicate" [3mscored[0m[2m=[0m300 [3mfailed[0m[2m=[0m0 [3melapsed_seconds[0m[2m=[0m835.090868108
+[2m2026-05-14T15:59:54.528578Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T16:00:38.690310Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T16:01:56.751908Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T16:03:59.028816Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T16:04:45.097390Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T16:05:31.575429Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T16:07:14.935685Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T16:08:17.644629Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T16:09:04.037162Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T16:12:26.373260Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T16:15:29.372430Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T16:22:38.869029Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T16:27:16.234574Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T16:30:35.354969Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T16:32:19.578432Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T16:34:26.993775Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T16:35:24.480359Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T16:37:19.852057Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T16:38:05.961594Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T16:51:07.653946Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T16:55:05.051202Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T16:56:08.987095Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:02:48.266077Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:04:16.658387Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:08:46.989762Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:09:46.810991Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:10:45.919124Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:11:32.395588Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:12:30.288653Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:13:12.328912Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:17:59.491628Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:21:25.356258Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:22:11.750448Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:26:50.384167Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:37:44.559485Z[0m [32m INFO[0m candidate_slice_done [3mcandidate_id[0m[2m=[0mqwen3.6-27b-dense [3mslice[0m[2m=[0m"paraphrase" [3mscored[0m[2m=[0m300 [3mfailed[0m[2m=[0m0 [3melapsed_seconds[0m[2m=[0m6114.470628601
+[2m2026-05-14T17:37:44.559627Z[0m [32m INFO[0m determinism_replay_start [3mcandidate_id[0m[2m=[0mqwen3.6-27b-dense [3mentries[0m[2m=[0m16 [3mrepeat_runs[0m[2m=[0m3
+[2m2026-05-14T17:41:09.618639Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:41:51.477936Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:45:58.610488Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:46:40.692357Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:50:47.920495Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:51:29.925522Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:52:11.701864Z[0m [32m INFO[0m determinism_replay_done [3mcandidate_id[0m[2m=[0mqwen3.6-27b-dense [3mstddev[0m[2m=[0m2.6645352591003757e-15 [3mpassed[0m[2m=[0mtrue
+[2m2026-05-14T17:52:11.719636Z[0m [32m INFO[0m run_candidate_eval complete [3mcandidate_id[0m[2m=[0mqwen3.6-27b-dense [3mauc[0m[2m=[0m0.9362666666666667 [3mpara_delta[0m[2m=[0m0.5980157409848676 [3mtail_range[0m[2m=[0m0.09649600000000001 [3mdet_stddev[0m[2m=[0m2.6645352591003757e-15 [3mtokens_per_second[0m[2m=[0m119.49181844340372 [3mpeak_vram[0m[2m=[0m57019 [3mpassed_det_gate[0m[2m=[0mtrue
+[2m2026-05-14T17:52:11.719653Z[0m [32m INFO[0m bakeoff_candidate_done [3mcandidate_id[0m[2m=[0mqwen3.6-27b-dense [3mscore_elapsed_seconds[0m[2m=[0m13062.463701946 [3mauc[0m[2m=[0m0.9362666666666667 [3mthroughput_tps[0m[2m=[0m119.49181844340372
+[2m2026-05-14T17:52:11.722345Z[0m [32m INFO[0m bakeoff_candidate_load_start [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mcandidate_index[0m[2m=[0m3 [3mtotal[0m[2m=[0m4
+[2m2026-05-14T17:52:11.723687Z[0m [32m INFO[0m Could not load token at "/home/ubuntu/.cache/huggingface/token", using no HF token.
+[2m2026-05-14T17:52:11.820692Z[0m [32m INFO[0m Loading `config.json` locally at `/home/ubuntu/models/gemma-4-31b/config.json`
+[2m2026-05-14T17:52:11.822061Z[0m [32m INFO[0m Could not load token at "/home/ubuntu/.cache/huggingface/token", using no HF token.
+[2m2026-05-14T17:52:11.859408Z[0m [32m INFO[0m Loading `tokenizer.json` at `/home/ubuntu/models/gemma-4-31b`
+[2m2026-05-14T17:52:11.859423Z[0m [32m INFO[0m Loading `tokenizer.json` locally at `/home/ubuntu/models/gemma-4-31b/tokenizer.json`
+[2m2026-05-14T17:52:11.859427Z[0m [32m INFO[0m Loading `config.json` at `/home/ubuntu/models/gemma-4-31b`
+[2m2026-05-14T17:52:11.859431Z[0m [32m INFO[0m Loading `config.json` locally at `/home/ubuntu/models/gemma-4-31b/config.json`
+[2m2026-05-14T17:52:11.860541Z[0m [32m INFO[0m Found model weight filenames ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"]
+[2m2026-05-14T17:52:11.860553Z[0m [32m INFO[0m Loading `model-00001-of-00002.safetensors` locally at `/home/ubuntu/models/gemma-4-31b/model-00001-of-00002.safetensors`
+[2m2026-05-14T17:52:11.860557Z[0m [32m INFO[0m Loading `model-00002-of-00002.safetensors` locally at `/home/ubuntu/models/gemma-4-31b/model-00002-of-00002.safetensors`
+[2m2026-05-14T17:52:11.860580Z[0m [32m INFO[0m Loading `generation_config.json` at `/home/ubuntu/models/gemma-4-31b`
+[2m2026-05-14T17:52:11.860596Z[0m [32m INFO[0m Loading `generation_config.json` locally at `/home/ubuntu/models/gemma-4-31b/generation_config.json`
+[2m2026-05-14T17:52:11.860600Z[0m [32m INFO[0m Loading `processor_config.json` at `/home/ubuntu/models/gemma-4-31b`
+[2m2026-05-14T17:52:11.860604Z[0m [32m INFO[0m Loading `processor_config.json` locally at `/home/ubuntu/models/gemma-4-31b/processor_config.json`
+[2m2026-05-14T17:52:11.860606Z[0m [32m INFO[0m Loading `tokenizer_config.json` at `/home/ubuntu/models/gemma-4-31b`
+[2m2026-05-14T17:52:11.860611Z[0m [32m INFO[0m Loading `tokenizer_config.json` locally at `/home/ubuntu/models/gemma-4-31b/tokenizer_config.json`
+[2m2026-05-14T17:52:11.861423Z[0m [32m INFO[0m Prompt chunk size is 1024.
+[2m2026-05-14T17:52:11.879493Z[0m [32m INFO[0m Detected minimum CUDA compute capability 9
+[2m2026-05-14T17:52:11.882106Z[0m [32m INFO[0m DType selected is BF16.
+[2m2026-05-14T17:52:11.911652Z[0m [32m INFO[0m Using automatic device mapping parameters: multimodal[max_seq_len: 4096, max_batch_size: 1, max_image_shape: (1024, 1024), max_num_images: 1].
+[2m2026-05-14T17:52:11.911668Z[0m [32m INFO[0m The following sub-models will not be device mapped and will be loaded on cuda[0]: vision, audio
+[2m2026-05-14T17:52:11.911731Z[0m [32m INFO[0m Model has 60 repeating layers.
+[2m2026-05-14T17:52:11.911769Z[0m [32m INFO[0m Layers 0-59: cuda[0] (80 GB)
+[2m2026-05-14T17:52:11.927868Z[0m [32m INFO[0m Detected minimum CUDA compute capability 9
+[2m2026-05-14T17:52:11.928499Z[0m [32m INFO[0m DType selected is BF16.
+[2m2026-05-14T17:52:11.928531Z[0m [32m INFO[0m Model config: Gemma4Config { text_config: Gemma4TextConfig { attention_bias: false, head_dim: 256, hidden_activation: GeluPytorchTanh, hidden_size: 5376, intermediate_size: 21504, num_attention_heads: 32, num_hidden_layers: 60, num_key_value_heads: 16, rms_norm_eps: 1e-6, rope_theta: 1000000.0, vocab_size: 262144, sliding_window: 1024, final_logit_softcapping: Some(30.0), query_pre_attn_scalar: 256, max_position_embeddings: 262144, quantization_config: None, tie_word_embeddings: true, sliding_window_pattern: 6, layer_types: ["sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention"], global_head_dim: 512, attention_k_eq_v: true, num_global_key_value_heads: Some(4), enable_moe_block: false, num_experts: None, top_k_experts: None, expert_intermediate_size: None, num_kv_shared_layers: 0, hidden_size_per_layer_input: Some(0), vocab_size_per_layer_input: Some(262144), use_double_wide_mlp: false, rope_parameters: Some(Gemma4RopeParameters { full_attention: Some(Gemma4RopeLayerParams { rope_theta: Some(1000000.0), rope_type: Some("proportional"), partial_rotary_factor: Some(0.25) }), sliding_attention: Some(Gemma4RopeLayerParams { rope_theta: Some(10000.0), rope_type: Some("default"), partial_rotary_factor: None }), rope_theta: None, rope_type: None, partial_rotary_factor: None }), use_bidirectional_attention: Some("vision") }, vision_config: Gemma4VisionConfig { hidden_size: 1152, intermediate_size: 4304, num_hidden_layers: 27, num_attention_heads: 16, num_key_value_heads: 16, head_dim: 72, hidden_activation: GeluPytorchTanh, rms_norm_eps: 1e-6, patch_size: 16, position_embedding_size: 10240, pooling_kernel_size: 3, default_output_length: 280, use_clipped_linears: false, standardize: true, rope_parameters: Some(Gemma4RopeParameters { full_attention: None, sliding_attention: None, rope_theta: Some(100.0), rope_type: Some("default"), partial_rotary_factor: None }) }, audio_config: None, image_token_id: 258880, audio_token_id: 258881, video_token_id: 258884, boi_token_id: 255999, eoi_token_id: 258882, boa_token_id: 256000, eoa_token_id: 258883, _eoa_token_index: Some(258883), audio_ms_per_token: None, vision_soft_tokens_per_image: Some(280) }
+[2m2026-05-14T17:52:32.509602Z[0m [32m INFO[0m `tokenizer_config.json` does not contain a chat template, attempting to use specified JINJA chat template.
+[2m2026-05-14T17:52:32.509648Z[0m [33m WARN[0m No specified chat template. No chat template will be used. Only prompts will be accepted, not messages.
+[2m2026-05-14T17:52:33.694596Z[0m [32m INFO[0m bos_toks = "<bos>", eos_toks = "<eos>", unk_tok = <unk>
+[2m2026-05-14T17:52:33.730800Z[0m [32m INFO[0m git revision: 2d4ba4f16f61e5e18be085d0dd137bc95cba038a
+[2m2026-05-14T17:52:33.730916Z[0m [32m INFO[0m Pipeline input modalities are [📝 Text, 🖼️ Vision, 🎬 Video]
+[2m2026-05-14T17:52:33.730921Z[0m [32m INFO[0m Pipeline output modalities are [📝 Text]
+[2m2026-05-14T17:52:33.731193Z[0m [32m INFO[0m bakeoff_candidate_load_done [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mload_elapsed_seconds[0m[2m=[0m22.008839197
+[2m2026-05-14T17:52:33.731210Z[0m [32m INFO[0m candidate_eval_start [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mctx_max_tokens[0m[2m=[0m4096 [3mnovel_count[0m[2m=[0m300 [3mduplicate_count[0m[2m=[0m300 [3mparaphrase_count[0m[2m=[0m300
+[2m2026-05-14T17:52:33.733106Z[0m [32m INFO[0m Prefix caching enabled (sequence-level, non-paged attention). Expect higher multi-turn throughput for both text and multimodal.
+[2m2026-05-14T17:53:32.332890Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:54:48.562210Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:55:07.316360Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:55:09.208117Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T17:55:09.208648Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m15 [3merr[0m[2m=[0msha256:b4366d34b852bde9d7e305425ffda6bde3b598637f01c21676370164197b7a95
+[2m2026-05-14T17:55:25.989770Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:56:25.117356Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:56:43.880589Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:56:45.768833Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T17:56:45.769259Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m25 [3merr[0m[2m=[0msha256:e1e82c03b7f4bb7c4189073f985f8f33932f0c74edde149d47d314553bdd2933
+[2m2026-05-14T17:56:45.772769Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:57:09.696830Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:57:11.584168Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T17:57:11.584483Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m28 [3merr[0m[2m=[0msha256:e5556ce746ec8e5370b17532c61ea8340abe3cb90d0770260c64b1161086a670
+[2m2026-05-14T17:57:17.643688Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:57:46.088954Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:57:47.973722Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T17:57:47.974156Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m32 [3merr[0m[2m=[0msha256:1af8a3ab9236756686560544fdd2aedf8d8964aa0ea484e24347fbdf1054efa9
+[2m2026-05-14T17:57:47.977822Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T17:59:13.882579Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T17:59:13.882970Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m42 [3merr[0m[2m=[0msha256:2a5b929b64602aa8636244d373ed8ab5576a6587b3625d7aa65ad607395f562e
+[2m2026-05-14T17:59:13.888015Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:00:52.551735Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:02:21.288509Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:02:23.172585Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T18:02:23.172891Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m60 [3merr[0m[2m=[0msha256:744c41f81c1b2727c0e4e9c3458251e6b95d37a1329fd17393b0d3bc05165939
+[2m2026-05-14T18:03:12.132242Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T18:03:12.132565Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m67 [3merr[0m[2m=[0msha256:a19af9e3c4d00d3491aa3e00c5f1cd8c36a01f512f7e73a821ccb33a781a2bd1
+[2m2026-05-14T18:04:02.701404Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:04:04.591135Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T18:04:04.591561Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m74 [3merr[0m[2m=[0msha256:afcab4c15ab9447b82e1e7364d811dc5761fca9c408efeb4d568b427acdb9179
+[2m2026-05-14T18:04:04.594840Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:05:55.493577Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T18:05:55.494014Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m84 [3merr[0m[2m=[0msha256:937343572d8fd88b2d39c423808112b51612c2dfccf39990f5165d0dcec26312
+[2m2026-05-14T18:05:55.498690Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:07:28.411982Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:07:30.297783Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T18:07:30.297977Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m96 [3merr[0m[2m=[0msha256:ec8cefeff8c983f16922a235fa307c01b988d885f54b93fc715f8c7e760d8810
+[2m2026-05-14T18:08:02.465976Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:08:04.355919Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T18:08:04.356240Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m102 [3merr[0m[2m=[0msha256:5f4e95e812b6c198a5af9a7df8abf1bd4550e39c84c5ac623fd18c0531846254
+[2m2026-05-14T18:08:47.391047Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:09:11.434283Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:09:13.321632Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T18:09:13.321950Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m111 [3merr[0m[2m=[0msha256:26e0618780bfb0a5fbfe9e6706ab1c7ec282ee36c149dcf4171546b6c752ff8e
+[2m2026-05-14T18:09:57.018854Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:10:15.890746Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:10:17.782304Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T18:10:17.782741Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m116 [3merr[0m[2m=[0msha256:48d01d699c53da989fd2b7d267c8da6897c4941be1d24740a610f081cf15173d
+[2m2026-05-14T18:13:44.834417Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T18:13:44.834727Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m140 [3merr[0m[2m=[0msha256:f07ed29edb69d3906e8e99a12d1fc41439b79abf0b20e04d1c554820dd382be2
+[2m2026-05-14T18:13:49.703182Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:16:35.736741Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:16:54.465292Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:18:35.488798Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:19:02.318390Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:19:04.205687Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T18:19:04.206126Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m174 [3merr[0m[2m=[0msha256:51d879b3f067fd4bda6680dae18dd8008fbeb4d15682c176d8112bdaa73a712a
+[2m2026-05-14T18:19:15.318720Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:19:34.109154Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:22:16.378664Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:22:18.262953Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T18:22:18.263380Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m195 [3merr[0m[2m=[0msha256:de4ce8d4c0ab2a3f54be01bf8d39644a1a9d55ec6ca26291ab1d39cec1f78084
+[2m2026-05-14T18:22:43.756318Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:25:00.393696Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:25:02.280910Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T18:25:02.281212Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m213 [3merr[0m[2m=[0msha256:805a059869054abf53850543341d7a906672c3d22cd4c4e55f9cb8d714a0e7e1
+[2m2026-05-14T18:25:09.705929Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:25:36.029010Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:25:54.748380Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:25:56.639786Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T18:25:56.640100Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m218 [3merr[0m[2m=[0msha256:deaa7a83a3541207c7826fa605ebc8802ac09c87257bbef1c310687ad392e8ec
+[2m2026-05-14T18:26:02.380341Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:26:20.986606Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:27:50.842960Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T18:27:50.843362Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m228 [3merr[0m[2m=[0msha256:3bb13e3855f8d8466d57eaed4d6fb07993c8cec1c3d4e9f2852afd54676a735e
+[2m2026-05-14T18:28:14.155652Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T18:28:14.155964Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m232 [3merr[0m[2m=[0msha256:0955692ed010544013cf1f6cd0d0de5c458a82059842ca9470041827d34fd31f
+[2m2026-05-14T18:28:16.837986Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:29:58.779180Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:30:00.668889Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T18:30:00.669203Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m246 [3merr[0m[2m=[0msha256:0c3e76e2fee867e122a0136a4e68b811622b594018f914a7d5e9a44e1cf7e08b
+[2m2026-05-14T18:30:00.675033Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:32:04.804823Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:32:06.688099Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T18:32:06.688407Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m261 [3merr[0m[2m=[0msha256:a260f34fb5c4fa7efd04e70b80a000321f409b9900a402df96bb58c99fc92ad3
+[2m2026-05-14T18:32:06.693264Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:36:16.992933Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:36:18.880436Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T18:36:18.880892Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mentry_index[0m[2m=[0m290 [3merr[0m[2m=[0msha256:c6b4952d9734983e1c523d285353b973a2905135c27ba3b3f4e2c185e1cccf02
+[2m2026-05-14T18:37:39.619800Z[0m [32m INFO[0m candidate_slice_done [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"novel" [3mscored[0m[2m=[0m277 [3mfailed[0m[2m=[0m23 [3melapsed_seconds[0m[2m=[0m2705.888573654
+[2m2026-05-14T18:45:36.449888Z[0m [32m INFO[0m candidate_slice_done [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"duplicate" [3mscored[0m[2m=[0m300 [3mfailed[0m[2m=[0m0 [3melapsed_seconds[0m[2m=[0m476.830039686
+[2m2026-05-14T18:46:47.884712Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:48:18.245276Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:48:38.305653Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:49:19.635161Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:50:29.101471Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:50:50.592933Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:50:52.478333Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T18:50:55.738775Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"paraphrase_original" [3mentry_index[0m[2m=[0m25 [3merr[0m[2m=[0msha256:94d92cfc3b77db57f8bbca22ac5363b3ca552b1d9746426828e9e4f01defb219
+[2m2026-05-14T18:50:55.742969Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:51:23.279093Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:51:52.476175Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:52:25.538017Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:52:27.422472Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T18:52:30.497106Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"paraphrase_original" [3mentry_index[0m[2m=[0m32 [3merr[0m[2m=[0msha256:f262faf2c89f892b3299c6360d0a3e10ad8c5ef4aff9112d11a4b7a66b2f0319
+[2m2026-05-14T18:52:30.501420Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:54:34.181146Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:56:28.271530Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T18:56:30.164464Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T18:56:33.478675Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"paraphrase_original" [3mentry_index[0m[2m=[0m51 [3merr[0m[2m=[0msha256:77ecb9e011c2c6be6f74c2cfd412b45d27f53290ba58ed541d5c890f481522d6
+[2m2026-05-14T18:58:01.702633Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:00:44.460419Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:01:05.637712Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:02:19.285977Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T19:02:22.919076Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"paraphrase_original" [3mentry_index[0m[2m=[0m80 [3merr[0m[2m=[0msha256:79b8f41b4d443680257ff36d6edd1bf2bd48e1e8cd3cf1391d76ac6e86895bed
+[2m2026-05-14T19:03:18.935253Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:03:20.823571Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T19:03:24.522054Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"paraphrase_original" [3mentry_index[0m[2m=[0m85 [3merr[0m[2m=[0msha256:e21dd7d92f96b4eaa5691a41fb0f35cd41f6698df4d7f40dd171af9dd4a83cd9
+[2m2026-05-14T19:04:58.243685Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:05:59.172098Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:06:01.065502Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T19:06:04.529465Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"paraphrase_original" [3mentry_index[0m[2m=[0m102 [3merr[0m[2m=[0msha256:a996076909a614d46ac4829f8d111a2f461386cc5ec6ee877c293be2e656e08e
+[2m2026-05-14T19:06:57.029139Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:06:58.918160Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T19:07:02.142161Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"paraphrase_original" [3mentry_index[0m[2m=[0m109 [3merr[0m[2m=[0msha256:7bf5ae3f5f185a5aba7c20032d16d2a15a4652e3d2c17c9cfab123ba90e75534
+[2m2026-05-14T19:07:09.140432Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:08:18.940614Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:08:40.936558Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:08:42.825122Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T19:08:46.114542Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"paraphrase_original" [3mentry_index[0m[2m=[0m116 [3merr[0m[2m=[0msha256:81a6201df1fbc387bf17651cdb0757e96f89c665adea73da9e80ca151a98ed94
+[2m2026-05-14T19:12:55.021549Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T19:12:58.949205Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"paraphrase_original" [3mentry_index[0m[2m=[0m140 [3merr[0m[2m=[0msha256:2de6ebbd33b1b32d3bf90057a7e527b6c34bf6d90237d36681edd48377c8c170
+[2m2026-05-14T19:13:04.754685Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:16:24.065449Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:16:45.743307Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:18:45.640180Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:19:17.747613Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:19:19.634495Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T19:19:19.635079Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"paraphrase_original" [3mentry_index[0m[2m=[0m174 [3merr[0m[2m=[0msha256:8574cfa9bf2e34b3c4dc47f58eeb009e784cc5ac37711615aafa51037ec3447c
+[2m2026-05-14T19:19:32.372940Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:19:53.834533Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:23:07.131362Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:23:56.965872Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:23:58.854664Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T19:24:02.007678Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"paraphrase_original" [3mentry_index[0m[2m=[0m199 [3merr[0m[2m=[0msha256:0c6247fd84579953f2ca989daa1d55f4a5828498866131145f6c8c87b9de9f17
+[2m2026-05-14T19:26:25.092415Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:26:55.198771Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:26:57.087872Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T19:27:00.167008Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"paraphrase_original" [3mentry_index[0m[2m=[0m215 [3merr[0m[2m=[0msha256:e0e2fdb1ef44459d91b72cfd2636ebe5153825ea122c85a5c48271080c02e6f9
+[2m2026-05-14T19:27:08.475932Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:27:30.438207Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:27:59.233355Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:28:01.122270Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T19:28:01.122792Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"paraphrase_original" [3mentry_index[0m[2m=[0m220 [3merr[0m[2m=[0msha256:dd737f93b78ce49a0ae5cd7801d636b93679afcab4da3fc05e08d25b07bee088
+[2m2026-05-14T19:28:01.127741Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:29:25.686941Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T19:29:28.999750Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"paraphrase_original" [3mentry_index[0m[2m=[0m227 [3merr[0m[2m=[0msha256:d247d24e9bcf1a8ec8279346ec1ee6280379cc8b8561da79b6e26c3e18211056
+[2m2026-05-14T19:30:43.248219Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:32:46.996221Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:33:08.675232Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:35:34.530156Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:35:36.415742Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T19:35:39.638414Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"paraphrase_original" [3mentry_index[0m[2m=[0m261 [3merr[0m[2m=[0msha256:9a1c8e365b8b1a85798bbeebfe15f12ff22f3555858e20ac54e7161c8399caa2
+[2m2026-05-14T19:35:39.643798Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:37:27.688069Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T19:37:32.375403Z[0m [33m WARN[0m score_failed [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"paraphrase_original" [3mentry_index[0m[2m=[0m271 [3merr[0m[2m=[0msha256:a0d343a04431fe978cbc07f355b4e42ed319ab8a0a9943f03c5718ec632c8102
+[2m2026-05-14T19:40:21.258623Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:42:15.286789Z[0m [32m INFO[0m candidate_slice_done [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mslice[0m[2m=[0m"paraphrase" [3mscored[0m[2m=[0m284 [3mfailed[0m[2m=[0m16 [3melapsed_seconds[0m[2m=[0m3398.836854147
+[2m2026-05-14T19:42:15.286924Z[0m [32m INFO[0m determinism_replay_start [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mentries[0m[2m=[0m16 [3mrepeat_runs[0m[2m=[0m3
+[2m2026-05-14T19:43:13.731348Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:44:30.303511Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:44:49.135523Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:44:51.027015Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T19:45:49.908643Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:45:51.797796Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T19:46:49.880397Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:47:08.685881Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:47:10.582031Z[0m [31mERROR[0m prompt step - Model failed with error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+[2m2026-05-14T19:48:09.493136Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:49:25.930314Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:49:44.765761Z[0m [33m WARN[0m perplexity scorer truncated overlong input [3merror_class[0m[2m=[0m"PerplexityScorerInputTruncated" [3mcap[0m[2m=[0m4096
+[2m2026-05-14T19:50:03.858321Z[0m [32m INFO[0m determinism_replay_done [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mstddev[0m[2m=[0m0.11258289005009281 [3mpassed[0m[2m=[0mfalse
+[2m2026-05-14T19:50:03.876276Z[0m [32m INFO[0m run_candidate_eval complete [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mauc[0m[2m=[0m0.09660649819494585 [3mpara_delta[0m[2m=[0m1.5228894106767636 [3mtail_range[0m[2m=[0m0.011243999999999997 [3mdet_stddev[0m[2m=[0m0.11258289005009281 [3mtokens_per_second[0m[2m=[0m208.67786910267276 [3mpeak_vram[0m[2m=[0m68061 [3mpassed_det_gate[0m[2m=[0mfalse
+[2m2026-05-14T19:50:03.876292Z[0m [32m INFO[0m bakeoff_candidate_done [3mcandidate_id[0m[2m=[0mgemma-4-31b [3mscore_elapsed_seconds[0m[2m=[0m7050.14508181 [3mauc[0m[2m=[0m0.09660649819494585 [3mthroughput_tps[0m[2m=[0m208.67786910267276
+[2m2026-05-14T19:50:03.881747Z[0m [32m INFO[0m bakeoff_complete [3mwinner_id[0m[2m=[0mSome("llama-3.1-8b-instruct") [3mwritten_to[0m[2m=[0m/home/ubuntu/bakeoff/report-a26.json
