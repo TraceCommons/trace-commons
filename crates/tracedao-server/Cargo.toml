@@ -14,7 +14,7 @@ async-trait = "0.1"
 axum = "0.8"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 deadpool-postgres = "0.14"
 dotenvy = "0.15"
 dirs = "6"
@@ -43,6 +43,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 google-cloud-storage = { version = "0.24", optional = true }
 google-cloud-kms = { version = "0.6", optional = true }
+hf-hub = { version = "0.4.3", default-features = false, features = ["tokio", "rustls-tls"] }
+parquet = { version = "55", default-features = false, features = ["arrow", "snap", "zstd", "lz4", "brotli"] }
+arrow-array = "55"
+arrow-schema = "55"
+rust_decimal = "1"
+futures = "0.3"
 
 [features]
 default = []
@@ -78,5 +84,10 @@ name = "tracedao-vector-replay"
 path = "src/bin/tracedao-vector-replay.rs"
 required-features = ["local-gpu-models"]
 
+[[bin]]
+name = "tracedao-pilot-bootstrap"
+path = "src/bin/tracedao-pilot-bootstrap.rs"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+wiremock = "0.6"
