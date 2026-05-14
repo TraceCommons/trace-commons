@@ -46,6 +46,17 @@ as an ops calibration utility.
    TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA=0
    ```
 
+## Known defects (2026-05-14)
+
+Before running against real contributor infrastructure, read
+[`./pilot-bootstrap-dryrun-notes.md`](./pilot-bootstrap-dryrun-notes.md).
+The loopback smoke below passes, but pointing the binary at the real
+`jedisct1/agent-traces-swival`, `badlogicgames/pi-mono`, or
+`TeichAI/DeepSeek-v4-Pro-Agent` HF datasets currently fails at shard
+discovery (parquet-only loader, JSONL-only datasets) and the translators
+encode a fictional schema. The harness is **not** pilot-ready for real
+runs until those defects are fixed.
+
 ## Local smoke validation
 
 Before pointing the harness at a real ingest deployment, run the
