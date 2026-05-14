@@ -11,6 +11,22 @@ production deployment, before Phase 1 runs.
 
 ## Phase 0 — Model bake-off (A2.1)
 
+> **A2.5 callout — the bake-off picks a model, not a discriminator.**
+> The A2.3c + A2.4 bake-offs measured aggregate-perplexity AUC < 0.5
+> across all four candidates and both corpus variants. The metric is
+> inverted on the modern aligned-LLM ecosystem — models find OASST2
+> reasoning *less* surprising than duplicate content. The bake-off's
+> `winner_id` is therefore *not* a "this model has good perplexity
+> discrimination" signal; it is "this model has the best
+> operationally-acceptable score under the committed decision rule."
+> Phase 1's perplexity floor ships at 0 for pilot launch regardless
+> of which model the bake-off picks. See
+> `docs/superpowers/reports/2026-05-14-gate-floor-recalibration-findings.md`
+> for the data and reasoning. Phase 0 is still worth running — it
+> still picks model identity, license, throughput, and the model
+> against which the tail-fraction floor will eventually be
+> calibrated.
+
 Goal: empirically pick the perplexity scorer model from a candidate set,
 rather than carrying the incumbent on tooling-maturity grounds. Run once
 per deployment, before any floor calibration — floors are scaled to the
@@ -266,7 +282,56 @@ data is not pilot data. Distribution shift is real:
 - Novelty floors are most sensitive to corpus drift because the index
   starts empty at deploy and fills up over time.
 
-Set the printed values in your env and proceed to Phase 2.
+### A2.5 pilot-launch floor recommendations
+
+A2.3c + A2.4 invalidated the assumption that aggregate perplexity
+discriminates novel reasoning from duplicate content. The
+`analyze-calibration.sh` output above will still emit a recommended
+perplexity floor, but **do not adopt it for pilot launch**. Override
+with the values below.
+
+| Floor                                 | Pilot-launch value           | Notes                                                                                                                  |
+|---------------------------------------|------------------------------|------------------------------------------------------------------------------------------------------------------------|
+| `PERPLEXITY_FLOOR_MICROS`             | `0` (disabled)               | All measured AUCs < 0.5 across both bake-off corpora and all four candidates. A positive floor would reject in the wrong direction. |
+| `TAIL_FRACTION_FLOOR_MICROS`          | `0` at launch                | Calibrate post-first-1000-pilot-traces using only the tail-fraction column from `analyze-calibration.sh` output. The aggregate-perplexity column is misleading. |
+| `NOVELTY_FLOOR_MICROS`                | `500000` (cosine novelty 0.5) | Unchanged from A2 deployment guidance. Embedder + vector-index path was not part of the A2.3c/A2.4 invalidation; primary active gate at launch. |
+
+The deployment runbook's "at least one of the three floors must be
+positive" invariant is satisfied by `NOVELTY_FLOOR_MICROS=500000`.
+
+Driver report:
+`docs/superpowers/reports/2026-05-14-gate-floor-recalibration-findings.md`.
+Spec: `docs/superpowers/specs/2026-05-14-gate-floor-recalibration-design.md`.
+
+### When the perplexity gate becomes useful
+
+Phase A.5 will revisit whether a perplexity-shaped floor can do real
+work once we have ~1000 pilot traces labeled novel/duplicate. Three
+candidate approaches, all parked until pilot data lands:
+
+- **Contrastive perplexity.** Compute the delta in logprobs between
+  two model checkpoints (one well-trained, one less so). The
+  *difference* may be more novelty-indicative than either absolute
+  perplexity. No schema change; one extra model load. See A2.5 spec
+  §3 for the open-question discussion.
+
+- **Per-token rarity.** Explicitly gather the lowest-N logprobs
+  across the trace and gate on "any genuinely surprising tokens
+  exist." This is a tighter version of `tail_fraction` and may
+  collapse into it once tail-fraction is pilot-calibrated. Cheapest
+  to implement; smallest design surface.
+
+- **Learned discriminator.** Train a small classifier on labeled
+  novel/duplicate exemplars from the pilot. Requires labeled pilot
+  data we don't have yet; first ~1000 traces are the prerequisite.
+  Highest ceiling, highest design cost.
+
+Choosing among these is Phase A.5 work. The findings report
+captures the rationale for parking it; pick after pilot data
+arrives, not before.
+
+Set the novelty floor printed above (`NOVELTY_FLOOR_MICROS=500000`)
+and the two zero overrides in your env, and proceed to Phase 2.
 
 ## Phase 2 — Closed alpha (zero-credit gating)
 
