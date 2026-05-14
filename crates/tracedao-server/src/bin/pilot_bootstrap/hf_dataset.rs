@@ -67,7 +67,11 @@ pub async fn list_parquet_shards(
     use hf_hub::api::tokio::ApiBuilder;
     use hf_hub::{Repo, RepoType};
 
-    let mut builder = ApiBuilder::new();
+    // `from_env()` honors `HF_HOME` and `HF_ENDPOINT`. The latter lets the
+    // operator smoke harness redirect dataset discovery at a loopback mock
+    // without rebuilding; production runs leave both unset and pick up the
+    // standard huggingface.co endpoint plus `~/.cache/huggingface`.
+    let mut builder = ApiBuilder::from_env();
     if let Some(dir) = cache_dir {
         builder = builder.with_cache_dir(dir.to_path_buf());
     }
