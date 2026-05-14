@@ -25,7 +25,7 @@ the link.
 | Setting gate floors or calibrating thresholds | [`./calibration.md`](./calibration.md) |
 | Validating a deployment before promoting | [`./smoke-test.md`](./smoke-test.md) |
 | Running the model bake-off | [`./calibration.md`](./calibration.md) (Phase 0) + [`./agent-traces-bakeoff-run.md`](./agent-traces-bakeoff-run.md) |
-| Running the pilot bootstrap harness | [`./pilot-bootstrap.md`](./pilot-bootstrap.md) |
+| Running the pilot bootstrap harness | [`./pilot-bootstrap.md`](./pilot-bootstrap.md) (see also [`./pilot-bootstrap-dryrun-notes.md`](./pilot-bootstrap-dryrun-notes.md) — known real-data defects) |
 | Rotating cloud-KMS keys | [`./key-rotation.md`](./key-rotation.md) |
 | Swapping the gate model or embedder | [`./model-swap.md`](./model-swap.md) |
 | Restoring from backup | [`./backup-restore.md`](./backup-restore.md) |
@@ -68,6 +68,9 @@ Every runbook in this directory, with a one-line description.
   meaning and alarm guidance for `/v1/admin/operational-summary`.
 - [`./pilot-bootstrap.md`](./pilot-bootstrap.md) — operator runbook for the
   HF-trace replay harness used to seed pilot calibration data.
+- [`./pilot-bootstrap-dryrun-notes.md`](./pilot-bootstrap-dryrun-notes.md) —
+  findings from the real-HF-dataset dry-run; documents two pre-pilot defects
+  in the harness's shard discovery and translators.
 - [`./smoke-test.md`](./smoke-test.md) — post-deploy validation checklist
   that exercises every required drill plus a fixture gate evaluation.
 - [`./troubleshooting.md`](./troubleshooting.md) — common failure modes by
