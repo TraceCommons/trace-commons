@@ -152,9 +152,7 @@ fn rejects_corpus_with_mismatched_slice_sha256() {
         let last = b.last_mut().expect("non-empty body");
         *last = last.wrapping_add(1);
     });
-    let err = bakeoff_corpus::load_corpus(&tarball)
-        .err()
-        .expect("expected sha256 mismatch error");
+    let err = bakeoff_corpus::load_corpus(&tarball).expect_err("expected sha256 mismatch error");
     let msg = format!("{err:#}").to_lowercase();
     assert!(
         msg.contains("sha256") || msg.contains("mismatch"),

@@ -60,7 +60,7 @@ fn swival_translator_handles_empty_session() {
         json!({"type":"model_change","id":"a","provider":"x"}),
         json!({"type":"thinking_level_change","id":"b"}),
     ]);
-    let err = t.translate("empty.jsonl", &bytes).err().expect("err");
+    let err = t.translate("empty.jsonl", &bytes).expect_err("err");
     assert!(
         err.to_string().contains("no textual content"),
         "unexpected error: {err}"
