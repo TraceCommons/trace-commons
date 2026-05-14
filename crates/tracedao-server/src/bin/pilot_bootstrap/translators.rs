@@ -3,10 +3,18 @@
 //! `PiMonoTranslator` and `DeepSeekAgentTranslator`; Slice 5 fills the stubs in
 //! and wires auto-detection from the `--source` argument.
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::hf_dataset::Row;
+
+/// Per-translator body cap so envelopes stay well under the gate-service
+/// request body limit. Tuned to mirror the swival source_code cap times a
+/// small constant; long messages get truncated rather than dropped.
+pub const MULTI_TURN_BODY_CAP: usize = 8000;
 
 /// Maximum number of `source_code` characters folded into the swival trace
 /// body. The spec calls out a 2000-char cap so the resulting envelope stays
@@ -119,9 +127,132 @@ impl Translator for PiMonoTranslator {
         "pi-mono"
     }
 
-    fn translate(&self, _row: &Row) -> Result<SubmissionDraft> {
-        anyhow::bail!("pi-mono translator is not implemented yet (filled in by Slice 5)")
+    fn translate(&self, row: &Row) -> Result<SubmissionDraft> {
+        let messages = row
+            .get_value("messages")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("pi-mono row missing `messages` array"))?;
+        if messages.is_empty() {
+            anyhow::bail!("pi-mono row has empty `messages` array");
+        }
+
+        let session_id = row.get_str("session_id").unwrap_or_default();
+        let domain = row
+            .get_str("task_type")
+            .or_else(|| row.get_str("domain"))
+            .unwrap_or("coding-session");
+
+        let body = longest_session_text(messages)?;
+        let body = truncate_chars(&body, MULTI_TURN_BODY_CAP);
+        let id = submission_id_from_body(&body);
+        Ok(SubmissionDraft {
+            submission_id: id,
+            trace_body: body,
+            source_dataset: "badlogicgames/pi-mono".into(),
+            source_row_id: session_id.to_string(),
+            source_domain_tag: format!("coding-session/{domain}"),
+        })
     }
+}
+
+/// Walk the pi-mono message tree (each message has an `id` and optional
+/// `parentId`), find the longest top-level chain, and concatenate the
+/// `content` (or `text`) field of each message in chain order.
+fn longest_session_text(messages: &[Value]) -> Result<String> {
+    let mut by_id: HashMap<String, &Value> = HashMap::new();
+    let mut children: HashMap<String, Vec<String>> = HashMap::new();
+    let mut roots: Vec<String> = Vec::new();
+
+    for msg in messages {
+        let id = msg
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("msg-{}", by_id.len()));
+        by_id.insert(id.clone(), msg);
+        let parent = msg
+            .get("parentId")
+            .or_else(|| msg.get("parent_id"))
+            .and_then(Value::as_str);
+        match parent {
+            Some(p) if !p.is_empty() => {
+                children.entry(p.to_string()).or_default().push(id);
+            }
+            _ => roots.push(id),
+        }
+    }
+    if roots.is_empty() {
+        // No parent linkage — fall back to linear concatenation.
+        return Ok(messages
+            .iter()
+            .filter_map(message_text)
+            .collect::<Vec<_>>()
+            .join("\n\n"));
+    }
+
+    let mut best: Vec<String> = Vec::new();
+    for root in &roots {
+        let chain = deepest_chain_from(root, &children);
+        if chain.len() > best.len() {
+            best = chain;
+        }
+    }
+    let body = best
+        .iter()
+        .filter_map(|id| by_id.get(id).copied().and_then(message_text))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Ok(body)
+}
+
+fn deepest_chain_from(start: &str, children: &HashMap<String, Vec<String>>) -> Vec<String> {
+    let mut best = vec![start.to_string()];
+    if let Some(kids) = children.get(start) {
+        for kid in kids {
+            let mut sub = deepest_chain_from(kid, children);
+            sub.insert(0, start.to_string());
+            // Strip duplicated `start` from the recursion result.
+            let extended: Vec<String> = std::iter::once(start.to_string())
+                .chain(deepest_chain_from(kid, children).into_iter())
+                .collect();
+            let _ = sub;
+            if extended.len() > best.len() {
+                best = extended;
+            }
+        }
+    }
+    best
+}
+
+fn message_text(msg: &Value) -> Option<String> {
+    if let Some(content) = msg.get("content").and_then(Value::as_str) {
+        return Some(content.to_string());
+    }
+    if let Some(text) = msg.get("text").and_then(Value::as_str) {
+        return Some(text.to_string());
+    }
+    if let Some(arr) = msg.get("content").and_then(Value::as_array) {
+        let joined: String = arr
+            .iter()
+            .filter_map(|c| c.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !joined.is_empty() {
+            return Some(joined);
+        }
+    }
+    None
+}
+
+fn truncate_chars(s: &str, cap: usize) -> String {
+    let mut out = String::with_capacity(s.len().min(cap));
+    for ch in s.chars() {
+        if out.len() + ch.len_utf8() > cap {
+            break;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// `TeichAI/DeepSeek-v4-Pro-Agent` exposes message-stream rows with
@@ -146,8 +277,54 @@ impl Translator for DeepSeekAgentTranslator {
         "deepseek-agent"
     }
 
-    fn translate(&self, _row: &Row) -> Result<SubmissionDraft> {
-        anyhow::bail!("deepseek-agent translator is not implemented yet (filled in by Slice 5)")
+    fn translate(&self, row: &Row) -> Result<SubmissionDraft> {
+        let messages = row
+            .get_value("messages")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("deepseek row missing `messages` array"))?;
+        if messages.is_empty() {
+            anyhow::bail!("deepseek row has empty `messages` array");
+        }
+
+        let mut chunks: Vec<String> = Vec::new();
+        for msg in messages {
+            let role = msg.get("role").and_then(Value::as_str).unwrap_or("");
+            if role != "assistant" {
+                continue;
+            }
+            if let Some(text) = msg.get("content").and_then(Value::as_str) {
+                chunks.push(text.to_string());
+                continue;
+            }
+            if let Some(arr) = msg.get("content").and_then(Value::as_array) {
+                for part in arr {
+                    if let Some(text) = part.get("text").and_then(Value::as_str) {
+                        chunks.push(text.to_string());
+                    }
+                }
+            }
+        }
+        if chunks.is_empty() {
+            anyhow::bail!("deepseek row produced no assistant text");
+        }
+        let body = truncate_chars(&chunks.join("\n\n"), MULTI_TURN_BODY_CAP);
+        let id = submission_id_from_body(&body);
+        let row_id = row
+            .get_str("session_id")
+            .or_else(|| row.get_str("id"))
+            .unwrap_or_default()
+            .to_string();
+        let domain = row
+            .get_str("domain")
+            .or_else(|| row.get_str("task_type"))
+            .unwrap_or("agent-reasoning");
+        Ok(SubmissionDraft {
+            submission_id: id,
+            trace_body: body,
+            source_dataset: "TeichAI/DeepSeek-v4-Pro-Agent".into(),
+            source_row_id: row_id,
+            source_domain_tag: format!("agent-reasoning/{domain}"),
+        })
     }
 }
 
