@@ -33,6 +33,9 @@ verification.
 - `docs/trace-commons-roadmap.md` — the production-gap queue and phase plan.
 - `docs/superpowers/specs/` — per-slice design specs.
 - `docs/superpowers/plans/` — per-slice implementation plans.
+- `docs/operator/README.md` — operator runbook index. Current runbooks:
+  A2.6 result handler, pilot-bootstrap first-100-traces, HF cache hygiene,
+  GPU cost ledger.
 
 When in doubt about what to build next, read the **"Production Gap Queue"**
 section of the roadmap.
@@ -41,17 +44,49 @@ section of the roadmap.
 
 - `tracedao-ingest` — hosted ingest / review / admin / worker API.
 - `tracedao-upload-claim-issuer` — EdDSA/Ed25519 upload-claim issuer.
+- `tracedao-gate-calibrate` — calibration tooling. Subcommands include
+  `tail-floor --sidecar <path> --db-url <url> --percentile <n>` for tail-floor
+  calibration, and the scorer flags `--scorer perplexity|token-rarity|both`
+  with `--token-rarity-k <N>` for per-token rarity. The real-scorer path
+  (`LocalPerplexityScorer`) is deferred at `BakeoffRealRarityNotImplemented`
+  pending A.5a.
 
 ## Local development
 
 ```bash
-cargo check -p tracedao-server --bins
+RUSTFLAGS="-D warnings" cargo check -p tracedao-server --bins
+RUSTFLAGS="-D warnings" cargo test -p tracedao-server --no-run
+cargo clippy -p tracedao-server --all-targets -- \
+  -A clippy::type_complexity -A clippy::collapsible_if \
+  -A clippy::manual_option_as_slice -A clippy::useless_vec \
+  -A clippy::redundant_pattern_matching
 cargo test -p tracedao-server --test trace_corpus_storage_contract
 cargo test -p tracedao-server --test trace_corpus_pg_store   # requires PostgreSQL
 ```
 
+CI applies `RUSTFLAGS=-D warnings` to check + test, so plain `cargo check`
+will not catch what CI catches. Always use the `RUSTFLAGS` form locally
+before claiming green. Clippy is CI-enforced — run it locally too.
+
 The protocol crate is `crates/tracedao-protocol`; the server crate is
 `crates/tracedao-server`. Migrations live in `migrations/`.
+
+## CI
+
+Four jobs gate every PR:
+
+- `cargo check` (with `RUSTFLAGS=-D warnings`).
+- `cargo test --no-run` (with `RUSTFLAGS=-D warnings`).
+- `cargo clippy` with the allow-list above (`-A clippy::type_complexity
+  -A clippy::collapsible_if -A clippy::manual_option_as_slice
+  -A clippy::useless_vec -A clippy::redundant_pattern_matching`). Do not
+  widen the allow-list without explicit approval.
+- `scripts/operator/pilot-bootstrap-smoke.sh` — pilot-bootstrap smoke job
+  exercising the JSONL loader path on every PR. Do not break it.
+
+GitHub Actions runners are on Node 24; pinned actions are
+`actions/checkout@v6` and `actions/cache@v5`. Future CI edits should hold
+those versions unless intentionally upgrading.
 
 ## Conventions specific to this repo
 
@@ -81,6 +116,26 @@ The protocol crate is `crates/tracedao-protocol`; the server crate is
   each have their own bearer-token gate. Do not mix them.
 - Drills (`/v1/admin/*-drill`) produce hash-only evidence and feed rollout-smoke
   required checks. When you add a drill, wire it into the smoke evidence path.
+- `crates/tracedao-server/src/bin/tracedao-ingest.rs` is ~61k LOC of
+  production code. Its ~60k LOC test module has been extracted to a sibling
+  file via `#[cfg(test)] #[path = "tracedao_ingest_internal/tests.rs"] mod
+  tests;`. Reuse this pattern if other binaries need the same split; do not
+  inline the tests back.
+- Pilot-bootstrap loads JSONL session files. Parquet + arrow deps were
+  removed; do not reintroduce them. See
+  `crates/tracedao-server/src/bin/pilot_bootstrap/hf_dataset.rs`.
+
+## Known gotchas
+
+- Plain `cargo check` does not apply `-D warnings`; CI does. Always verify
+  with `RUSTFLAGS='-D warnings' cargo check -p tracedao-server --bins` and
+  `RUSTFLAGS='-D warnings' cargo test -p tracedao-server --no-run` before
+  claiming green. Dead-code and warning regressions slip through plain
+  `cargo check`.
+- Pilot-bootstrap loader streams JSONL session files; parquet support was
+  removed. See `crates/tracedao-server/src/bin/pilot_bootstrap/hf_dataset.rs`.
+- `tracedao-ingest.rs` test module is extracted to
+  `tracedao_ingest_internal/tests.rs` via `#[path = ...]`.
 
 ## Memory
 
