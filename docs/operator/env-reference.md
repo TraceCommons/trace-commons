@@ -351,8 +351,8 @@ These aren't env vars but they gate which envs even matter at runtime.
 |---|---|
 | `gcs-client` | Compiles `google-cloud-storage`. Required for `TRACE_COMMONS_REMOTE_OBJECT_STORE_PROVIDER=gcs`. |
 | `gcp-kms` | Compiles `google-cloud-kms`. Required for `TRACE_COMMONS_KEK_PROVIDER=gcp_kms`. |
-| `local-gpu-models` | Compiles the candle perplexity scorer + fastembed embedder + usearch vector index. Required for `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu`. |
-| `local-gpu-models-cuda` | Implies `local-gpu-models`, adds candle CUDA backend. Required when `TRACE_COMMONS_PERPLEXITY_DEVICE=cuda*`. |
+| `local-gpu-models` | Compiles the mistralrs perplexity scorer + fastembed embedder + usearch vector index. Required for `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu`. A2.3 migrated the scorer off candle-direct; architecture is auto-detected from `config.json`. |
+| `local-gpu-models-cuda` | Implies `local-gpu-models`, adds the mistralrs CUDA backend. Required when `TRACE_COMMONS_PERPLEXITY_DEVICE=cuda*`. |
 
 Production build command:
 

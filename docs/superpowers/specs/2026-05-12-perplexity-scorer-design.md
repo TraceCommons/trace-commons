@@ -19,6 +19,32 @@ implements its `PerplexityScorer` slot for Phase A)
 > kept as a future alternative if its build-health recovers. Sections
 > below are updated to reflect this.
 
+## Update (2026-05-14)
+
+This spec is preserved as historical record for the A2 slice; subsequent
+retrofits have superseded several of its decisions. Read alongside the
+successor specs:
+
+- **Inference backend.** A2.3
+  (`2026-05-13-mistralrs-migration-design.md`) reversed the 2026-05-13
+  library flip above and migrated the perplexity scorer from a
+  candle-direct Llama loader to a mistralrs-backed loader. The
+  architecture is now auto-detected from each model's `config.json`;
+  the candle-direct path and its per-arch dispatch table (A2.2,
+  `2026-05-13-bakeoff-arch-dispatch-design.md`) are obsolete. The
+  QK-Norm silent-fallback bug A2.2 fixed for candle Qwen3 is moot
+  under A2.3 because mistralrs owns the implementation.
+- **Default model.** A2.5 (`2026-05-14-gate-floor-recalibration-design.md`)
+  recommends **Qwen3-8B-Base** as the operator default; the
+  Llama-3.1-8B-Instruct recommendation in the table below is the
+  pre-bake-off incumbent and is retained as a permitted choice but no
+  longer the default.
+- **Gate floors.** A2.5 ships the perplexity floor at `0` (disabled)
+  for pilot launch because A2.3c + A2.4 measured aggregate-perplexity
+  AUC < 0.5 across all candidates. The "set perplexity floor based on
+  Phase 1 calibration" guidance below is deferred until Phase A.5
+  lands a replacement metric.
+
 ## Goal
 
 Replace `MockPerplexityScorer` in `trace-commons-gate-enclave` with a real

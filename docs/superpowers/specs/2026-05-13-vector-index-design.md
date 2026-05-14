@@ -35,6 +35,19 @@ explicitly Phase B work; v1 ships with regular at-rest disk encryption
 | `ef_search` | **50** |
 | Cargo feature | **`local-gpu-models`** (shared with A2 / A3 — single feature) |
 
+## Update (2026-05-14)
+
+This spec remains current. The A2.3 mistralrs migration
+(`2026-05-13-mistralrs-migration-design.md`) and the A2.2 candle
+arch-dispatch work (`2026-05-13-bakeoff-arch-dispatch-design.md`) only
+touched the perplexity-scorer path; usearch + HNSW are unchanged. The
+A2.5 gate-floor recalibration
+(`2026-05-14-gate-floor-recalibration-design.md`) ships the novelty
+floor at `500000` (cosine novelty 0.5) as the **primary active gate**
+at pilot launch — the perplexity and tail-fraction floors ship at 0.
+This makes the vector-index path load-bearing for credit decisions
+from day one rather than a secondary signal alongside perplexity.
+
 **Why these:**
 
 - `usearch` is the lightest HNSW library in the Rust ecosystem.

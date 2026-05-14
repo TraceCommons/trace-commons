@@ -28,6 +28,17 @@ host.
 | Output dim | **1024 (full BGE-large)** with truncation to 256 for nearest-neighbor coarse search if matryoshka is enabled |
 | Numeric format | f32 cosine similarity over unit-normalized vectors |
 | Cargo feature | **`local-gpu-models`** (shared with A2 — single feature for the whole local-inference path) |
+
+## Update (2026-05-14)
+
+This spec remains current. The A2.3 mistralrs migration
+(`2026-05-13-mistralrs-migration-design.md`) and the A2.5 gate-floor
+recalibration (`2026-05-14-gate-floor-recalibration-design.md`) only
+touched the perplexity-scorer half of the local-inference path; the
+fastembed + BGE-large-en-v1.5 embedder is unchanged. Because A2.5
+ships the perplexity floor disabled at pilot launch, the embedder
+feeds the **primary active gate** (novelty), making this path
+load-bearing rather than a secondary signal.
 | Hardware | Single NVIDIA H100 80GB (shared with A2) |
 
 **Why these:**
