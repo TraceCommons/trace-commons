@@ -60,16 +60,23 @@ service on regular GPU hardware with **cloud KMS as the KEK**, accepting
 that the operator and cloud provider can read user content via KMS
 `Decrypt`. Phase B (below) does the trust upgrade once dstack is ready.
 
-**Phase A status (2026-05-13): code-complete + smoke-validated on real GPU
-hardware.** All six work items below are merged on `main`; the binary
-boots green on a Lambda Cloud A10 with KEK + perplexity scorer + embedder
-+ vector index loaded, and `audit-chain-drill` returns `ready: true`. The
-empirical model bake-off retrofit (A2.1) is also merged, so the production
-model choice is empirically grounded rather than incumbent-by-default. The
-real bake-off run, env-var default flip, and floor recalibration against
-the winner remain operator activities (per the A2.1 spec rollout A2.1b-e).
-Pilot deployment on H100 with cloud-KMS-rooted DEK wrapping is the next
-gate.
+**Phase A status (2026-05-14): code-complete + bake-off-validated.** All
+A1–A6 work items below plus four bake-off retrofits (A2.1, A2.2, A2.3,
+A2.5) and two real bake-off runs (A2.3c + A2.4) are merged on `main`.
+The binary boots green on Lambda Cloud GPU hardware
+(A10 / A100 / H100); `audit-chain-drill` returns `ready: true`. The
+empirical model bake-off ran four candidates (Llama-3.1-8B-Instruct,
+Qwen3-8B-Base, Qwen 3.6 27B Dense, Gemma 4 31B Base) against two
+distinct duplicate-slice corpora (boilerplate + Wikipedia). The
+headline finding is uncomfortable: **perplexity-based novelty AUC is
+inverted (< 0.5) across all candidate × corpus combinations** —
+modern instruct-aligned LLMs find OASST2-style reasoning *less*
+surprising than common duplicate content. A2.5 reconfigures the gate
+floors to ship the perplexity floor at 0 (disabled) for pilot launch,
+keep tail-fraction at 0 pending post-first-1000-trace calibration,
+and rely on the novelty-embedder floor (500000) as the active primary
+gate. The deeper perplexity-replacement metric design is parked under
+**Phase A.5** below pending real pilot data.
 
 - A1: `CloudKmsKeyWrapper` (GCP KMS) — done
 - A2: real `PerplexityScorer` (candle + Llama-3.1-8B-Instruct as
@@ -78,18 +85,33 @@ gate.
   bake-off`, corpus builder, decision rule, operator runbook Phase 0) —
   done; see `docs/operator/calibration.md` § Phase 0
 - A2.2: candle arch dispatch + Gemma 4 support + Qwen3 QK-Norm fix —
-  pending re-run; arch-dispatch code merged, awaiting bake-off rerun
-  per spec rollout A2.2b–f
-- A2.3: mistralrs backend migration + Qwen 3.6 support — code merged
-  (mistralrs git-pinned to `2d4ba4f`); per-arch candle dispatch
-  replaced by mistralrs auto-detection; pending the 4-way bake-off
-  re-run on Lambda H100 (A2.3c) and the env-var default flip (A2.3e)
+  done. Superseded for the production runtime path by A2.3
+  (mistralrs replaces the hand-rolled candle `ScorerBackend` enum);
+  retained as a documented validation pass that ground-truthed
+  candle's per-arch surface and fixed the Qwen3 silent-QK-Norm bug
+  before A2.3 took over.
+- A2.3: mistralrs backend migration + Qwen 3.6 support — done.
+  Code merged (mistralrs git-pinned to `2d4ba4f`); per-arch candle
+  dispatch replaced by mistralrs auto-detection.
+- A2.3c: 4-way bake-off real run (Llama-3.1-8B + Qwen3-8B + Qwen 3.6
+  27B Dense + Gemma 4 31B), boilerplate-duplicate corpus — done;
+  report at `docs/superpowers/reports/2026-05-13-model-bakeoff-result-a23c.{json,md}`.
+  All four AUCs measured below 0.5; winner-by-rule was Qwen3-8B-Base
+  (Apache-2.0 license tiebreaker inside a marginal-AUC band).
+- A2.4: corpus iteration with Wikipedia-introductions duplicate slice
+  (same 4 candidates, same code) — done; report at
+  `docs/superpowers/reports/2026-05-14-model-bakeoff-result-a24.{json,md}`.
+  AUCs moved but none crossed 0.5. Llama-Instruct +0.120, Gemma 4
+  31B +0.130; Qwen base models slightly worse. A2.4's winner-by-rule
+  flipped to Llama-3.1-8B-Instruct (highest in-budget AUC); the
+  flip is informational since A2.5 disables the perplexity floor.
 - A2.5: gate-floor recalibration after bake-off findings — done; see
   `docs/superpowers/reports/2026-05-14-gate-floor-recalibration-findings.md`
   and `docs/operator/calibration.md` Phase 1. Perplexity floor ships
   at 0 (disabled) for pilot launch; tail-fraction floor at 0
   pending post-first-1000-trace calibration; novelty floor at 500000
-  is the active primary gate.
+  is the active primary gate. Model pick stays Qwen3-8B-Base for
+  cost (smallest VRAM footprint; choice no longer load-bearing).
 - A3: real `Embedder` (fastembed + BGE-large-en-v1.5) — done
 - A4: real `VectorIndex` (usearch with on-disk persistence) — done
 - A5: `novelty_utility` credit-event emission — done
