@@ -312,6 +312,91 @@ async fn empty_scorer_selection_is_rejected() {
 }
 
 #[tokio::test]
+async fn per_trace_scores_match_corpus_lengths_and_round_trip_auc() {
+    // A2.7 perplexity-floor calibration needs the per-trace scores. This
+    // test pins three properties of the new `per_trace_scores` block:
+    //   1. Each slice vector has exactly one entry per corpus row (so the
+    //      consumer can index into the corpus alongside the scores).
+    //   2. With a clean mock scorer, every entry is `Some(_)` — no `None`
+    //      slots — and the values are finite.
+    //   3. The AUC recomputed from the per-trace novel + duplicate vectors
+    //      equals the summary `discrimination_auc` on the row, byte-for-byte
+    //      (same source data, same metric function, no rounding in between).
+    use bakeoff_metrics::discrimination_auc;
+    let scorer = MockPerplexityScorer::new();
+    let candidate = synth_candidate();
+    let corpus = synth_corpus();
+
+    let result = run_candidate_eval(
+        EvalScorers::perplexity_only(&scorer),
+        &candidate,
+        &corpus,
+        3,
+        DeviceKind::NonCuda,
+    )
+    .await
+    .expect("mock eval must succeed");
+
+    let pts = result
+        .per_trace_scores
+        .as_ref()
+        .expect("perplexity run must populate per_trace_scores");
+    assert_eq!(pts.novel.len(), corpus.novel.len());
+    assert_eq!(pts.duplicate.len(), corpus.duplicate.len());
+    assert_eq!(pts.paraphrase_original.len(), corpus.paraphrase.len());
+    assert_eq!(
+        pts.paraphrase_back_translation.len(),
+        corpus.paraphrase.len()
+    );
+
+    // Clean mock: every entry scored, no failures.
+    let novel_vals: Vec<f64> = pts
+        .novel
+        .iter()
+        .map(|v| v.expect("clean mock should not fail"))
+        .collect();
+    let dup_vals: Vec<f64> = pts
+        .duplicate
+        .iter()
+        .map(|v| v.expect("clean mock should not fail"))
+        .collect();
+    for v in novel_vals.iter().chain(dup_vals.iter()) {
+        assert!(v.is_finite());
+    }
+
+    // Round-trip: AUC recomputed from the per-trace vectors equals the
+    // collapsed `discrimination_auc` field that fed the decision rule.
+    let recomputed = discrimination_auc(&novel_vals, &dup_vals);
+    assert!(
+        (recomputed - result.discrimination_auc).abs() < 1e-12,
+        "per-trace AUC ({recomputed}) must match summary ({}) bit-for-bit",
+        result.discrimination_auc,
+    );
+}
+
+#[tokio::test]
+async fn per_trace_scores_absent_in_rarity_only_mode() {
+    // Rarity-only runs (`--scorer token-rarity`) have no perplexity column
+    // to record; the new field must stay absent so the JSON shape matches
+    // pre-existing rarity-only consumer expectations.
+    let rarity = MockTokenRarityScorer::new();
+    let candidate = synth_candidate();
+    let corpus = synth_corpus();
+    let scorers = EvalScorers {
+        perplexity: None,
+        token_rarity: Some(&rarity),
+        token_rarity_k: 10,
+    };
+    let result = run_candidate_eval(scorers, &candidate, &corpus, 3, DeviceKind::NonCuda)
+        .await
+        .expect("rarity-only eval must succeed");
+    assert!(
+        result.per_trace_scores.is_none(),
+        "rarity-only mode must not populate per_trace_scores"
+    );
+}
+
+#[tokio::test]
 async fn token_rarity_with_zero_k_is_rejected() {
     // K == 0 would produce a meaningless rarity column. Reject early with
     // a labeled error so the operator can fix the CLI invocation.
