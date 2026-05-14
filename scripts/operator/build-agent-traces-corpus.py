@@ -9,21 +9,35 @@ bakeoff_corpus.rs`). The novel slice is swapped from OASST2 chat
 duplicate slice and the paraphrase slice are reused verbatim from an
 existing A2.4-era `corpus-wiki.tar.zst`.
 
-Default source dataset is `jedisct1/agent-traces-swival` — 33.7k MIT-
-licensed OSS security-audit traces produced by the Swival agent. Each
-row is mapped to a single prose body that joins the trace's
-human-readable narrative fields:
+Default source dataset is `jedisct1/agent-traces-swival` — MIT-
+licensed agent traces produced by the Swival harness.
 
-    novel_text = "\\n\\n".join([
-        row["title"],
-        row["severity"] + " " + row["finding_type"],
-        "\\n".join(row["preconditions"]),
-        "\\n".join(row["proof"]),
-        row["fix_outline"],
-        (row["source_code"] or "")[:1000],
-    ]).strip()
+Swival schema (authoritative):
 
-The `--format` flag selects the row-to-text mapping. v1 ships
+    The dataset is a collection of `*.jsonl` files at the repo root.
+    Each file is one session (~3,330 sessions total). Each line in a
+    file is one event in that session. Event rows do NOT share a
+    common schema across files — columns drift per session, so
+    `datasets.load_dataset(..., streaming=True)` raises a CastError
+    when it tries to enforce a single Arrow schema across the file
+    set. Avoid that path; download the raw `.jsonl` files and parse
+    them by hand.
+
+    Event row fields observed in practice include `uuid`,
+    `parentUuid`, `sessionId`, `harness`, `type`, `content`, and a
+    nested `message` object whose `content` is either a string or a
+    list of `{type, text, ...}` chunks. The narrative-field schema
+    used by an earlier draft (`title`, `severity`, `proof`,
+    `fix_outline`, etc.) does NOT exist on disk and was never
+    correct.
+
+This script flattens each session into one trace by concatenating
+every non-empty text snippet found on `message.content` (string or
+chunk list) and on the top-level `content` field, joined by double
+newlines. The result is a multi-paragraph body that resembles the
+kind of trace Trace Commons is intended to gate.
+
+The `--format` flag selects the session-to-text mapping. v1 ships
 "swival" only; additional dataset formats can be added without
 changing the tarball contract.
 
@@ -53,13 +67,12 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import glob
 import hashlib
 import io
 import json
 import os
 import random
-import re
-import shutil
 import sys
 import tarfile
 import tempfile
@@ -76,7 +89,6 @@ DEFAULT_COUNT = 300
 DEFAULT_SEED = 42
 MIN_WORDS = 200
 MAX_WORDS = 2000
-SOURCE_CODE_CAP = 1000
 
 # ---------------------------------------------------------------------------
 # Errors / logging helpers
@@ -98,60 +110,67 @@ def step(phase: str, **kv: object) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Row -> text mappings
+# Session -> text mappings
 # ---------------------------------------------------------------------------
 
 
-def _coerce_list(value: object) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return [str(v) for v in value if v is not None]
-    if isinstance(value, str):
-        return [value]
-    return [str(value)]
+def _extract_event_text(event: dict) -> list[str]:
+    """Pull every non-empty text snippet out of one swival event row.
 
-
-def swival_row_to_text(row: dict) -> str:
-    """Join the human-readable narrative fields of a swival row.
-
-    Swival rows describe a single security-audit finding: a title, a
-    severity + finding_type, a list of preconditions, a list of proof
-    steps, a fix outline, and the source code under audit. Joining
-    these as prose gives a multi-paragraph body that resembles the
-    kind of trace Trace Commons is intended to gate.
+    Looks at `message.content` (string OR list-of-chunks with `text`
+    fields) and the top-level `content` field. Returns trimmed
+    snippets in observed order; the caller joins them with blank
+    lines so they read as one trace.
     """
     parts: list[str] = []
-    title = str(row.get("title") or "").strip()
-    if title:
-        parts.append(title)
 
-    severity = str(row.get("severity") or "").strip()
-    finding_type = str(row.get("finding_type") or "").strip()
-    if severity or finding_type:
-        parts.append(f"{severity} {finding_type}".strip())
+    msg = event.get("message")
+    if isinstance(msg, dict):
+        c = msg.get("content", "")
+        if isinstance(c, str):
+            s = c.strip()
+            if s:
+                parts.append(s)
+        elif isinstance(c, list):
+            for chunk in c:
+                if isinstance(chunk, dict):
+                    t = chunk.get("text")
+                    if isinstance(t, str):
+                        s = t.strip()
+                        if s:
+                            parts.append(s)
 
-    preconditions = _coerce_list(row.get("preconditions"))
-    if preconditions:
-        parts.append("\n".join(p.strip() for p in preconditions if p.strip()))
+    c2 = event.get("content")
+    if isinstance(c2, str):
+        s = c2.strip()
+        if s:
+            parts.append(s)
 
-    proof = _coerce_list(row.get("proof"))
-    if proof:
-        parts.append("\n".join(p.strip() for p in proof if p.strip()))
+    return parts
 
-    fix_outline = str(row.get("fix_outline") or "").strip()
-    if fix_outline:
-        parts.append(fix_outline)
 
-    source_code = str(row.get("source_code") or "")
-    if source_code:
-        parts.append(source_code[:SOURCE_CODE_CAP])
+def swival_session_to_text(session_lines: Iterable[str]) -> str:
+    """Concat every event's content fields into one prose trace.
 
-    return "\n\n".join(p for p in parts if p).strip()
+    `session_lines` is the raw line iterator of a swival session's
+    `.jsonl` file. Lines that fail to parse as JSON are skipped
+    silently (per the hash-only logging convention; malformed event
+    rows do happen in the wild and are not operator-actionable).
+    """
+    parts: list[str] = []
+    for line in session_lines:
+        try:
+            event = json.loads(line)
+        except Exception:  # noqa: BLE001 — malformed line, skip
+            continue
+        if not isinstance(event, dict):
+            continue
+        parts.extend(_extract_event_text(event))
+    return "\n\n".join(parts).strip()
 
 
 FORMATS = {
-    "swival": swival_row_to_text,
+    "swival": swival_session_to_text,
 }
 
 
@@ -160,26 +179,35 @@ FORMATS = {
 # ---------------------------------------------------------------------------
 
 
-def iter_dataset_rows(source: str) -> Iterator[dict]:
-    """Yield rows from a HuggingFace dataset id, streaming.
+def iter_session_files(source: str) -> Iterator[Path]:
+    """Download the dataset's `*.jsonl` files and yield their paths.
 
-    Uses `datasets.load_dataset(..., streaming=True)` to avoid pulling
-    the full dataset into RAM. The default split is `train`.
+    Uses `huggingface_hub.snapshot_download` to grab every `.jsonl`
+    file at the dataset root. Each file is one session. Yields in
+    sorted filename order so sampling at a fixed seed is
+    reproducible.
     """
     try:
-        from datasets import load_dataset
+        from huggingface_hub import snapshot_download
     except ImportError as exc:
-        raise bail(f"datasets_package_missing detail={type(exc).__name__}")
+        raise bail(f"huggingface_hub_package_missing detail={type(exc).__name__}")
 
     step("dataset_open", source_label=_short_label(source))
     try:
-        ds = load_dataset(source, split="train", streaming=True)
+        local_dir = snapshot_download(
+            repo_id=source,
+            repo_type="dataset",
+            allow_patterns=["*.jsonl"],
+        )
     except Exception as exc:  # noqa: BLE001 — surface label only
         raise bail(f"dataset_load_failed detail={type(exc).__name__}")
 
-    for row in ds:
-        if isinstance(row, dict):
-            yield row
+    paths = sorted(glob.glob(os.path.join(local_dir, "*.jsonl")))
+    if not paths:
+        raise bail("dataset_no_jsonl_files")
+    step("dataset_sessions_listed", sessions=len(paths))
+    for p in paths:
+        yield Path(p)
 
 
 def _short_label(value: str) -> str:
@@ -194,28 +222,30 @@ def _short_label(value: str) -> str:
 
 
 def collect_novel_texts(
-    rows: Iterable[dict],
+    session_paths: Iterable[Path],
     formatter,
     count: int,
     seed: int,
     pool_cap: int,
 ) -> list[str]:
-    """Filter rows to 200-2000 words and deterministically sample `count`.
+    """Filter session traces to 200-2000 words and deterministically sample `count`.
 
-    The streaming dataset is consumed up to `pool_cap` filtered
-    entries; from that pool we draw `count` with the given seed. This
-    gives reproducible output without loading the whole 33.7k-row
-    dataset into RAM.
+    Each yielded path is one swival session `.jsonl`. We flatten each
+    session into one trace via `formatter`, then filter by word
+    count, accumulate up to `pool_cap` entries, and draw `count` of
+    them with the given seed. This gives reproducible output without
+    materializing every session in memory at once.
     """
     if count <= 0:
         raise bail("count_must_be_positive")
     pool: list[str] = []
     seen = 0
-    for row in rows:
+    for path in session_paths:
         seen += 1
         try:
-            text = formatter(row)
-        except Exception:  # noqa: BLE001 — skip malformed rows silently
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                text = formatter(fh)
+        except Exception:  # noqa: BLE001 — skip malformed sessions silently
             continue
         if not text:
             continue
@@ -225,12 +255,12 @@ def collect_novel_texts(
         pool.append(text)
         if len(pool) >= pool_cap:
             break
-        if seen % 1000 == 0:
+        if seen % 250 == 0:
             step("dataset_scan", scanned=seen, pool=len(pool))
 
     step("dataset_scan_done", scanned=seen, pool=len(pool))
     if len(pool) < count:
-        raise bail(f"insufficient_filtered_rows pool={len(pool)} target={count}")
+        raise bail(f"insufficient_filtered_sessions pool={len(pool)} target={count}")
 
     rng = random.Random(seed)
     sampled = rng.sample(pool, count)
@@ -447,9 +477,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # 2. Stream the source dataset and assemble the novel slice.
-    rows = iter_dataset_rows(args.source)
+    session_paths = iter_session_files(args.source)
     novel_texts = collect_novel_texts(
-        rows=rows,
+        session_paths=session_paths,
         formatter=formatter,
         count=args.count,
         seed=args.seed,
