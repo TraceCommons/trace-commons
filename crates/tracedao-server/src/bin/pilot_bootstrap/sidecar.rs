@@ -71,6 +71,10 @@ impl Sidecar {
         Ok(())
     }
 
+    // Exposed for operator tooling that needs to surface the sidecar location;
+    // the main loop logs the path separately, so this accessor is currently
+    // unused but kept as part of the Sidecar surface.
+    #[allow(dead_code)]
     pub fn path(&self) -> &Path {
         &self.path
     }

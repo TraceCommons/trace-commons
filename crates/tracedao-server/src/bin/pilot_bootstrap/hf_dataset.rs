@@ -43,6 +43,9 @@ pub struct ShardRowIter {
 }
 
 impl ShardRowIter {
+    // Safe empty-iter default for callers that need to short-circuit a shard
+    // without bailing the run. Not yet wired from the main loop.
+    #[allow(dead_code)]
     pub fn empty() -> Self {
         Self {
             inner: Box::new(std::iter::empty()),
