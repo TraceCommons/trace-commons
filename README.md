@@ -31,8 +31,9 @@ The roadmap is `docs/trace-commons-roadmap.md`; the storage contract is
 
 ## Open Work
 
-This repo has zero current users — see `docs/trace-commons-roadmap.md` for the
-full framing. As of 2026-05-12 the work is phased: Phase A is the
+This repo has zero contributor-facing deployments — see
+`docs/trace-commons-roadmap.md` for the full framing. As of 2026-05-12 the
+work is phased: Phase A is the
 pilot-readiness slice (real gate service on regular GPU hardware with cloud
 KMS as the KEK, accepting an operator-trusted model); Phase B is the trust
 upgrade to a dstack-attested enclave, deferred until pilot operational
@@ -62,9 +63,20 @@ privacy is a planned upgrade, not a current property.
    `docs/superpowers/specs/2026-05-11-private-vector-system-design.md`
    (rephased).
 
-2. **Complete the Ironclaw extraction.** Ironclaw should depend on the shared
-   `tracedao-protocol` crate but doesn't yet. Until that wiring lands, this
-   server has no clients at all and most server-side polish is speculative.
+2. **Complete the Ironclaw extraction** — *partial mitigation now exists.*
+   Ironclaw should depend on the shared `tracedao-protocol` crate for the
+   contributor UX, but that wiring lives on the Ironclaw side and is not
+   under this repo's control. As of 2026-05-14, the `tracedao-pilot-bootstrap`
+   binary (`crates/tracedao-server/src/bin/tracedao-pilot-bootstrap.rs`,
+   landed in PR #47) provides a bootstrap path: it replays HuggingFace
+   agent-traces datasets through the existing `/v1/traces` ingest API,
+   generating realistic submissions for gate-floor calibration, audit-chain
+   validation, and embedder + vector-index seeding without requiring real
+   contributors. See `docs/operator/pilot-bootstrap.md` for operator usage.
+   This is not a substitute for Ironclaw — it is a load-generation harness —
+   but it unblocks the calibration and pipeline-validation work that
+   previously required real user traffic, so server-side polish is no longer
+   gated end-to-end on the Ironclaw rewire.
 
 ### Phase B — trust upgrade (after pilot)
 
