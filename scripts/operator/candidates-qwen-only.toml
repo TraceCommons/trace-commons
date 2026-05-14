@@ -1,0 +1,12 @@
+# Single-candidate manifest for A2.7 re-bake-off (per-trace scores).
+# Only includes Qwen 3.6 27B Dense — the sole A2.6 candidate that passed
+# AUC > 0.5 with clean determinism. Used to regenerate the bake-off
+# report with the per_trace_scores arrays required by A2.7 calibration.
+
+[[candidate]]
+id = "qwen3.6-27b-dense"
+path = "/home/ubuntu/models/qwen3.6-27b-dense"
+arch = "qwen3"
+license = "Apache-2.0"
+params_b = 27
+release_date_unix = 1745452800
