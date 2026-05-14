@@ -19,6 +19,8 @@ use anyhow::Context;
 /// useful as a stable `source_row_id` substrate.
 #[derive(Debug, Clone)]
 pub struct SessionFile {
+    #[allow(dead_code)]
+    // read by the pilot-bootstrap binary via `read_session_bytes`; test target re-imports module for other helpers
     pub local_path: PathBuf,
     pub sibling_name: String,
 }
@@ -26,6 +28,7 @@ pub struct SessionFile {
 /// Discover `.jsonl` session files for the given HF dataset id, downloading
 /// missing files into the local cache. Returned in stable lexicographic
 /// order so sampling at a fixed seed is reproducible across runs.
+#[allow(dead_code)] // called by the pilot-bootstrap binary; test target only exercises `list_local_jsonl_sessions`
 pub async fn list_jsonl_sessions(
     dataset_id: &str,
     cache_dir: Option<&Path>,

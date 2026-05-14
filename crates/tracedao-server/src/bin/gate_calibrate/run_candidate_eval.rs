@@ -90,6 +90,8 @@ fn micros_to_f64(v: u64) -> f64 {
 /// measured via `nvidia-smi`; everything else reports zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceKind {
+    #[allow(dead_code)]
+    // constructed by `From<HardwareTier>` in the gate-calibrate binary; test target only constructs `NonCuda`
     Cuda,
     NonCuda,
 }
