@@ -6,6 +6,10 @@ PostgreSQL audit data plus the encrypted artifact store. It is the
 automated replacement for the manual SSD-snapshot procedure documented
 in [`backup-restore.md`](backup-restore.md).
 
+For first-time setup, fixture shape, and rehearsal preconditions, see
+[`vector-replay-setup.md`](vector-replay-setup.md). This document is
+the production runbook; the setup doc is the pre-rehearsal checklist.
+
 ## When to use this
 
 - The per-tenant `.usearch` file is corrupted (e.g. unclean shutdown
