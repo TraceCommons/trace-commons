@@ -20,11 +20,13 @@ pub const DETERMINISM_GATE: f64 = 1e-5;
 /// candidate are dropped before scoring. 0.5 is the spec's compromise between
 /// "ignore tiny throughput differences" and "reject obviously unviable runs."
 /// Bump only with an accompanying decision-rule-version increment.
+#[allow(dead_code)] // consumed by `pick_winner` in the gate-calibrate binary; test target re-imports module for other unit tests
 pub const THROUGHPUT_FLOOR_RATIO: f64 = 0.5;
 
 /// Two scores within this fractional band of the top score are considered a
 /// tie and decided by license / size / recency tiebreakers. 2 % matches the
 /// spec; it absorbs noise without engulfing meaningful score gaps.
+#[allow(dead_code)] // consumed by `pick_winner` in the gate-calibrate binary; test target re-imports module for other unit tests
 pub const TIE_TOLERANCE: f64 = 0.02;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +43,7 @@ pub enum License {
 
 impl License {
     /// Higher = more permissive. Used as the first tiebreaker.
+    #[allow(dead_code)] // called by `pick_winner` in the gate-calibrate binary; not reached from the test target
     pub fn permissiveness(&self) -> u8 {
         match self {
             License::Apache2 => 4,
@@ -156,6 +159,7 @@ impl CandidateResult {
 /// Weighted score per the spec:
 ///   0.6 * AUC + 0.3 * (1 - clamp(paraphrase_delta, 0, 1)) + 0.1 * (tail / tail_norm_max)
 /// When `tail_norm_max` is 0 the tail term collapses to 0 rather than dividing.
+#[allow(dead_code)] // called by `pick_winner` in the gate-calibrate binary; not reached from the test target
 pub fn weighted_score(r: &CandidateResult, tail_norm_max: f64) -> f64 {
     let para_clamped = r.paraphrase_delta.clamp(0.0, 1.0);
     let tail_term = if tail_norm_max == 0.0 {
@@ -174,6 +178,7 @@ pub fn weighted_score(r: &CandidateResult, tail_norm_max: f64) -> f64 {
 ///    in-budget set as the normalizer.
 /// 4. Anyone within `(1 - TIE_TOLERANCE)` of the top score is a contender.
 /// 5. Break ties by: license permissiveness DESC, params_b ASC, release_date DESC.
+#[allow(dead_code)] // called by the gate-calibrate binary; not reached from the test target
 pub fn pick_winner(results: &[CandidateResult]) -> Option<&CandidateResult> {
     // Step 1: determinism gate.
     let gated: Vec<&CandidateResult> = results

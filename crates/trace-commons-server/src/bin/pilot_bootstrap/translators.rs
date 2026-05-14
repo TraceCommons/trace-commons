@@ -58,6 +58,7 @@ pub struct SubmissionDraft {
 /// Input is the raw bytes of one `.jsonl` session file; output is one
 /// submission draft (or an error if the session yields no usable content).
 pub trait Translator: Send + Sync {
+    #[allow(dead_code)] // logged by the pilot-bootstrap binary; test target only invokes `translate`
     fn name(&self) -> &str;
     fn translate(&self, session_name: &str, session_bytes: &[u8]) -> Result<SubmissionDraft>;
 }
@@ -180,6 +181,8 @@ fn row_id_from_sibling(sibling: &str) -> String {
 /// same on-disk shape; only `source_dataset` and `source_domain_tag`
 /// differ. Wrappers below pick the labels.
 struct SessionConcatTranslator {
+    #[allow(dead_code)]
+    // read via `Translator::name` from the pilot-bootstrap binary; test target only invokes `translate`
     name: &'static str,
     source_dataset: &'static str,
     source_domain_tag: &'static str,
@@ -298,6 +301,7 @@ impl Translator for DeepSeekAgentTranslator {
 }
 
 /// Construct a translator by short name.
+#[allow(dead_code)] // called by the pilot-bootstrap binary; test target constructs concrete translators directly
 pub fn translator_by_name(name: &str) -> Result<Box<dyn Translator>> {
     match name {
         "swival" => Ok(Box::new(SwivalTranslator::new())),
