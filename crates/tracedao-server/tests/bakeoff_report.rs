@@ -17,6 +17,7 @@ fn result(id: &str, auc: f64, para: f64, tail: f64, throughput: f64, det: f64) -
         passed_determinism_gate: det < DETERMINISM_GATE,
         release_date_unix: 0,
         load_or_eval_error: None,
+        metrics: None,
     }
 }
 

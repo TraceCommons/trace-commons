@@ -76,6 +76,48 @@ pub struct CandidateResult {
     /// re-derive it from the logs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_or_eval_error: Option<String>,
+    /// Per-metric scoring block, populated when the bake-off was invoked with
+    /// `--scorer token-rarity` or `--scorer both`. Absent for `--scorer
+    /// perplexity` (the default and back-compat path for A2.3c / A2.4 / A2.6
+    /// reports). When present, each sub-field carries the per-trace scores
+    /// and the AUC of that metric on this candidate; the decision rule still
+    /// reads `discrimination_auc` (perplexity-derived when available) so
+    /// promoting per-token rarity is a deliberate, separate change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<CandidateMetrics>,
+}
+
+/// Per-metric scoring detail for the Phase A.5 dual-scorer bake-off. Each
+/// sub-block carries the discrimination AUC plus the per-trace scores that
+/// AUC was computed from, so downstream tooling can re-compute / re-plot
+/// without re-running the bake-off.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CandidateMetrics {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perplexity: Option<MetricBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_rarity: Option<TokenRarityMetricBlock>,
+}
+
+/// Per-trace perplexity scores + AUC for a single candidate. The
+/// per-trace numbers are the same `f64` micros-divided values that fed
+/// `discrimination_auc`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricBlock {
+    pub discrimination_auc: f64,
+    pub novel_scores: Vec<f64>,
+    pub duplicate_scores: Vec<f64>,
+}
+
+/// Per-trace token-rarity scores + AUC + the K the scorer used. Same shape
+/// as `MetricBlock` plus the K so report consumers can spot mismatched-K
+/// comparisons.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenRarityMetricBlock {
+    pub discrimination_auc: f64,
+    pub novel_scores: Vec<f64>,
+    pub duplicate_scores: Vec<f64>,
+    pub k: u32,
 }
 
 impl CandidateResult {
@@ -103,6 +145,7 @@ impl CandidateResult {
             passed_determinism_gate: false,
             release_date_unix,
             load_or_eval_error: Some(error_class.to_string()),
+            metrics: None,
         }
     }
 }
