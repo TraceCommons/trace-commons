@@ -51,29 +51,49 @@ What it does not have:
 These are the only items that need to land before someone could actually
 deploy this for real. Everything else is polish.
 
-### Production Gap Queue (2026-05-14)
+### Production Gap Queue (2026-05-14, post second merge wave)
 
 Ordered. Top item is the active blocker.
 
-1. **A2.6 result + decision routing.** Bake-off currently running on
-   Lambda H100; report expected today. Outcome routes per the A2.7
-   spec (PRs #50, #58): winner-promotion path or metric-replacement
-   escalation into Phase A.5.
-2. **Tail-fraction floor calibration.** Currently 0 (disabled) per
-   A2.5. Needs the first ~1000 pilot traces to set a real floor; runs
-   against the corpus produced by the `tracedao-pilot-bootstrap`
-   harness (A.6 / PR #47).
-3. **Pilot launch.** Next gate after (1) and (2). Server side is
-   code-complete + smoke-validated; pilot-bootstrap binary is on
-   `main` with a local smoke harness (PR #51), swival corpus-builder
-   schema fix (PR #54), and an indexed operator runbook (PR #52).
+1. **A2.6 result + outcome-branch decision.** Bake-off running on
+   Lambda H100 (started 11:11 UTC; ETA ~18:00 UTC). First candidate
+   (Llama-3.1-8B-Instruct) completed at 12:34 UTC with AUC 0.342; three
+   candidates remaining (Qwen3-8B-Base, Qwen 3.6 27B Dense, Gemma 4
+   31B). Once all four land, route per the A2.7 spec (PRs #50, #58):
+   winner-promotion path, do-nothing (existing floors hold), or
+   metric-replacement escalation into Phase A.5 if final AUC < 0.4.
+   Report skeleton is pre-written with placeholder AUC slots and
+   A2.3c/A2.4 historical comparison rows pre-filled (PR #64). Phase A.5
+   plan stub is pre-written and activates only on the AUC < 0.4 branch
+   (PR #65).
+2. **Pilot launch.** Server side is code-complete + smoke-validated and
+   the pilot-bootstrap binary is now real-data-capable (PR #67):
+   JSONL session loader, three working translators (swival, pi-mono,
+   deepseek), 5/5 idempotent submissions verified against real swival,
+   parquet/arrow deps dropped. Pilot-bootstrap local smoke harness
+   (PR #51), swival corpus-builder schema fix (PR #54), and operator
+   runbook index (PR #52) already on `main`. Remaining blocker is
+   operator-side execution: provision host, run binary, watch sidecar.
+3. **Tail-fraction floor calibration.** Currently 0 (disabled) per
+   A2.5. Subcommand now landed (PR #66):
+   `tracedao-gate-calibrate tail-floor --sidecar <path> --db-url <url>
+   --percentile <n>` — consumes the pilot-bootstrap sidecar JSONL plus
+   the decisions table, uses nearest-rank percentile + headroom-micros.
+   Capability-complete; awaits the first pilot run's data to produce a
+   real floor.
 4. **Phase A.5 perplexity-replacement metric.** Conditional on A2.6
-   outcome. Per-token rarity Python prototype landed (PR #55); Rust
-   bake-off integration is in progress today.
+   AUC < 0.4 branch. Per-token rarity scorer now landed in the Rust
+   bake-off binary (PR #63) on the mock-scorer path; real-scorer
+   rarity wiring deferred at `BakeoffRealRarityNotImplemented`. Phase
+   A.5 plan stub on `main` (PR #65).
 5. **Ironclaw client wiring.** Still the eventual unblock for real
    contributor traffic; out of this repo's control. Pilot-bootstrap
    harness is the work-around for everything that previously required
    real users.
+
+Recently closed: real-data pilot-bootstrap defects (parquet-only loader,
+fictional translator schemas surfaced by the PR #62 dry-run) — closed
+by PR #67 with end-to-end verification against real HF swival.
 
 ### 1. Phase A — real gate service on regular hardware with cloud KMS
 
@@ -84,18 +104,30 @@ service on regular GPU hardware with **cloud KMS as the KEK**, accepting
 that the operator and cloud provider can read user content via KMS
 `Decrypt`. Phase B (below) does the trust upgrade once dstack is ready.
 
-**Phase A status (2026-05-14): code-complete + smoke-validated.** All
-A1–A6 work items below plus four bake-off retrofits (A2.1, A2.2, A2.3,
-A2.5) and two real bake-off runs (A2.3c + A2.4) are merged on `main`.
-Two follow-up items are in progress today: A2.6 (agent-traces novel-slice
-4-way bake-off) is **currently running on Lambda H100** — Llama-3.1-8B,
-Qwen3-8B-Base, Qwen 3.6 27B Dense, Gemma 4 31B; report expected today
-(ETA ~14:00 UTC). The Phase A.5 per-token rarity scorer is being wired
-into the Rust bake-off binary (parallel work in progress) under a
-`--scorer perplexity|token-rarity|both` flag; the Python prototype
-(PR #55, under `scripts/research/`) is already on `main`. Pilot launch
-is the next gate, blocked on A2.6 result review and post-pilot
-tail-fraction calibration.
+**Phase A status (2026-05-14, post second merge wave): code-complete +
+smoke-validated; pilot-bootstrap real-data-capable.** All A1–A6 work
+items below plus four bake-off retrofits (A2.1, A2.2, A2.3, A2.5) and
+two real bake-off runs (A2.3c + A2.4) are merged on `main`. The
+per-token rarity scorer landed in the Rust bake-off binary (PR #63) on
+the mock-scorer path under a `--scorer perplexity|token-rarity|both`
+flag; real-scorer rarity wiring is deferred at
+`BakeoffRealRarityNotImplemented`. The A2.6 report skeleton (PR #64) and
+a conditional Phase A.5 implementation plan stub (PR #65) are also on
+`main`. The pilot-bootstrap binary was rewritten end-to-end against the
+real HF agent-traces schema in PR #67 — JSONL session loader replaces
+parquet, three working translators (swival, pi-mono, deepseek), 5/5
+idempotent submissions verified against real swival, parquet/arrow deps
+dropped. The tail-fraction floor calibration subcommand landed in
+PR #66 (`tracedao-gate-calibrate tail-floor`).
+
+In flight: A2.6 (agent-traces novel-slice 4-way bake-off) is **running
+on Lambda H100** — started 11:11 UTC; Llama-3.1-8B-Instruct completed
+at 12:34 UTC with AUC 0.342 (first concrete A2.6 result; informational
+until the remaining three candidates land). Qwen3-8B-Base, Qwen 3.6
+27B Dense, and Gemma 4 31B pending; full report ETA ~18:00 UTC.
+Pilot launch is the next gate, blocked on A2.6 result review,
+operator-side pilot-bootstrap execution, and post-pilot tail-fraction
+calibration.
 The binary boots green on Lambda Cloud GPU hardware
 (A10 / A100 / H100); `audit-chain-drill` returns `ready: true`. The
 empirical model bake-off ran four candidates (Llama-3.1-8B-Instruct,
@@ -146,13 +178,17 @@ gate. The deeper perplexity-replacement metric design is parked under
   is the active primary gate. Model pick stays Qwen3-8B-Base for
   cost (smallest VRAM footprint; choice no longer load-bearing).
 - A2.6: agent-traces novel-slice bake-off — **in progress today**.
-  Run started on Lambda H100 against the 4-way candidate set
-  (Llama-3.1-8B-Instruct, Qwen3-8B-Base, Qwen 3.6 27B Dense, Gemma 4
-  31B). Report expected today (~14:00 UTC). PR #50 also landed the
-  A2.7 follow-up spec stub; PR #58 refined that spec with
-  outcome-branch decision recipes so the post-run routing (winner
-  promotion vs. metric-replacement escalation to Phase A.5) is
-  pre-specified. Corpus builder + runbook merged previously. Spec:
+  Run started on Lambda H100 at 11:11 UTC against the 4-way candidate
+  set (Llama-3.1-8B-Instruct, Qwen3-8B-Base, Qwen 3.6 27B Dense,
+  Gemma 4 31B). Llama-3.1-8B-Instruct completed at 12:34 UTC with
+  AUC 0.342 (first concrete result); three candidates pending. Full
+  report ETA ~18:00 UTC. Report skeleton pre-written with placeholder
+  AUC slots and A2.3c/A2.4 historical comparison rows pre-filled
+  (PR #64). PR #50 landed the A2.7 follow-up spec stub; PR #58
+  refined that spec with outcome-branch decision recipes so the
+  post-run routing (winner promotion, do-nothing, or
+  metric-replacement escalation to Phase A.5) is pre-specified.
+  Corpus builder + runbook merged previously. Spec:
   `docs/superpowers/specs/2026-05-14-agent-traces-bakeoff-design.md`;
   operator runbook: `docs/operator/agent-traces-bakeoff-run.md`.
 - A3: real `Embedder` (fastembed + BGE-large-en-v1.5) — done
@@ -161,9 +197,14 @@ gate. The deeper perplexity-replacement metric design is parked under
 - A6: revocation worker hook (`invalidate_vector_entry`) plus typed
   propagation-failure audit retrofit for non-vector targets — done
 - A.6: pilot-bootstrap HF-trace replay harness
-  (`tracedao-pilot-bootstrap` binary) — done (binary; awaits operator
-  run for the first 30k submissions per A.6's "What success looks like"
-  criteria). Spec:
+  (`tracedao-pilot-bootstrap` binary) — done; real-data-capable as of
+  PR #67. PR #62 dry-run surfaced parquet-only loading and fictional
+  translator schemas; PR #67 rewrote the binary end-to-end against the
+  real HF agent-traces schema with a JSONL session loader and three
+  working translators (swival, pi-mono, deepseek), verified end-to-end
+  with 5/5 idempotent submissions against real swival. `parquet` and
+  `arrow-*` deps dropped. Awaits operator run for the first 30k
+  submissions per A.6's "What success looks like" criteria. Spec:
   `docs/superpowers/specs/2026-05-14-pilot-bootstrap-harness-design.md`.
   Plan: `docs/superpowers/plans/2026-05-14-pilot-bootstrap-harness.md`.
   Runbook: `docs/operator/pilot-bootstrap.md`.
@@ -229,11 +270,13 @@ Three candidate approaches recorded in
 - **Per-token rarity** — gate on the lowest-N logprob tail. A
   tighter version of `tail_fraction`; may collapse into it after
   pilot calibration. Python prototype landed in PR #55
-  (`scripts/research/`); Rust bake-off integration is **in progress
-  today** (parallel agent wiring a `--scorer
-  perplexity|token-rarity|both` flag into the existing
-  `tracedao-gate-calibrate bake-off` binary so A2.6 candidates can
-  be re-scored under both metrics on the same corpus).
+  (`scripts/research/`); Rust bake-off integration landed in PR #63
+  on the mock-scorer path under a `--scorer
+  perplexity|token-rarity|both` flag in the existing
+  `tracedao-gate-calibrate bake-off` binary. Real-scorer rarity
+  wiring is deferred at `BakeoffRealRarityNotImplemented` — it
+  activates only on the A2.6 AUC < 0.4 branch per the Phase A.5
+  plan stub (PR #65).
 - **Learned discriminator** — small classifier trained on labeled
   novel/duplicate exemplars. Highest ceiling, depends on labeled
   pilot data.

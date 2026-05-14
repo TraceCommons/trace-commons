@@ -68,19 +68,22 @@ privacy is a planned upgrade, not a current property.
    contributor UX, but that wiring lives on the Ironclaw side and is not
    under this repo's control. As of 2026-05-14, the `tracedao-pilot-bootstrap`
    binary (`crates/tracedao-server/src/bin/tracedao-pilot-bootstrap.rs`,
-   landed in PR #47) provides a bootstrap path: it replays HuggingFace
-   agent-traces datasets through the existing `/v1/traces` ingest API,
+   landed in PR #47 and rewritten end-to-end in PR #67 against the real
+   HuggingFace agent-traces schema) provides a bootstrap path: it replays
+   HF agent-traces sessions through the existing `/v1/traces` ingest API,
    generating realistic submissions for gate-floor calibration, audit-chain
    validation, and embedder + vector-index seeding without requiring real
-   contributors. PR #51 adds a local smoke harness for the bootstrap binary,
-   PR #54 fixes the swival schema in the agent-traces corpus builder, and
-   PR #52 indexes the 16 operator runbooks (including
-   `docs/operator/pilot-bootstrap.md`) so the dry-run procedure is reachable
-   from a single entry point. See `docs/operator/pilot-bootstrap.md` for
-   operator usage. This is not a substitute for Ironclaw — it is a
-   load-generation harness — but it unblocks the calibration and
-   pipeline-validation work that previously required real user traffic, so
-   server-side polish is no longer gated end-to-end on the Ironclaw rewire.
+   contributors. The PR #62 dry-run surfaced parquet-only loading and
+   fictional translator schemas; PR #67 replaces those with a JSONL session
+   loader and three working translators (swival, pi-mono, deepseek) verified
+   end-to-end with 5/5 idempotent submissions against real swival, and drops
+   the `parquet` / `arrow-*` deps. PR #51 adds a local smoke harness, PR #54
+   fixed the swival schema in the corpus builder, and PR #52 indexes the
+   operator runbooks. See `docs/operator/pilot-bootstrap.md` for operator
+   usage. This is not a substitute for Ironclaw — it is a load-generation
+   harness — but it is now real-data-capable, so the only remaining blocker
+   on first real use is operator-side: provision a host, run the binary,
+   watch the sidecar, and decide when to flip live for the Ironclaw rewire.
 
 ### Phase B — trust upgrade (after pilot)
 
