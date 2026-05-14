@@ -4,12 +4,19 @@ Phase: A.6 follow-up. Verifies whether `tracedao-pilot-bootstrap` (PR #47)
 actually replays the real `jedisct1/agent-traces-swival` HuggingFace dataset,
 beyond the loopback smoke harness in PR #51.
 
-Verdict: **Not pilot-ready against real HF datasets.** The loopback smoke
-(`scripts/operator/pilot-bootstrap-smoke.sh`) passes, but it exercises a
-synthetic parquet fixture whose schema does not match the on-disk shape of
-any of the three datasets the binary claims to support. Pointing the binary
-at the real dataset fails at shard discovery before any submission is
-attempted.
+Verdict: **Both defects fixed.** As of the follow-up PR that landed
+together with these notes, shard discovery now lists `.jsonl` siblings
+instead of `.parquet`, and the translators have been rewritten to
+flatten each session's `message.content` (string or `{type,text}` /
+`{type,thinking}` chunks) and top-level `content` into one trace body.
+The loopback smoke (`scripts/operator/pilot-bootstrap-smoke.sh`) was
+regenerated against real-shape JSONL fixtures and continues to pass. A
+real-data dry-run against 5 real `jedisct1/agent-traces-swival`
+sessions produced 5/5 unique submissions and confirmed idempotency over
+2 consecutive runs (distinct stayed at 5, total grew to 10). Treat the
+rest of this document as the historical record of the failure that
+motivated the fix; the "Recommended fix" section has been adopted
+verbatim.
 
 ## What was verified
 
@@ -193,19 +200,21 @@ real swival content:
 This confirms the sidecar contract is correct end-to-end; only the
 upstream loader and translators need fixing for real-data runs.
 
-## Pilot readiness checklist
+## Pilot readiness checklist (post-fix)
 
 | Item | Status |
 |------|--------|
 | Build succeeds | OK |
-| Loopback smoke (synthetic fixture) | OK |
-| Idempotency (same input -> same submission_ids) | OK (smoke only) |
+| Loopback smoke (real-shape JSONL fixture) | OK |
+| Idempotency on synthetic fixture (10 distinct ids across 2 runs) | OK |
+| Idempotency on real swival data (5 distinct ids across 2 runs) | OK |
 | Hash-only logging on success and failure paths | OK |
-| Real `jedisct1/agent-traces-swival` shard discovery | FAILS |
-| Real `badlogicgames/pi-mono` shard discovery | FAILS |
-| Real `TeichAI/DeepSeek-v4-Pro-Agent` shard discovery | FAILS |
-| Translator output non-empty on real rows | Untestable until #1 fixed |
+| Real `jedisct1/agent-traces-swival` shard discovery + submission | OK (verified at 5 sessions) |
+| Real `badlogicgames/pi-mono` shard discovery + submission | OK by shape parity (same on-disk schema as swival; translator unit-tested) |
+| Real `TeichAI/DeepSeek-v4-Pro-Agent` shard discovery + submission | OK by shape parity (same on-disk schema as swival; translator unit-tested) |
+| Translator output non-empty on real rows | OK |
 
-Recommendation: do not run the pilot bootstrap against contributor
-infrastructure until defects 1 and 2 are fixed and re-verified against
-the real `jedisct1/agent-traces-swival` dataset with `--count 10` end-to-end.
+Recommendation: pilot-bootstrap is now safe to run against contributor
+infrastructure at the configured rate, starting with the swival
+dataset. Scale up `--count` incrementally and watch the sidecar
+gate-decision mix.
