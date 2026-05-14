@@ -98,9 +98,12 @@ Behavior:
                               gate_policy_version does not match the
                               currently configured embedder. Default:
                               warn + skip mismatched rows.
-  --dry-run                   List the submissions that would be replayed
-                              without performing the work. Exits 0 on
-                              success.
+  --dry-run                   Count rows that would be replayed (pre-
+                              filter) using PostgreSQL only. Does NOT
+                              initialise the embedder, KEK wrapper, or
+                              artifact store — safe to run on a laptop
+                              without the BGE-large fastembed cache or
+                              KEK material. Exits 0 on success.
   --limit <N>                 Stop after N rows.
   --page-size <N>             Postgres page size (default: 500).
 
@@ -342,6 +345,14 @@ async fn run_replay(args: ReplayArgs) -> Result<ReplaySummary> {
         .context("VectorReplayInit: PostgreSQL migrations failed")?;
     let store: Arc<dyn TraceCorpusStore> = Arc::new(backend);
 
+    // --dry-run shortcircuits BEFORE the expensive embedder / KEK / artifact
+    // store init so operators can sanity-check the binary on a laptop without
+    // the 1.3 GB BGE-large cache, KEK material, or a populated artifact root.
+    // We only need Postgres to count the rows that WOULD be replayed.
+    if args.dry_run {
+        return run_dry_run(args, store.as_ref(), &tenant_id_str, summary, started_at).await;
+    }
+
     // Build the KEK wrapper. Mirrors `tracedao-ingest`'s
     // `TRACE_COMMONS_KEK_PROVIDER` selector — local_master_key and dstack
     // are supported here without requiring the async GCP arm because the
@@ -573,6 +584,77 @@ async fn run_replay(args: ReplayArgs) -> Result<ReplaySummary> {
 
     summary.elapsed_seconds =
         (Instant::now().duration_since(started_at).as_millis() as f64) / 1000.0;
+    Ok(summary)
+}
+
+/// Dry-run path: count rows that WOULD be replayed using nothing but the
+/// PostgreSQL pager. This intentionally does NOT touch the embedder, KEK, or
+/// artifact store so operators can run `--dry-run` on a laptop without the
+/// BGE-large fastembed cache (~1.3 GB), KEK material, or the encrypted
+/// artifact root populated.
+///
+/// We deliberately do not apply the per-row liveness filters here
+/// (`status == Accepted`, revocation check, artifact existence, embedder
+/// match). Those require additional queries / artifact-store reads, and the
+/// purpose of dry-run is a cheap "is the wiring correct + how big is the
+/// candidate set" check, not a full simulation. The full replay path applies
+/// all five filters and emits per-row outcomes.
+async fn run_dry_run(
+    args: ReplayArgs,
+    store: &dyn TraceCorpusStore,
+    tenant_id_str: &str,
+    mut summary: ReplaySummary,
+    started_at: Instant,
+) -> Result<ReplaySummary> {
+    let mut after_cursor: Option<(DateTime<Utc>, Uuid)> = None;
+    'outer: loop {
+        let rows = store
+            .stream_trace_gate_decisions_for_replay(tenant_id_str, args.page_size, after_cursor)
+            .await
+            .map_err(|e| anyhow::anyhow!("VectorReplayPgQueryFailed: {e}"))?;
+        if rows.is_empty() {
+            break;
+        }
+        let last_cursor = rows
+            .last()
+            .map(|r| (r.decided_at, r.decision_id))
+            .expect("non-empty page");
+
+        for _row in &rows {
+            summary.rows_scanned += 1;
+            if let Some(lim) = args.limit {
+                if summary.rows_scanned > lim {
+                    summary.rows_scanned -= 1;
+                    break 'outer;
+                }
+            }
+        }
+
+        after_cursor = Some(last_cursor);
+        if let Some(lim) = args.limit {
+            if summary.rows_scanned >= lim {
+                break;
+            }
+        }
+        if (rows.len() as u32) < args.page_size {
+            break;
+        }
+    }
+
+    summary.elapsed_seconds =
+        (Instant::now().duration_since(started_at).as_millis() as f64) / 1000.0;
+    tracing::info!(
+        target: "tracedao_vector_replay",
+        event = "vector_replay_dry_run",
+        tenant_storage_ref = %summary.tenant_storage_ref,
+        mode = %summary.mode,
+        rows_scanned = summary.rows_scanned,
+        require_embedder_match = args.require_embedder_match,
+        limit = ?args.limit,
+        page_size = args.page_size,
+        "dry-run: would replay {} candidate row(s) (pre-filter)",
+        summary.rows_scanned,
+    );
     Ok(summary)
 }
 
@@ -941,6 +1023,37 @@ mod tests {
         assert_eq!(ReplayMode::default(), ReplayMode::Fresh);
         assert_eq!(ReplayMode::Fresh.as_str(), "fresh");
         assert_eq!(ReplayMode::Incremental.as_str(), "incremental");
+    }
+
+    /// Regression guard: `run_dry_run` MUST NOT take any embedder, KEK
+    /// wrapper, vector-index, or artifact-store handle. That guarantees the
+    /// `--dry-run` path cannot transitively initialise the BGE-large
+    /// fastembed cache or read KEK material — both of which are 1.3 GB / KMS
+    /// gated and block operator sanity-checks on a laptop.
+    ///
+    /// We assert the signature by binding to a typed function pointer. Any
+    /// future change that threads an embedder, KEK, or artifact-store handle
+    /// into `run_dry_run` will fail this compile-time check and force a
+    /// reviewer-visible signature change.
+    #[test]
+    fn run_dry_run_signature_excludes_embedder_kek_artifact_store() {
+        // Bind `run_dry_run` to a function pointer whose argument list does
+        // not mention `FastEmbedTextEmbedder`, `KmsKeyWrapper`,
+        // `UsearchVectorIndex`, or `ServiceOwnedTraceArtifactStore`. If a
+        // future change threads one of those into the dry-run path, this
+        // assignment fails to compile and a reviewer is forced to confirm
+        // the regression.
+        let _f: for<'a> fn(
+            ReplayArgs,
+            &'a (dyn TraceCorpusStore + 'a),
+            &'a str,
+            ReplaySummary,
+            Instant,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<ReplaySummary>> + Send + 'a>,
+        > = |args, store, tenant, summary, started_at| {
+            Box::pin(run_dry_run(args, store, tenant, summary, started_at))
+        };
     }
 
     #[test]
