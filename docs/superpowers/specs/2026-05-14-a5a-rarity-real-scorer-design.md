@@ -1,9 +1,23 @@
 # Phase A.5a — Per-Token Rarity Real-Scorer Wiring and Pre-Flight (Design)
 
 Date: 2026-05-14
-Status: **DRAFT — activated only if A2.6 final results trigger A.5 activation
+Status: **DEFERRED (2026-05-14, post-A2.6 partial).** Qwen 3.6 27B Dense
+landed AUC 0.936 on A2.6's agent-traces corpus, well above 0.5. Per the
+A2.6 outcome map, this triggers A2.7 (perplexity floor recalibration),
+NOT A.5. **A.5 (and therefore A.5a) is DEFERRED.** Gemma 4 31B still in
+flight; A.5a would only re-activate if Gemma confirms a categorical
+failure mode the 27B somehow masked (very unlikely). See
+`project_perplexity_size_pattern.md` memory for the size-pattern
+finding — perplexity is not broken, it just needs a model big enough.
+This sub-spec, the parent A.5 spec, the implementation plan stub, the
+runbook at `docs/operator/a5a-rarity-preflight.md`, and the pre-flight
+script at `scripts/research/a5a_rarity_preflight.py` are retained for
+reference, not execution. Original drafting status follows for
+re-activation context.
+
+**Original status (pre-A2.6 partial):** DRAFT — activated only if A2.6 final results trigger A.5 activation
 (all candidates AUC < 0.4, or operator decision in the 0.4-0.5 partial
-range).** Do not implement against this spec until A2.6 results are recorded
+range). Do not implement against this spec until A2.6 results are recorded
 in `docs/superpowers/reports/` and an operator has signed off on A.5
 activation.
 Owner: Trace Commons / Datasets lane

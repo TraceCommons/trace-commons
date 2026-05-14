@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+# DEFERRED (2026-05-14, post-A2.6 partial): Qwen 3.6 27B Dense landed AUC
+# 0.936 on A2.6's agent-traces corpus, well above 0.5. Per the A2.6 outcome
+# map, this triggers A2.7 (perplexity floor recalibration), NOT A.5. A.5
+# (and therefore this pre-flight) is DEFERRED. Gemma 4 31B still in flight;
+# this script would only re-activate if Gemma confirms a categorical failure
+# mode the 27B somehow masked (very unlikely). See
+# project_perplexity_size_pattern.md memory for the size-pattern finding —
+# perplexity is not broken, it just needs a model big enough. Retained for
+# reference, not execution.
 """A.5a per-token rarity pre-flight — focused one-candidate rerun.
 
 Per the architect verdict captured in
