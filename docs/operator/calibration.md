@@ -148,7 +148,13 @@ compiled in
 or `--features local-gpu-models-cuda` to activate mistralrs's CUDA
 kernels).
 Default-features builds refuse the real-scorer path with
-`BakeoffRealScorerRequiresFeature`.
+`BakeoffRealScorerRequiresFeature`. CPU-only `local-gpu-models` builds
+that select `--hardware=a10` or `--hardware=h100` are refused with
+`BakeoffCudaHardwareRequiresCudaFeature` at startup, before any model
+load — this guard exists because mistralrs otherwise silently falls
+back to CPU inference on CUDA hosts, which on 2026-05-14 burned ~63
+minutes of Lambda H100 time at 0 MiB VRAM before being aborted. If you
+see that error class, rebuild with `--features local-gpu-models-cuda`.
 
 The mistralrs backend is git-pinned to master SHA
 `2d4ba4f16f61e5e18be085d0dd137bc95cba038a` (2026-04-15). Slice 0 of the
