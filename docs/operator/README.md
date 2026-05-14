@@ -26,6 +26,7 @@ the link.
 | Validating a deployment before promoting | [`./smoke-test.md`](./smoke-test.md) |
 | Running the model bake-off | [`./calibration.md`](./calibration.md) (Phase 0) + [`./agent-traces-bakeoff-run.md`](./agent-traces-bakeoff-run.md) |
 | Handling an A2.6 bake-off result | [`./a26-bakeoff-result-handler.md`](./a26-bakeoff-result-handler.md) |
+| Calibrating the perplexity floor after A2.6 Outcome 1 | [`./a27-perplexity-floor-calibration.md`](./a27-perplexity-floor-calibration.md) |
 | Running the pilot bootstrap harness | [`./pilot-bootstrap.md`](./pilot-bootstrap.md) (see also [`./pilot-bootstrap-dryrun-notes.md`](./pilot-bootstrap-dryrun-notes.md) — known real-data defects) |
 | Running the pilot-bootstrap first-100-traces dry run | [`./pilot-bootstrap-first-100-traces.md`](./pilot-bootstrap-first-100-traces.md) |
 | Managing the HuggingFace dataset / model cache | [`./hf-dataset-cache-hygiene.md`](./hf-dataset-cache-hygiene.md) |
@@ -49,6 +50,11 @@ Every runbook in this directory, with a one-line description.
 - [`./a26-bakeoff-result-handler.md`](./a26-bakeoff-result-handler.md) — post-run
   handler for the A2.6 bake-off: pull the report, fill the skeleton, route to
   the A2.7 / A2.7-partial / Phase A.5 outcome branch, tear down.
+- [`./a27-perplexity-floor-calibration.md`](./a27-perplexity-floor-calibration.md) —
+  Outcome 1 worked procedure: pick the worst-of-passing calibration candidate,
+  compute Youden's-J + p10 novel anchors, geometric-mean + 0.5× headroom, set
+  `TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS`, update deployment template,
+  smoke-verify.
 - [`./agent-traces-bakeoff-run.md`](./agent-traces-bakeoff-run.md) — operator
   activity for the A2.6 agent-traces bake-off across candidate gate models.
 - [`./architecture.md`](./architecture.md) — one-page deployment topology
