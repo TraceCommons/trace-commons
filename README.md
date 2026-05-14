@@ -32,7 +32,7 @@ The roadmap is `docs/trace-commons-roadmap.md`; the storage contract is
 ## Open Work
 
 This repo has zero contributor-facing deployments — see
-`docs/trace-commons-roadmap.md` for the full framing. As of 2026-05-12 the
+`docs/trace-commons-roadmap.md` for the full framing. As of 2026-05-14 the
 work is phased: Phase A is the
 pilot-readiness slice (real gate service on regular GPU hardware with cloud
 KMS as the KEK, accepting an operator-trusted model); Phase B is the trust
@@ -40,6 +40,16 @@ upgrade to a dstack-attested enclave, deferred until pilot operational
 learning is in hand. The KEK trust-model regression is intentional and
 documented — contributor-facing language must be honest that TEE-rooted
 privacy is a planned upgrade, not a current property.
+
+Phase A is code-complete and smoke-validated. The empirical model bake-off
+that gated the pilot — A2.6, agent-traces novel slice, four-way candidate
+comparison — has three of four candidates in and is trending Outcome 1
+("at least one candidate AUC > 0.5"): Llama-3.1-8B-Instruct 0.342,
+Qwen3-8B-Base 0.243, **Qwen 3.6 27B Dense 0.936**, with Gemma 4 31B Base
+still in flight. The size pattern (8B candidates flunk, 27B passes)
+locks the pilot deployment goal to a 27B-class GPU host. The next gate
+is A2.7 perplexity floor calibration from the winning model; the plan
+stub (PR #74) is ready to promote pending the Gemma row.
 
 ### Phase A — blocks pilot
 
@@ -73,17 +83,17 @@ privacy is a planned upgrade, not a current property.
    HF agent-traces sessions through the existing `/v1/traces` ingest API,
    generating realistic submissions for gate-floor calibration, audit-chain
    validation, and embedder + vector-index seeding without requiring real
-   contributors. The PR #62 dry-run surfaced parquet-only loading and
-   fictional translator schemas; PR #67 replaces those with a JSONL session
-   loader and three working translators (swival, pi-mono, deepseek) verified
-   end-to-end with 5/5 idempotent submissions against real swival, and drops
-   the `parquet` / `arrow-*` deps. PR #51 adds a local smoke harness, PR #54
-   fixed the swival schema in the corpus builder, and PR #52 indexes the
-   operator runbooks. See `docs/operator/pilot-bootstrap.md` for operator
-   usage. This is not a substitute for Ironclaw — it is a load-generation
-   harness — but it is now real-data-capable, so the only remaining blocker
-   on first real use is operator-side: provision a host, run the binary,
-   watch the sidecar, and decide when to flip live for the Ironclaw rewire.
+   contributors. PR #67 is real-data-capable with a JSONL session loader,
+   three working translators (swival, pi-mono, deepseek), and 5/5
+   idempotent submissions verified end-to-end against real swival. The
+   `pilot-bootstrap-first-100` operator runbook landed in PR #70, and the
+   critical tail_floor credentials-leak pilot blocker was closed in PR #86.
+   See `docs/operator/pilot-bootstrap.md` for operator usage. The
+   bootstrap is not a substitute for Ironclaw — it is a load-generation
+   harness. What blocks first real use is now operator-side and shaped by
+   the A2.6 size-pattern finding: provision a 27B-class GPU host, load the
+   A2.6 winning model (Qwen 3.6 27B Dense unless Gemma 4 31B overtakes it),
+   apply the A2.7-calibrated perplexity floor, then run the bootstrap.
 
 ### Phase B — trust upgrade (after pilot)
 
@@ -165,8 +175,9 @@ sweep landed in the same PR). Warnings-as-errors is now green on `main`:
 PR #57 gated dead-code (`ThroughputRecord`, `VramRecord`) in
 `tracedao-gate-calibrate` behind `#[allow(dead_code)]`, and PR #59 gated
 `tracedao-ingest` test-only items behind `#[cfg(test)]`. `cargo clippy -D
-warnings` is still not wired into CI; that remains the next CI gate to
-land. Run the same commands locally before pushing.
+warnings` is enforced in CI as of PR #78, and PR #79 moved GitHub Actions
+onto Node 24 and added a pilot-bootstrap smoke job. Run the same commands
+locally before pushing.
 
 ---
 
