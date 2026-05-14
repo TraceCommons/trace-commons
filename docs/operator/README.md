@@ -25,7 +25,11 @@ the link.
 | Setting gate floors or calibrating thresholds | [`./calibration.md`](./calibration.md) |
 | Validating a deployment before promoting | [`./smoke-test.md`](./smoke-test.md) |
 | Running the model bake-off | [`./calibration.md`](./calibration.md) (Phase 0) + [`./agent-traces-bakeoff-run.md`](./agent-traces-bakeoff-run.md) |
+| Handling an A2.6 bake-off result | [`./a26-bakeoff-result-handler.md`](./a26-bakeoff-result-handler.md) |
 | Running the pilot bootstrap harness | [`./pilot-bootstrap.md`](./pilot-bootstrap.md) (see also [`./pilot-bootstrap-dryrun-notes.md`](./pilot-bootstrap-dryrun-notes.md) — known real-data defects) |
+| Running the pilot-bootstrap first-100-traces dry run | [`./pilot-bootstrap-first-100-traces.md`](./pilot-bootstrap-first-100-traces.md) |
+| Managing the HuggingFace dataset / model cache | [`./hf-dataset-cache-hygiene.md`](./hf-dataset-cache-hygiene.md) |
+| Recording GPU instance spend | [`./gpu-cost-ledger.md`](./gpu-cost-ledger.md) |
 | Rotating cloud-KMS keys | [`./key-rotation.md`](./key-rotation.md) |
 | Swapping the gate model or embedder | [`./model-swap.md`](./model-swap.md) |
 | Restoring from backup | [`./backup-restore.md`](./backup-restore.md) |
@@ -42,6 +46,9 @@ the link.
 
 Every runbook in this directory, with a one-line description.
 
+- [`./a26-bakeoff-result-handler.md`](./a26-bakeoff-result-handler.md) — post-run
+  handler for the A2.6 bake-off: pull the report, fill the skeleton, route to
+  the A2.7 / A2.7-partial / Phase A.5 outcome branch, tear down.
 - [`./agent-traces-bakeoff-run.md`](./agent-traces-bakeoff-run.md) — operator
   activity for the A2.6 agent-traces bake-off across candidate gate models.
 - [`./architecture.md`](./architecture.md) — one-page deployment topology
@@ -58,8 +65,14 @@ Every runbook in this directory, with a one-line description.
   endpoints, what each validates, and cadence guidance.
 - [`./env-reference.md`](./env-reference.md) — table of every
   `TRACE_COMMONS_*` env, default, required/optional, and surface touched.
+- [`./gpu-cost-ledger.md`](./gpu-cost-ledger.md) — append-only ledger of
+  GPU instance spend for bake-offs and corpus rebuilds.
 - [`./hash-only-logging.md`](./hash-only-logging.md) — interpreting
   hash-only error classes in production logs.
+- [`./hf-dataset-cache-hygiene.md`](./hf-dataset-cache-hygiene.md) — cache
+  layout, disk-space requirements, and hygiene commands for the HuggingFace
+  dataset and model cache used by pilot-bootstrap and the bake-off corpus
+  builder.
 - [`./key-rotation.md`](./key-rotation.md) — Cloud KMS key-version rotation
   procedure, including drill validation and rollback.
 - [`./model-swap.md`](./model-swap.md) — procedure for upgrading the
@@ -71,6 +84,9 @@ Every runbook in this directory, with a one-line description.
 - [`./pilot-bootstrap-dryrun-notes.md`](./pilot-bootstrap-dryrun-notes.md) —
   findings from the real-HF-dataset dry-run; documents two pre-pilot defects
   in the harness's shard discovery and translators.
+- [`./pilot-bootstrap-first-100-traces.md`](./pilot-bootstrap-first-100-traces.md) —
+  controlled first-100 dry run against staging to verify gate decision
+  distribution and audit chain row counts before scaling.
 - [`./smoke-test.md`](./smoke-test.md) — post-deploy validation checklist
   that exercises every required drill plus a fixture gate evaluation.
 - [`./troubleshooting.md`](./troubleshooting.md) — common failure modes by
