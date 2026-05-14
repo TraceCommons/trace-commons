@@ -28,18 +28,20 @@ duplicate slice may push AUC across 0.5 for at least one candidate. If
 true, A2.5's "perplexity disabled at launch" recommendation can be
 partially walked back and Phase A.5 can be deferred or scrapped.
 
-Outcome (circle the branch that fired when results land):
+Outcome (circle the outcome that fired when results land):
 
-- [ ] **Branch 1 — at least one candidate AUC > 0.5.** Hypothesis holds.
+> Outcome 1/2/3 maps to the three branches in the A2.6 spec's "What success looks like" section.
+
+- [ ] **Outcome 1 — at least one candidate AUC > 0.5.** Hypothesis holds.
       File A2.7 PR updating A2.5's floor recommendations: re-enable the
       perplexity floor calibrated against this run's distribution. Close
       Phase A.5 (perplexity-replacement metric) as no longer needed.
-- [ ] **Branch 2 — all candidates 0.5 > AUC > 0.4.** Hypothesis partially
+- [ ] **Outcome 2 — all candidates 0.5 > AUC > 0.4.** Hypothesis partially
       supported. Document the partial improvement. Phase A.5 stays
       parked with reduced urgency. Floor recommendation stays at A2.5's
       (0), documented as conservative-by-default; operators may
       experiment with positive floors against their own pilot data.
-- [ ] **Branch 3 — all candidates AUC < 0.4.** Hypothesis fails. A2.5's
+- [ ] **Outcome 3 — all candidates AUC < 0.4.** Hypothesis fails. A2.5's
       conclusion is reinforced: perplexity-based novelty doesn't work
       across multiple corpus shapes for modern aligned LLMs. Phase A.5
       stays on the roadmap; agent-traces corpus retired as a hedge.
@@ -60,18 +62,18 @@ corpus size (300/300/300) are held constant.
 
 ## Next-step recommendation
 
-Selected branch: <TBD — circle one of the three above when results land>.
+Selected outcome: <TBD — circle one of the three above when results land>.
 
-Concrete actions, conditional on branch:
+Concrete actions, conditional on outcome:
 
-- **If Branch 1 fires:** open A2.7 PR retitled "Re-enable perplexity
+- **If Outcome 1 fires:** open A2.7 PR retitled "Re-enable perplexity
   floor against swival-calibrated distribution"; recalibrate floor via
   `scripts/operator/calibrate-from-hf.sh` against the winning candidate;
   update `docs/operator/env-reference.md` defaults; mark Phase A.5
   closed in the roadmap.
-- **If Branch 2 fires:** annotate A2.5's recommendation as
+- **If Outcome 2 fires:** annotate A2.5's recommendation as
   "conservative-by-default, operator-overridable"; leave Phase A.5 on
   the roadmap with reduced priority; no production-default changes.
-- **If Branch 3 fires:** reinforce A2.5's recommendation; keep
+- **If Outcome 3 fires:** reinforce A2.5's recommendation; keep
   perplexity floor at 0 for pilot launch; promote Phase A.5
   (perplexity-replacement metric) to the next active slice.

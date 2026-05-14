@@ -147,7 +147,7 @@ A2.7 should not start until **both** of the following hold:
 - [ ] A2.6 report is in `docs/superpowers/reports/`
   (`2026-05-14-model-bakeoff-result-a26.{json,md}`).
 - [ ] The "Trigger criteria" table in the A2.7 spec maps cleanly to
-  outcome branch 1 (full fire, AUC > 0.5) or outcome branch 2
+  Outcome 1 (full fire, AUC > 0.5) or Outcome 2
   (docs-only, 0.4 < AUC < 0.5). If the report shows AUC < 0.4 across
   every candidate, this plan never executes — A.5 activates instead
   (see `docs/superpowers/plans/2026-05-14-a5-perplexity-replacement.md`).

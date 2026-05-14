@@ -11,7 +11,7 @@ Predecessors:
 
 ## Activation condition
 
-> **TODO: activate only if A2.6 keeps all candidate AUCs below 0.5.**
+> **Activates if A2.6 results show either (a) all candidates AUC < 0.4 (full activation, start A.5a immediately), or (b) all candidates in the 0.4 < AUC < 0.5 range (partial activation, parked with reduced urgency per A2.7's Outcome 2 branch).**
 >
 > A2.6 is in flight on a Lambda H100 at spec time. This spec is pre-drafted
 > so we can file it within minutes of the bake-off completing if (and only
@@ -173,7 +173,7 @@ weights them.
 
 ### Implementation cost
 
-- Modify the score-aggregator in the candle/mistralrs scorer (where
+- Modify the score-aggregator in the mistralrs scorer (where
   per-token logprobs are already available) to track and return the top-K
   rarest tokens explicitly.
 - Add `TRACE_COMMONS_SCORER_RARITY_K` env var (default ~16 or 32).

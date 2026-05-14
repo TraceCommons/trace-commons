@@ -4,7 +4,7 @@
 
 **Goal:** A new `trace-commons-pilot-bootstrap` binary that pulls HF agent-traces datasets, translates rows to `trace-commons-protocol` submission envelopes, and POSTs through the existing `/v1/submissions` ingest API at a configurable rate. Generates 30k+ realistic submissions for A2.5 floor calibration + Phase A.5 metric design + end-to-end pipeline validation.
 
-**Architecture:** Single binary in `crates/trace-commons-server/src/bin/trace-commons-pilot-bootstrap.rs`. Reads HF datasets via the `hf-hub` crate (already in tree for the candle path), parses parquet via `arrow`, translates rows via per-dataset translators, sends submissions via `reqwest`. Labeling sidecar in local JSONL. Single-process, single-tenant; deterministic submission IDs for idempotency.
+**Architecture:** Single binary in `crates/trace-commons-server/src/bin/trace-commons-pilot-bootstrap.rs`. Reads HF datasets via JSONL session loading (parquet support was removed in PR #67 after the real swival/pi-mono/DeepSeek datasets turned out to ship JSONL only). Translates rows via per-dataset translators, sends submissions via `reqwest`. Labeling sidecar in local JSONL. Single-process, single-tenant; deterministic submission IDs for idempotency.
 
 **Tech Stack:** Rust, `hf-hub`, `arrow` (verify in tree; if not, surface for approval), `reqwest` (already in tree), `serde_json`, `clap`.
 
