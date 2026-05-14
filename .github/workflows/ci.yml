@@ -1,0 +1,87 @@
+# GitHub Actions CI for trace-commons-server.
+#
+# Runs the default-features build path plus the non-CUDA local-gpu-models
+# feature variant on every push to main and every pull request against main.
+# The CUDA variant (local-gpu-models-cuda) is operator-tested on GPU hosts
+# only — it requires the CUDA toolkit and is not exercised here.
+#
+# Format and clippy checks are intentionally omitted while the repo baseline
+# is dirty; they will be re-introduced in dedicated cleanup PRs.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -D warnings
+
+jobs:
+  cargo-check-default:
+    name: cargo check (default features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-check-default-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-default-
+      - run: cargo check -p trace-commons-server --bins
+
+  cargo-check-local-gpu-models:
+    name: cargo check (local-gpu-models, non-CUDA)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-check-local-gpu-models-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-local-gpu-models-
+      # local-gpu-models-cuda is intentionally not exercised here: it requires
+      # the CUDA toolkit and a GPU runtime, and is operator-tested on GPU
+      # hosts only.
+      - run: cargo check -p trace-commons-server --bins --features local-gpu-models
+
+  cargo-test-default:
+    name: cargo test (default features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-test-default-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-default-
+      - run: cargo test -p trace-commons-server

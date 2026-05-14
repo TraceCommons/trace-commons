@@ -129,6 +129,22 @@ This repo builds without an Ironclaw path dependency. Ironclaw should depend on
 the shared `trace-commons-protocol` crate when the client-side integration is
 rewired.
 
+## CI
+
+GitHub Actions runs on every push to `main` and every pull request against
+`main` (see `.github/workflows/ci.yml`). The pipeline exercises three jobs:
+
+- `cargo check -p trace-commons-server --bins` (default features).
+- `cargo check -p trace-commons-server --bins --features local-gpu-models`
+  (non-CUDA variant; the `local-gpu-models-cuda` variant is operator-tested
+  on GPU hosts only).
+- `cargo test -p trace-commons-server` (default features; the existing integration
+  test suite).
+
+Run the same commands locally before pushing. `cargo fmt --check` and
+`cargo clippy -D warnings` are not yet wired into CI — the current baseline
+needs a dedicated cleanup pass before either gate can be turned on.
+
 ---
 
 ## Reference: Trace Credits
