@@ -1,4 +1,4 @@
-# Bake-off report (<TBD: generated_at from JSON>)
+# Bake-off report (partial results as of 2026-05-14 18:01 UTC; Gemma 4 31B still scoring)
 
 - run identifier: A2.6c (agent-traces novel slice retrofit)
 - corpus: sha256:46e0eef8a52e309ce695ad20d1e242ce43eb210c11e02764beeaf7fa3d341bb5
@@ -11,14 +11,16 @@
 - paraphrase slice: 300 rows (Qwen3-4B-Base back-translation, batched)
 - hardware: Lambda H100 SXM5 80GB, region <TBD>
 
-Winner: <TBD>
+Winner: <TBD — Gemma 4 31B still scoring; Qwen 3.6 27B Dense is the current leader with AUC 0.9363>
 
 | candidate | auc | paraphrase_delta | tail_range | throughput_tps | determinism_stddev | license | params_b | passed_gate |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| llama-3.1-8b-instruct | <TBD> | <TBD> | <TBD> | <TBD> | <TBD> | LlamaCommunity | 8 | <TBD> |
-| qwen3-8b-base | <TBD> | <TBD> | <TBD> | <TBD> | <TBD> | Apache2 | 8 | <TBD> |
-| qwen3.6-27b-dense | <TBD> | <TBD> | <TBD> | <TBD> | <TBD> | Apache2 | 27 | <TBD> |
+| llama-3.1-8b-instruct | 0.3425 | 0.8291 | 0.0153 | 291.76 | 1.110e-16 | LlamaCommunity | 8 | true |
+| qwen3-8b-base | 0.2431 | 0.8234 | 0.0071 | 248.46 | 1.110e-16 | Apache2 | 8 | true |
+| qwen3.6-27b-dense | 0.9363 | 0.5980 | 0.0965 | 119.49 | 2.665e-15 | Apache2 | 27 | true |
 | gemma-4-31b | <TBD> | <TBD> | <TBD> | <TBD> | <TBD> | Apache2 | 31 | <TBD> |
+
+Gemma 4 31B Base: scoring in progress as of 18:01 UTC; expected completion ~21:00 UTC.
 
 ## Hypothesis test outcome
 
@@ -32,10 +34,12 @@ Outcome (circle the outcome that fired when results land):
 
 > Outcome 1/2/3 maps to the three branches in the A2.6 spec's "What success looks like" section.
 
-- [ ] **Outcome 1 — at least one candidate AUC > 0.5.** Hypothesis holds.
-      File A2.7 PR updating A2.5's floor recommendations: re-enable the
-      perplexity floor calibrated against this run's distribution. Close
-      Phase A.5 (perplexity-replacement metric) as no longer needed.
+- [x] **Outcome 1 — at least one candidate AUC > 0.5.** Hypothesis holds.
+      FIRES via Qwen 3.6 27B Dense (AUC 0.9363). A2.7 perplexity floor
+      recalibration is the active follow-up; Phase A.5
+      (perplexity-replacement metric) is now DEFERRED. Gemma 4 31B's
+      result, when it lands, may strengthen the conclusion but is
+      unlikely to invert it (Outcome 1 already fired and is sticky).
 - [ ] **Outcome 2 — all candidates 0.5 > AUC > 0.4.** Hypothesis partially
       supported. Document the partial improvement. Phase A.5 stays
       parked with reduced urgency. Floor recommendation stays at A2.5's
@@ -55,25 +59,34 @@ corpus size (300/300/300) are held constant.
 
 | candidate | A2.3c AUC (OASST2 / boilerplate) | A2.4 AUC (OASST2 / wiki intros) | A2.6 AUC (swival / wiki intros) |
 | --- | --- | --- | --- |
-| llama-3.1-8b-instruct | 0.119744 | 0.240022 | <TBD> |
-| qwen3-8b-base | 0.235000 | 0.206522 | <TBD> |
-| qwen3.6-27b-dense | 0.275922 | 0.264117 | <TBD> |
-| gemma-4-31b | 0.054500 | 0.184867 | <TBD> |
+| llama-3.1-8b-instruct | 0.119744 | 0.240022 | 0.3425 |
+| qwen3-8b-base | 0.235000 | 0.206522 | 0.2431 |
+| qwen3.6-27b-dense | 0.275922 | 0.264117 | 0.9363 (not evaluated in A2.3c/A2.4 — candle backend limitation; first evaluated in A2.6 via mistralrs) |
+| gemma-4-31b | 0.054500 | 0.184867 | <TBD> (not evaluated in A2.3c/A2.4 — candle backend limitation; first evaluated in A2.6 via mistralrs) |
+
+Note: the A2.3c and A2.4 columns for the 27B/31B rows are retained from
+the prior reports for shape continuity, but those runs aborted on model
+load under the candle backend. A2.6 is the first run where the larger
+two candidates produce real AUCs; the 27B/31B prior-column numbers
+should be read as "no comparable measurement" rather than as a
+regression.
 
 ## Next-step recommendation
 
-Selected outcome: <TBD — circle one of the three above when results land>.
+Selected outcome: **Outcome 1**.
 
-Concrete actions, conditional on outcome:
+Concrete actions:
 
-- **If Outcome 1 fires:** open A2.7 PR retitled "Re-enable perplexity
-  floor against swival-calibrated distribution"; recalibrate floor via
-  `scripts/operator/calibrate-from-hf.sh` against the winning candidate;
-  update `docs/operator/env-reference.md` defaults; mark Phase A.5
-  closed in the roadmap.
-- **If Outcome 2 fires:** annotate A2.5's recommendation as
-  "conservative-by-default, operator-overridable"; leave Phase A.5 on
-  the roadmap with reduced priority; no production-default changes.
-- **If Outcome 3 fires:** reinforce A2.5's recommendation; keep
-  perplexity floor at 0 for pilot launch; promote Phase A.5
-  (perplexity-replacement metric) to the next active slice.
+- A2.7 fires (full): promote PR #74's plan stub to executable plan.
+  Calibration candidate is the worst-of-passing model (to be selected
+  once Gemma 4 31B's AUC lands; current worst-of-passing among the
+  three completed candidates is Llama-3.1-8B-Instruct at AUC 0.3425,
+  which did not cross 0.5 — Qwen 3.6 27B Dense is the only crosser so
+  far, so it is provisionally both best- and worst-of-passing).
+- Open A2.7 PR retitled "Re-enable perplexity floor against
+  swival-calibrated distribution"; recalibrate floor via
+  `scripts/operator/calibrate-from-hf.sh` against the chosen
+  calibration candidate; update `docs/operator/env-reference.md`
+  defaults.
+- Phase A.5 (perplexity-replacement metric) marked DEFERRED per
+  Outcome 1 routing.
