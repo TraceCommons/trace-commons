@@ -135,7 +135,7 @@ impl FlakyScorer {
 impl PerplexityScorer for FlakyScorer {
     fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
-        if n % 3 == 0 {
+        if n.is_multiple_of(3) {
             anyhow::bail!("FlakyScorerInjectedFailure");
         }
         self.inner.score(plaintext)
