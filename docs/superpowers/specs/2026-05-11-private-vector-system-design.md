@@ -23,6 +23,30 @@ Predecessors:
 > Phase A treats those as future work and runs the same components
 > as ordinary services.
 
+## Update (2026-05-14)
+
+Phase A's per-component specs have evolved since this overview was
+rephased. Successor specs of record:
+
+- **PerplexityScorer.** Backend migrated from candle-direct to
+  mistralrs in A2.3
+  (`2026-05-13-mistralrs-migration-design.md`); architecture is
+  auto-detected from `config.json`. See the addendum in
+  `2026-05-12-perplexity-scorer-design.md`.
+- **Gate floors.** A2.5
+  (`2026-05-14-gate-floor-recalibration-design.md`) reconfigured the
+  three floors after A2.3c + A2.4 measured aggregate-perplexity
+  AUC < 0.5 across all bake-off candidates. Pilot launch ships
+  perplexity floor `0` (disabled), tail-fraction floor `0`
+  (calibrate post-first-1000-traces), novelty floor `500000`
+  (cosine 0.5). **Novelty is the primary active gate** at launch;
+  the "two-half gate" framing below is preserved as the eventual
+  Phase A.5 shape, not the pilot shape.
+
+The trait surface, schema, envelope format, and gate-decision row
+shape called out in the rephase note are still unchanged across the
+two phases.
+
 ## Goal
 
 Ship the dstack-resident attested workload that holds the production KEK, runs a

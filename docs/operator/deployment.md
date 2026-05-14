@@ -110,15 +110,19 @@ Plus (when built with `local-gpu-models`):
 Use [`scripts/operator/stage-models.sh`](../../scripts/operator/stage-models.sh):
 
 ```sh
-TRACE_COMMONS_PERPLEXITY_MODEL_PATH=/srv/models/llama-3.1-8b-instruct \
+TRACE_COMMONS_PERPLEXITY_MODEL_PATH=/srv/models/qwen3-8b-base \
 TRACE_COMMONS_EMBEDDER_CACHE_DIR=/var/cache/tracedao-embedder \
 HF_TOKEN=hf_xxxxxxxxxxxxxxxx \
 ./scripts/operator/stage-models.sh
 ```
 
-The script downloads Llama-3.1-8B-Instruct and BGE-large-en-v1.5, then
-verifies SHA256 against `scripts/operator/.model-checksums`. Re-running is
-idempotent; already-staged weights are skipped.
+The script downloads the configured perplexity model and
+BGE-large-en-v1.5, then verifies SHA256 against
+`scripts/operator/.model-checksums`. Re-running is idempotent;
+already-staged weights are skipped. A2.5 recommends **Qwen3-8B-Base**
+as the operator default (see `calibration.md` Phase 0);
+Llama-3.1-8B-Instruct remains a permitted incumbent choice but is no
+longer the recommended default.
 
 ## Configure environment
 
@@ -154,7 +158,7 @@ export TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS=true
 # --- Gate (models) ---
 export TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu
 export TRACE_COMMONS_GATE_SERVICE_MASTER_KEY=<32B hex>  # generate once, store securely
-export TRACE_COMMONS_PERPLEXITY_MODEL_PATH=/srv/models/llama-3.1-8b-instruct
+export TRACE_COMMONS_PERPLEXITY_MODEL_PATH=/srv/models/qwen3-8b-base  # A2.5 recommendation; arch auto-detected via mistralrs (A2.3)
 export TRACE_COMMONS_PERPLEXITY_DEVICE=cuda:0
 export TRACE_COMMONS_EMBEDDER_CACHE_DIR=/var/cache/tracedao-embedder
 export TRACE_COMMONS_VECTOR_INDEX_ROOT=/var/lib/tracedao-vector-index
@@ -206,7 +210,8 @@ common first-deploy failures are listed in
 1. **Startup phase.** Watch for these `tracing` events in order:
    - `kek_wrapper.ready` — KMS adapter loaded.
    - `gate_service.ready` (with `policy_version` and `gate_version_hash`) —
-     candle scorer + fastembed embedder + usearch index loaded.
+     mistralrs scorer + fastembed embedder + usearch index loaded
+     (A2.3 migrated the perplexity scorer off candle-direct).
    - `db.rls_ready` — RLS policies present.
    - `server.listening` — Axum bound.
 2. **`GET /v1/admin/config-status`.** Should report no critical config
