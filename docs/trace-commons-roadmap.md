@@ -51,6 +51,30 @@ What it does not have:
 These are the only items that need to land before someone could actually
 deploy this for real. Everything else is polish.
 
+### Production Gap Queue (2026-05-14)
+
+Ordered. Top item is the active blocker.
+
+1. **A2.6 result + decision routing.** Bake-off currently running on
+   Lambda H100; report expected today. Outcome routes per the A2.7
+   spec (PRs #50, #58): winner-promotion path or metric-replacement
+   escalation into Phase A.5.
+2. **Tail-fraction floor calibration.** Currently 0 (disabled) per
+   A2.5. Needs the first ~1000 pilot traces to set a real floor; runs
+   against the corpus produced by the `trace-commons-pilot-bootstrap`
+   harness (A.6 / PR #47).
+3. **Pilot launch.** Next gate after (1) and (2). Server side is
+   code-complete + smoke-validated; pilot-bootstrap binary is on
+   `main` with a local smoke harness (PR #51), swival corpus-builder
+   schema fix (PR #54), and an indexed operator runbook (PR #52).
+4. **Phase A.5 perplexity-replacement metric.** Conditional on A2.6
+   outcome. Per-token rarity Python prototype landed (PR #55); Rust
+   bake-off integration is in progress today.
+5. **Ironclaw client wiring.** Still the eventual unblock for real
+   contributor traffic; out of this repo's control. Pilot-bootstrap
+   harness is the work-around for everything that previously required
+   real users.
+
 ### 1. Phase A — real gate service on regular hardware with cloud KMS
 
 The pilot-readiness slice. Trace Commons aspires to an operator-constrained
@@ -60,9 +84,18 @@ service on regular GPU hardware with **cloud KMS as the KEK**, accepting
 that the operator and cloud provider can read user content via KMS
 `Decrypt`. Phase B (below) does the trust upgrade once dstack is ready.
 
-**Phase A status (2026-05-14): code-complete + bake-off-validated.** All
+**Phase A status (2026-05-14): code-complete + smoke-validated.** All
 A1–A6 work items below plus four bake-off retrofits (A2.1, A2.2, A2.3,
 A2.5) and two real bake-off runs (A2.3c + A2.4) are merged on `main`.
+Two follow-up items are in progress today: A2.6 (agent-traces novel-slice
+4-way bake-off) is **currently running on Lambda H100** — Llama-3.1-8B,
+Qwen3-8B-Base, Qwen 3.6 27B Dense, Gemma 4 31B; report expected today
+(ETA ~14:00 UTC). The Phase A.5 per-token rarity scorer is being wired
+into the Rust bake-off binary (parallel work in progress) under a
+`--scorer perplexity|token-rarity|both` flag; the Python prototype
+(PR #55, under `scripts/research/`) is already on `main`. Pilot launch
+is the next gate, blocked on A2.6 result review and post-pilot
+tail-fraction calibration.
 The binary boots green on Lambda Cloud GPU hardware
 (A10 / A100 / H100); `audit-chain-drill` returns `ready: true`. The
 empirical model bake-off ran four candidates (Llama-3.1-8B-Instruct,
@@ -112,11 +145,16 @@ gate. The deeper perplexity-replacement metric design is parked under
   pending post-first-1000-trace calibration; novelty floor at 500000
   is the active primary gate. Model pick stays Qwen3-8B-Base for
   cost (smallest VRAM footprint; choice no longer load-bearing).
-- A2.6: agent-traces novel-slice bake-off — pending run (corpus
-  builder + runbook merged; awaiting operator bake-off run + report
-  per spec rollout A2.6b). Spec at
+- A2.6: agent-traces novel-slice bake-off — **in progress today**.
+  Run started on Lambda H100 against the 4-way candidate set
+  (Llama-3.1-8B-Instruct, Qwen3-8B-Base, Qwen 3.6 27B Dense, Gemma 4
+  31B). Report expected today (~14:00 UTC). PR #50 also landed the
+  A2.7 follow-up spec stub; PR #58 refined that spec with
+  outcome-branch decision recipes so the post-run routing (winner
+  promotion vs. metric-replacement escalation to Phase A.5) is
+  pre-specified. Corpus builder + runbook merged previously. Spec:
   `docs/superpowers/specs/2026-05-14-agent-traces-bakeoff-design.md`;
-  operator runbook at `docs/operator/agent-traces-bakeoff-run.md`.
+  operator runbook: `docs/operator/agent-traces-bakeoff-run.md`.
 - A3: real `Embedder` (fastembed + BGE-large-en-v1.5) — done
 - A4: real `VectorIndex` (usearch with on-disk persistence) — done
 - A5: `novelty_utility` credit-event emission — done
@@ -190,7 +228,12 @@ Three candidate approaches recorded in
   checkpoints. No schema change; one extra model load.
 - **Per-token rarity** — gate on the lowest-N logprob tail. A
   tighter version of `tail_fraction`; may collapse into it after
-  pilot calibration.
+  pilot calibration. Python prototype landed in PR #55
+  (`scripts/research/`); Rust bake-off integration is **in progress
+  today** (parallel agent wiring a `--scorer
+  perplexity|token-rarity|both` flag into the existing
+  `trace-commons-gate-calibrate bake-off` binary so A2.6 candidates can
+  be re-scored under both metrics on the same corpus).
 - **Learned discriminator** — small classifier trained on labeled
   novel/duplicate exemplars. Highest ceiling, depends on labeled
   pilot data.
