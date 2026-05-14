@@ -46,6 +46,53 @@ as an ops calibration utility.
    TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA=0
    ```
 
+## Local smoke validation
+
+Before pointing the harness at a real ingest deployment, run the
+loopback smoke. It builds the binary, spins up a stdlib-only Python
+mock that plays both `huggingface.co` and `/v1/traces` on
+`127.0.0.1:3907`, primes the hf-hub cache from a 7 KB checked-in
+parquet fixture (`scripts/operator/fixtures/swival-smoke.parquet`),
+and asserts both the happy-path POST count and submission-id
+idempotency across two consecutive runs.
+
+The smoke is fully offline — no `huggingface.co` reachability or
+`HF_TOKEN` is needed. Typical wall-clock cost is well under a minute
+on a developer laptop.
+
+```
+# Build once (release profile keeps the smoke fast).
+cargo build --release --bin trace-commons-pilot-bootstrap
+
+# Run the loopback smoke. Exits 0 on success, 1 with a hash-only
+# diagnostic label on failure (e.g. `run2_distinct_3_expected_10_idempotency_broken`).
+./scripts/operator/pilot-bootstrap-smoke.sh
+```
+
+Expected last line:
+
+```
+SmokePilotBootstrapOK: 10 submissions, idempotency confirmed (distinct stayed at 10 across 2 runs)
+```
+
+Tunables (override via env):
+
+| Var | Default | Meaning |
+|-----|---------|---------|
+| `SMOKE_COUNT` | `10` | submissions per run |
+| `SMOKE_PORT` | `3907` | loopback port for the mock server |
+| `SMOKE_BINARY` | `./target/release/trace-commons-pilot-bootstrap` | binary under test |
+| `SMOKE_SIDECAR` | `/tmp/pilot-bootstrap-smoke-sidecar.jsonl` | sidecar output |
+| `SMOKE_HF_CACHE` | `/tmp/pilot-bootstrap-smoke-hf-cache` | scratch hf-hub cache |
+| `SMOKE_MOCK_LOG` | `/tmp/pilot-bootstrap-smoke-mock.log` | mock server stderr |
+| `SMOKE_BINARY_LOG` | `/tmp/pilot-bootstrap-smoke-binary.log` | binary stdout+stderr |
+
+The mock server only binds to `127.0.0.1` and refuses any non-loopback
+host. The smoke cleans up the sidecar before each run and terminates
+the mock on `EXIT`/`INT`/`TERM`. Run the smoke whenever the binary,
+the protocol envelope, or the translators change before promoting to
+a staging deployment.
+
 ## Quick start
 
 ### 100-submission smoke
