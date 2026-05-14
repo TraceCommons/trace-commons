@@ -156,7 +156,7 @@ fn failed_candidate_with_load_error_is_excluded_from_winner() {
     );
     assert!(failed.load_or_eval_error.is_some());
     assert!(!failed.passed_determinism_gate);
-    assert!(pick_winner(&[failed.clone()]).is_none());
+    assert!(pick_winner(std::slice::from_ref(&failed)).is_none());
 
     // With a healthy candidate alongside, the healthy one wins.
     let healthy = result("healthy", 0.8, 0.1, 0.5, 1000.0, 1e-7);
