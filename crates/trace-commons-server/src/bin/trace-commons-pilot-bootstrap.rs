@@ -52,10 +52,20 @@ struct Cli {
     #[arg(long, default_value_t = 42)]
     seed: u64,
 
-    /// Local cache directory for downloaded HF parquet shards.
+    /// Local cache directory for downloaded HF JSONL session files.
     /// Defaults to the standard `hf-hub` cache (`~/.cache/huggingface`).
     #[arg(long)]
     cache_dir: Option<PathBuf>,
+
+    /// Minimum word count for a session to be submitted. Sessions below
+    /// this threshold are skipped silently.
+    #[arg(long, default_value_t = pilot_bootstrap::DEFAULT_MIN_WORDS)]
+    min_words: usize,
+
+    /// Maximum word count for a session to be submitted. Sessions above
+    /// this threshold are skipped silently.
+    #[arg(long, default_value_t = pilot_bootstrap::DEFAULT_MAX_WORDS)]
+    max_words: usize,
 
     /// Print the parsed configuration and exit without submitting.
     #[arg(long)]
@@ -85,6 +95,8 @@ async fn main() -> anyhow::Result<()> {
         seed: cli.seed,
         cache_dir: cli.cache_dir,
         dry_run: cli.dry_run,
+        min_words: cli.min_words,
+        max_words: cli.max_words,
     };
 
     run_pilot_bootstrap(config).await

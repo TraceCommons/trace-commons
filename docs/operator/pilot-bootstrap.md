@@ -16,9 +16,11 @@ as an ops calibration utility.
 ## What it is (and is not)
 
 - Single binary, single process, single tenant.
-- Reads parquet shards from HuggingFace via `hf-hub`, translates rows to
-  `trace-commons-protocol` envelopes through the deterministic redactor, and
-  POSTs to `/v1/traces` at a configurable rate.
+- Reads `.jsonl` session files from HuggingFace via `hf-hub` (one file =
+  one session = one trace), flattens each session into a body via the
+  per-dataset translator, runs the body through the deterministic
+  redactor, and POSTs the resulting `trace-commons-protocol` envelope to
+  `/v1/traces` at a configurable rate.
 - Idempotent: re-running against the same dataset is safe — the
   ingest server collapses duplicate submission ids to no-ops.
 - **Not** a multi-tenant load tester. **Not** adversarial input. **Not**
@@ -37,35 +39,42 @@ as an ops calibration utility.
    on the ingest side. The harness reads the same token from
    `TRACE_COMMONS_PILOT_TENANT_TOKEN` (or `--tenant-token`).
 
-3. Free disk space for the HF parquet cache (`~/.cache/huggingface`
-   by default; override with `--cache-dir`). The swival shards are
-   under a couple of GB; multi-dataset runs add proportionally.
+3. Free disk space for the HF session cache (`~/.cache/huggingface`
+   by default; override with `--cache-dir`). The swival JSONL session
+   files total a few GB; multi-dataset runs add proportionally.
 4. Zero-credit calibration mode on the server side:
 
    ```
    TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA=0
    ```
 
-## Known defects (2026-05-14)
+## Session schema
 
-Before running against real contributor infrastructure, read
-[`./pilot-bootstrap-dryrun-notes.md`](./pilot-bootstrap-dryrun-notes.md).
-The loopback smoke below passes, but pointing the binary at the real
-`jedisct1/agent-traces-swival`, `badlogicgames/pi-mono`, or
-`TeichAI/DeepSeek-v4-Pro-Agent` HF datasets currently fails at shard
-discovery (parquet-only loader, JSONL-only datasets) and the translators
-encode a fictional schema. The harness is **not** pilot-ready for real
-runs until those defects are fixed.
+All three target datasets ship one `.jsonl` file per session at the
+repo root. Each line is one event row; the translator concatenates the
+textual content of every event into one trace body. Recognized text
+fields (per event, in this order): `message.content` (string OR list of
+`{type:"text", text:"..."}` or `{type:"thinking", thinking:"..."}`
+chunks) and the top-level `content`. Other event fields (`type`,
+`model_change`, `parentId`, `timestamp`, ...) are ignored. Sessions
+whose flattened body falls outside the word-count bounds
+(`--min-words`/`--max-words`, default 200..=2000) are skipped.
+
+See `scripts/operator/build-agent-traces-corpus.py` for the
+authoritative reference implementation and
+[`./pilot-bootstrap-dryrun-notes.md`](./pilot-bootstrap-dryrun-notes.md)
+for the post-mortem of the earlier parquet-shaped loader.
 
 ## Local smoke validation
 
 Before pointing the harness at a real ingest deployment, run the
 loopback smoke. It builds the binary, spins up a stdlib-only Python
 mock that plays both `huggingface.co` and `/v1/traces` on
-`127.0.0.1:3907`, primes the hf-hub cache from a 7 KB checked-in
-parquet fixture (`scripts/operator/fixtures/swival-smoke.parquet`),
-and asserts both the happy-path POST count and submission-id
-idempotency across two consecutive runs.
+`127.0.0.1:3907`, primes the hf-hub cache from a directory of
+checked-in JSONL session fixtures
+(`scripts/operator/fixtures/swival-smoke/`), and asserts both the
+happy-path POST count and submission-id idempotency across two
+consecutive runs.
 
 The smoke is fully offline — no `huggingface.co` reachability or
 `HF_TOKEN` is needed. Typical wall-clock cost is well under a minute
@@ -176,7 +185,9 @@ cargo run --release ... -- --source TeichAI/DeepSeek-v4-Pro-Agent --count 10000 
 | `--rate` | `1.0` | requests per second |
 | `--sidecar` | `./pilot-bootstrap-sidecar.jsonl` | append-only JSONL |
 | `--seed` | `42` | deterministic row sampling seed |
-| `--cache-dir` | hf-hub default | parquet cache directory |
+| `--cache-dir` | hf-hub default | JSONL session cache directory |
+| `--min-words` | `200` | drop sessions with fewer words after flatten |
+| `--max-words` | `2000` | drop sessions with more words after flatten |
 | `--dry-run` | off | print resolved config and exit |
 
 ## Sidecar interpretation
