@@ -28,7 +28,7 @@ Referenced from
 |---|---|---|---|---|---|
 | 2026-05-13 | A2.3c | Lambda H100 SXM5 80GB | ~5 | ~$25 | model bake-off (boilerplate duplicate slice) |
 | 2026-05-13 | A2.4 | Lambda H100 SXM5 80GB | ~5 | ~$25 | model bake-off (Wikipedia duplicate slice) |
-| 2026-05-14 | A2.6 | Lambda H100 SXM5 80GB | ~5 | ~$22 | model bake-off (agent-traces novel slice) |
+| 2026-05-14 | A2.6 | Lambda H100 SXM5 80GB | 8.65 | ~$37 | model bake-off (agent-traces novel slice, 4 candidates; final) |
 
 ## Hash-only / no-secrets reminder
 
