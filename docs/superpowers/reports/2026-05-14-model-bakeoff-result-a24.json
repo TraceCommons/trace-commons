@@ -1,0 +1,65 @@
+{
+  "generated_at": "2026-05-14T05:17:10.475869433+00:00",
+  "corpus_sha256": "sha256:7f4349686db668d081f0d9ebfbe682e803bd888fff61705c527c975db631d718",
+  "manifest_sha256": "sha256:2e360df9449d81d664caeb0e17ed893ccb28e5998604c4caafd1aa46a13fd0f0",
+  "candidates": [
+    {
+      "id": "llama-3.1-8b-instruct",
+      "discrimination_auc": 0.24002222222222222,
+      "paraphrase_delta": 0.1249158008495719,
+      "tail_fraction_range": 0.021226000000000002,
+      "determinism_stddev": 0.0,
+      "throughput_tps": 316.22150311375856,
+      "peak_vram_mib": 17489,
+      "license": "llama-community",
+      "params_b": 8,
+      "passed_determinism_gate": true,
+      "release_date_unix": 1721692800
+    },
+    {
+      "id": "qwen3-8b-base",
+      "discrimination_auc": 0.20652222222222222,
+      "paraphrase_delta": 0.14159976209575528,
+      "tail_fraction_range": 0.025124,
+      "determinism_stddev": 4.163336342344337e-17,
+      "throughput_tps": 270.6510505509943,
+      "peak_vram_mib": 17779,
+      "license": "Apache-2.0",
+      "params_b": 8,
+      "passed_determinism_gate": true,
+      "release_date_unix": 1745884800
+    },
+    {
+      "id": "qwen3.6-27b-dense",
+      "discrimination_auc": 0.26411666666666667,
+      "paraphrase_delta": 0.13984306862438572,
+      "tail_fraction_range": 0.022289000000000007,
+      "determinism_stddev": 1.249000902703301e-16,
+      "throughput_tps": 126.09218344913526,
+      "peak_vram_mib": 55607,
+      "license": "Apache-2.0",
+      "params_b": 27,
+      "passed_determinism_gate": true,
+      "release_date_unix": 1776470400
+    },
+    {
+      "id": "gemma-4-31b",
+      "discrimination_auc": 0.18486666666666668,
+      "paraphrase_delta": 0.1734078490191651,
+      "tail_fraction_range": 0.032828,
+      "determinism_stddev": 1.1102230246251565e-16,
+      "throughput_tps": 213.94487723367325,
+      "peak_vram_mib": 72793,
+      "license": "Apache-2.0",
+      "params_b": 31,
+      "passed_determinism_gate": true,
+      "release_date_unix": 1774742400
+    }
+  ],
+  "winner_id": "llama-3.1-8b-instruct",
+  "decision_rule_version": 1,
+  "mock_scorer": false,
+  "ctx_max_tokens": 4096,
+  "determinism_gate_value": 0.00001,
+  "partial": false
+}

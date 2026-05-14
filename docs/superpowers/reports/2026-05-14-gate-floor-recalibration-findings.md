@@ -14,9 +14,9 @@ Driver runs:
 - A2.3c — 4-candidate bake-off against the boilerplate-shaped duplicate
   slice (license boilerplate, FAQ-prefix, stock prose). Complete.
 - A2.4 — same 4 candidates against a Wikipedia-introductions duplicate
-  slice. 3 of 4 complete at the time of this report (Gemma 4 31B Base
-  is still in flight); A2.4 was constructed specifically to test the
-  hypothesis that A2.3c's headline finding was a corpus artifact.
+  slice. Complete (2026-05-14, 4 of 4 candidates). A2.4 was
+  constructed specifically to test the hypothesis that A2.3c's
+  headline finding was a corpus artifact.
 
 ## TL;DR
 
@@ -55,28 +55,35 @@ The base/instruct/dense/large axis doesn't change the sign of the
 result — every model under measurement finds duplicate boilerplate
 *more* surprising than novel reasoning.
 
-## A2.4 — Wikipedia-corpus run (3 of 4 complete)
+## A2.4 — Wikipedia-corpus run (complete)
 
 Same four candidates, same paraphrase pipeline. Duplicate slice
 replaced with Wikipedia article introductions on the hypothesis that
 "boilerplate is too far from the model's training distribution; using
 something the model has seen will reverse the AUC."
 
-Source: `~/bakeoff-results-a23/report-a24.json` (in flight at A2.5
-spec time; copied inline here).
+Source: `docs/superpowers/reports/2026-05-14-model-bakeoff-result-a24.json`.
 
-| Candidate              | AUC                                  | Paraphrase delta | Tail-fraction range | Throughput tps |
-|------------------------|--------------------------------------|------------------|---------------------|----------------|
-| Llama-3.1-8B-Instruct  | 0.2400                               | 0.1249           | 0.0212              | 316.2          |
-| Qwen3-8B-Base          | 0.2065                               | 0.1416           | 0.0251              | 270.7          |
-| Qwen 3.6 27B Dense     | 0.2641                               | 0.1398           | 0.0223              | 126.1          |
-| Gemma 4 31B Base       | result pending; A2.4 still in flight at A2.5-spec time | — | — | — |
+| Candidate              | AUC    | Paraphrase delta | Tail-fraction range | Throughput tps |
+|------------------------|--------|------------------|---------------------|----------------|
+| Llama-3.1-8B-Instruct  | 0.2400 | 0.1249           | 0.0212              | 316.2          |
+| Qwen3-8B-Base          | 0.2065 | 0.1416           | 0.0251              | 270.7          |
+| Qwen 3.6 27B Dense     | 0.2641 | 0.1398           | 0.0223              | 126.1          |
+| Gemma 4 31B Base       | 0.1849 | 0.1734           | 0.0328              | 213.9          |
 
-Gemma 4 31B Base scored 0.0545 in A2.3c (boilerplate corpus); its A2.4
-result is the only outstanding data point. The corpus-design
-hypothesis can be evaluated for the other three candidates already,
-and the answer is: the corpus change moved the numbers, but it did
-not move them across 0.5.
+Gemma 4 31B Base improved from 0.0545 (A2.3c) to 0.1849 (A2.4) — a
++0.130 jump, the largest absolute swing in the dataset besides
+Llama-Instruct's +0.120. Wikipedia helps the dense/large base model
+substantially even though it slightly hurt the smaller Qwen3-8B-Base.
+The corpus change moves every candidate but does not move any of
+them across 0.5.
+
+Headline-winner note: A2.4's `pick_winner` selected
+`llama-3.1-8b-instruct` (AUC 0.2400, in-throughput-budget) over
+A2.3c's Qwen3-8B-Base. Qwen 3.6 27B Dense had the highest A2.4 AUC
+(0.2641) but failed the throughput floor (126 tps vs ~158 cutoff).
+**Neither winner pick is load-bearing for the gate-floor decision**
+— per A2.5, the perplexity floor ships at 0 either way.
 
 ## Side-by-side delta (the most important data view)
 
@@ -85,7 +92,7 @@ not move them across 0.5.
 | Llama-3.1-8B-Instruct  | 0.1197    | 0.2400   | +0.120   |
 | Qwen3-8B-Base          | 0.2350    | 0.2065   | −0.029   |
 | Qwen 3.6 27B Dense     | 0.2759    | 0.2641   | −0.012   |
-| Gemma 4 31B Base       | 0.0545    | pending  | —        |
+| Gemma 4 31B Base       | 0.0545    | 0.1849   | +0.130   |
 
 ## Interpretation
 
@@ -101,28 +108,30 @@ the pilot-launch decision:
    measure.
 
 2. **The corpus change (boilerplate → Wikipedia) helped Llama-Instruct
-   decisively (+0.12) but slightly hurt the base/large models (−0.029
-   to −0.012).** Hypothesis: base models were already less RLHF-
+   decisively (+0.12) and Gemma 4 31B substantially (+0.13) but
+   slightly hurt the smaller Qwen base models (−0.029 to −0.012).**
+   Hypothesis: smaller Qwen base models were already less RLHF-
    distorted, so the boilerplate corpus wasn't penalizing them as
    much; swapping to Wikipedia (which they're trained on heavily)
    makes the duplicate slice even *less* surprising for them →
-   reduces the gap. Llama-Instruct, by contrast, gains the most from
-   the corpus swap because its RLHF-shaped confidence pattern aligns
-   most with Wikipedia intros. None of this changes the sign — every
-   number is still below 0.5 — but it does say the corpus-design
-   intuition that worked for A2's pseudocode (boilerplate as
-   "obviously duplicate") doesn't survive contact with the models we
-   can actually run.
+   reduces the gap. Llama-Instruct and Gemma 4 31B, by contrast, both
+   gain from the corpus swap — Llama because its RLHF-shaped
+   confidence aligns with Wikipedia prose, Gemma 4 because it's
+   trained on Wikipedia at extreme density. None of this changes the
+   sign — every number is still below 0.5 — but it does say the
+   corpus-design intuition that worked for A2's pseudocode
+   (boilerplate as "obviously duplicate") doesn't survive contact
+   with the models we can actually run.
 
-3. **Gemma 4 31B's tail_fraction_range of 0.2019 in A2.3c is the
-   strongest single signal in the dataset.** The *tail* of the
-   perplexity distribution does separate slices even when the
+3. **Gemma 4 31B's tail_fraction_range is the strongest single signal
+   in the dataset** (0.2019 in A2.3c, dropping to 0.0328 in A2.4 — the
+   tail signal is corpus-dependent too, not invariant). The *tail* of
+   the perplexity distribution does separate slices even when the
    aggregate does not. This is what justifies leaving the
    tail-fraction floor in the codebase (at 0 for pilot launch) rather
-   than removing it. Gemma 4 31B's A2.4 result is the data point most
-   worth waiting on — if its tail-fraction range stays near 0.20 on
-   the Wikipedia corpus, that strengthens the post-pilot tail-
-   fraction calibration argument.
+   than removing it; the floor needs pilot-distribution calibration
+   before it can usefully discriminate, but the residual signal is
+   real.
 
 4. **The pattern is consistent across model families and corpus
    designs.** This isn't a single-candidate quirk that another model
