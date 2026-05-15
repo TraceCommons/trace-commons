@@ -1,21 +1,21 @@
 # A2.7 Perplexity Floor Calibration — Operator Runbook (Outcome 1)
 
-> **2026-05-14 STILL BLOCKED — per-trace-scores binary mod regressed
-> on multimodal pipelines.** PR #95 added per-trace score persistence
-> to the bake-off report (closing the first gap), but the new
-> accumulator hangs silently when the candidate's mistralrs pipeline
-> reports input modalities `[Text, Vision]`. That includes the
-> Qwen 3.6 27B Dense calibration anchor (only HF-published variant
-> is `Qwen/Qwen3.6-27B`, the multimodal `Qwen3_5ForConditionalGeneration`
-> architecture). See
+> **2026-05-15 EXECUTED — pilot launches with calibrated floor.** The
+> A2.7 re-bake-off completed cleanly 2026-05-15 07:06 UTC against
+> Qwen 3.6 27B Dense (AUC 0.9363, bit-identical to A2.6;
+> passed_det_gate, 0/300 score failures across all slices). The
+> per_trace_scores arrays from PR #95 fed
+> `scripts/research/a27_calibrate_perplexity_floor.py` which proposed
+> `TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=6246774` (Youden's-J
+> optimum 13.03, p10 novel 11.98, geomean 12.49, 0.5x headroom →
+> 6.25, well below median novel 20.31). Result committed at
+> `docs/superpowers/reports/2026-05-15-a27-calibration-result.json`
+> and `docs/operator/deployment.md:171`. The earlier
+> 2026-05-14 "PR #95 multimodal hang regression" was a build-flag
+> mistake (CPU-only build) — see
 > `docs/superpowers/reports/2026-05-14-pr95-multimodal-hang-regression.md`
-> for the full reproduction and recommended fix path. **Operator
-> action while still blocked: ship the pilot with
-> `TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=0` per A2.5's
-> conservative default; the in-pilot tail-fraction subcommand (PR
-> #66) can drive a separate calibration path on real contributor
-> data.** Resume here once the regression is fixed and a re-bake-off
-> run produces a clean `report-a27.json` with per_trace_scores.
+> retraction banner and the build-env capture under
+> `scripts/operator/build-env/`.
 
 Phase: A.2.7 post-A2.6. Predecessors:
 [`./a26-bakeoff-result-handler.md`](./a26-bakeoff-result-handler.md) (which

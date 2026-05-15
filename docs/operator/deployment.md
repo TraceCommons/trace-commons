@@ -168,7 +168,7 @@ export TRACE_COMMONS_VECTOR_INDEX_DIM=1024
 # A2.3c + A2.4 measured perplexity-AUC < 0.5 across all candidates and corpora,
 # so the perplexity floor ships disabled. Tail-fraction floor is calibrated
 # post-first-1000-pilot-traces. Novelty is the active primary gate at launch.
-export TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=0      # A2.5: perplexity AUC < 0.5; disabled at pilot launch
+export TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=6246774  # A2.7 (2026-05-15): calibrated from Qwen 3.6 27B per-trace scores; 0.5x headroom on geomean(Youden's-J=13.03, p10_novel=11.98). See docs/superpowers/reports/2026-05-15-a27-calibration-result.json.
 export TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS=0   # A2.5: calibrate post-first-1000-traces
 export TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS=500000    # 0.5 cosine novelty; unchanged
 export TRACE_COMMONS_GATE_POLICY_VERSION=pilot-v1
