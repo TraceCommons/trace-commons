@@ -1,0 +1,13 @@
+{
+  "calibration_candidate": "qwen3.6-27b-dense",
+  "discrimination_auc_reported": 0.9362666666666667,
+  "discrimination_auc_recomputed": 0.9362666666666667,
+  "youden_j_optimum_perplexity": 13.027116,
+  "p10_novel_perplexity": 11.981833,
+  "median_novel_perplexity": 20.30711,
+  "headroom_multiplier": 0.5,
+  "floor_raw_perplexity": 12.493547469939353,
+  "floor_proposed_perplexity": 6.246773734969676,
+  "floor_proposed_micros": 6246774,
+  "env_var_line": "TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=6246774"
+}
