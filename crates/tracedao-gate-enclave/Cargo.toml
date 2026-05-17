@@ -47,7 +47,7 @@ tokio = { version = "1", optional = true, features = ["rt"] }
 # the optional serde / serde_json / tokio entries above. Independent of
 # `local-gpu-models`: a host can compile the NEAR AI scorer without the
 # mistralrs/candle/CUDA stack.
-reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "rustls-tls-native-roots"] }
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
 
 [features]
 default = []
@@ -80,7 +80,6 @@ near-ai-scorer = [
     "dep:reqwest",
     "dep:serde",
     "dep:serde_json",
-    "dep:tokio",
 ]
 
 [dev-dependencies]

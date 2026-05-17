@@ -44,9 +44,7 @@ use crate::perplexity::{
 use crate::perplexity_local::{aggregate_perplexity_metrics, per_token_rarity_micros};
 use anyhow::{Context, anyhow, bail};
 use serde::{Deserialize, Serialize};
-use std::thread;
 use std::time::Duration;
-use tokio::runtime::Runtime;
 
 /// Static configuration for the NEAR AI scorer.
 ///
@@ -105,43 +103,29 @@ impl NearAiScorerConfig {
     }
 }
 
-/// Bridged HTTP client + dedicated single-thread tokio runtime.
+/// HTTP-backed scorer using `reqwest::blocking`.
 ///
-/// Mirrors `LocalPerplexityScorer`'s bridging pattern: the sync
-/// [`PerplexityScorer::score`] trait method calls `runtime.block_on(...)` on
-/// the owned current-thread runtime. Keeps callers free to use any runtime
-/// flavor (including current-thread test runtimes) without panicking from
-/// `block_in_place`.
+/// `reqwest::blocking::Client` runs its own tokio current-thread runtime on a
+/// dedicated worker thread internally — same dedicated-thread pattern that
+/// `LocalPerplexityScorer` uses to avoid the "Cannot start a runtime from
+/// within a runtime" panic when the sync trait method is called inside the
+/// bake-off binary's `#[tokio::main]` context. Keeping the bridging inside
+/// reqwest means we don't have to hand-roll the mpsc job loop.
 pub struct NearAiPerplexityScorer {
     cfg: NearAiScorerConfig,
-    client: reqwest::Client,
-    runtime: Runtime,
-    /// Holds the dedicated worker thread the runtime drives. None in this
-    /// implementation — the runtime is driven by `block_on` on the calling
-    /// thread, identical to `LocalPerplexityScorer`'s flavor.
-    _worker: Option<thread::JoinHandle<()>>,
+    client: reqwest::blocking::Client,
 }
 
 impl NearAiPerplexityScorer {
     pub fn try_new(cfg: NearAiScorerConfig) -> anyhow::Result<Self> {
         cfg.validate()?;
 
-        let client = reqwest::Client::builder()
+        let client = reqwest::blocking::Client::builder()
             .timeout(cfg.timeout)
             .build()
             .context("NearAiScorerHttpClientBuildFailed")?;
 
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("NearAiScorerRuntimeBuildFailed")?;
-
-        Ok(Self {
-            cfg,
-            client,
-            runtime,
-            _worker: None,
-        })
+        Ok(Self { cfg, client })
     }
 
     /// Build a scoring request body. Kept factored out so the request shape is
@@ -183,35 +167,28 @@ impl NearAiPerplexityScorer {
         let req = self.build_request(plaintext)?;
         let url = format!("{}/completions", self.cfg.base_url);
 
-        let resp_text: String = self.runtime.block_on(async {
-            let resp = self
-                .client
-                .post(&url)
-                .bearer_auth(&self.cfg.api_key)
-                .json(&req)
-                .send()
-                .await
-                .context("NearAiScorerHttpSendFailed")?;
-            let status = resp.status();
-            let body = resp
-                .text()
-                .await
-                .context("NearAiScorerHttpBodyReadFailed")?;
-            if !status.is_success() {
-                // Body may contain a vLLM validation message; surface its
-                // length only, not its content (provider strings are not
-                // hash-only audit material).
-                return Err(anyhow!(
-                    "NearAiScorerHttpStatusError status={} body_len={}",
-                    status.as_u16(),
-                    body.len()
-                ));
-            }
-            Ok::<_, anyhow::Error>(body)
-        })?;
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.cfg.api_key)
+            .json(&req)
+            .send()
+            .context("NearAiScorerHttpSendFailed")?;
+        let status = resp.status();
+        let body = resp.text().context("NearAiScorerHttpBodyReadFailed")?;
+        if !status.is_success() {
+            // Body may contain a vLLM validation message; surface its
+            // length only, not its content (provider strings are not
+            // hash-only audit material).
+            return Err(anyhow!(
+                "NearAiScorerHttpStatusError status={} body_len={}",
+                status.as_u16(),
+                body.len()
+            ));
+        }
 
-        let parsed: CompletionsResponse = serde_json::from_str(&resp_text)
-            .context("NearAiScorerResponseParseFailed")?;
+        let parsed: CompletionsResponse =
+            serde_json::from_str(&body).context("NearAiScorerResponseParseFailed")?;
         let choice = parsed
             .choices
             .into_iter()
