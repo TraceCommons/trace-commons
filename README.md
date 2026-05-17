@@ -1,298 +1,222 @@
-# TraceCommons Server
+# TraceCommons
 
-Hosted server-side control plane for Trace Commons / TraceCommons.
+**A privacy-preserving commons for AI agent traces, with contributor rewards.**
 
-This repository is the extraction point for the pieces that should not live
-inside Ironclaw long term: public/private ingest, review queues, tenant access
-grants, audit/retention/revocation workers, export jobs, upload-claim issuing,
-object storage, and the production database schema.
+TraceCommons is an opt-in pipeline that lets people who run AI agents
+contribute redacted traces of those interactions to a shared corpus, in
+exchange for non-transferable account credits proportional to the utility
+their contributions provide. It's designed for one specific failure mode of
+the current AI ecosystem: the most useful training and evaluation data lives
+in private user sessions that nobody can collect responsibly, so it never
+gets collected at all.
 
-## Where Trace Commons Is
+The contract is "local-first, opt-in, redaction before upload":
 
-Trace Commons is past the local-only MVP. The hosted server now owns its
-database, object-storage abstraction, upload-claim issuer, and shared protocol
-surface. The current shape:
+- Trace contribution is **off by default**. Raw traces stay on the user's
+  device unless they explicitly opt in.
+- Uploads carry only `ironclaw.trace_contribution.v1` envelopes — text and
+  tool payloads are stripped or replaced with stable placeholders during
+  local deterministic redaction.
+- The server scores incoming traces for novelty against a frontier model
+  running inside a hardware TEE, so the operator never sees plaintext.
+- Accepted, settled traces mint **Trace Credits** through a hash-only
+  utility-attestation pipeline. Credits are non-transferable and bound to
+  reviewed evidence; uploads alone don't pay.
 
-| Area | State |
-|------|-------|
-| Local capture (Ironclaw side) | Stable. Opt-in, redaction-first, atomic queue writes, in-process queue worker, sanitized telemetry. |
-| Upload-claim auth | EdDSA/Ed25519 managed keysets with `kid` selection, guarded HTTPS refresh, optional max-stale fail-closed; static tokens and HS256 are bridge-only. A standalone Ed25519-only issuer MVP ships in this repo. |
-| Tenant access grants | Durable principal/role/scope/use grants with admin create/list/revoke. `TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS=true` makes them fail-closed across ingest/review/export/audit. |
-| PostgreSQL store | `TraceCorpusStore` with the `PgBackend` implementation. DB dual-write available; surface-scoped DB-read flags cover contributor, reviewer, replay, audit, and ranking lists. RLS is forced on all Trace Commons tables and centralized behind `trace_current_tenant_id()`. |
-| Encrypted artifact store | Local-encrypted (dev default) and filesystem-remote (rehearsal). The trait surface is production-shaped; the cloud provider is the open gap (see below). |
-| Revocation / retention | Tombstones, exact delayed-credit reversal, worker-cache invalidation, service-owned object deletion for every current artifact kind, configured remote-deleter for disabled cloud refs. |
-| Observability | Admin operational summary + Prometheus-text `/v1/admin/operational-metrics`, structured per-gate warning logs, hash-only error/reason logging across workers. |
-| Smoke / rollout | Required-check rollout-smoke gate with `/v1/admin/rollout-smoke/{evidence,preflight}`, dedicated drills for every required check, 24h staleness window. |
-| Trace Credits | Server-side settlement with hash-only utility attestations, dry-run + central-issuer-approved live batches, NEAR receipt outbox, credit holds, scoped credit-cycle scheduler. Central issuer principal allowlist gates every credit-bearing route. |
+This repository — `trace-commons-server` — is the hosted control plane:
+ingest, review, retention, revocation, encrypted artifact storage,
+upload-claim issuing, audit chain, and credit settlement. The contributor
+client lives in a separate repo (Ironclaw); the shared protocol DTOs live
+in `crates/trace-commons-protocol`.
 
-The roadmap is `docs/trace-commons-roadmap.md`; the storage contract is
-`docs/trace-commons-storage.md`; the envelope and threat model are
-`docs/trace-commons.md`.
+## Status: Pilot Deployment
 
-## Open Work
+TraceCommons is **in pilot deployment as of May 2026**. What that means
+concretely:
 
-This repo has zero contributor-facing deployments — see
-`docs/trace-commons-roadmap.md` for the full framing. As of 2026-05-14 the
-work is phased: Phase A is the
-pilot-readiness slice (real gate service on regular GPU hardware with cloud
-KMS as the KEK, accepting an operator-trusted model); Phase B is the trust
-upgrade to a dstack-attested enclave, deferred until pilot operational
-learning is in hand. The KEK trust-model regression is intentional and
-documented — contributor-facing language must be honest that TEE-rooted
-privacy is a planned upgrade, not a current property.
+| Component | State |
+|---|---|
+| Hosted server (this repo) | Phase A code-complete, smoke-validated, deployable. |
+| Scoring backend | **NEAR AI Cloud** (TEE-hosted vLLM, Intel TDX + NVIDIA GPU TEE) — chosen so a pilot host needs no local CUDA stack. Smoke-validated against `Qwen3.6-35B-A3B-FP8`. |
+| Gate floors | Recalibration against the hosted model is required before first contributor traffic — see [`docs/operator/a27-perplexity-floor-calibration.md`](docs/operator/a27-perplexity-floor-calibration.md). |
+| KMS / KEK | Cloud KMS (GCP first) with envelope-encrypted per-object DEKs. Phase A trust boundary. |
+| TEE trust upgrade | Phase B — move the gate service into an attested dstack enclave once dstack-GPU primitives stabilize. The current KEK boundary is honestly weaker than the Phase B target; this is documented, not papered over. |
+| Contributor client | Ironclaw integration is the remaining gate before live contributor traffic. The `trace-commons-pilot-bootstrap` binary stands in as a load-generation harness against real HF agent-traces sessions so calibration and end-to-end validation can proceed without it. |
+| Credits | Settlement, hash-only attestation pipeline, central-issuer ABAC, NEAR receipt outbox — all in. Credit-bearing routes are gated by a central-issuer principal allowlist. |
 
-Phase A is code-complete and smoke-validated. The empirical model bake-off
-that gated the pilot — A2.6, agent-traces novel slice, four-way candidate
-comparison — has three of four candidates in and is trending Outcome 1
-("at least one candidate AUC > 0.5"): Llama-3.1-8B-Instruct 0.342,
-Qwen3-8B-Base 0.243, **Qwen 3.6 27B Dense 0.936**, with Gemma 4 31B Base
-still in flight. The size pattern (8B candidates flunk, 27B passes)
-locks the pilot deployment goal to a 27B-class GPU host. The next gate
-is A2.7 perplexity floor calibration from the winning model; the plan
-stub (PR #74) is ready to promote pending the Gemma row.
+Pilot intentionally **scopes down** from the original design: regular GPU
+hardware (in NEAR AI's TEE) instead of an attested local enclave; cloud
+KMS as the KEK; a single calibrated model rather than per-tenant selection.
+Phase B narrows the trust gap; Phase A proves the path with operators.
 
-### Phase A — blocks pilot
+The full phasing and open work queue lives in
+[`docs/trace-commons-roadmap.md`](docs/trace-commons-roadmap.md). Per-slice
+design specs and implementation plans live under
+[`docs/superpowers/`](docs/superpowers/).
 
-1. **Real gate service on regular GPU hardware.** The trait surface
-   (`TraceGateService`, `KmsKeyWrapper`) is shipped (PRs #9–#12). Mock
-   perplexity / embedder / vector-index impls exist in
-   `trace-commons-gate-enclave`. What's still needed:
-   - `CloudKmsKeyWrapper` (GCP KMS first) wrapping per-object DEKs. Satisfies
-     the existing `TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY`
-     startup gate by convention.
-   - Real `PerplexityScorer` (Llama-class via candle / mistralrs / ort —
-     decision spec needed first).
-   - Real `Embedder` (BGE-large / gte-large, matryoshka variants).
-   - Real `VectorIndex` (usearch with on-disk persistence; no sealing).
-   - `novelty_utility` credit-event emission through the existing
-     central-issuer ABAC + audit-hashing pipeline.
-   - Revocation worker hook calling `invalidate_vector_entry`.
+## Architecture
 
-   See `docs/superpowers/specs/2026-05-11-trace-kek-strategy-design.md`
-   (chosen-path note) and
-   `docs/superpowers/specs/2026-05-11-private-vector-system-design.md`
-   (rephased).
+```
+┌────────────────────┐    ┌────────────────────┐    ┌──────────────────┐
+│  Ironclaw client   │    │  trace-commons-    │    │  NEAR AI Cloud   │
+│  (separate repo)   │───▶│  ingest (this repo)│───▶│  (TEE-hosted vLLM│
+│  local redaction   │    │                    │    │   scoring)       │
+└────────────────────┘    │  ┌──────────────┐  │    └──────────────────┘
+                          │  │ gate-enclave │  │
+                          │  │  orchestrator│  │
+                          │  └──────────────┘  │
+                          │  ┌──────────────┐  │    ┌──────────────────┐
+                          │  │  PostgreSQL  │◀─┼───▶│  Object storage  │
+                          │  │  with RLS    │  │    │  (GCS, FS, local)│
+                          │  └──────────────┘  │    └──────────────────┘
+                          │  ┌──────────────┐  │    ┌──────────────────┐
+                          │  │  credit      │──┼───▶│  NEAR receipt    │
+                          │  │  settlement  │  │    │  outbox          │
+                          │  └──────────────┘  │    └──────────────────┘
+                          └────────────────────┘
+```
 
-2. **Complete the Ironclaw extraction** — *partial mitigation now exists.*
-   Ironclaw should depend on the shared `trace-commons-protocol` crate for the
-   contributor UX, but that wiring lives on the Ironclaw side and is not
-   under this repo's control. As of 2026-05-14, the `trace-commons-pilot-bootstrap`
-   binary (`crates/trace-commons-server/src/bin/trace-commons-pilot-bootstrap.rs`,
-   landed in PR #47 and rewritten end-to-end in PR #67 against the real
-   HuggingFace agent-traces schema) provides a bootstrap path: it replays
-   HF agent-traces sessions through the existing `/v1/traces` ingest API,
-   generating realistic submissions for gate-floor calibration, audit-chain
-   validation, and embedder + vector-index seeding without requiring real
-   contributors. PR #67 is real-data-capable with a JSONL session loader,
-   three working translators (swival, pi-mono, deepseek), and 5/5
-   idempotent submissions verified end-to-end against real swival. The
-   `pilot-bootstrap-first-100` operator runbook landed in PR #70, and the
-   critical tail_floor credentials-leak pilot blocker was closed in PR #86.
-   See `docs/operator/pilot-bootstrap.md` for operator usage. The
-   bootstrap is not a substitute for Ironclaw — it is a load-generation
-   harness. What blocks first real use is now operator-side and shaped by
-   the A2.6 size-pattern finding: provision a 27B-class GPU host, load the
-   A2.6 winning model (Qwen 3.6 27B Dense unless Gemma 4 31B overtakes it),
-   apply the A2.7-calibrated perplexity floor, then run the bootstrap.
+Authoritative contracts to read before changing anything substantive:
 
-### Phase B — trust upgrade (after pilot)
-
-Move the gate-service binary inside an attested dstack enclave. Swap
-`CloudKmsKeyWrapper` for `DstackKekWrapper`. Re-wrap every DEK under the
-new wrapper (one batch pass; v2 envelope format already supports it via
-the `wrapper_kind` field). No schema, envelope-format, or trait changes —
-roughly 2 weeks of integration work assuming dstack-GPU primitives have
-stabilized by then.
-
-### Worth doing without users
-
-Real correctness / security work that holds value with zero users — these
-tighten the trust model, not the deployment runbook.
-
-- **Auth-derived `TenantCtx` propagation** into every ingest / review /
-  export / worker / maintenance path. Most paths already fail closed on
-  drift; the remaining surface is a finite list of handlers.
-- **Privileged-action ABAC** for review override, destructive purge, and
-  tombstone changes. Tightens authorization away from static token roles.
-- **Production-grade audit append/read** with hash-chain verification,
-  per-source content-read rows, sampled reconciliation. Partial today.
-- **Private vector infrastructure** — replace the deterministic placeholder
-  with a real private embedder + search adapter over redacted projections.
-- **PostgreSQL `TraceCorpusStore` integration coverage** for remaining slices.
-- **Standalone upload-claim issuer hardening** — key rotation rehearsal,
-  deploy story, basic CLI on the existing Ed25519 MVP.
-
-### Deferred until there is a user
-
-Explicit non-goals while the repo has zero deployments — per-tenant rollout
-flags, smoke-evidence apparatus, operator runbooks, migration tooling between
-object-store backends, and the full Phase 6 cutover machinery. When a real
-deployment names its constraints, that work returns shaped to its needs. See
-the roadmap for the full deferred list.
-
-## Binaries
-
-- `trace-commons-ingest`: hosted ingest/review/admin/worker API.
-- `trace-commons-upload-claim-issuer`: EdDSA/Ed25519 upload-claim issuer for hosted
-  contributors.
+- [`docs/trace-commons.md`](docs/trace-commons.md) — envelope contract and
+  threat model
+- [`docs/trace-commons-storage.md`](docs/trace-commons-storage.md) — storage
+  contract
+- [`docs/trace-commons-roadmap.md`](docs/trace-commons-roadmap.md) — phased
+  open work and "Production Gap Queue"
 
 ## Repository Layout
 
-- `crates/trace-commons-protocol`: shared TraceCommons protocol DTOs and redaction helpers.
-- `crates/trace-commons-server`: Rust server binaries.
-- `migrations`: TraceCommons server database schema, renumbered as this repo's
-  first migration.
-- `docs`: Trace Commons design (`trace-commons.md`), storage contract
-  (`trace-commons-storage.md`), and roadmap (`trace-commons-roadmap.md`).
-- `docs/superpowers/specs`: per-slice design specs (e.g. the cloud trace
-  artifact provider spec linked above).
+```
+crates/
+├── trace-commons-protocol/      DTOs + redaction helpers shared with the client.
+├── trace-commons-gate-enclave/  Scoring orchestrator (perplexity, embedder, vector index).
+│                                Two real perplexity backends: mistralrs (local CUDA,
+│                                feature `local-gpu-models`) and NEAR AI Cloud HTTP
+│                                (feature `near-ai-scorer`).
+└── trace-commons-server/        All hosted binaries.
+    └── src/bin/
+        ├── trace-commons-ingest                 Hosted ingest / review / admin / worker API.
+        ├── trace-commons-upload-claim-issuer    EdDSA/Ed25519 upload-claim issuer.
+        ├── trace-commons-gate-calibrate         Offline calibration + model bake-off.
+        ├── trace-commons-pilot-bootstrap        HF agent-traces load generator for pilot.
+        └── trace-commons-vector-replay          Vector-index replay tool.
 
-## Local Development
-
-```bash
-cargo check -p trace-commons-server --bins
-cargo test -p trace-commons-server --test trace_corpus_storage_contract --test trace_corpus_pg_store
+migrations/                      PostgreSQL schema.
+docs/
+├── trace-commons.md, trace-commons-storage.md, trace-commons-roadmap.md  Authoritative contracts.
+├── operator/                    Operator runbooks (per slice).
+└── superpowers/                 Per-slice design specs + implementation plans.
+.github/workflows/ci.yml         CI gates.
 ```
 
-This repo builds without an Ironclaw path dependency. Ironclaw should depend on
-the shared `trace-commons-protocol` crate when the client-side integration is
-rewired.
+## Getting Started
 
-## CI
+### Build + Test
 
-GitHub Actions runs on every push to `main` and every pull request against
-`main` (see `.github/workflows/ci.yml`). The pipeline exercises three jobs:
+```bash
+# Minimum: default-features build + tests (no GPU, no external scoring)
+cargo check -p trace-commons-server --bins
+cargo test  -p trace-commons-server
 
-- `cargo check -p trace-commons-server --bins` (default features).
-- `cargo check -p trace-commons-server --bins --features local-gpu-models`
-  (non-CUDA variant; the `local-gpu-models-cuda` variant is operator-tested
-  on GPU hosts only).
-- `cargo test -p trace-commons-server` (default features; the existing integration
-  test suite).
+# With the NEAR AI scoring backend (pilot configuration)
+cargo check -p trace-commons-server --bins --features near-ai-scorer
 
-`cargo fmt --check` is wired into CI as of PR #56 (repo-wide `cargo fmt --all`
-sweep landed in the same PR). Warnings-as-errors is now green on `main`:
-PR #57 gated dead-code (`ThroughputRecord`, `VramRecord`) in
-`trace-commons-gate-calibrate` behind `#[allow(dead_code)]`, and PR #59 gated
-`trace-commons-ingest` test-only items behind `#[cfg(test)]`. `cargo clippy -D
-warnings` is enforced in CI as of PR #78, and PR #79 moved GitHub Actions
-onto Node 24 and added a pilot-bootstrap smoke job. Run the same commands
-locally before pushing.
+# With local CUDA scoring (mistralrs; needs CUDA toolchain for the cuda subfeature)
+cargo check -p trace-commons-server --bins --features local-gpu-models
+```
 
----
+CI applies `RUSTFLAGS=-D warnings` to every cargo invocation, so warnings
+fail the build. To catch what CI catches before pushing:
 
-## Reference: Trace Credits
+```bash
+RUSTFLAGS='-D warnings' cargo check -p trace-commons-server --bins
+RUSTFLAGS='-D warnings' cargo test  -p trace-commons-server --no-run
+cargo clippy -p trace-commons-server --all-targets -- \
+  -D warnings \
+  -A clippy::type_complexity -A clippy::collapsible_if \
+  -A clippy::manual_option_as_slice -A clippy::useless_vec \
+  -A clippy::redundant_pattern_matching
+cargo fmt --all -- --check
+```
 
-Trace Credits are non-transferable account credits backed by reviewed utility
-evidence. Uploads and ranker scores do not settle credit directly. Utility
-workers record hash-only attestations for accepted traces, admins run
-settlement batches, and optional NEAR receipt calls are queued only after
-off-chain settlement finalizes.
+PostgreSQL integration tests require a live database; export
+`TRACE_COMMONS_PG_TEST_DATABASE_URL` and run:
 
-The credit path is gated by a stack of fail-closed controls. Most production
-deployments will want the full central-issuer profile via
-`TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE=true`, which
-enforces:
+```bash
+cargo test -p trace-commons-server --test trace_corpus_pg_store
+```
 
-- DB mirror + RLS readiness fail-closed
-- Pinned PostgreSQL runtime role
-  (`TRACE_COMMONS_POSTGRES_RUNTIME_ROLE_SHA256`)
-- Managed EdDSA signed-token enforcement + tenant-access-grant enforcement
-- Pinned central issuer principal refs
-  (`TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS`)
-- Fresh central source-list approvals
-  (`TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true`,
-  `TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS`, optional
-  `TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS`)
-- Pinned NEAR credit contract + configured submit/confirm adapters with
-  bearer-auth required
-  (`TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH=true`)
-- Fresh rollout-smoke readiness
-  (`TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY=true`)
+### Run a Local Ingest Server
 
-When the central issuer profile is enabled, unlisted principals can still
-inspect dry-runs but cannot record issuer approvals, finalize live settlement,
-manually mark NEAR outbox rows, or trigger NEAR account freeze/unfreeze.
-Unlisted reviewer/admin/worker principals cannot create positive credit
-through manual mutation, utility credit/attestation, prediction-credit,
-process-evaluation utility credit, or credit-bearing export generation;
-unlisted utility-worker principals cannot start live settlement, credit-cycle,
-or NEAR credit outbox schedulers.
+```bash
+TRACE_COMMONS_TENANT_TOKENS='tenant-a:dev-token-a;expires_at=2027-01-01T00:00:00Z' \
+TRACE_COMMONS_BIND='127.0.0.1:3907' \
+cargo run --bin trace-commons-ingest
+```
 
-Credit holds enqueue `freeze_credit_account` / `unfreeze_credit_account` NEAR
-outbox rows around the active-hold transition. Revocation propagation appends
-deterministic negative ledger rows plus `reverse_credit_receipt` calls for
-settled revoked sources. All hold/approval/outbox audit rows are hash-only
-and typed.
+This runs the dev profile against the local-encrypted artifact store and
+the in-process mock gate. Production-grade configuration (cloud KMS, real
+gate scorer, central-issuer credit profile, RLS-pinned PostgreSQL role,
+fresh rollout-smoke) is documented in
+[`docs/operator/`](docs/operator/) — start there before touching any
+deployment.
 
-`/v1/admin/config-status` and `/v1/admin/operational-summary` expose only safe
-readiness fields: configured / not-configured booleans, timeouts, bounds, hashed
-key refs, and missing-control names. They never return ARNs, URLs, bearer
-tokens, account references, approval evidence, or transaction hashes.
+## Contributing
 
-## Reference: Ranking Evidence
+Branch protection on `main` requires:
 
-Ranking evidence is stored separately from settlement. Admins register
-hash-only holdout calibration dataset manifests; workers register feature
-hashes, model predictions, lab/reviewer/evaluator labels, and calibration runs.
-All client-supplied hashes must be canonical lowercase `sha256:<64 hex>`;
-symbolic placeholders are rejected.
+- All CI checks green (`cargo fmt --check`, three `cargo check` variants,
+  `cargo clippy`, `cargo test`, `pilot-bootstrap-smoke`).
+- A pull request (no direct pushes).
+- Linear history (squash or rebase, no merge commits).
+- Any review conversations resolved before merge.
 
-Key invariants enforced server-side:
+Self-merge is permitted; reviewer approval is not currently required (the
+project is still small). When this changes, the requirement will land here
+and in the GitHub branch protection settings simultaneously.
 
-- For a `(calibration_dataset_hash, target_use, policy_version)` holdout key,
-  lifecycle updates must keep source manifest hash and counts unchanged.
-- Predictions must name a registered active or candidate model and reference
-  an existing feature vector hash.
-- Calibration treats repeated labels from the same source on the same
-  submission and target use as corrections; a latest `disputed` label
-  suppresses that source's evidence until a newer non-disputed label arrives.
-- Label-source authority: utility workers write `frontier_lab`, reviewers write
-  `reviewer`, benchmark workers write `benchmark`, process-evaluation workers
-  write `system`, admins are the explicit override.
-- Settlement of `ranking_utility` credit requires an active model with a
-  fresh promotable calibration run for the same policy / target / dataset,
-  every credit event bound to a `ranking_prediction:<uuid>` with matching
-  score, and zero uncleared model-risk codes.
+### Conventions worth knowing
 
-Production gates:
+- **Hash-only audit and logging.** Audit rows, error logs, and operational
+  surfaces are hash-only or label-only. Raw URLs, bearer tokens, ARNs,
+  account references, transaction hashes, contributor identity, and trace
+  bodies must never appear in stored rows or log strings.
+- **Fail-closed by default.** When a required gate is configured but its
+  dependency is missing, refuse the path with a safe missing-control name.
+  Never silently fall back to plaintext or a less-restricted backend.
+- **Tenant scoping.** Every read/write is driven by auth-derived tenant +
+  actor context. Envelope tenant fields are attribution only.
+- **PostgreSQL RLS is forced** on every Trace Commons table; tenant
+  predicates go through `trace_current_tenant_id()`.
+- **Commit style.** Short imperative subjects (no `feat:` / `fix:` prefixes
+  — match the existing log). No emojis in commits, PRs, code, or reports.
 
-- `TRACE_COMMONS_RANKING_REQUIRE_SERVER_FEATURE_PROVENANCE=true` — requires
-  server-derived feature evidence before ranking credit can mint or settle.
-- `TRACE_COMMONS_RANKING_REQUIRE_CALIBRATION_DATASET_REGISTRY=true` —
-  calibration runs fail closed unless the holdout hash has a matching
-  registered non-retired dataset row.
-- `TRACE_COMMONS_RANKING_REQUIRE_ACTIVE_CALIBRATION_DATASET=true` — that
-  registered row must be `active` (requires the registry gate above).
+A more complete style + workflow note for AI-assisted development is in
+[`CLAUDE.md`](CLAUDE.md); the conventions there are the same ones humans
+follow.
 
-Admin readiness surfaces: `/v1/admin/ranking/readiness-drill`,
-`/v1/admin/ranking/adjudication-report`,
-`/v1/admin/ranking/labeler-reliability-report`,
-`/v1/admin/ranking/model-backtest-report`,
-`/v1/admin/ranking/calibration-dataset-conflicts`.
+### Where to look for what
 
-## Reference: External Adapters
+- Roadmap and pilot blockers: [`docs/trace-commons-roadmap.md`](docs/trace-commons-roadmap.md)
+- Envelope + threat model: [`docs/trace-commons.md`](docs/trace-commons.md)
+- Storage contract: [`docs/trace-commons-storage.md`](docs/trace-commons-storage.md)
+- Per-slice design specs: [`docs/superpowers/specs/`](docs/superpowers/specs/)
+- Per-slice implementation plans: [`docs/superpowers/plans/`](docs/superpowers/plans/)
+- Operator runbooks: [`docs/operator/`](docs/operator/)
 
-Operator-owned adapters are pluggable; the server records only safe configured
-/ not-configured readiness fields in config status.
+## Public Reference Notes
 
-| Purpose | URL env | Bearer env | Timeout env |
-|---------|---------|------------|-------------|
-| Benchmark evaluator | `TRACE_COMMONS_BENCHMARK_EVALUATOR_URL` | `..._BEARER_TOKEN` | `..._TIMEOUT_MS` |
-| Process evaluator | `TRACE_COMMONS_PROCESS_EVALUATOR_URL` | `..._BEARER_TOKEN` | `..._TIMEOUT_MS` |
-| Benchmark registry submit | `TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL` | `..._BEARER_TOKEN` | `..._TIMEOUT_MS` |
-| Benchmark registry confirm | `TRACE_COMMONS_BENCHMARK_REGISTRY_CONFIRMATION_URL` | `..._BEARER_TOKEN` | `..._TIMEOUT_MS` |
-| NEAR credit submit | `TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL` | (operator-owned) | (operator-owned) |
-| NEAR credit confirm | `TRACE_COMMONS_NEAR_CREDIT_CONFIRMATION_URL` | (operator-owned) | (operator-owned) |
+The Trace Credits, ranking-evidence, and external-adapter surface areas are
+each large enough to warrant their own documents. Until they're broken out,
+they live inline in `docs/`:
 
-Production deployments enforce bearer-auth presence with
-`TRACE_COMMONS_BENCHMARK_REGISTRY_REQUIRE_ADAPTER_AUTH=true` and
-`TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH=true`.
-
-The NEAR outbox is intentionally a deterministic method-call payload set for
-a non-transferable receipt contract: only `settle_credit_receipt`,
-`reverse_credit_receipt`, `freeze_credit_account`, and
-`unfreeze_credit_account` are emitted, the server ledger remains
-authoritative, and payloads carry batch ids, account hashes, source-list
-hashes, policy versions, attestation/signature hashes, amounts, and
-issuer-signature hashes — never trace bodies or raw contributor identity.
+- **Trace Credits** — settlement model, central-issuer profile, NEAR outbox.
+  See `docs/operator/calibration.md` and the credit-settlement specs under
+  `docs/superpowers/specs/`.
+- **Ranking evidence** — calibration registry, label-source authority, model
+  promotion. See ranking-related specs under `docs/superpowers/specs/`.
+- **External adapters** — benchmark/process evaluators, NEAR credit
+  submit/confirm. All adapters are operator-owned; the server only records
+  `configured` / `not_configured` readiness fields in
+  `/v1/admin/config-status`.

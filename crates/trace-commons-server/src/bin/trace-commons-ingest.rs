@@ -37,7 +37,9 @@ use trace_commons_server::db::{Database, TraceCorpusRlsDiagnostics};
 use trace_commons_server::error::DatabaseError;
 use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
 use trace_commons_server::secrets::SecretsCrypto;
-use trace_commons_server::trace_artifact_kek::{KekWrapperStatus, KmsKeyWrapper, LocalMasterKeyWrapper};
+use trace_commons_server::trace_artifact_kek::{
+    KekWrapperStatus, KmsKeyWrapper, LocalMasterKeyWrapper,
+};
 use trace_commons_server::trace_artifact_store::{
     EncryptedTraceArtifactReceipt, FileRemoteTraceArtifactProvider,
     LocalEncryptedTraceArtifactStore, ServiceOwnedTraceArtifactStore, TraceArtifactKind,
@@ -5401,7 +5403,8 @@ impl KekProviderSelection {
 /// helper — use `build_selected_kek_wrapper_async` from an async context.
 fn build_selected_kek_wrapper_sync(
     kek_key: secrecy::SecretString,
-) -> anyhow::Result<Box<dyn trace_commons_server::trace_artifact_kek::KmsKeyWrapper + Send + Sync>> {
+) -> anyhow::Result<Box<dyn trace_commons_server::trace_artifact_kek::KmsKeyWrapper + Send + Sync>>
+{
     let provider = KekProviderSelection::from_env()?;
     build_sync_provider(provider, kek_key)
 }
@@ -5411,7 +5414,8 @@ fn build_selected_kek_wrapper_sync(
 #[allow(dead_code)]
 async fn build_selected_kek_wrapper_async(
     kek_key: secrecy::SecretString,
-) -> anyhow::Result<Box<dyn trace_commons_server::trace_artifact_kek::KmsKeyWrapper + Send + Sync>> {
+) -> anyhow::Result<Box<dyn trace_commons_server::trace_artifact_kek::KmsKeyWrapper + Send + Sync>>
+{
     let provider = KekProviderSelection::from_env()?;
     match provider {
         KekProviderSelection::GcpCloudKms => {
@@ -5427,10 +5431,12 @@ async fn build_selected_kek_wrapper_async(
 #[cfg(feature = "gcp-kms")]
 async fn build_gcp_cloud_kms_provider(
     key_name: String,
-) -> anyhow::Result<Box<dyn trace_commons_server::trace_artifact_kek::KmsKeyWrapper + Send + Sync>> {
-    let client = trace_commons_server::trace_artifact_kek::gcp::GcpCloudKmsClient::try_new(key_name)
-        .await
-        .context("GCP Cloud KMS client init failed")?;
+) -> anyhow::Result<Box<dyn trace_commons_server::trace_artifact_kek::KmsKeyWrapper + Send + Sync>>
+{
+    let client =
+        trace_commons_server::trace_artifact_kek::gcp::GcpCloudKmsClient::try_new(key_name)
+            .await
+            .context("GCP Cloud KMS client init failed")?;
     Ok(Box::new(
         trace_commons_server::trace_artifact_kek::CloudKmsKeyWrapper::new(client, "gcp_cloud_kms"),
     ))
@@ -5439,7 +5445,8 @@ async fn build_gcp_cloud_kms_provider(
 #[cfg(not(feature = "gcp-kms"))]
 async fn build_gcp_cloud_kms_provider(
     _key_name: String,
-) -> anyhow::Result<Box<dyn trace_commons_server::trace_artifact_kek::KmsKeyWrapper + Send + Sync>> {
+) -> anyhow::Result<Box<dyn trace_commons_server::trace_artifact_kek::KmsKeyWrapper + Send + Sync>>
+{
     anyhow::bail!(
         "KekProviderUnavailable: gcp_cloud_kms wrapper requires the gcp-kms cargo feature"
     )
@@ -5448,7 +5455,8 @@ async fn build_gcp_cloud_kms_provider(
 fn build_sync_provider(
     provider: KekProviderSelection,
     kek_key: secrecy::SecretString,
-) -> anyhow::Result<Box<dyn trace_commons_server::trace_artifact_kek::KmsKeyWrapper + Send + Sync>> {
+) -> anyhow::Result<Box<dyn trace_commons_server::trace_artifact_kek::KmsKeyWrapper + Send + Sync>>
+{
     match provider {
         KekProviderSelection::LocalMasterKey => {
             let crypto = trace_commons_server::secrets::SecretsCrypto::new(kek_key)

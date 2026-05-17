@@ -267,8 +267,9 @@ async fn main() -> anyhow::Result<()> {
 /// overrides. `try_init` is used so a parent process that already installed
 /// a subscriber (e.g. an integration test harness) wins.
 fn init_tracing() {
-    let filter = std::env::var("RUST_LOG")
-        .unwrap_or_else(|_| "info,trace_commons_gate_calibrate=info,trace_commons_server=info".into());
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| {
+        "info,trace_commons_gate_calibrate=info,trace_commons_server=info".into()
+    });
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -645,7 +646,9 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
                 logprobs_top_k: 5,
                 timeout: std::time::Duration::from_secs(args.near_ai_timeout_secs),
             };
-            Some(trace_commons_gate_enclave::NearAiPerplexityScorer::try_new(cfg)?)
+            Some(trace_commons_gate_enclave::NearAiPerplexityScorer::try_new(
+                cfg,
+            )?)
         } else {
             None
         };
@@ -741,12 +744,12 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
                 );
                 let score_start = std::time::Instant::now();
                 let eval_scorers = run_candidate_eval::EvalScorers {
-                    perplexity: mock_perplexity
-                        .as_ref()
-                        .map(|s| s as &dyn trace_commons_gate_enclave::perplexity::PerplexityScorer),
-                    token_rarity: mock_token_rarity
-                        .as_ref()
-                        .map(|s| s as &dyn trace_commons_gate_enclave::perplexity::TokenRarityScorer),
+                    perplexity: mock_perplexity.as_ref().map(|s| {
+                        s as &dyn trace_commons_gate_enclave::perplexity::PerplexityScorer
+                    }),
+                    token_rarity: mock_token_rarity.as_ref().map(|s| {
+                        s as &dyn trace_commons_gate_enclave::perplexity::TokenRarityScorer
+                    }),
                     token_rarity_k: args.token_rarity_k,
                 };
                 match run_candidate_eval::run_candidate_eval(
