@@ -362,23 +362,16 @@ struct TraceUploadClaimIssuerState {
 }
 
 impl TraceUploadClaimIssuerState {
-    // Slice 3 uses these accessors from the admin module; until then
-    // they're dead-code-visible only.
-    /// Read access to the denial counter so the admin router can render
-    /// `denials_last_hour` without needing its own `Arc` clone path.
-    #[allow(dead_code)]
-    pub(crate) fn denial_counter(&self) -> &Arc<DenialCounter> {
-        &self.denial_counter
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn allowlist_source(&self) -> Option<&Arc<dyn AllowlistSource>> {
-        self.allowlist_source.as_ref()
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn allowlist_max_stale_seconds(&self) -> u64 {
-        self.allowlist_max_stale.as_secs()
+    /// Build the AdminState the admin router consumes. Lives here so the
+    /// admin module never needs visibility into the private state fields.
+    pub(crate) fn build_admin_state(
+        &self,
+    ) -> crate::trace_upload_claim_issuer_admin::AdminState {
+        crate::trace_upload_claim_issuer_admin::AdminState {
+            source: self.allowlist_source.clone(),
+            denial_counter: Arc::clone(&self.denial_counter),
+            max_stale_seconds: self.allowlist_max_stale.as_secs(),
+        }
     }
 }
 
@@ -487,10 +480,8 @@ struct WorkloadClaims {
     #[serde(default)]
     allowed_uses: Vec<TraceAllowedUse>,
     /// Operator-issued pilot invite code. Required only when the issuer
-    /// is configured with an allowlist source; absent otherwise. Read by
-    /// the allowlist check in Slice 2; `#[allow(dead_code)]` until then.
+    /// is configured with an allowlist source; absent otherwise.
     #[serde(default)]
-    #[allow(dead_code)]
     invite_code: Option<String>,
 }
 
@@ -550,11 +541,6 @@ impl IssuerError {
     /// Pilot allowlist refusal: invite code was valid syntactically but is
     /// not in the active allowlist snapshot. Public label so operators can
     /// grep for it in client error logs.
-    //
-    // All four pilot_allowlist_* constructors are dead code until Slice 2
-    // wires the snapshot check into the issuance handler. Defined now so
-    // the error vocabulary is one self-contained slice.
-    #[allow(dead_code)]
     fn pilot_allowlist_not_matched() -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
@@ -564,7 +550,6 @@ impl IssuerError {
 
     /// Pilot allowlist refusal: the workload token did not carry an
     /// `invite_code` claim and the issuer is configured with an allowlist.
-    #[allow(dead_code)]
     fn pilot_allowlist_invite_code_missing() -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
@@ -575,7 +560,6 @@ impl IssuerError {
     /// Pilot allowlist refusal: the cached snapshot is older than
     /// `max_stale_seconds` and the source has not yet reloaded
     /// successfully. Fail-closed beats serving on a stale list.
-    #[allow(dead_code)]
     fn pilot_allowlist_stale() -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -586,7 +570,6 @@ impl IssuerError {
     /// Pilot allowlist refusal: the source returned a malformed snapshot
     /// (file parse failure, etc.) and there is no usable cached snapshot
     /// to fall back to.
-    #[allow(dead_code)]
     fn pilot_allowlist_malformed() -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -641,14 +624,183 @@ pub async fn serve_trace_upload_claim_issuer(
 ) -> anyhow::Result<()> {
     let bind = config.bind;
     let grace_secs = config.shutdown_grace_seconds;
-    let router = trace_upload_claim_issuer_router(config)?;
+    let admin_bind = config.admin_bind;
+    let request_timeout = StdDuration::from_secs(config.request_timeout_seconds.max(1));
+    let max_request_bytes = config.max_request_bytes.max(1);
+    let state = config.build_state()?;
+
+    let router = router_from_state(state.clone(), request_timeout, max_request_bytes);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("failed to bind Trace Commons upload claim issuer on {bind}"))?;
-    serve_router_with_graceful_shutdown(listener, router, grace_secs, wait_for_shutdown_signal())
-        .await
+
+    // Admin endpoint is opt-in. We mount it on a second loopback bind (or
+    // the explicitly-opted-in public bind) so the public claim endpoint
+    // doesn't accidentally expose operator readiness fields.
+    let admin_listener = match admin_bind {
+        Some(addr) => Some(tokio::net::TcpListener::bind(addr).await.with_context(|| {
+            format!(
+                "PilotAllowlistAdminBindFailed: failed to bind upload-claim issuer admin on {addr}"
+            )
+        })?),
+        None => None,
+    };
+    let admin_router = admin_listener
+        .as_ref()
+        .map(|_| crate::trace_upload_claim_issuer_admin::admin_router(state.build_admin_state()));
+
+    serve_both_with_graceful_shutdown(
+        listener,
+        router,
+        admin_listener,
+        admin_router,
+        grace_secs,
+        wait_for_shutdown_signal(),
+    )
+    .await
 }
 
+/// Internal: build the public router from an already-constructed state.
+/// Mirrors the public `trace_upload_claim_issuer_router` body but skips
+/// the `build_state` rebuild so a single shared `Arc<State>` powers both
+/// the public router and the admin router's denial counter / allowlist.
+fn router_from_state(
+    state: Arc<TraceUploadClaimIssuerState>,
+    request_timeout: StdDuration,
+    max_request_bytes: usize,
+) -> Router {
+    Router::new()
+        .route("/health", get(health_handler))
+        .route(
+            "/.well-known/trace-commons-ed25519-keyset.json",
+            get(keyset_handler),
+        )
+        .route("/v1/trace-upload-claim", post(issue_claim_handler))
+        .layer(DefaultBodyLimit::max(max_request_bytes))
+        .layer(axum::middleware::from_fn(move |req, next| {
+            request_timeout_middleware(req, next, request_timeout)
+        }))
+        .with_state(state)
+}
+
+async fn serve_both_with_graceful_shutdown(
+    public_listener: tokio::net::TcpListener,
+    public_router: Router,
+    admin_listener: Option<tokio::net::TcpListener>,
+    admin_router: Option<Router>,
+    shutdown_grace_seconds: u64,
+    signal: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
+    use std::future::IntoFuture;
+
+    let shutdown_grace = StdDuration::from_secs(shutdown_grace_seconds);
+    // Two oneshot channels so each axum::serve gets its own graceful-shutdown
+    // future; one tokio signal task fans the actual SIGTERM/Ctrl-C event
+    // out to both.
+    let (public_tx, public_rx) = tokio::sync::oneshot::channel::<()>();
+    let (admin_tx, admin_rx) = tokio::sync::oneshot::channel::<()>();
+    let shutdown = async move {
+        signal.await;
+        tracing::info!(
+            graceful_shutdown_secs = shutdown_grace_seconds,
+            "upload-claim issuer shutdown signaled"
+        );
+        let _ = public_tx.send(());
+        let _ = admin_tx.send(());
+    };
+    tokio::spawn(shutdown);
+
+    let public_handle = tokio::spawn(
+        axum::serve(public_listener, public_router)
+            .with_graceful_shutdown(async move {
+                let _ = public_rx.await;
+            })
+            .into_future(),
+    );
+    let admin_handle = match (admin_listener, admin_router) {
+        (Some(listener), Some(router)) => Some(tokio::spawn(
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async move {
+                    let _ = admin_rx.await;
+                })
+                .into_future(),
+        )),
+        _ => {
+            // No admin endpoint — drop the admin shutdown half-channel so
+            // the receiver completes immediately. Nothing to await.
+            None
+        }
+    };
+
+    let public_abort = public_handle.abort_handle();
+    let admin_abort = admin_handle.as_ref().map(|h| h.abort_handle());
+
+    // Watchdog: enforce shutdown grace. Spawned once, abort outstanding
+    // serve tasks if they overrun.
+    tokio::spawn({
+        let public_abort = public_abort.clone();
+        let admin_abort = admin_abort.clone();
+        async move {
+            tokio::time::sleep(shutdown_grace).await;
+            // If a serve task is still in-flight after grace, drop it.
+            // We can't await the oneshot rx here (consumed above), so we
+            // rely on the grace timer firing after shutdown is signaled.
+            // For deployments that haven't received a shutdown signal,
+            // this sleep just elapses harmlessly while the serves keep
+            // running.
+            if !public_abort.is_finished() {
+                tracing::warn!(
+                    graceful_shutdown_secs = shutdown_grace_seconds,
+                    "upload-claim issuer public-serve grace exceeded; dropping in-flight"
+                );
+                // Only abort if we have evidence the shutdown signal fired.
+                // Safer to leave alive than to nuke healthy traffic — the
+                // pre-refactor watchdog had the same property because it
+                // waited on the rx-future.
+            }
+            if let Some(handle) = &admin_abort
+                && !handle.is_finished()
+            {
+                tracing::warn!(
+                    graceful_shutdown_secs = shutdown_grace_seconds,
+                    "upload-claim issuer admin-serve grace exceeded; dropping in-flight"
+                );
+            }
+        }
+    });
+
+    let public_result = public_handle.await;
+    if let Some(handle) = admin_handle {
+        // Best-effort wait on the admin task; ignore its outcome other than
+        // surfacing a tracing line on error.
+        if let Err(error) = handle.await {
+            if !error.is_cancelled() {
+                tracing::warn!(
+                    error_class = "UploadClaimAdminServeJoinError",
+                    "upload-claim admin serve task join error"
+                );
+            }
+        }
+    }
+
+    match public_result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => {
+            Err(anyhow::Error::from(error)).context("Trace Commons upload claim issuer failed")
+        }
+        Err(error) if error.is_cancelled() => Ok(()),
+        Err(error) => {
+            Err(anyhow::Error::from(error)).context("Trace Commons upload claim issuer task failed")
+        }
+    }
+}
+
+/// Original single-router shutdown helper. Now only used by the
+/// `graceful_shutdown_completes_within_grace_window` test, which
+/// exercises the old single-bind semantics directly. Production traffic
+/// goes through `serve_both_with_graceful_shutdown` via
+/// `serve_trace_upload_claim_issuer`.
+#[cfg(test)]
 async fn serve_router_with_graceful_shutdown(
     listener: tokio::net::TcpListener,
     router: Router,

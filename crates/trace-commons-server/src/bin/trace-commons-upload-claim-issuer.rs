@@ -1,3 +1,4 @@
+use trace_commons_server::trace_upload_claim_allowlist::hash_invite_code;
 use trace_commons_server::trace_upload_claim_issuer::{
     TraceUploadClaimIssuerConfig, UploadClaimIssuerHealthCheck,
     configure_tenant_access_grants_from_env, generate_upload_claim_keypair, mint_test_upload_claim,
@@ -12,17 +13,24 @@ USAGE:
     trace-commons-upload-claim-issuer [SUBCOMMAND]
 
 SUBCOMMANDS:
-    (none)              Start the HTTP issuer (default)
-    --generate-keypair  Print a fresh Ed25519 keypair (PKCS#8 + SPKI PEM)
-                        and a suggested kid (UUID v4) to stdout
-    --health-check      Load env config, verify keys, exit 0 on success
-                        and 1 with a hash-only reason on failure
-    --mint-test-claim   Mint a test upload claim for a hardcoded test
-                        tenant/principal and print the JWT to stdout
-                        (FOR TESTING / DEPLOY PROBES ONLY)
-    -h, --help          Print this help text
+    (none)                       Start the HTTP issuer (default)
+    --generate-keypair           Print a fresh Ed25519 keypair (PKCS#8 + SPKI PEM)
+                                 and a suggested kid (UUID v4) to stdout
+    --health-check               Load env config, verify keys, exit 0 on success
+                                 and 1 with a hash-only reason on failure
+    --mint-test-claim            Mint a test upload claim for a hardcoded test
+                                 tenant/principal and print the JWT to stdout
+                                 (FOR TESTING / DEPLOY PROBES ONLY)
+    --hash-invite-code <CODE>    Print the canonical sha256: hash of an invite
+                                 code (the value the operator pastes into the
+                                 pilot allowlist JSON file). Reads CODE from the
+                                 next argument; use this rather than rolling a
+                                 local sha256 helper so the hashing function
+                                 stays in lockstep with the issuance handler.
+    -h, --help                   Print this help text
 
 Environment variables are documented in docs/upload-claim-issuer.md.
+Pilot allowlist operator guide: docs/operator/pilot-allowlist.md.
 ";
 
 fn main() -> anyhow::Result<()> {
@@ -39,6 +47,7 @@ fn main() -> anyhow::Result<()> {
         Some("--generate-keypair") => run_generate_keypair(),
         Some("--health-check") => run_health_check(),
         Some("--mint-test-claim") => run_mint_test_claim(),
+        Some("--hash-invite-code") => run_hash_invite_code(args.get(1).map(String::as_str)),
         Some(other) if other.starts_with("--") => {
             eprintln!("unknown subcommand: {other}\n");
             eprint!("{HELP_TEXT}");
@@ -46,6 +55,18 @@ fn main() -> anyhow::Result<()> {
         }
         _ => run_server(),
     }
+}
+
+fn run_hash_invite_code(code: Option<&str>) -> anyhow::Result<()> {
+    let Some(code) = code.map(str::trim).filter(|s| !s.is_empty()) else {
+        eprintln!(
+            "--hash-invite-code requires a CODE argument. Example:\n  \
+             trace-commons-upload-claim-issuer --hash-invite-code INV-PILOT-001"
+        );
+        std::process::exit(2);
+    };
+    println!("{}", hash_invite_code(code));
+    Ok(())
 }
 
 fn run_generate_keypair() -> anyhow::Result<()> {
