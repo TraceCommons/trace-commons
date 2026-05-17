@@ -24,6 +24,10 @@ use crate::db::Database;
 use crate::trace_corpus_storage::{
     TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
 };
+use crate::trace_upload_claim_allowlist::{
+    AllowlistError, AllowlistSource, AllowlistSourceSpec, DenialCounter, FileAllowlistSource,
+    hash_invite_code,
+};
 use trace_commons_protocol::trace_contribution::{ConsentScope, TraceAllowedUse};
 
 pub const TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION: &str =
@@ -37,6 +41,19 @@ const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 10;
 const DEFAULT_MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MINT_TEST_CLAIM_TENANT: &str = "trace-upload-claim-issuer-test-tenant";
 const MINT_TEST_CLAIM_PRINCIPAL: &str = "principal:trace-upload-claim-issuer-test";
+
+const DEFAULT_ALLOWLIST_REFRESH_INTERVAL_SECONDS: u64 = 60;
+const DEFAULT_ALLOWLIST_MAX_STALE_SECONDS: u64 = 3600;
+const DEFAULT_DENIAL_COUNTER_WINDOW_SECONDS: u64 = 3600;
+
+pub const TRACE_COMMONS_ALLOWLIST_SOURCE_ENV: &str = "TRACE_COMMONS_ALLOWLIST_SOURCE";
+pub const TRACE_COMMONS_ALLOWLIST_REFRESH_INTERVAL_SECONDS_ENV: &str =
+    "TRACE_COMMONS_ALLOWLIST_REFRESH_INTERVAL_SECONDS";
+pub const TRACE_COMMONS_ALLOWLIST_MAX_STALE_SECONDS_ENV: &str =
+    "TRACE_COMMONS_ALLOWLIST_MAX_STALE_SECONDS";
+pub const TRACE_COMMONS_ISSUER_ADMIN_BIND_ENV: &str = "TRACE_COMMONS_ISSUER_ADMIN_BIND";
+pub const TRACE_COMMONS_ISSUER_ADMIN_BIND_ALLOW_PUBLIC_ENV: &str =
+    "TRACE_COMMONS_ISSUER_ADMIN_BIND_ALLOW_PUBLIC";
 
 #[derive(Clone)]
 pub struct TraceUploadClaimIssuerConfig {
@@ -55,6 +72,17 @@ pub struct TraceUploadClaimIssuerConfig {
     pub shutdown_grace_seconds: u64,
     pub request_timeout_seconds: u64,
     pub max_request_bytes: usize,
+    /// Pilot allowlist source. `None` = allowlist disabled, issuer
+    /// behaves exactly as the pre-allowlist MVP. See
+    /// `trace_upload_claim_allowlist`.
+    pub allowlist_source: Option<AllowlistSourceSpec>,
+    pub allowlist_refresh_interval_seconds: u64,
+    pub allowlist_max_stale_seconds: u64,
+    /// Optional second-bind for the operator admin endpoint
+    /// (`/v1/admin/allowlist-status`). `None` = admin endpoint disabled.
+    /// Must be a loopback address unless
+    /// `TRACE_COMMONS_ISSUER_ADMIN_BIND_ALLOW_PUBLIC=1` is set.
+    pub admin_bind: Option<SocketAddr>,
 }
 
 impl fmt::Debug for TraceUploadClaimIssuerConfig {
@@ -82,6 +110,16 @@ impl fmt::Debug for TraceUploadClaimIssuerConfig {
             .field("shutdown_grace_seconds", &self.shutdown_grace_seconds)
             .field("request_timeout_seconds", &self.request_timeout_seconds)
             .field("max_request_bytes", &self.max_request_bytes)
+            .field("allowlist_source", &self.allowlist_source)
+            .field(
+                "allowlist_refresh_interval_seconds",
+                &self.allowlist_refresh_interval_seconds,
+            )
+            .field(
+                "allowlist_max_stale_seconds",
+                &self.allowlist_max_stale_seconds,
+            )
+            .field("admin_bind", &self.admin_bind)
             .finish()
     }
 }
@@ -139,6 +177,33 @@ impl TraceUploadClaimIssuerConfig {
                 })
                 .transpose()?
                 .unwrap_or(DEFAULT_MAX_REQUEST_BYTES);
+        let allowlist_source =
+            AllowlistSourceSpec::parse(optional_env(TRACE_COMMONS_ALLOWLIST_SOURCE_ENV)?.as_deref())?;
+        let allowlist_refresh_interval_seconds =
+            optional_env(TRACE_COMMONS_ALLOWLIST_REFRESH_INTERVAL_SECONDS_ENV)?
+                .map(|value| {
+                    value.parse::<u64>().with_context(|| {
+                        format!("invalid {TRACE_COMMONS_ALLOWLIST_REFRESH_INTERVAL_SECONDS_ENV}")
+                    })
+                })
+                .transpose()?
+                .unwrap_or(DEFAULT_ALLOWLIST_REFRESH_INTERVAL_SECONDS);
+        let allowlist_max_stale_seconds =
+            optional_env(TRACE_COMMONS_ALLOWLIST_MAX_STALE_SECONDS_ENV)?
+                .map(|value| {
+                    value.parse::<u64>().with_context(|| {
+                        format!("invalid {TRACE_COMMONS_ALLOWLIST_MAX_STALE_SECONDS_ENV}")
+                    })
+                })
+                .transpose()?
+                .unwrap_or(DEFAULT_ALLOWLIST_MAX_STALE_SECONDS);
+        let admin_bind = optional_env(TRACE_COMMONS_ISSUER_ADMIN_BIND_ENV)?
+            .map(|value| {
+                value
+                    .parse::<SocketAddr>()
+                    .with_context(|| format!("invalid {TRACE_COMMONS_ISSUER_ADMIN_BIND_ENV}"))
+            })
+            .transpose()?;
 
         Ok(Self {
             bind,
@@ -156,6 +221,10 @@ impl TraceUploadClaimIssuerConfig {
             shutdown_grace_seconds,
             request_timeout_seconds,
             max_request_bytes,
+            allowlist_source,
+            allowlist_refresh_interval_seconds,
+            allowlist_max_stale_seconds,
+            admin_bind,
         })
     }
 
@@ -185,6 +254,48 @@ impl TraceUploadClaimIssuerConfig {
             "TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_AUDIENCE is required"
         );
 
+        // Build the allowlist source (if any) eagerly so a missing or
+        // malformed file fails issuer startup rather than waiting for the
+        // first claim request to hit the snapshot loader.
+        let allowlist_source: Option<Arc<dyn AllowlistSource>> = match &self.allowlist_source {
+            None => None,
+            Some(AllowlistSourceSpec::File(path)) => {
+                let source = FileAllowlistSource::new(
+                    path.clone(),
+                    StdDuration::from_secs(self.allowlist_refresh_interval_seconds.max(1)),
+                );
+                source.warm().with_context(|| {
+                    format!(
+                        "PilotAllowlistSourceMissing: failed to load allowlist file at {}",
+                        path.display()
+                    )
+                })?;
+                Some(Arc::new(source))
+            }
+            Some(AllowlistSourceSpec::Near { .. }) => {
+                anyhow::bail!(
+                    "PilotAllowlistNearSourceNotImplemented: use file:<path> until the on-chain allowlist source lands"
+                );
+            }
+        };
+
+        // Loopback guard: if the operator configured an admin bind on a
+        // public address by accident, refuse to start. The opt-in env
+        // override stays available for the rare deployment that wants to
+        // expose the admin endpoint behind a separate gateway.
+        if let Some(addr) = self.admin_bind
+            && !addr.ip().is_loopback()
+            && !env_truthy(TRACE_COMMONS_ISSUER_ADMIN_BIND_ALLOW_PUBLIC_ENV)
+        {
+            anyhow::bail!(
+                "PilotAllowlistAdminBindNotLoopback: {TRACE_COMMONS_ISSUER_ADMIN_BIND_ENV}={addr} is not a loopback address; set {TRACE_COMMONS_ISSUER_ADMIN_BIND_ALLOW_PUBLIC_ENV}=1 to override"
+            );
+        }
+
+        let denial_counter = Arc::new(DenialCounter::new(StdDuration::from_secs(
+            DEFAULT_DENIAL_COUNTER_WINDOW_SECONDS,
+        )));
+
         Ok(Arc::new(TraceUploadClaimIssuerState {
             signing_key,
             signing_kid: self.signing_kid.trim().to_string(),
@@ -198,6 +309,9 @@ impl TraceUploadClaimIssuerConfig {
             workload_public_key_pem,
             tenant_access_grant_db: self.tenant_access_grant_db.clone(),
             require_tenant_access_grants: self.require_tenant_access_grants,
+            allowlist_source,
+            allowlist_max_stale: StdDuration::from_secs(self.allowlist_max_stale_seconds),
+            denial_counter,
         }))
     }
 }
@@ -242,6 +356,30 @@ struct TraceUploadClaimIssuerState {
     workload_public_key_pem: String,
     tenant_access_grant_db: Option<Arc<dyn Database>>,
     require_tenant_access_grants: bool,
+    allowlist_source: Option<Arc<dyn AllowlistSource>>,
+    allowlist_max_stale: StdDuration,
+    denial_counter: Arc<DenialCounter>,
+}
+
+impl TraceUploadClaimIssuerState {
+    // Slice 3 uses these accessors from the admin module; until then
+    // they're dead-code-visible only.
+    /// Read access to the denial counter so the admin router can render
+    /// `denials_last_hour` without needing its own `Arc` clone path.
+    #[allow(dead_code)]
+    pub(crate) fn denial_counter(&self) -> &Arc<DenialCounter> {
+        &self.denial_counter
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn allowlist_source(&self) -> Option<&Arc<dyn AllowlistSource>> {
+        self.allowlist_source.as_ref()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn allowlist_max_stale_seconds(&self) -> u64 {
+        self.allowlist_max_stale.as_secs()
+    }
 }
 
 impl TraceUploadClaimIssuerState {
@@ -835,6 +973,9 @@ impl TraceUploadClaimIssuerState {
         workload: &WorkloadClaims,
         request: TraceUploadClaimRequest,
     ) -> Result<TraceUploadClaimResponse, IssuerError> {
+        // Allowlist gate first — refuses before any further work so denied
+        // requests don't pay for schema/window/grant lookups.
+        let policy_label = self.enforce_pilot_allowlist(workload)?;
         if request.schema_version != TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION {
             return Err(IssuerError::bad_request(
                 "unsupported request schema_version",
@@ -918,9 +1059,7 @@ impl TraceUploadClaimIssuerState {
             submission_id: request.submission_id,
             allowed_consent_scopes: consent_scopes,
             allowed_uses,
-            // Slice 2 replaces this with the active allowlist policy_label
-            // when an allowlist is configured. None today.
-            policy_label: None,
+            policy_label,
         };
         let mut header = Header::new(Algorithm::EdDSA);
         header.kid = Some(self.signing_kid.clone());
@@ -932,6 +1071,74 @@ impl TraceUploadClaimIssuerState {
             expires_at,
             expires_in: self.max_ttl_seconds,
         })
+    }
+
+    /// Apply the pilot allowlist gate. Returns `None` when no allowlist is
+    /// configured (off-by-default; legacy behavior). Returns `Some(policy_label)`
+    /// on success so the caller can embed it in the minted claim. All
+    /// refusals are hash-only logged with `error_class` matching the
+    /// returned `IssuerError` message.
+    fn enforce_pilot_allowlist(
+        &self,
+        workload: &WorkloadClaims,
+    ) -> Result<Option<String>, IssuerError> {
+        let Some(source) = self.allowlist_source.as_ref() else {
+            return Ok(None);
+        };
+        let Some(invite_code) = workload
+            .invite_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            tracing::warn!(
+                error_class = "PilotAllowlistInviteCodeMissing",
+                "upload-claim refused: workload claims lack invite_code"
+            );
+            return Err(IssuerError::pilot_allowlist_invite_code_missing());
+        };
+        let subject_hash = hash_invite_code(invite_code);
+        let snapshot = match source.snapshot() {
+            Ok(snap) => snap,
+            Err(AllowlistError::Malformed(_)) => {
+                tracing::warn!(
+                    error_class = "PilotAllowlistMalformed",
+                    source_label = %source_label_or_unknown(source.as_ref()),
+                    "upload-claim refused: allowlist source malformed and no cached snapshot"
+                );
+                return Err(IssuerError::pilot_allowlist_malformed());
+            }
+            Err(_) => {
+                tracing::warn!(
+                    error_class = "PilotAllowlistStale",
+                    source_label = %source_label_or_unknown(source.as_ref()),
+                    "upload-claim refused: allowlist source unavailable and no cached snapshot"
+                );
+                return Err(IssuerError::pilot_allowlist_stale());
+            }
+        };
+        let snapshot_age = snapshot.loaded_at.elapsed();
+        if snapshot_age > self.allowlist_max_stale {
+            tracing::warn!(
+                error_class = "PilotAllowlistStale",
+                source_label = %snapshot.source_label,
+                snapshot_age_seconds = snapshot_age.as_secs(),
+                "upload-claim refused: cached allowlist snapshot exceeded max-stale window"
+            );
+            return Err(IssuerError::pilot_allowlist_stale());
+        }
+        if !snapshot.contains(&subject_hash) {
+            tracing::warn!(
+                error_class = "PilotAllowlistNotMatched",
+                subject_hash = %subject_hash,
+                policy_label = %snapshot.policy_label,
+                source_label = %snapshot.source_label,
+                "upload-claim refused: subject_hash not in allowlist"
+            );
+            self.denial_counter.record();
+            return Err(IssuerError::pilot_allowlist_not_matched());
+        }
+        Ok(Some(snapshot.policy_label))
     }
 
     async fn enforce_tenant_access_grants(
@@ -962,6 +1169,17 @@ impl TraceUploadClaimIssuerState {
             consent_scopes,
             allowed_uses,
         )
+    }
+}
+
+/// Tag the source label for log lines without exposing the trait method
+/// directly. `FileAllowlistSource` carries `file:<path>` already; an
+/// uncached / future source variant might not, so fall back to a
+/// hash-safe placeholder.
+fn source_label_or_unknown(source: &dyn AllowlistSource) -> String {
+    match source.snapshot() {
+        Ok(snap) => snap.source_label,
+        Err(_) => "unknown".to_string(),
     }
 }
 
@@ -1243,6 +1461,10 @@ mod tests {
             shutdown_grace_seconds: DEFAULT_SHUTDOWN_GRACE_SECONDS,
             request_timeout_seconds: DEFAULT_REQUEST_TIMEOUT_SECONDS,
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
+            allowlist_source: None,
+            allowlist_refresh_interval_seconds: DEFAULT_ALLOWLIST_REFRESH_INTERVAL_SECONDS,
+            allowlist_max_stale_seconds: DEFAULT_ALLOWLIST_MAX_STALE_SECONDS,
+            admin_bind: None,
         }
     }
 
@@ -1666,6 +1888,9 @@ mod tests {
                 workload_public_key_pem: self.workload_public_key_pem.clone(),
                 tenant_access_grant_db: self.tenant_access_grant_db.clone(),
                 require_tenant_access_grants: self.require_tenant_access_grants,
+                allowlist_source: self.allowlist_source.clone(),
+                allowlist_max_stale: self.allowlist_max_stale,
+                denial_counter: Arc::clone(&self.denial_counter),
             }
         }
     }
@@ -1703,5 +1928,161 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    // ----- Pilot allowlist integration cases -------------------------------
+
+    use crate::trace_upload_claim_allowlist::{AllowlistSourceSpec, hash_invite_code};
+
+    fn workload_token_with_invite(issuer: &str, audience: &str, invite_code: &str) -> String {
+        let now = Utc::now();
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some("workload-key-1".to_string());
+        jsonwebtoken::encode(
+            &header,
+            &json!({
+                "sub": "principal:agent-1",
+                "principal_ref": "principal:agent-1",
+                "tenant_id": "tenant-a",
+                "iss": issuer,
+                "aud": audience,
+                "iat": now.timestamp(),
+                "exp": (now + Duration::minutes(5)).timestamp(),
+                "allowed_consent_scopes": ["debugging_evaluation", "benchmark_only"],
+                "allowed_uses": ["debugging", "evaluation"],
+                "invite_code": invite_code,
+            }),
+            &EncodingKey::from_ed_pem(WORKLOAD_EDDSA_PRIVATE_KEY_PEM.as_bytes())
+                .expect("workload key parses"),
+        )
+        .expect("workload token signs")
+    }
+
+    fn write_allowlist_file(
+        path: &std::path::Path,
+        policy_label: &str,
+        codes: &[&str],
+    ) {
+        use std::io::Write;
+        let entries: Vec<String> = codes
+            .iter()
+            .map(|c| {
+                format!(
+                    "{{\"subject_hash\":\"{}\",\"tenant_id\":\"tenant-a\"}}",
+                    hash_invite_code(c)
+                )
+            })
+            .collect();
+        let body = format!(
+            "{{\"version\":1,\"generated_at\":\"2026-05-17T00:00:00Z\",\"policy_label\":\"{policy_label}\",\"entries\":[{}]}}",
+            entries.join(",")
+        );
+        let mut f = std::fs::File::create(path).expect("create allowlist file");
+        f.write_all(body.as_bytes()).expect("write allowlist file");
+    }
+
+    fn config_with_file_allowlist(path: std::path::PathBuf) -> TraceUploadClaimIssuerConfig {
+        TraceUploadClaimIssuerConfig {
+            allowlist_source: Some(AllowlistSourceSpec::File(path)),
+            ..test_config()
+        }
+    }
+
+    #[tokio::test]
+    async fn allowlist_admits_listed_invite_and_embeds_policy_label() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("allowlist.json");
+        write_allowlist_file(&path, "pilot-2026-05", &["INV-OK-001"]);
+        let config = config_with_file_allowlist(path);
+        let token = workload_token_with_invite("workload-issuer", "trace-claim-issuer", "INV-OK-001");
+        let (status, body) = post_claim(config, token, claim_request()).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let access_token = body
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .expect("access_token present");
+
+        // Decode the minted JWT body and confirm policy_label is embedded.
+        let parts: Vec<&str> = access_token.split('.').collect();
+        assert_eq!(parts.len(), 3, "JWT has three parts");
+        use base64::Engine;
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(parts[1])
+            .expect("payload decodes");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&payload).expect("payload is json");
+        assert_eq!(
+            parsed.get("policy_label").and_then(|v| v.as_str()),
+            Some("pilot-2026-05"),
+            "minted JWT carries policy_label"
+        );
+    }
+
+    #[tokio::test]
+    async fn allowlist_refuses_unlisted_invite_with_named_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("allowlist.json");
+        write_allowlist_file(&path, "pilot-2026-05", &["INV-OK-001"]);
+        let config = config_with_file_allowlist(path);
+        let token = workload_token_with_invite(
+            "workload-issuer",
+            "trace-claim-issuer",
+            "INV-NOT-LISTED",
+        );
+        let (status, body) = post_claim(config, token, claim_request()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("PilotAllowlistNotMatched")
+        );
+    }
+
+    #[tokio::test]
+    async fn allowlist_refuses_missing_invite_with_named_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("allowlist.json");
+        write_allowlist_file(&path, "pilot-2026-05", &["INV-OK-001"]);
+        let config = config_with_file_allowlist(path);
+        // Use the base workload_token helper (no invite_code field).
+        let token = workload_token("workload-issuer", "trace-claim-issuer");
+        let (status, body) = post_claim(config, token, claim_request()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("PilotAllowlistInviteCodeMissing")
+        );
+    }
+
+    #[tokio::test]
+    async fn allowlist_off_by_default_preserves_legacy_behavior() {
+        // No invite_code field; no allowlist configured. Issuance must
+        // succeed exactly as before this slice.
+        let config = test_config();
+        let token = workload_token("workload-issuer", "trace-claim-issuer");
+        let (status, _) = post_claim(config, token, claim_request()).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn allowlist_stale_snapshot_refuses_with_named_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("allowlist.json");
+        write_allowlist_file(&path, "pilot-2026-05", &["INV-OK-001"]);
+        let mut config = config_with_file_allowlist(path);
+        // Force the snapshot to be "stale" by setting max-stale to 0 and
+        // sleeping enough that the cached snapshot's age > 0.
+        config.allowlist_max_stale_seconds = 0;
+        let token = workload_token_with_invite("workload-issuer", "trace-claim-issuer", "INV-OK-001");
+        // Wait a brief moment so loaded_at.elapsed() > Duration::from_secs(0).
+        // Duration::from_secs(0) means "any elapsed time is stale", but our
+        // comparison is `snapshot_age > max_stale`, so the snapshot has to
+        // be older than zero — any non-zero elapsed wins.
+        tokio::time::sleep(StdDuration::from_millis(5)).await;
+        let (status, body) = post_claim(config, token, claim_request()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("PilotAllowlistStale")
+        );
     }
 }
