@@ -65,15 +65,25 @@ deferred:
      ]
    }
    ```
-   `subject_hash` is `sha256(canonical_subject_string)` where
-   `canonical_subject_string` is whatever the issuer's existing workload
-   identity verification yields — NEAR account id, EdDSA pubkey hex, or
-   issuer-side-issued invite code. The exact subject encoding is the
-   issuer's existing convention; we do not change it here. Storing
+   `subject_hash` is `sha256:hex(sha256("invite:" + invite_code))`. The
+   pilot uses operator-issued **invite codes** as the canonical subject —
+   no NEAR account lookup, no EdDSA pubkey ceremony. The `"invite:"`
+   prefix namespaces the hash so a later subject type (e.g. NEAR account
+   ids in the open-pilot phase) cannot collide accidentally. Storing
    subjects as `sha256:` hashes matches the repo's hash-only audit
    convention so the file can be committed publicly without leaking
    contributor identity. `note_label` is operator-facing only, never
    logged or returned.
+
+   The invite code reaches the issuer via a new optional `invite_code`
+   field on the existing `WorkloadClaims` struct
+   (`crates/trace-commons-server/src/trace_upload_claim_issuer.rs:333`).
+   When `--allowlist-source` is set the field becomes required and a
+   missing value yields HTTP 400 `PilotAllowlistInviteCodeMissing`.
+   The Ironclaw client and the dev workload-token signer both need to
+   start populating it before any allowlisted contributor's first
+   refresh succeeds. This is the only client-visible protocol change
+   in the slice.
 
 2. **`null` (no flag)** — allowlist disabled, issuer behaves exactly as
    today (issues to any caller with a valid workload token). This is the
@@ -132,7 +142,13 @@ New flow with `--allowlist-source` set:
 5. (unchanged) Sign and return the claim. The minted claim includes a
    `policy_label` claim ("pilot-2026-05") so server-side audit rows can
    correlate accepted submissions with the allowlist policy active when
-   the claim was minted.
+   the claim was minted. This is one new `Option<String>` field on the
+   existing `UploadClaimClaims` serde struct
+   (`trace_upload_claim_issuer.rs:354`); the JSON-Web-Token validator on
+   the ingest side (jsonwebtoken-rs) silently ignores unknown claims by
+   default, so this is non-breaking for clients that haven't been
+   updated yet. The ingest server can start reading it in a follow-up
+   slice once it's flowing.
 
 Refresh failure handling: if `snapshot()` fails to reload the source
 (file deleted, NEAR RPC unreachable), the issuer keeps serving the last
@@ -165,9 +181,28 @@ restart resets it. No tenant breakdown — the surface mirrors the existing
 the allowlist is unconfigured the field set degrades to
 `{ "configured": false }` only.
 
-The admin endpoint is gated behind the issuer's existing operator bearer
-token (whatever that is today; the issuer is a separate process from
-ingest and has its own auth surface — confirm at implementation time).
+The issuer has no operator-bearer surface today. The router exposes
+`/health`, `/.well-known/trace-commons-ed25519-keyset.json`, and
+`POST /v1/trace-upload-claim` — none of them admin-gated. Two ways to
+mount the new admin endpoint; recommend the second:
+
+1. **New bearer-auth env**: `TRACE_COMMONS_ISSUER_ADMIN_BEARER_TOKEN`,
+   middleware that rejects requests without `Authorization: Bearer <token>`
+   matching the env. Standard pattern, but adds a long-lived secret to
+   the operator's footprint.
+2. **Separate admin bind** (recommended): add
+   `TRACE_COMMONS_ISSUER_ADMIN_BIND` (default `127.0.0.1:0` =
+   disabled). When set, spin a second axum server on that address with
+   only `/v1/admin/*` routes. No bearer needed; operator hits it via SSH
+   tunnel or direct localhost curl on the issuer host. Matches how many
+   ops tools expose hostmetric endpoints. Fail-closed: if the env is
+   set but the bind fails, the whole issuer refuses to start with
+   `PilotAllowlistAdminBindFailed`.
+
+Either pattern is mechanical to implement. The localhost-only bind has
+fewer secrets to rotate; the bearer pattern is one more env. Pick at
+implementation time; the spec defaults to option 2 unless the operator
+objects.
 
 ## Failure modes and refusal vocabulary
 
@@ -180,6 +215,8 @@ taxonomy is:
 | `PilotAllowlistStale` | Snapshot exceeded `max_stale_seconds` | 503 |
 | `PilotAllowlistSourceMissing` | `--allowlist-source` references a path/account that has never loaded | 500 (startup fails closed; this only fires if the operator pointed at a moving target post-startup) |
 | `PilotAllowlistMalformed` | JSON parse failure or schema mismatch on reload | 503 (keep serving stale until max-stale; do not adopt malformed file) |
+| `PilotAllowlistInviteCodeMissing` | Workload claims lack the `invite_code` field when allowlist is configured | 400 |
+| `PilotAllowlistAdminBindFailed` | `TRACE_COMMONS_ISSUER_ADMIN_BIND` is set but the bind fails at startup | (startup-only; process exits non-zero) |
 
 All four propagate as `tracing::warn` with `error_class` set to the
 label, `subject_hash` (where applicable), and `source_label`. Never the
@@ -205,6 +242,8 @@ Env-var equivalents:
 - `TRACE_COMMONS_ALLOWLIST_SOURCE`
 - `TRACE_COMMONS_ALLOWLIST_REFRESH_INTERVAL_SECONDS`
 - `TRACE_COMMONS_ALLOWLIST_MAX_STALE_SECONDS`
+- `TRACE_COMMONS_ISSUER_ADMIN_BIND` (e.g. `127.0.0.1:8081`; when set,
+  mounts `/v1/admin/allowlist-status` on this address. Unset = disabled.)
 
 ## Test plan
 
@@ -244,20 +283,28 @@ today's MVP. No on-disk state outside the JSON file itself.
 
 ## Open questions for the owner
 
-1. **Canonical subject string** — what does the issuer's current
-   workload-identity verification produce? NEAR account id?
-   issuer-issued invite code? An EdDSA pubkey hex? The spec assumes
-   whatever it is gets `sha256:`-hashed verbatim. Confirm at
-   implementation time to lock the encoding before the first allowlist
-   file ships.
-2. **Operator bearer for `/v1/admin/allowlist-status`** — confirm the
-   issuer has an existing operator auth surface to mount this on; if
-   not, this endpoint either needs to defer or we add a tiny
-   `TRACE_COMMONS_ISSUER_ADMIN_BEARER_TOKEN` env at the same time.
-3. **`policy_label` in the minted claim** — does the existing claim
-   schema have an extensions slot we can add this to without breaking the
-   client's JWT validator? If yes, embed; if no, defer the embedding to
-   a follow-up and just log it issuer-side for now.
+All three of the original draft questions resolved 2026-05-17:
 
-These don't block drafting the implementation plan against this spec;
-they block the first `cargo check` on it.
+1. **Canonical subject string** — RESOLVED. Invite codes. No crypto,
+   no NEAR account lookup. The issuer reads a new `invite_code` field
+   off the existing `WorkloadClaims` struct, the allowlist file stores
+   `sha256:hex(sha256("invite:" + invite_code))`, the operator hands
+   contributors invite codes out of band (form, DM, whatever fits the
+   pilot's recruiting flow). Inline in the relevant sections above.
+2. **Operator bearer for the admin endpoint** — RESOLVED.
+   The issuer has no admin auth surface today. Spec recommends a
+   separate localhost-only admin bind
+   (`TRACE_COMMONS_ISSUER_ADMIN_BIND`) over a long-lived bearer token,
+   so there's no new secret to rotate. Either pattern works; localhost
+   bind is the default unless the operator objects at implementation
+   time.
+3. **`policy_label` in the minted claim** — RESOLVED. The existing
+   `UploadClaimClaims` is a serde struct
+   (`trace_upload_claim_issuer.rs:354`); `policy_label: Option<String>`
+   is a one-line additive field, and jsonwebtoken-rs ignores unknown
+   claims on the validator side, so this is non-breaking for clients
+   that haven't been updated. The ingest server starts reading it in a
+   follow-up slice.
+
+Nothing else parked. Ready to draft the implementation plan against
+this spec on operator approval.
