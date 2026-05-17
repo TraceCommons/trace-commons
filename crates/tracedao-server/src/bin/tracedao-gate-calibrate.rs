@@ -112,6 +112,27 @@ struct BakeOffArgs {
     /// default; bump only when sweeping K as part of a calibration pass.
     #[arg(long, default_value_t = 10)]
     token_rarity_k: usize,
+    /// Scoring backend for the real-scorer arm. `local` keeps the existing
+    /// mistralrs (CUDA) path — manifest candidates are loaded and scored on
+    /// the local GPU. `near-ai` posts each scoring request to a NEAR AI Cloud
+    /// `/v1/completions` direct endpoint; the per-candidate `model_path` is
+    /// ignored and the configured `--near-ai-model` is used instead. Ignored
+    /// under `--mock-scorer`.
+    #[arg(long, value_enum, default_value_t = ScorerBackend::Local)]
+    scorer_backend: ScorerBackend,
+    /// Base URL of the NEAR AI direct-completions endpoint, including the
+    /// `/v1` suffix and no trailing slash. Required when
+    /// `--scorer-backend=near-ai`. Example:
+    /// `https://qwen3-6-35b.completions.near.ai/v1`.
+    #[arg(long)]
+    near_ai_base_url: Option<String>,
+    /// NEAR AI hosted model ID, e.g. `Qwen/Qwen3.6-35B-A3B-FP8`. Required
+    /// when `--scorer-backend=near-ai`.
+    #[arg(long)]
+    near_ai_model: Option<String>,
+    /// HTTP timeout in seconds for each NEAR AI scoring request.
+    #[arg(long, default_value_t = 60)]
+    near_ai_timeout_secs: u64,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,12 +151,27 @@ impl ScorerSelection {
     }
 }
 
-#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 enum HardwareTier {
     A10,
     H100,
     Cpu,
 }
+
+/// Real-scorer backend selection. `Local` is the existing mistralrs (CUDA)
+/// path; `NearAi` swaps in [`NearAiPerplexityScorer`], which posts to a
+/// TEE-hosted vLLM and supports both the perplexity and per-token rarity
+/// metrics in one HTTP round-trip.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum ScorerBackend {
+    Local,
+    NearAi,
+}
+
+/// Env var carrying the NEAR AI Cloud bearer token. CLI flag intentionally
+/// avoided: API keys must not appear in process listings or shell history.
+#[cfg(feature = "near-ai-scorer")]
+const TRACEDAO_NEAR_AI_API_KEY: &str = "TRACEDAO_NEAR_AI_API_KEY";
 
 /// Set when the binary is compiled with `--features local-gpu-models-cuda`,
 /// which enables mistralrs's CUDA backend. Used by the bake-off startup
@@ -527,15 +563,30 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
         );
     }
 
-    // Reject the real-scorer path up front when the build feature is off,
-    // so we don't half-execute and write a misleading partial report.
-    #[cfg(not(feature = "local-gpu-models"))]
+    // Reject the real-scorer path up front when the matching build feature
+    // is off, so we don't half-execute and write a misleading partial report.
+    // `--scorer-backend=local` needs `local-gpu-models`; `=near-ai` needs
+    // `near-ai-scorer`. Mock dry runs bypass both.
     if !args.mock_scorer {
-        anyhow::bail!(
-            "BakeoffRealScorerRequiresFeature: rebuild with \
-             --features local-gpu-models, or pass --mock-scorer for \
-             dry runs"
-        );
+        match args.scorer_backend {
+            ScorerBackend::Local => {
+                #[cfg(not(feature = "local-gpu-models"))]
+                anyhow::bail!(
+                    "BakeoffRealScorerRequiresFeature: --scorer-backend=local \
+                     requires --features local-gpu-models; rebuild, switch \
+                     to --scorer-backend=near-ai, or pass --mock-scorer for \
+                     a dry run"
+                );
+            }
+            ScorerBackend::NearAi => {
+                #[cfg(not(feature = "near-ai-scorer"))]
+                anyhow::bail!(
+                    "BakeoffNearAiScorerRequiresFeature: --scorer-backend=near-ai \
+                     requires --features near-ai-scorer; rebuild or pass \
+                     --mock-scorer for a dry run"
+                );
+            }
+        }
     }
 
     // Refuse CUDA hardware selection when the binary lacks the cuda
@@ -543,14 +594,61 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
     // back to CPU on `--hardware=h100` / `--hardware=a10`, which (as
     // of 2026-05-14) burned hours of Lambda time before being aborted.
     // Fail closed with a named error class so operators see the cause.
-    if let Some(label) = cuda_hardware_guard(args.hardware, args.mock_scorer, HAS_CUDA) {
-        anyhow::bail!(
-            "{label}: --hardware={:?} requires a binary built with \
-             --features local-gpu-models-cuda; rebuild or rerun with \
-             --mock-scorer for a dry run",
-            args.hardware,
-        );
+    // NEAR AI mode does no local inference, so the CUDA guard does not
+    // apply — the `--hardware` flag is purely a report-metadata label in
+    // that mode.
+    if args.scorer_backend == ScorerBackend::Local {
+        if let Some(label) = cuda_hardware_guard(args.hardware, args.mock_scorer, HAS_CUDA) {
+            anyhow::bail!(
+                "{label}: --hardware={:?} requires a binary built with \
+                 --features local-gpu-models-cuda; rebuild or rerun with \
+                 --mock-scorer for a dry run",
+                args.hardware,
+            );
+        }
     }
+
+    // NEAR AI mode: validate flags + env var up front, build the scorer
+    // once, reuse across candidates. The model is fixed by config; the
+    // per-candidate `model_path` is intentionally ignored on this arm. A
+    // mismatch between candidate.id and the configured model is logged
+    // per-iteration so operators notice if they fed the wrong manifest.
+    #[cfg(feature = "near-ai-scorer")]
+    let near_ai_scorer: Option<tracedao_gate_enclave::NearAiPerplexityScorer> =
+        if args.scorer_backend == ScorerBackend::NearAi && !args.mock_scorer {
+            let base_url = args.near_ai_base_url.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "BakeoffNearAiBaseUrlMissing: --near-ai-base-url is required \
+                     when --scorer-backend=near-ai"
+                )
+            })?;
+            let model = args.near_ai_model.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "BakeoffNearAiModelMissing: --near-ai-model is required \
+                     when --scorer-backend=near-ai"
+                )
+            })?;
+            let api_key = std::env::var(TRACEDAO_NEAR_AI_API_KEY).map_err(|_| {
+                anyhow::anyhow!(
+                    "BakeoffNearAiApiKeyMissing: env var {} is required when \
+                     --scorer-backend=near-ai",
+                    TRACEDAO_NEAR_AI_API_KEY
+                )
+            })?;
+            let cfg = tracedao_gate_enclave::NearAiScorerConfig {
+                base_url,
+                model,
+                api_key,
+                // Same tail cutoff as the local scorer for cross-backend
+                // comparability of `tail_fraction_micros`.
+                tail_logprob_cutoff: -8.0,
+                logprobs_top_k: 5,
+                timeout: std::time::Duration::from_secs(args.near_ai_timeout_secs),
+            };
+            Some(tracedao_gate_enclave::NearAiPerplexityScorer::try_new(cfg)?)
+        } else {
+            None
+        };
 
     let device_kind: run_candidate_eval::DeviceKind = args.hardware.into();
     let total = manifest.candidates.len();
@@ -597,16 +695,20 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
         None
     };
 
-    // Real scorers only support the perplexity column today. Refuse
-    // `--scorer token-rarity` / `--scorer both` on the real path with a
-    // self-explanatory error class; the mock path supports all three modes
-    // so AUC-curve comparison work can land before the real-scorer rarity
-    // path is wired through (Phase A.5a follow-up).
-    if !args.mock_scorer && args.scorer != ScorerSelection::Perplexity {
+    // Real-scorer per-token rarity is only available on `--scorer-backend=near-ai`
+    // — the NEAR AI scorer impl's both `PerplexityScorer` and `TokenRarityScorer`
+    // off one HTTP round-trip. The local mistralrs path still owes the A.5a
+    // implementation; refuse rarity selections there with the historic error
+    // class so existing operator playbooks keep working.
+    if !args.mock_scorer
+        && args.scorer != ScorerSelection::Perplexity
+        && args.scorer_backend == ScorerBackend::Local
+    {
         anyhow::bail!(
             "BakeoffRealRarityNotImplemented: real-scorer per-token rarity is \
-             not wired through yet; rerun with --scorer perplexity, or pair \
-             your rarity scorer selection with --mock-scorer for a dry run"
+             not wired through on --scorer-backend=local; rerun with --scorer \
+             perplexity, switch to --scorer-backend=near-ai, or pair your \
+             rarity scorer selection with --mock-scorer for a dry run"
         );
     }
 
@@ -670,85 +772,162 @@ async fn run_bakeoff(args: BakeOffArgs) -> anyhow::Result<()> {
                 }
             }
 
-            #[cfg(feature = "local-gpu-models")]
-            {
-                use tracedao_gate_enclave::perplexity_local::{
-                    CandleDeviceKind, LocalPerplexityScorer,
-                };
-                // Map operator-facing HardwareTier to the local-device
-                // enum. The selector is informational under mistralrs
-                // (which picks its compute device from build features),
-                // but we keep the parameter for env-var-shape continuity.
-                // The Cpu arm is unreachable because the
-                // BakeoffCpuRequiresMockScorer guard above bailed.
-                let candle_device = match args.hardware {
-                    HardwareTier::A10 | HardwareTier::H100 => CandleDeviceKind::Cuda(0),
-                    HardwareTier::Cpu => unreachable!(
-                        "BakeoffCpuRequiresMockScorer guard should have refused this path"
-                    ),
-                };
-                // Matches TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF
-                // from the calibrate path.
-                const TAIL_LOGPROB_CUTOFF: f32 = -8.0;
-                let max_tokens = run_candidate_eval::ctx_for(&c.arch);
-                // A2.3: arch dispatch is gone — mistralrs auto-detects the
-                // architecture from `config.json`. The `CandidateArch` on
-                // the candidate is informational (used for `ctx_for`); no
-                // backend translation is required at this call site.
-                let scorer = match LocalPerplexityScorer::try_new(
-                    c.id.clone(),
-                    c.path.clone(),
-                    candle_device,
-                    TAIL_LOGPROB_CUTOFF,
-                    max_tokens,
-                ) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        break 'eval Err(("LocalPerplexityScorerLoadFailed", e));
-                    }
-                };
-                tracing::info!(
-                    candidate_id = %c.id,
-                    load_elapsed_seconds = load_start.elapsed().as_secs_f64(),
-                    "bakeoff_candidate_load_done"
-                );
-                let score_start = std::time::Instant::now();
-                // Real-scorer path is perplexity-only today; the
-                // BakeoffRealRarityNotImplemented guard above already
-                // refused any other selection.
-                match run_candidate_eval::run_candidate_eval(
-                    run_candidate_eval::EvalScorers::perplexity_only(&scorer),
-                    c,
-                    &corpus,
-                    args.determinism_repeat_runs,
-                    device_kind,
-                )
-                .await
-                {
-                    Ok(r) => {
+            match args.scorer_backend {
+                ScorerBackend::Local => {
+                    #[cfg(feature = "local-gpu-models")]
+                    {
+                        use tracedao_gate_enclave::perplexity_local::{
+                            CandleDeviceKind, LocalPerplexityScorer,
+                        };
+                        // Map operator-facing HardwareTier to the local-device
+                        // enum. The selector is informational under mistralrs
+                        // (which picks its compute device from build features),
+                        // but we keep the parameter for env-var-shape continuity.
+                        // The Cpu arm is unreachable because the
+                        // BakeoffCpuRequiresMockScorer guard above bailed.
+                        let candle_device = match args.hardware {
+                            HardwareTier::A10 | HardwareTier::H100 => CandleDeviceKind::Cuda(0),
+                            HardwareTier::Cpu => unreachable!(
+                                "BakeoffCpuRequiresMockScorer guard should have refused this path"
+                            ),
+                        };
+                        // Matches TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF
+                        // from the calibrate path.
+                        const TAIL_LOGPROB_CUTOFF: f32 = -8.0;
+                        let max_tokens = run_candidate_eval::ctx_for(&c.arch);
+                        // A2.3: arch dispatch is gone — mistralrs auto-detects the
+                        // architecture from `config.json`. The `CandidateArch` on
+                        // the candidate is informational (used for `ctx_for`); no
+                        // backend translation is required at this call site.
+                        let scorer = match LocalPerplexityScorer::try_new(
+                            c.id.clone(),
+                            c.path.clone(),
+                            candle_device,
+                            TAIL_LOGPROB_CUTOFF,
+                            max_tokens,
+                        ) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                break 'eval Err(("LocalPerplexityScorerLoadFailed", e));
+                            }
+                        };
                         tracing::info!(
                             candidate_id = %c.id,
-                            score_elapsed_seconds = score_start.elapsed().as_secs_f64(),
-                            auc = r.discrimination_auc,
-                            throughput_tps = r.throughput_tps,
-                            "bakeoff_candidate_done"
+                            load_elapsed_seconds = load_start.elapsed().as_secs_f64(),
+                            "bakeoff_candidate_load_done"
                         );
-                        break 'eval Ok(r);
+                        let score_start = std::time::Instant::now();
+                        // Local real-scorer path is perplexity-only today; the
+                        // BakeoffRealRarityNotImplemented guard above already
+                        // refused rarity selections on this backend.
+                        match run_candidate_eval::run_candidate_eval(
+                            run_candidate_eval::EvalScorers::perplexity_only(&scorer),
+                            c,
+                            &corpus,
+                            args.determinism_repeat_runs,
+                            device_kind,
+                        )
+                        .await
+                        {
+                            Ok(r) => {
+                                tracing::info!(
+                                    candidate_id = %c.id,
+                                    score_elapsed_seconds = score_start.elapsed().as_secs_f64(),
+                                    auc = r.discrimination_auc,
+                                    throughput_tps = r.throughput_tps,
+                                    "bakeoff_candidate_done"
+                                );
+                                break 'eval Ok(r);
+                            }
+                            Err(e) => break 'eval Err(("RunCandidateEvalFailed", e)),
+                        }
                     }
-                    Err(e) => break 'eval Err(("RunCandidateEvalFailed", e)),
+                    // The early-return at top of run_bakeoff already bailed;
+                    // synthesize a fail-closed branch so the `local-gpu-models = off`
+                    // build still type-checks.
+                    #[cfg(not(feature = "local-gpu-models"))]
+                    {
+                        break 'eval Err((
+                            "BakeoffRealScorerRequiresFeature",
+                            anyhow::anyhow!(
+                                "local real-scorer path reached without local-gpu-models feature"
+                            ),
+                        ));
+                    }
                 }
-            }
-
-            // No feature, no mock scorer: the early-return at top of
-            // run_bakeoff already bailed; reaching here is impossible but
-            // the compiler can't prove it for the `local-gpu-models = off`
-            // build, so synthesize a fail-closed branch.
-            #[cfg(not(feature = "local-gpu-models"))]
-            {
-                break 'eval Err((
-                    "BakeoffRealScorerRequiresFeature",
-                    anyhow::anyhow!("real scorer path reached without local-gpu-models feature"),
-                ));
+                ScorerBackend::NearAi => {
+                    #[cfg(feature = "near-ai-scorer")]
+                    {
+                        // Pre-built scorer from the per-run init above.
+                        // `expect` is safe: the early-return guards refused
+                        // the NEAR AI arm without --mock-scorer when the
+                        // scorer wasn't constructed.
+                        let scorer = near_ai_scorer
+                            .as_ref()
+                            .expect("near_ai_scorer constructed when --scorer-backend=near-ai");
+                        // The configured model is fixed; the manifest's
+                        // per-candidate `path` is ignored. Warn (label-only)
+                        // when the candidate id doesn't match so the operator
+                        // notices a mismatched manifest.
+                        if c.id != args.near_ai_model.as_deref().unwrap_or_default() {
+                            tracing::warn!(
+                                candidate_id = %c.id,
+                                error_class = "BakeoffNearAiCandidateModelMismatch",
+                                "candidate id differs from --near-ai-model; \
+                                 NEAR AI mode scores the configured model"
+                            );
+                        }
+                        tracing::info!(
+                            candidate_id = %c.id,
+                            load_elapsed_seconds = load_start.elapsed().as_secs_f64(),
+                            "bakeoff_candidate_load_done"
+                        );
+                        let score_start = std::time::Instant::now();
+                        // NEAR AI implements both `PerplexityScorer` and
+                        // `TokenRarityScorer` off one HTTP round-trip per
+                        // entry; build whichever side of EvalScorers the
+                        // operator selected.
+                        let eval_scorers = run_candidate_eval::EvalScorers {
+                            perplexity: args.scorer.use_perplexity().then_some(
+                                scorer as &dyn tracedao_gate_enclave::perplexity::PerplexityScorer,
+                            ),
+                            token_rarity: args.scorer.use_token_rarity().then_some(
+                                scorer as &dyn tracedao_gate_enclave::perplexity::TokenRarityScorer,
+                            ),
+                            token_rarity_k: args.token_rarity_k,
+                        };
+                        match run_candidate_eval::run_candidate_eval(
+                            eval_scorers,
+                            c,
+                            &corpus,
+                            args.determinism_repeat_runs,
+                            device_kind,
+                        )
+                        .await
+                        {
+                            Ok(r) => {
+                                tracing::info!(
+                                    candidate_id = %c.id,
+                                    score_elapsed_seconds = score_start.elapsed().as_secs_f64(),
+                                    auc = r.discrimination_auc,
+                                    throughput_tps = r.throughput_tps,
+                                    "bakeoff_candidate_done"
+                                );
+                                break 'eval Ok(r);
+                            }
+                            Err(e) => break 'eval Err(("RunCandidateEvalFailed", e)),
+                        }
+                    }
+                    #[cfg(not(feature = "near-ai-scorer"))]
+                    {
+                        break 'eval Err((
+                            "BakeoffNearAiScorerRequiresFeature",
+                            anyhow::anyhow!(
+                                "near-ai real-scorer path reached without near-ai-scorer feature"
+                            ),
+                        ));
+                    }
+                }
             }
         };
 
