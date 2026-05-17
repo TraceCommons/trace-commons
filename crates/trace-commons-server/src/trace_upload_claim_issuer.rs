@@ -348,6 +348,12 @@ struct WorkloadClaims {
     allowed_consent_scopes: Vec<ConsentScope>,
     #[serde(default)]
     allowed_uses: Vec<TraceAllowedUse>,
+    /// Operator-issued pilot invite code. Required only when the issuer
+    /// is configured with an allowlist source; absent otherwise. Read by
+    /// the allowlist check in Slice 2; `#[allow(dead_code)]` until then.
+    #[serde(default)]
+    #[allow(dead_code)]
+    invite_code: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -367,6 +373,12 @@ struct UploadClaimClaims {
     submission_id: Option<Uuid>,
     allowed_consent_scopes: Vec<ConsentScope>,
     allowed_uses: Vec<TraceAllowedUse>,
+    /// `policy_label` from the active pilot allowlist when the claim was
+    /// minted under a configured allowlist source. Omitted entirely when
+    /// the issuer runs without allowlist gating, so existing clients see
+    /// no schema change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy_label: Option<String>,
 }
 
 #[derive(Debug)]
@@ -394,6 +406,53 @@ impl IssuerError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: "failed to issue upload claim",
+        }
+    }
+
+    /// Pilot allowlist refusal: invite code was valid syntactically but is
+    /// not in the active allowlist snapshot. Public label so operators can
+    /// grep for it in client error logs.
+    //
+    // All four pilot_allowlist_* constructors are dead code until Slice 2
+    // wires the snapshot check into the issuance handler. Defined now so
+    // the error vocabulary is one self-contained slice.
+    #[allow(dead_code)]
+    fn pilot_allowlist_not_matched() -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: "PilotAllowlistNotMatched",
+        }
+    }
+
+    /// Pilot allowlist refusal: the workload token did not carry an
+    /// `invite_code` claim and the issuer is configured with an allowlist.
+    #[allow(dead_code)]
+    fn pilot_allowlist_invite_code_missing() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: "PilotAllowlistInviteCodeMissing",
+        }
+    }
+
+    /// Pilot allowlist refusal: the cached snapshot is older than
+    /// `max_stale_seconds` and the source has not yet reloaded
+    /// successfully. Fail-closed beats serving on a stale list.
+    #[allow(dead_code)]
+    fn pilot_allowlist_stale() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "PilotAllowlistStale",
+        }
+    }
+
+    /// Pilot allowlist refusal: the source returned a malformed snapshot
+    /// (file parse failure, etc.) and there is no usable cached snapshot
+    /// to fall back to.
+    #[allow(dead_code)]
+    fn pilot_allowlist_malformed() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "PilotAllowlistMalformed",
         }
     }
 }
@@ -628,6 +687,7 @@ pub fn mint_test_upload_claim() -> anyhow::Result<String> {
         submission_id: None,
         allowed_consent_scopes: Vec::new(),
         allowed_uses: Vec::new(),
+        policy_label: None,
     };
     let mut header = Header::new(Algorithm::EdDSA);
     header.kid = Some(state.signing_kid.clone());
@@ -858,6 +918,9 @@ impl TraceUploadClaimIssuerState {
             submission_id: request.submission_id,
             allowed_consent_scopes: consent_scopes,
             allowed_uses,
+            // Slice 2 replaces this with the active allowlist policy_label
+            // when an allowlist is configured. None today.
+            policy_label: None,
         };
         let mut header = Header::new(Algorithm::EdDSA);
         header.kid = Some(self.signing_kid.clone());
@@ -1365,6 +1428,7 @@ mod tests {
             iat: Some(Utc::now().timestamp()),
             allowed_consent_scopes: vec![ConsentScope::DebuggingEvaluation],
             allowed_uses: vec![TraceAllowedUse::Debugging],
+            invite_code: None,
         };
         let request = TraceUploadClaimRequest {
             schema_version: TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION.to_string(),
