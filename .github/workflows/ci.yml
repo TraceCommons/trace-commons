@@ -112,6 +112,29 @@ jobs:
       # hosts only.
       - run: cargo check -p trace-commons-server --bins --features local-gpu-models
 
+  cargo-check-near-ai-scorer:
+    name: cargo check (near-ai-scorer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-check-near-ai-scorer-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-near-ai-scorer-
+      # Exercises the NEAR AI Cloud scorer module on its own (no local-gpu-models)
+      # so a regression in the HTTP-backed scoring path can't slip through under
+      # cover of the transitive build the local-gpu-models job pulls in.
+      - run: cargo check -p trace-commons-server --bins --features near-ai-scorer
+      - run: cargo test -p trace-commons-gate-enclave --features near-ai-scorer --lib perplexity_near_ai
+
   cargo-test-default:
     name: cargo test (default features)
     runs-on: ubuntu-latest

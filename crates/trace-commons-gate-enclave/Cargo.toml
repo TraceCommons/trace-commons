@@ -42,6 +42,13 @@ fastembed = { version = "5.13.4", optional = true }
 # keeps integration tests working without enabling the feature.
 tokio = { version = "1", optional = true, features = ["rt"] }
 
+# Optional NEAR AI Cloud scorer stack — enabled by the `near-ai-scorer`
+# feature. Pulls in reqwest for the OpenAI-compatible HTTP client. Reuses
+# the optional serde / serde_json / tokio entries above. Independent of
+# `local-gpu-models`: a host can compile the NEAR AI scorer without the
+# mistralrs/candle/CUDA stack.
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
+
 [features]
 default = []
 # Compile the candle-backed `CandlePerplexityScorer`. Off by default; turning
@@ -64,6 +71,15 @@ local-gpu-models = [
 local-gpu-models-cuda = [
     "local-gpu-models",
     "mistralrs/cuda",
+]
+# Compile the NEAR AI Cloud-backed `NearAiPerplexityScorer`. Off by default;
+# turning this on pulls in reqwest + a current-thread tokio runtime. Independent
+# of `local-gpu-models` — a TEE-hosted scoring deployment compiles this without
+# the CUDA stack.
+near-ai-scorer = [
+    "dep:reqwest",
+    "dep:serde",
+    "dep:serde_json",
 ]
 
 [dev-dependencies]
