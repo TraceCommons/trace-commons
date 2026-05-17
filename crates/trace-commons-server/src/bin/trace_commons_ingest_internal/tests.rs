@@ -21229,7 +21229,9 @@ impl RecordingInvalidationGateService {
     }
 }
 
-impl trace_commons_server::trace_gate_service::TraceGateService for RecordingInvalidationGateService {
+impl trace_commons_server::trace_gate_service::TraceGateService
+    for RecordingInvalidationGateService
+{
     fn evaluate_trace(
         &self,
         tenant_ctx: &trace_commons_server::trace_gate_service::TenantCtx,
