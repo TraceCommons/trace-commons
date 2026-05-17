@@ -38,9 +38,7 @@
 
 #![cfg(feature = "near-ai-scorer")]
 
-use crate::perplexity::{
-    PerplexityResult, PerplexityScorer, TokenRarityResult, TokenRarityScorer,
-};
+use crate::perplexity::{PerplexityResult, PerplexityScorer, TokenRarityResult, TokenRarityScorer};
 use crate::perplexity_local::{aggregate_perplexity_metrics, per_token_rarity_micros};
 use anyhow::{Context, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -220,7 +218,10 @@ impl NearAiPerplexityScorer {
 impl PerplexityScorer for NearAiPerplexityScorer {
     fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
         let logprobs = self.fetch_logprobs(plaintext)?;
-        Ok(aggregate_perplexity_metrics(&logprobs, self.cfg.tail_logprob_cutoff))
+        Ok(aggregate_perplexity_metrics(
+            &logprobs,
+            self.cfg.tail_logprob_cutoff,
+        ))
     }
 }
 
