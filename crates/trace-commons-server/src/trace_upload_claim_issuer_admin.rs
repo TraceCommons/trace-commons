@@ -193,7 +193,10 @@ mod tests {
 
         // Identity-revealing fields must not appear under any name.
         let text = body.to_string();
-        assert!(!text.contains("subject_hash"), "subject hashes leaked: {text}");
+        assert!(
+            !text.contains("subject_hash"),
+            "subject hashes leaked: {text}"
+        );
         assert!(!text.contains("tenant_id"), "tenant_id leaked: {text}");
         assert!(!text.contains("note_label"), "note_label leaked: {text}");
         assert!(!text.contains("INV-"), "raw invite codes leaked: {text}");

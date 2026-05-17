@@ -45,7 +45,10 @@ pub fn hash_invite_code(code: &str) -> String {
 #[derive(Debug, Clone)]
 pub enum AllowlistSourceSpec {
     File(PathBuf),
-    Near { account: String, view_method: String },
+    Near {
+        account: String,
+        view_method: String,
+    },
 }
 
 impl AllowlistSourceSpec {
@@ -78,9 +81,7 @@ impl AllowlistSourceSpec {
                 "PilotAllowlistNearSourceNotImplemented: use file:<path> until the on-chain allowlist source lands (account={account}, view_method={view_method})"
             ));
         }
-        anyhow::bail!(
-            "PilotAllowlistSourceMalformed: source must be 'file:<path>' (got {raw:?})"
-        )
+        anyhow::bail!("PilotAllowlistSourceMalformed: source must be 'file:<path>' (got {raw:?})")
     }
 }
 
@@ -166,7 +167,11 @@ fn validate_subject_hash(s: &str) -> Result<(), AllowlistError> {
             "subject_hash must start with sha256: (got {s:?})"
         )));
     };
-    if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
+    if hex.len() != 64
+        || !hex
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    {
         return Err(AllowlistError::Malformed(format!(
             "subject_hash must be sha256:<64 lower-hex> (got {s:?})"
         )));
@@ -235,7 +240,10 @@ impl FileAllowlistSource {
     /// the first request.
     pub fn warm(&self) -> Result<(), AllowlistError> {
         let snapshot = load_file(&self.path, &self.source_label, Instant::now())?;
-        *self.cached.lock().expect("FileAllowlistSource mutex poisoned") = Some(snapshot);
+        *self
+            .cached
+            .lock()
+            .expect("FileAllowlistSource mutex poisoned") = Some(snapshot);
         Ok(())
     }
 }
@@ -287,9 +295,8 @@ fn load_file(
     source_label: &str,
     loaded_at: Instant,
 ) -> Result<AllowlistSnapshot, AllowlistError> {
-    let bytes = std::fs::read(path).map_err(|e| {
-        AllowlistError::SourceMissing(format!("read {}: {e}", path.display()))
-    })?;
+    let bytes = std::fs::read(path)
+        .map_err(|e| AllowlistError::SourceMissing(format!("read {}: {e}", path.display())))?;
     let file: AllowlistFile = serde_json::from_slice(&bytes)
         .map_err(|e| AllowlistError::Malformed(format!("parse {}: {e}", path.display())))?;
     AllowlistSnapshot::from_file(file, source_label.to_string(), loaded_at)
@@ -450,8 +457,7 @@ mod tests {
                 },
             ],
         };
-        let snap =
-            AllowlistSnapshot::from_file(file, "test".into(), Instant::now()).expect("ok");
+        let snap = AllowlistSnapshot::from_file(file, "test".into(), Instant::now()).expect("ok");
         assert_eq!(snap.subject_hashes.len(), 1);
         assert!(snap.contains(&h));
     }

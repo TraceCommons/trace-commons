@@ -177,8 +177,9 @@ impl TraceUploadClaimIssuerConfig {
                 })
                 .transpose()?
                 .unwrap_or(DEFAULT_MAX_REQUEST_BYTES);
-        let allowlist_source =
-            AllowlistSourceSpec::parse(optional_env(TRACE_COMMONS_ALLOWLIST_SOURCE_ENV)?.as_deref())?;
+        let allowlist_source = AllowlistSourceSpec::parse(
+            optional_env(TRACE_COMMONS_ALLOWLIST_SOURCE_ENV)?.as_deref(),
+        )?;
         let allowlist_refresh_interval_seconds =
             optional_env(TRACE_COMMONS_ALLOWLIST_REFRESH_INTERVAL_SECONDS_ENV)?
                 .map(|value| {
@@ -364,9 +365,7 @@ struct TraceUploadClaimIssuerState {
 impl TraceUploadClaimIssuerState {
     /// Build the AdminState the admin router consumes. Lives here so the
     /// admin module never needs visibility into the private state fields.
-    pub(crate) fn build_admin_state(
-        &self,
-    ) -> crate::trace_upload_claim_issuer_admin::AdminState {
+    pub(crate) fn build_admin_state(&self) -> crate::trace_upload_claim_issuer_admin::AdminState {
         crate::trace_upload_claim_issuer_admin::AdminState {
             source: self.allowlist_source.clone(),
             denial_counter: Arc::clone(&self.denial_counter),
@@ -2110,11 +2109,7 @@ mod tests {
         .expect("workload token signs")
     }
 
-    fn write_allowlist_file(
-        path: &std::path::Path,
-        policy_label: &str,
-        codes: &[&str],
-    ) {
+    fn write_allowlist_file(path: &std::path::Path, policy_label: &str, codes: &[&str]) {
         use std::io::Write;
         let entries: Vec<String> = codes
             .iter()
@@ -2146,7 +2141,8 @@ mod tests {
         let path = dir.path().join("allowlist.json");
         write_allowlist_file(&path, "pilot-2026-05", &["INV-OK-001"]);
         let config = config_with_file_allowlist(path);
-        let token = workload_token_with_invite("workload-issuer", "trace-claim-issuer", "INV-OK-001");
+        let token =
+            workload_token_with_invite("workload-issuer", "trace-claim-issuer", "INV-OK-001");
         let (status, body) = post_claim(config, token, claim_request()).await;
         assert_eq!(status, StatusCode::OK, "body: {body}");
         let access_token = body
@@ -2161,8 +2157,7 @@ mod tests {
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(parts[1])
             .expect("payload decodes");
-        let parsed: serde_json::Value =
-            serde_json::from_slice(&payload).expect("payload is json");
+        let parsed: serde_json::Value = serde_json::from_slice(&payload).expect("payload is json");
         assert_eq!(
             parsed.get("policy_label").and_then(|v| v.as_str()),
             Some("pilot-2026-05"),
@@ -2176,11 +2171,8 @@ mod tests {
         let path = dir.path().join("allowlist.json");
         write_allowlist_file(&path, "pilot-2026-05", &["INV-OK-001"]);
         let config = config_with_file_allowlist(path);
-        let token = workload_token_with_invite(
-            "workload-issuer",
-            "trace-claim-issuer",
-            "INV-NOT-LISTED",
-        );
+        let token =
+            workload_token_with_invite("workload-issuer", "trace-claim-issuer", "INV-NOT-LISTED");
         let (status, body) = post_claim(config, token, claim_request()).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(
@@ -2224,7 +2216,8 @@ mod tests {
         // Force the snapshot to be "stale" by setting max-stale to 0 and
         // sleeping enough that the cached snapshot's age > 0.
         config.allowlist_max_stale_seconds = 0;
-        let token = workload_token_with_invite("workload-issuer", "trace-claim-issuer", "INV-OK-001");
+        let token =
+            workload_token_with_invite("workload-issuer", "trace-claim-issuer", "INV-OK-001");
         // Wait a brief moment so loaded_at.elapsed() > Duration::from_secs(0).
         // Duration::from_secs(0) means "any elapsed time is stale", but our
         // comparison is `snapshot_age > max_stale`, so the snapshot has to
