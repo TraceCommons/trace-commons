@@ -93,20 +93,20 @@ CREATE INDEX IF NOT EXISTS idx_trace_ranking_labels_submission
 
 ALTER TABLE trace_ranking_model_versions ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_ranking_model_versions
-    USING (tenant_id = current_setting('trace-commons.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('trace-commons.trace_tenant_id', true));
+    USING (tenant_id = current_setting('trace_commons.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('trace_commons.trace_tenant_id', true));
 
 ALTER TABLE trace_ranking_features ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_ranking_features
-    USING (tenant_id = current_setting('trace-commons.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('trace-commons.trace_tenant_id', true));
+    USING (tenant_id = current_setting('trace_commons.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('trace_commons.trace_tenant_id', true));
 
 ALTER TABLE trace_ranking_predictions ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_ranking_predictions
-    USING (tenant_id = current_setting('trace-commons.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('trace-commons.trace_tenant_id', true));
+    USING (tenant_id = current_setting('trace_commons.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('trace_commons.trace_tenant_id', true));
 
 ALTER TABLE trace_ranking_labels ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_ranking_labels
-    USING (tenant_id = current_setting('trace-commons.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('trace-commons.trace_tenant_id', true));
+    USING (tenant_id = current_setting('trace_commons.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('trace_commons.trace_tenant_id', true));

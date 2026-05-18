@@ -45,7 +45,7 @@ async fn cleanup_pg_trace_tenant(backend: &PgBackend, tenant_id: &str) {
         .await
         .expect("start cleanup transaction");
     tx.execute(
-        "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
         &[&tenant_id],
     )
     .await
@@ -5149,7 +5149,7 @@ async fn postgres_rls_hides_same_submission_id_across_tenant_contexts() {
             .expect("get raw RLS client");
         let tx = client.transaction().await.expect("start raw RLS tx");
         tx.execute(
-            "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
             &[&tenant_id],
         )
         .await

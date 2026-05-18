@@ -76,20 +76,20 @@ CREATE INDEX IF NOT EXISTS idx_trace_near_credit_outbox_status
 
 ALTER TABLE trace_utility_attestations ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_utility_attestations
-    USING (tenant_id = current_setting('trace-commons.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('trace-commons.trace_tenant_id', true));
+    USING (tenant_id = current_setting('trace_commons.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('trace_commons.trace_tenant_id', true));
 
 ALTER TABLE trace_credit_settlement_batches ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_credit_settlement_batches
-    USING (tenant_id = current_setting('trace-commons.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('trace-commons.trace_tenant_id', true));
+    USING (tenant_id = current_setting('trace_commons.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('trace_commons.trace_tenant_id', true));
 
 ALTER TABLE trace_credit_holds ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_credit_holds
-    USING (tenant_id = current_setting('trace-commons.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('trace-commons.trace_tenant_id', true));
+    USING (tenant_id = current_setting('trace_commons.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('trace_commons.trace_tenant_id', true));
 
 ALTER TABLE trace_near_credit_outbox ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_near_credit_outbox
-    USING (tenant_id = current_setting('trace-commons.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('trace-commons.trace_tenant_id', true));
+    USING (tenant_id = current_setting('trace_commons.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('trace_commons.trace_tenant_id', true));

@@ -703,13 +703,13 @@ async fn trace_tenant_context_is_transaction_local(
     let tx = client.transaction().await?;
     let probe_tenant = "__trace_rls_probe_tenant__";
     tx.execute(
-        "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
         &[&probe_tenant],
     )
     .await?;
     let inside = tx
         .query_one(
-            "SELECT current_setting('trace-commons.trace_tenant_id', true) AS tenant_context",
+            "SELECT current_setting('trace_commons.trace_tenant_id', true) AS tenant_context",
             &[],
         )
         .await?
@@ -717,7 +717,7 @@ async fn trace_tenant_context_is_transaction_local(
     tx.commit().await?;
     let after = client
         .query_one(
-            "SELECT current_setting('trace-commons.trace_tenant_id', true) AS tenant_context",
+            "SELECT current_setting('trace_commons.trace_tenant_id', true) AS tenant_context",
             &[],
         )
         .await?

@@ -1211,7 +1211,7 @@ impl PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
         tx.execute(
-            "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
             &[&tenant_id],
         )
         .await

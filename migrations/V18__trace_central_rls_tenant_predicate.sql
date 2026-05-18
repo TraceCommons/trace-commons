@@ -3,7 +3,7 @@ RETURNS TEXT
 LANGUAGE SQL
 STABLE
 AS $$
-    SELECT NULLIF(current_setting('trace-commons.trace_tenant_id', true), '');
+    SELECT NULLIF(current_setting('trace_commons.trace_tenant_id', true), '');
 $$;
 
 DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_tenants;
