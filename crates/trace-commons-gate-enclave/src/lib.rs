@@ -19,7 +19,7 @@ pub mod perplexity_local;
 #[cfg(feature = "near-ai-scorer")]
 pub mod perplexity_near_ai;
 pub mod vector_index;
-#[cfg(feature = "local-gpu-models")]
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
 pub mod vector_index_usearch;
 
 pub use embedder::{Embedder, MockEmbedder};
@@ -33,5 +33,5 @@ pub use perplexity::{
 #[cfg(feature = "near-ai-scorer")]
 pub use perplexity_near_ai::{NearAiPerplexityScorer, NearAiScorerConfig};
 pub use vector_index::{MockVectorIndex, NearestNeighbor, VectorIndex};
-#[cfg(feature = "local-gpu-models")]
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
 pub use vector_index_usearch::UsearchVectorIndex;

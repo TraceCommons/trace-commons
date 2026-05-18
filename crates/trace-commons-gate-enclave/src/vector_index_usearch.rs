@@ -36,7 +36,7 @@
 //! flushes, regardless of the dirty-counter. Drop of `UsearchVectorIndex`
 //! flushes every still-cached tenant.
 
-#![cfg(feature = "local-gpu-models")]
+#![cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
 
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
