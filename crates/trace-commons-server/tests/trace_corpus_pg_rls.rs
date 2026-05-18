@@ -783,7 +783,7 @@ async fn assert_raw_sql_rls_filters_by_tenant_context(
         .await
         .expect("start raw RLS assertion transaction");
     tx.execute(
-        "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
         &[&tenant_a],
     )
     .await
@@ -797,7 +797,7 @@ async fn assert_raw_sql_rls_filters_by_tenant_context(
         .expect("count tenant A visible submissions")
         .get(0);
     tx.execute(
-        "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
         &[&tenant_b],
     )
     .await
@@ -869,7 +869,7 @@ async fn assert_raw_sql_tenants_visible_only_with_matching_tenant_context(
         .await
         .expect("start raw tenant A assertion transaction");
     tx.execute(
-        "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
         &[&tenant_a],
     )
     .await
@@ -899,7 +899,7 @@ async fn assert_raw_sql_tenants_visible_only_with_matching_tenant_context(
         .await
         .expect("start raw tenant B assertion transaction");
     tx.execute(
-        "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
         &[&tenant_b],
     )
     .await
@@ -1075,7 +1075,7 @@ async fn assert_raw_sql_trace_rows_visible_only_with_matching_tenant_context(
         .await
         .expect("start raw tenant A RLS assertion transaction");
     tx.execute(
-        "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
         &[&tenant_a],
     )
     .await
@@ -1099,7 +1099,7 @@ async fn assert_raw_sql_trace_rows_visible_only_with_matching_tenant_context(
         .await
         .expect("start raw tenant B RLS assertion transaction");
     tx.execute(
-        "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
         &[&tenant_b],
     )
     .await
@@ -1169,7 +1169,7 @@ async fn assert_raw_sql_tenant_policies_visible_only_with_matching_tenant_contex
         .await
         .expect("start raw tenant policy tenant A assertion transaction");
     tx.execute(
-        "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
         &[&tenant_a],
     )
     .await
@@ -1198,7 +1198,7 @@ async fn assert_raw_sql_tenant_policies_visible_only_with_matching_tenant_contex
         .await
         .expect("start raw tenant policy tenant B assertion transaction");
     tx.execute(
-        "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
         &[&tenant_b],
     )
     .await
@@ -1275,7 +1275,7 @@ async fn assert_raw_sql_tenant_access_grants_visible_only_with_matching_tenant_c
         .await
         .expect("start raw tenant access grant tenant A assertion transaction");
     tx.execute(
-        "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
         &[&tenant_a],
     )
     .await
@@ -1304,7 +1304,7 @@ async fn assert_raw_sql_tenant_access_grants_visible_only_with_matching_tenant_c
         .await
         .expect("start raw tenant access grant tenant B assertion transaction");
     tx.execute(
-        "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
         &[&tenant_b],
     )
     .await
@@ -1342,7 +1342,7 @@ async fn cleanup_trace_tenants(backend: &PgBackend, tenant_ids: &[&str]) {
             .await
             .expect("start cleanup transaction");
         tx.execute(
-            "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
             &[&tenant_id],
         )
         .await
@@ -1436,7 +1436,7 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
 
     assert!(sql.contains("CREATE OR REPLACE FUNCTION trace_current_tenant_id()"));
     assert!(sql.contains("RETURNS TEXT"));
-    assert!(sql.contains("current_setting('trace-commons.trace_tenant_id', true)"));
+    assert!(sql.contains("current_setting('trace_commons.trace_tenant_id', true)"));
     for table in expected_trace_rls_tables() {
         assert!(
             sql.contains(&format!(
@@ -1595,7 +1595,7 @@ async fn pg_store_rejects_stale_audit_previous_hash_per_tenant() {
             .await
             .expect("start cleanup transaction");
         tx.execute(
-            "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
             &[tenant_id],
         )
         .await
@@ -1630,7 +1630,7 @@ async fn store_facade_sets_transaction_local_tenant_context() {
             .expect("get pooled connection");
         client
             .execute(
-                "SELECT set_config('trace-commons.trace_tenant_id', $1, false)",
+                "SELECT set_config('trace_commons.trace_tenant_id', $1, false)",
                 &[&tenant_b],
             )
             .await
@@ -1657,7 +1657,7 @@ async fn store_facade_sets_transaction_local_tenant_context() {
         .expect("get pooled connection");
     let tenant_context: String = client
         .query_one(
-            "SELECT current_setting('trace-commons.trace_tenant_id', true)",
+            "SELECT current_setting('trace_commons.trace_tenant_id', true)",
             &[],
         )
         .await
@@ -1682,7 +1682,7 @@ async fn store_facade_sets_transaction_local_tenant_context() {
         .await
         .expect("start cleanup transaction");
     tx.execute(
-        "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
         &[&tenant_a],
     )
     .await
@@ -1781,7 +1781,7 @@ async fn store_facade_keeps_same_submission_id_isolated_by_tenant() {
             .await
             .expect("start cleanup transaction");
         tx.execute(
-            "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
             &[&tenant_id],
         )
         .await
@@ -2667,7 +2667,7 @@ async fn store_facade_preserves_retention_job_scope_and_items() {
             .await
             .expect("start cleanup transaction");
         tx.execute(
-            "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
             &[tenant_id],
         )
         .await
@@ -3802,7 +3802,7 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
             .await
             .expect("start cleanup transaction");
         tx.execute(
-            "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
             &[tenant_id],
         )
         .await
@@ -4230,7 +4230,7 @@ async fn store_facade_invalidates_object_refs_and_tombstones_by_tenant_scope() {
             .await
             .expect("start cleanup transaction");
         tx.execute(
-            "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
             &[tenant_id],
         )
         .await
@@ -4342,7 +4342,7 @@ async fn store_facade_invalidates_export_manifests_by_submission_with_tenant_sco
             .await
             .expect("start cleanup transaction");
         tx.execute(
-            "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
             &[&tenant_id],
         )
         .await
@@ -4598,7 +4598,7 @@ async fn store_facade_invalidates_export_manifest_items_by_submission_with_tenan
             .await
             .expect("start cleanup transaction");
         tx.execute(
-            "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
             &[tenant_id],
         )
         .await
@@ -4760,7 +4760,7 @@ async fn store_facade_rejects_export_manifest_item_cross_tenant_refs() {
             .await
             .expect("start cleanup transaction");
         tx.execute(
-            "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
             &[tenant_id],
         )
         .await
@@ -4867,7 +4867,7 @@ async fn store_facade_rejects_derived_record_mismatched_tenant_object_ref() {
             .await
             .expect("start cleanup transaction");
         tx.execute(
-            "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
             &[tenant_id],
         )
         .await
@@ -4998,7 +4998,7 @@ async fn store_facade_rejects_vector_entry_mismatched_submission_derived_id() {
         .await
         .expect("start cleanup transaction");
     tx.execute(
-        "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
         &[&tenant_id],
     )
     .await

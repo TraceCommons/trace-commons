@@ -40,6 +40,6 @@ CREATE INDEX IF NOT EXISTS idx_trace_ranking_preference_labels_rejected_submissi
 
 ALTER TABLE trace_ranking_preference_labels ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_ranking_preference_labels
-    USING (tenant_id = current_setting('trace-commons.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('trace-commons.trace_tenant_id', true));
+    USING (tenant_id = current_setting('trace_commons.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('trace_commons.trace_tenant_id', true));
 ALTER TABLE trace_ranking_preference_labels FORCE ROW LEVEL SECURITY;

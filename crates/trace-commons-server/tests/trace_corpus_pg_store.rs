@@ -111,7 +111,7 @@ async fn export_mirror_counts(
         .expect("get count connection");
     let tx = client.transaction().await.expect("start count transaction");
     tx.execute(
-        "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
         &[&tenant_id],
     )
     .await
@@ -149,7 +149,7 @@ async fn cleanup_tenant(backend: &PgBackend, tenant_id: &str) {
         .await
         .expect("start cleanup transaction");
     tx.execute(
-        "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
         &[&tenant_id],
     )
     .await
@@ -3371,7 +3371,7 @@ async fn pg_store_inserts_trace_gate_decision_under_tenant_scope() {
             .await
             .expect("start readback transaction");
         tx.execute(
-            "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
             &[&tenant_alpha],
         )
         .await
@@ -3413,7 +3413,7 @@ async fn pg_store_inserts_trace_gate_decision_under_tenant_scope() {
             .await
             .expect("start null readback transaction");
         tx.execute(
-            "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
             &[&tenant_alpha],
         )
         .await
@@ -3458,7 +3458,7 @@ async fn pg_store_inserts_trace_gate_decision_under_tenant_scope() {
             .await
             .expect("start withheld readback transaction");
         tx.execute(
-            "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
             &[&tenant_alpha],
         )
         .await
@@ -3494,7 +3494,7 @@ async fn pg_store_inserts_trace_gate_decision_under_tenant_scope() {
             .await
             .expect("start withheld none readback transaction");
         tx.execute(
-            "SELECT set_config('trace-commons.trace_tenant_id', $1, true)",
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
             &[&tenant_alpha],
         )
         .await

@@ -24,6 +24,6 @@ CREATE INDEX IF NOT EXISTS idx_trace_benchmark_registry_outbox_status
 
 ALTER TABLE trace_benchmark_registry_outbox ENABLE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_benchmark_registry_outbox
-    USING (tenant_id = current_setting('trace-commons.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('trace-commons.trace_tenant_id', true));
+    USING (tenant_id = current_setting('trace_commons.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('trace_commons.trace_tenant_id', true));
 ALTER TABLE trace_benchmark_registry_outbox FORCE ROW LEVEL SECURITY;

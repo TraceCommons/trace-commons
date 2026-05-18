@@ -22,5 +22,5 @@ CREATE INDEX IF NOT EXISTS idx_trace_ranking_calibration_datasets_policy
 ALTER TABLE trace_ranking_calibration_datasets ENABLE ROW LEVEL SECURITY;
 ALTER TABLE trace_ranking_calibration_datasets FORCE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_ranking_calibration_datasets
-    USING (tenant_id = current_setting('trace-commons.trace_tenant_id', true))
-    WITH CHECK (tenant_id = current_setting('trace-commons.trace_tenant_id', true));
+    USING (tenant_id = current_setting('trace_commons.trace_tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('trace_commons.trace_tenant_id', true));
