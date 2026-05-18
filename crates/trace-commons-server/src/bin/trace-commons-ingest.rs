@@ -242,6 +242,23 @@ const TRACE_COMMONS_PERPLEXITY_DEFAULT_MODEL_ID: &str = "meta-llama/Llama-3.1-8B
 const TRACE_COMMONS_PERPLEXITY_DEFAULT_MAX_TOKENS: usize = 16_384;
 #[allow(dead_code)]
 const TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF: f32 = -8.0;
+
+// NEAR AI Cloud-backed perplexity scorer (pilot deployment path). Read only when
+// `TRACE_COMMONS_GATE_SERVICE=enclave_near_ai` AND the `near-ai-scorer` cargo
+// feature is compiled in. API key intentionally only read from env (never CLI)
+// so it never appears in process listings.
+#[allow(dead_code)]
+const TRACE_COMMONS_NEAR_AI_BASE_URL: &str = "TRACE_COMMONS_NEAR_AI_BASE_URL";
+#[allow(dead_code)]
+const TRACE_COMMONS_NEAR_AI_MODEL: &str = "TRACE_COMMONS_NEAR_AI_MODEL";
+#[allow(dead_code)]
+const TRACE_COMMONS_NEAR_AI_API_KEY: &str = "TRACE_COMMONS_NEAR_AI_API_KEY";
+#[allow(dead_code)]
+const TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS: &str = "TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS";
+#[allow(dead_code)]
+const TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS: u64 = 60;
+#[allow(dead_code)]
+const TRACE_COMMONS_NEAR_AI_DEFAULT_LOGPROBS_TOP_K: u32 = 5;
 // fastembed embedder (Phase A3). Read only when
 // `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu` AND the `local-gpu-models`
 // feature is compiled in.
@@ -4197,6 +4214,14 @@ async fn build_trace_gate_service_from_env() -> anyhow::Result<Arc<dyn TraceGate
                 "{TRACE_COMMONS_GATE_SERVICE}=\"enclave_local_gpu\" requires the trace-commons-server `local-gpu-models` cargo feature; rebuild with --features local-gpu-models"
             );
         }
+        #[cfg(feature = "near-ai-scorer")]
+        "enclave_near_ai" => build_enclave_near_ai_gate_service_from_env().await,
+        #[cfg(not(feature = "near-ai-scorer"))]
+        "enclave_near_ai" => {
+            anyhow::bail!(
+                "{TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\" requires the trace-commons-server `near-ai-scorer` cargo feature; rebuild with --features near-ai-scorer"
+            );
+        }
         "dstack" => {
             let endpoint =
                 std::env::var(TRACE_COMMONS_GATE_SERVICE_ENCLAVE_ENDPOINT).unwrap_or_default();
@@ -4457,14 +4482,263 @@ async fn build_enclave_local_gpu_gate_service_from_env() -> anyhow::Result<Arc<d
     )))
 }
 
+/// Build the `enclave_near_ai` gate service: NEAR AI Cloud-backed perplexity
+/// scorer (HTTP, TEE-hosted vLLM) + fastembed-rs embedder + usearch vector
+/// index. The embedder and vector index run locally on CPU — the GPU work is
+/// the perplexity scoring, which the NEAR AI host owns. This is the pilot
+/// deployment path that removes the local CUDA / mistralrs dependency from
+/// the production server.
+///
+/// Required env vars:
+/// - `TRACE_COMMONS_NEAR_AI_BASE_URL` — direct-completions endpoint, e.g.
+///   `https://qwen3-6-35b.completions.near.ai/v1`. No trailing slash.
+/// - `TRACE_COMMONS_NEAR_AI_MODEL` — model id passed to the API, e.g.
+///   `Qwen/Qwen3.6-35B-A3B-FP8`.
+/// - `TRACE_COMMONS_NEAR_AI_API_KEY` — bearer token (never logged, never
+///   accepted on the CLI).
+/// - The same gate-floor / policy-version / embedder / vector-index env
+///   vars as `enclave_local_gpu`.
+#[cfg(feature = "near-ai-scorer")]
+async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn TraceGateService>>
+{
+    use std::time::Duration as StdDuration;
+    use trace_commons_gate_enclave::embedder_fastembed::FastEmbedTextEmbedder;
+    use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex;
+    use trace_commons_gate_enclave::{
+        EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig, NearAiPerplexityScorer,
+        NearAiScorerConfig,
+    };
+
+    let master_key = std::env::var(TRACE_COMMONS_GATE_SERVICE_MASTER_KEY).with_context(|| {
+        format!(
+            "{TRACE_COMMONS_GATE_SERVICE_MASTER_KEY} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
+        )
+    })?;
+    let crypto = SecretsCrypto::new(SecretString::from(master_key))
+        .context("failed to initialize gate-service KEK wrapper")?;
+    let wrapper: Arc<dyn KmsKeyWrapper> = Arc::new(LocalMasterKeyWrapper::new(
+        crypto,
+        "trace-commons-gate-enclave-near-ai-v1",
+    ));
+
+    let base_url = std::env::var(TRACE_COMMONS_NEAR_AI_BASE_URL).with_context(|| {
+        format!(
+            "{TRACE_COMMONS_NEAR_AI_BASE_URL} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
+        )
+    })?;
+    let model = std::env::var(TRACE_COMMONS_NEAR_AI_MODEL).with_context(|| {
+        format!(
+            "{TRACE_COMMONS_NEAR_AI_MODEL} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
+        )
+    })?;
+    let api_key = std::env::var(TRACE_COMMONS_NEAR_AI_API_KEY).with_context(|| {
+        format!(
+            "{TRACE_COMMONS_NEAR_AI_API_KEY} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
+        )
+    })?;
+    let timeout_seconds = match std::env::var(TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS) {
+        Ok(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS
+            } else {
+                trimmed.parse::<u64>().with_context(|| {
+                    format!("{TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS} must be a positive integer")
+                })?
+            }
+        }
+        Err(_) => TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS,
+    };
+    anyhow::ensure!(
+        timeout_seconds > 0,
+        "{TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS} must be greater than zero"
+    );
+    let tail_cutoff = match std::env::var(TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF) {
+        Ok(raw) => raw.trim().parse::<f32>().with_context(|| {
+            format!(
+                "{TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF} must be a floating-point number"
+            )
+        })?,
+        Err(_) => TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF,
+    };
+    anyhow::ensure!(
+        tail_cutoff.is_finite(),
+        "{TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF} must be finite"
+    );
+
+    let scorer_cfg = NearAiScorerConfig {
+        base_url,
+        model: model.clone(),
+        api_key,
+        tail_logprob_cutoff: tail_cutoff,
+        logprobs_top_k: TRACE_COMMONS_NEAR_AI_DEFAULT_LOGPROBS_TOP_K,
+        timeout: StdDuration::from_secs(timeout_seconds),
+    };
+    let scorer =
+        NearAiPerplexityScorer::try_new(scorer_cfg).context("NearAiPerplexityScorerInitFailed")?;
+
+    // fastembed-rs embedder — same configuration surface as the local-GPU
+    // path. Runs locally on CPU; no GPU required.
+    let embedder_model_id = std::env::var(TRACE_COMMONS_EMBEDDER_MODEL_ID)
+        .unwrap_or_else(|_| TRACE_COMMONS_EMBEDDER_DEFAULT_MODEL_ID.to_string());
+    let embedder_cache_dir = std::env::var(TRACE_COMMONS_EMBEDDER_CACHE_DIR)
+        .unwrap_or_else(|_| TRACE_COMMONS_EMBEDDER_DEFAULT_CACHE_DIR.to_string());
+    let embedder_max_tokens = match std::env::var(TRACE_COMMONS_EMBEDDER_MAX_TOKENS) {
+        Ok(raw) => raw.trim().parse::<usize>().with_context(|| {
+            format!("{TRACE_COMMONS_EMBEDDER_MAX_TOKENS} must be a positive integer")
+        })?,
+        Err(_) => TRACE_COMMONS_EMBEDDER_DEFAULT_MAX_TOKENS,
+    };
+    anyhow::ensure!(
+        embedder_max_tokens > 0,
+        "{TRACE_COMMONS_EMBEDDER_MAX_TOKENS} must be greater than zero"
+    );
+    let embedder_matryoshka_dim = match std::env::var(TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM) {
+        Ok(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.parse::<usize>().with_context(|| {
+                    format!("{TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM} must be a positive integer")
+                })?)
+            }
+        }
+        Err(_) => None,
+    };
+    if let Some(d) = embedder_matryoshka_dim {
+        anyhow::ensure!(
+            d > 0,
+            "{TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM} must be greater than zero"
+        );
+    }
+    let embedder = FastEmbedTextEmbedder::try_new(
+        embedder_model_id.clone(),
+        &embedder_cache_dir,
+        embedder_matryoshka_dim,
+        embedder_max_tokens,
+    )
+    .await
+    .context("FastEmbedTextEmbedderInitFailed")?;
+
+    let vector_index_root = std::env::var(TRACE_COMMONS_VECTOR_INDEX_ROOT)
+        .unwrap_or_else(|_| TRACE_COMMONS_VECTOR_INDEX_DEFAULT_ROOT.to_string());
+    let vector_index_dim = parse_usize_env(
+        TRACE_COMMONS_VECTOR_INDEX_DIM,
+        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_DIM,
+    )?;
+    let vector_index_max_open = parse_usize_env(
+        TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN,
+        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_MAX_OPEN,
+    )?;
+    let vector_index_flush_every = parse_usize_env(
+        TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY,
+        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_FLUSH_EVERY,
+    )?;
+    let vector_index_hnsw_m = parse_usize_env(
+        TRACE_COMMONS_VECTOR_INDEX_HNSW_M,
+        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_HNSW_M,
+    )?;
+    let vector_index_ef_construction = parse_usize_env(
+        TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION,
+        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_CONSTRUCTION,
+    )?;
+    let vector_index_ef_search = parse_usize_env(
+        TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH,
+        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_SEARCH,
+    )?;
+    let vector_index = UsearchVectorIndex::try_new(
+        &vector_index_root,
+        vector_index_dim,
+        vector_index_hnsw_m,
+        vector_index_ef_construction,
+        vector_index_ef_search,
+        vector_index_max_open,
+        vector_index_flush_every,
+    )
+    .with_context(|| {
+        format!(
+            "failed to initialize UsearchVectorIndex (root={vector_index_root}, dim={vector_index_dim})"
+        )
+    })?;
+
+    anyhow::ensure!(
+        embedder.output_dim() == vector_index_dim,
+        "embedder output_dim ({}) must equal {} ({})",
+        embedder.output_dim(),
+        TRACE_COMMONS_VECTOR_INDEX_DIM,
+        vector_index_dim,
+    );
+
+    let perplexity_floor_micros =
+        parse_required_u64_env(TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS)?;
+    let tail_fraction_floor_micros =
+        parse_required_u64_env(TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS)?;
+    let novelty_floor_micros = parse_required_u64_env(TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS)?;
+    anyhow::ensure!(
+        perplexity_floor_micros > 0 || tail_fraction_floor_micros > 0 || novelty_floor_micros > 0,
+        "{}/{}/{} cannot all be zero — at least one gate floor must be positive",
+        TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS,
+        TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS,
+        TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS,
+    );
+    let gate_policy_version =
+        std::env::var(TRACE_COMMONS_GATE_POLICY_VERSION).with_context(|| {
+            format!(
+                "{} must be set when {}=\"enclave_near_ai\"",
+                TRACE_COMMONS_GATE_POLICY_VERSION, TRACE_COMMONS_GATE_SERVICE,
+            )
+        })?;
+    anyhow::ensure!(
+        !gate_policy_version.trim().is_empty(),
+        "{} must be non-empty",
+        TRACE_COMMONS_GATE_POLICY_VERSION,
+    );
+    let top_k = parse_usize_env(TRACE_COMMONS_GATE_TOP_K, TRACE_COMMONS_GATE_DEFAULT_TOP_K)?;
+
+    // Gate version hash mixes in the perplexity *model id* (which here is
+    // the NEAR AI hosted model name) so rotating the hosted model produces a
+    // distinct audit trail. `max_tokens` is left at 0 for the NEAR AI arm —
+    // the hosted endpoint enforces its own input cap and we don't drive it
+    // from a client-side env.
+    let gate_version_hash = compute_gate_version_hash(
+        &gate_policy_version,
+        perplexity_floor_micros,
+        tail_fraction_floor_micros,
+        novelty_floor_micros,
+        top_k,
+        &model,
+        0,
+        tail_cutoff,
+        &embedder_model_id,
+        embedder_max_tokens,
+        embedder_matryoshka_dim,
+        vector_index_dim,
+    );
+
+    let cfg = EnclaveGateOrchestratorConfig {
+        gate_policy_version,
+        gate_version_hash,
+        perplexity_floor_micros,
+        tail_fraction_floor_micros,
+        novelty_floor_micros,
+        top_k,
+    };
+    let orchestrator = EnclaveGateOrchestrator::new(scorer, embedder, vector_index, cfg);
+    Ok(Arc::new(EnclaveGateService::new(
+        orchestrator,
+        wrapper,
+        "enclave_near_ai",
+    )))
+}
+
 /// Parse a required `u64` env var. Returns an error if the var is unset,
 /// empty, or doesn't parse. Used for the three gate floors that the
 /// orchestrator config refuses to default.
-#[cfg(feature = "local-gpu-models")]
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
 fn parse_required_u64_env(var: &'static str) -> anyhow::Result<u64> {
-    let raw = std::env::var(var).with_context(|| {
-        format!("{var} must be set when TRACE_COMMONS_GATE_SERVICE=\"enclave_local_gpu\"")
-    })?;
+    let raw = std::env::var(var)
+        .with_context(|| format!("{var} must be set on the production gate-service path"))?;
     let trimmed = raw.trim();
     anyhow::ensure!(!trimmed.is_empty(), "{var} must not be empty");
     trimmed
@@ -4477,7 +4751,7 @@ fn parse_required_u64_env(var: &'static str) -> anyhow::Result<u64> {
 /// caps, and the vector index dim. Operators rotating any of these MUST see
 /// the audit trail break — the previous fixed `"sha256:enclave_mock_v1"` value
 /// stamped every decision regardless of configuration.
-#[cfg(feature = "local-gpu-models")]
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
 #[allow(clippy::too_many_arguments)]
 fn compute_gate_version_hash(
     policy_version: &str,
@@ -4509,7 +4783,7 @@ fn compute_gate_version_hash(
 
 /// Parse `T = usize` from an env var with a default fallback. Trim + strict
 /// integer parse; empty / unset → default; malformed → fail-closed.
-#[cfg(feature = "local-gpu-models")]
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
 fn parse_usize_env(var: &'static str, default: usize) -> anyhow::Result<usize> {
     match std::env::var(var) {
         Ok(raw) => {

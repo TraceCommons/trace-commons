@@ -119,7 +119,7 @@ mod normalize_tests {
 // FastEmbedTextEmbedder — feature-gated on `local-gpu-models`.
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "local-gpu-models")]
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
 mod fastembed_impl {
     use super::l2_normalize_in_place;
     use crate::embedder::Embedder;
@@ -430,5 +430,5 @@ mod fastembed_impl {
     }
 }
 
-#[cfg(feature = "local-gpu-models")]
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
 pub use fastembed_impl::FastEmbedTextEmbedder;

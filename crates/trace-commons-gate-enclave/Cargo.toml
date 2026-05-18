@@ -75,11 +75,19 @@ local-gpu-models-cuda = [
 # Compile the NEAR AI Cloud-backed `NearAiPerplexityScorer`. Off by default;
 # turning this on pulls in reqwest + a current-thread tokio runtime. Independent
 # of `local-gpu-models` — a TEE-hosted scoring deployment compiles this without
-# the CUDA stack.
+# the CUDA / mistralrs stack, but still needs the same CPU-only embedder
+# (fastembed via ort) + vector index (usearch) to drive the rest of the gate
+# pipeline. Pulls those in alongside the HTTP client.
 near-ai-scorer = [
     "dep:reqwest",
     "dep:serde",
     "dep:serde_json",
+    "dep:fastembed",
+    "dep:tokenizers",
+    "dep:hf-hub",
+    "dep:tokio",
+    "dep:usearch",
+    "dep:lru",
 ]
 
 [dev-dependencies]
