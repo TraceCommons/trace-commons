@@ -1944,6 +1944,10 @@ fn build_near_ai_adapter() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilte
 }
 
 pub(crate) fn read_privacy_env(canonical: &str, legacy: &str) -> Option<String> {
+    let canonical_present = std::env::var(canonical)
+        .ok()
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
     if let Ok(value) = std::env::var(canonical) {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
@@ -1953,12 +1957,46 @@ pub(crate) fn read_privacy_env(canonical: &str, legacy: &str) -> Option<String> 
     if let Ok(value) = std::env::var(legacy) {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
-            // One-shot deprecation log handled by caller; this helper
-            // is pure value-read.
+            if !canonical_present {
+                emit_legacy_privacy_env_deprecation_warning_once();
+            }
             return Some(trimmed.to_string());
         }
     }
     None
+}
+
+static LEGACY_PRIVACY_ENV_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn emit_legacy_privacy_env_deprecation_warning_once() {
+    if LEGACY_PRIVACY_ENV_WARNED
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_ok()
+    {
+        eprintln!(
+            "warning: legacy IRONCLAW_TRACE_PRIVACY_FILTER_* environment variables are deprecated; \
+             rename to TRACE_PRIVACY_FILTER_* (legacy names will be removed in a future release)"
+        );
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_legacy_privacy_env_warning_for_tests() {
+    LEGACY_PRIVACY_ENV_WARNED.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn privacy_filter_backend_label(backend: PrivacyFilterBackendTag) -> &'static str {
+    match backend {
+        PrivacyFilterBackendTag::None => "none",
+        PrivacyFilterBackendTag::Sidecar => "sidecar",
+        PrivacyFilterBackendTag::NearAi => "near_ai",
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2124,13 +2162,32 @@ impl DeterministicTraceRedactor {
             Ok(Some(redaction)) => redaction,
             Ok(None) => return Ok(text),
             Err(error) => {
-                let error_text = error.to_string();
-                report.increment("privacy_filter:sidecar_failure");
-                report.add_warning(format!(
-                    "Privacy Filter sidecar failed; deterministic redaction fallback was used. error_hash={}",
-                    canonical_hash(&error_text)
-                ));
-                return Ok(text);
+                match self.privacy_filter_backend {
+                    PrivacyFilterBackendTag::NearAi => {
+                        // Spec fail-closed: surface as RedactionFailed.
+                        return Err(error);
+                    }
+                    PrivacyFilterBackendTag::Sidecar => {
+                        let error_text = error.to_string();
+                        let backend_label = privacy_filter_backend_label(
+                            self.privacy_filter_backend,
+                        );
+                        report.increment(format!(
+                            "privacy_filter:{backend_label}_failure"
+                        ));
+                        report.add_warning(format!(
+                            "Privacy Filter {backend_label} backend failed; deterministic redaction fallback was used. error_hash={}",
+                            canonical_hash(&error_text)
+                        ));
+                        return Ok(text);
+                    }
+                    PrivacyFilterBackendTag::None => {
+                        // Unreachable: when backend tag is None, no adapter is
+                        // installed and we returned early above. Be defensive
+                        // and surface the error rather than silently swallow.
+                        return Err(error);
+                    }
+                }
             }
         };
 
@@ -3868,6 +3925,132 @@ mod tests {
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
         }
+    }
+
+    #[derive(Debug)]
+    struct AlwaysFailingPrivacyFilterAdapter;
+
+    #[async_trait::async_trait]
+    impl super::PrivacyFilterAdapter for AlwaysFailingPrivacyFilterAdapter {
+        async fn redact_text(
+            &self,
+            _text: &str,
+        ) -> Result<
+            Option<super::SafePrivacyFilterRedaction>,
+            super::TraceContributionError,
+        > {
+            Err(super::TraceContributionError::RedactionFailed {
+                reason: "synthetic adapter failure for tests".to_string(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn near_ai_runtime_error_propagates_fail_closed() {
+        use super::{
+            DeterministicTraceRedactor, PrivacyFilterBackendTag, RedactionReport,
+            TraceContributionError,
+        };
+        use std::sync::Arc;
+        let adapter = Arc::new(AlwaysFailingPrivacyFilterAdapter);
+        let redactor = DeterministicTraceRedactor::try_default()
+            .expect("default redactor")
+            .with_privacy_filter(adapter, PrivacyFilterBackendTag::NearAi);
+        let mut report = RedactionReport::default();
+        let mut summary = None;
+        let result = redactor
+            .apply_privacy_filter_to_text(
+                "alice@example.com".to_string(),
+                &mut report,
+                &mut summary,
+            )
+            .await;
+        match result {
+            Err(TraceContributionError::RedactionFailed { reason }) => {
+                assert!(
+                    reason.contains("synthetic adapter failure"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            Ok(text) => panic!("expected error; got Ok({text:?})"),
+        }
+        // No fallback warning or counter should be emitted in fail-closed
+        // mode.
+        let dump = format!("{:?}", report);
+        assert!(
+            !dump.contains("sidecar_failure")
+                && !dump.contains("near_ai_failure"),
+            "fail-closed must not emit a backend_failure counter: {dump}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sidecar_runtime_error_falls_back_with_backend_label() {
+        use super::{
+            DeterministicTraceRedactor, PrivacyFilterBackendTag, RedactionReport,
+        };
+        use std::sync::Arc;
+        let adapter = Arc::new(AlwaysFailingPrivacyFilterAdapter);
+        let redactor = DeterministicTraceRedactor::try_default()
+            .expect("default redactor")
+            .with_privacy_filter(adapter, PrivacyFilterBackendTag::Sidecar);
+        let mut report = RedactionReport::default();
+        let mut summary = None;
+        let text = redactor
+            .apply_privacy_filter_to_text(
+                "alice@example.com".to_string(),
+                &mut report,
+                &mut summary,
+            )
+            .await
+            .expect("sidecar must swallow runtime errors");
+        // Original text is returned to the caller (sidecar legacy
+        // contract).
+        assert_eq!(text, "alice@example.com");
+        let dump = format!("{:?}", report);
+        assert!(
+            dump.contains("privacy_filter:sidecar_failure"),
+            "expected sidecar_failure counter to be incremented; got {dump}"
+        );
+        assert!(
+            dump.contains("sidecar backend failed"),
+            "expected backend-aware warning; got {dump}"
+        );
+    }
+
+    #[test]
+    fn legacy_privacy_env_emits_deprecation_warning_once() {
+        use super::{read_privacy_env, reset_legacy_privacy_env_warning_for_tests};
+        let _guard = ENV_LOCK.lock().unwrap();
+        reset_legacy_privacy_env_warning_for_tests();
+        let canonical = "TRACE_PRIVACY_FILTER_TEST_DEPR_ABCDEF";
+        let legacy = "IRONCLAW_TRACE_PRIVACY_FILTER_TEST_DEPR_ABCDEF";
+        unsafe {
+            std::env::remove_var(canonical);
+            std::env::set_var(legacy, "legacy-only");
+        }
+        // First read should trigger the warning (best-effort: we cannot
+        // capture stderr without extra deps, but we can verify the
+        // atomic transitioned). The call itself must not panic.
+        assert_eq!(
+            read_privacy_env(canonical, legacy).as_deref(),
+            Some("legacy-only")
+        );
+        // After the first emission, the atomic is set; subsequent reads
+        // must not reset it.
+        assert!(
+            super::LEGACY_PRIVACY_ENV_WARNED
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "warning latch must be set after first legacy read"
+        );
+        // Second read; latch should remain true (idempotent).
+        let _ = read_privacy_env(canonical, legacy);
+        assert!(super::LEGACY_PRIVACY_ENV_WARNED
+            .load(std::sync::atomic::Ordering::SeqCst));
+        unsafe {
+            std::env::remove_var(legacy);
+        }
+        reset_legacy_privacy_env_warning_for_tests();
     }
 
     #[test]

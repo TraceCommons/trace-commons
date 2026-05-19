@@ -108,6 +108,78 @@ async fn error_strings_do_not_leak_api_key() {
 }
 
 #[tokio::test]
+async fn empty_data_array_surfaces_as_redaction_failed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
+        .mount(&server)
+        .await;
+
+    let err = adapter(server.uri())
+        .redact_text("hello world")
+        .await
+        .expect_err("empty data array must error fail-closed");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("near-ai privacy classifier returned empty data array"),
+        "unexpected error: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn malformed_json_surfaces_as_redaction_failed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("{not valid json")
+                .insert_header("content-type", "application/json"),
+        )
+        .mount(&server)
+        .await;
+
+    let err = adapter(server.uri())
+        .redact_text("hello world")
+        .await
+        .expect_err("malformed JSON must error fail-closed");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("parse error"),
+        "expected 'parse error' in message; got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn empty_spans_passes_text_through_unchanged() {
+    // Documented contract: a 200 with `data: [{spans: []}]` means the
+    // classifier looked at the text and found no PII. We return
+    // Ok(Some(redaction)) with span_count = 0 and redacted_text equal
+    // to the original — same effective behavior as the sidecar on a
+    // clean trace.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{"spans": []}]
+            })),
+        )
+        .mount(&server)
+        .await;
+
+    let original = "totally clean text without PII";
+    let result = adapter(server.uri())
+        .redact_text(original)
+        .await
+        .expect("call succeeds")
+        .expect("entry present even with no spans");
+    assert_eq!(result.redacted_text, original);
+    assert_eq!(result.summary.span_count, 0);
+}
+
+#[tokio::test]
 async fn canary_run_against_mock_returns_healthy() {
     let server = MockServer::start().await;
     // Canary text is three synthetic values joined by spaces; mock
