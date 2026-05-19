@@ -43,6 +43,7 @@ the link.
 | Interpreting `/v1/admin/operational-summary` | [`./operational-summary.md`](./operational-summary.md) |
 | Running or scheduling admin drills | [`./drills.md`](./drills.md) |
 | Looking up an env var | [`./env-reference.md`](./env-reference.md) |
+| Driving review / admin / worker / tenant workflows from a CLI | [`./operator-binaries.md`](./operator-binaries.md) |
 | Diagnosing a stuck or failing service | [`./troubleshooting.md`](./troubleshooting.md) |
 | Understanding the deployment topology | [`./architecture.md`](./architecture.md) |
 
@@ -88,6 +89,10 @@ Every runbook in this directory, with a one-line description.
   perplexity model or embedder and the gate-version implications.
 - [`./operational-summary.md`](./operational-summary.md) — field-by-field
   meaning and alarm guidance for `/v1/admin/operational-summary`.
+- [`./operator-binaries.md`](./operator-binaries.md) — operator CLI
+  workflows for `trace-commons-{review,admin,worker,tenant}`: install,
+  env-var matrix, common sequences, defense-in-depth notes, and an
+  error-variant troubleshooting table.
 - [`./pilot-bootstrap.md`](./pilot-bootstrap.md) — operator runbook for the
   HF-trace replay harness used to seed pilot calibration data.
 - [`./pilot-bootstrap-dryrun-notes.md`](./pilot-bootstrap-dryrun-notes.md) —

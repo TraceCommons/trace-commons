@@ -188,3 +188,26 @@ jobs:
       # with a `SmokePilotBootstrapFailure:<label>` diagnostic.
       - name: Run pilot-bootstrap smoke
         run: bash scripts/operator/pilot-bootstrap-smoke.sh
+
+  operator-binaries-smoke:
+    name: operator-binaries smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-operator-binaries-smoke-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-operator-binaries-smoke-
+      # Builds and exercises the four operator CLIs (review, admin, worker,
+      # tenant), confirming --version + --help + per-binary subcommand counts.
+      # See docs/operator/operator-binaries.md.
+      - name: Run operator-binaries smoke
+        run: bash scripts/operator/operator-smoke.sh
