@@ -1617,6 +1617,18 @@ pub enum TraceContributionError {
     RedactionFailed { reason: String },
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum PrivacyFilterConfigError {
+    #[error("unknown TRACE_PRIVACY_FILTER_BACKEND value: {value}")]
+    UnknownBackend { value: String },
+    #[error("missing required env var for backend {backend}: {var}")]
+    MissingEnv { backend: &'static str, var: &'static str },
+    #[error("invalid env var {var}: {reason}")]
+    InvalidEnv { var: &'static str, reason: String },
+    #[error("backend {backend} requires the {feature} cargo feature")]
+    FeatureDisabled { backend: &'static str, feature: &'static str },
+}
+
 #[async_trait]
 pub trait TraceRedactor: Send + Sync {
     async fn redact_trace(
@@ -3602,6 +3614,37 @@ pub fn apply_credit_estimate_to_envelope(envelope: &mut TraceContributionEnvelop
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn privacy_filter_config_error_messages_are_stable() {
+        use super::PrivacyFilterConfigError;
+        let e = PrivacyFilterConfigError::UnknownBackend { value: "junk".into() };
+        assert_eq!(e.to_string(), "unknown TRACE_PRIVACY_FILTER_BACKEND value: junk");
+        let e = PrivacyFilterConfigError::MissingEnv {
+            backend: "near-ai",
+            var: "TRACE_NEAR_AI_PRIVACY_API_KEY",
+        };
+        assert_eq!(
+            e.to_string(),
+            "missing required env var for backend near-ai: TRACE_NEAR_AI_PRIVACY_API_KEY"
+        );
+        let e = PrivacyFilterConfigError::FeatureDisabled {
+            backend: "near-ai",
+            feature: "near-ai-privacy-filter",
+        };
+        assert_eq!(
+            e.to_string(),
+            "backend near-ai requires the near-ai-privacy-filter cargo feature"
+        );
+        let e = PrivacyFilterConfigError::InvalidEnv {
+            var: "TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS",
+            reason: "not a number".into(),
+        };
+        assert_eq!(
+            e.to_string(),
+            "invalid env var TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS: not a number"
+        );
+    }
+
     #[test]
     fn redaction_pipeline_version_emits_per_backend_suffix() {
         use super::{redaction_pipeline_version, PrivacyFilterBackendTag, DETERMINISTIC_REDACTION_PIPELINE_VERSION};
