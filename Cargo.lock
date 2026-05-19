@@ -7042,6 +7042,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "trace-commons-operator-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "trace-commons-protocol"
 version = "0.1.0"
 dependencies = [
