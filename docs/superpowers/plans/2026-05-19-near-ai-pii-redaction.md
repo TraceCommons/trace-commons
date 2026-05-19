@@ -6,7 +6,9 @@
 
 **Architecture:** New module in `tracedao-protocol` behind feature `near-ai-privacy-filter`. Calls `https://cloud-api.near.ai/v1/privacy/classify`, maps `spans` into the existing `SafePrivacyFilterRedaction` shape, applies `[REDACTED:{category}]` substitution. Existing `DeterministicTraceRedactor` and envelope schema unchanged; only the `redaction_pipeline_version` string gains a new suffix.
 
-**Tech Stack:** Rust async, `reqwest` 0.12 (new optional direct dep), `wiremock` (new dev-dep), `async-trait`, `serde`. Tokio runtime.
+**Tech Stack:** Rust async, `reqwest` 0.12 (new optional direct dep), `wiremock` 0.6 (new dev-dep), `async-trait`, `serde`. Tokio runtime. Workspace edition 2024, MSRV 1.92.
+
+**Visibility prerequisites:** This plan requires bumping the following items in `trace_contribution.rs` from private to `pub(crate)`: `safe_privacy_filter_label` (line ~1468), `RedactionReport::increment` (line ~1376), `RedactionReport::add_pii_label` (line ~1380), `RedactionReport::add_warning` (line ~1387). They are called from the new sibling module.
 
 **Spec:** `docs/superpowers/specs/2026-05-19-near-ai-pii-redaction-design.md`
 
@@ -53,7 +55,7 @@ wiremock = "0.6"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "process", "time"] }
 ```
 
-(If `tokio` is already in `[dev-dependencies]`, just add the macros + rt features.)
+Confirmed: `tokio` is currently a runtime dep (not in dev-dependencies); the `[dev-dependencies]` entry above is new and necessary so `#[tokio::test]` can resolve `macros` and `rt-multi-thread`.
 
 - [ ] **Step 2: Verify default build still compiles**
 
@@ -256,17 +258,29 @@ git commit -m "Add PrivacyFilterConfigError for fail-closed backend configuratio
 **Files:**
 - Modify: `crates/tracedao-protocol/src/trace_contribution.rs`
 
-- [ ] **Step 1: Write failing test for canonical + back-compat lookup**
+- [ ] **Step 1: Add a process-wide env mutex to the test module**
+
+The workspace is edition 2024 (MSRV 1.92), so `std::env::set_var` /
+`remove_var` are `unsafe`. All env-touching tests in this crate must
+serialize through one lock to avoid corrupting the process env in
+parallel test runs. Add at the top of the test module:
+
+```rust
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+```
+
+- [ ] **Step 2: Write failing test for canonical + back-compat lookup**
 
 ```rust
 #[test]
 fn read_privacy_env_prefers_canonical_then_legacy() {
     use super::read_privacy_env;
-    // SAFETY: setting env vars in tests is process-global; this test is
-    // single-threaded by virtue of `cargo test`'s default for `--test-threads=1`
-    // env-modifying tests; if other tests touch these vars, gate behind a Mutex.
+    let _guard = ENV_LOCK.lock().unwrap();
     let canonical = "TRACE_PRIVACY_FILTER_TEST_CANONICAL_XYZ";
     let legacy = "IRONCLAW_TRACE_PRIVACY_FILTER_TEST_CANONICAL_XYZ";
+    // SAFETY: holding ENV_LOCK serializes env mutation across all
+    // env-touching tests in this crate. Edition 2024 marks these
+    // unsafe because env is process-global state.
     unsafe {
         std::env::remove_var(canonical);
         std::env::remove_var(legacy);
@@ -290,16 +304,12 @@ fn read_privacy_env_prefers_canonical_then_legacy() {
 }
 ```
 
-Note: `std::env::set_var` is `unsafe` in current Rust nightly; if the
-project pins stable where it's safe, drop the `unsafe` block. Verify
-with `rustc --version` before writing the test.
-
-- [ ] **Step 2: Run and confirm fail**
+- [ ] **Step 3: Run and confirm fail**
 
 Run: `cargo test -p tracedao-protocol read_privacy_env_prefers_canonical_then_legacy`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement `read_privacy_env`**
+- [ ] **Step 4: Implement `read_privacy_env`**
 
 Add a private helper near `parse_usize_env` (~line 1836):
 
@@ -325,12 +335,12 @@ fn read_privacy_env(canonical: &str, legacy: &str) -> Option<String> {
 
 Make it `pub(crate)` so the test (in the same crate) can call it.
 
-- [ ] **Step 4: Run targeted test**
+- [ ] **Step 5: Run targeted test**
 
-Run: `cargo test -p tracedao-protocol read_privacy_env_prefers_canonical_then_legacy -- --test-threads=1`
+Run: `cargo test -p tracedao-protocol read_privacy_env_prefers_canonical_then_legacy`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add crates/tracedao-protocol/src/trace_contribution.rs
@@ -549,9 +559,13 @@ fn build_near_ai_adapter() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilte
 }
 ```
 
-Note: `parse_usize_env` is no longer called by this function; leave it
-in place if it has other callers, otherwise remove it in Task 9
-cleanup.
+**Dead-code cleanup (do not defer):** Confirmed via grep that
+`parse_usize_env` had only sidecar-config callers (lines 1818, 1821,
+1825, 1826). After this rewrite it has zero callers. Under
+`RUSTFLAGS='-D warnings'` the CI build fails on dead code. **Delete
+the `parse_usize_env` function** as part of this step. If a future
+caller needs the same shape, the inline pattern in `build_sidecar_adapter`
+demonstrates it.
 
 - [ ] **Step 4: Add ENV_LOCK and update tests to acquire it**
 
@@ -715,8 +729,28 @@ git commit -m "Plumb PrivacyFilterBackendTag through DeterministicTraceRedactor"
 **Files:**
 - Create: `crates/tracedao-protocol/src/privacy_filter_near_ai.rs`
 - Modify: `crates/tracedao-protocol/src/lib.rs`
+- Modify: `crates/tracedao-protocol/src/trace_contribution.rs` (visibility bumps)
 
-- [ ] **Step 1: Wire module into lib.rs**
+- [ ] **Step 1: Bump visibility on items the new module needs**
+
+Verified by grep — these items are currently private:
+
+- `safe_privacy_filter_label` (`trace_contribution.rs:1468`) → `pub(crate) fn`
+- `RedactionReport::increment` (`:1376`) → `pub(crate) fn`
+- `RedactionReport::add_pii_label` (`:1380`) → `pub(crate) fn`
+- `RedactionReport::add_warning` (`:1387`) → `pub(crate) fn`
+
+`RedactionReport` itself is already `pub struct`; its fields `counts`,
+`pii_labels_present`, `warnings`, `blocked_secret_detected` need to
+be accessible. Check each; if private, bump to `pub(crate)`. The
+`SafePrivacyFilterRedaction`, `SafePrivacyFilterSummary`,
+`TraceContributionError`, `PrivacyFilterAdapter`, and
+`PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES` are already `pub`.
+
+Make these edits in `trace_contribution.rs` and confirm with:
+`RUSTFLAGS='-D warnings' cargo check -p tracedao-protocol`
+
+- [ ] **Step 2: Wire module into lib.rs**
 
 Add to `crates/tracedao-protocol/src/lib.rs`:
 
@@ -725,7 +759,7 @@ Add to `crates/tracedao-protocol/src/lib.rs`:
 pub mod privacy_filter_near_ai;
 ```
 
-- [ ] **Step 2: Write failing unit tests first (TDD)**
+- [ ] **Step 3: Write failing unit tests first (TDD)**
 
 Create `crates/tracedao-protocol/src/privacy_filter_near_ai.rs` with:
 
@@ -1123,14 +1157,9 @@ mod tests {
 }
 ```
 
-This requires `safe_privacy_filter_label`, `RedactionReport`,
-`SafePrivacyFilterRedaction`, `SafePrivacyFilterSummary`, and
-`PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES` to be `pub` (or
-`pub(crate)`). Check current visibility and adjust in
-`trace_contribution.rs` as needed — the safest move is a small
-"crate-public re-exports for backends" section.
+Visibility bumps were already made in Step 1.
 
-- [ ] **Step 3: Run feature-on build + unit tests**
+- [ ] **Step 4: Run feature-on build + unit tests**
 
 Run: `RUSTFLAGS='-D warnings' cargo check -p tracedao-protocol --features near-ai-privacy-filter`
 Expected: PASS.
@@ -1138,12 +1167,12 @@ Expected: PASS.
 Run: `cargo test -p tracedao-protocol --features near-ai-privacy-filter privacy_filter_near_ai::`
 Expected: all tests PASS.
 
-- [ ] **Step 4: Run default-feature build**
+- [ ] **Step 5: Run default-feature build**
 
 Run: `RUSTFLAGS='-D warnings' cargo check -p tracedao-protocol`
 Expected: PASS (module is feature-gated, dispatch returns `FeatureDisabled`).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add crates/tracedao-protocol/src/privacy_filter_near_ai.rs crates/tracedao-protocol/src/lib.rs crates/tracedao-protocol/src/trace_contribution.rs
@@ -1274,14 +1303,22 @@ async fn canary_run_against_mock_returns_healthy() {
     let server = MockServer::start().await;
     // Canary text is three synthetic values joined by spaces; mock
     // returns three spans covering each.
+    // Canary text is the three synthetic values joined by single
+    // spaces: "<a> <b> <c>". Verified byte offsets:
+    //   a = "trace-canary.person@example.invalid"  (35 bytes) → 0..35
+    //   space at 35..36
+    //   b = "tc_canary_secret_0123456789abcdef"     (33 bytes) → 36..69
+    //   space at 69..70
+    //   c = "/tmp/trace_canary_private/path.txt"   (34 bytes) → 70..104
+    // Total text length: 104 bytes.
     Mock::given(method("POST"))
         .and(path("/privacy/classify"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": [{
                 "spans": [
-                    {"category": "private_email", "start": 0, "end": 39, "score": 0.99, "text": "trace-canary.person@example.invalid"},
-                    {"category": "secret", "start": 40, "end": 73, "score": 0.99, "text": "tc_canary_secret_0123456789abcdef"},
-                    {"category": "private_address", "start": 74, "end": 108, "score": 0.99, "text": "/tmp/trace_canary_private/path.txt"}
+                    {"category": "private_email",   "start":  0, "end":  35, "score": 0.99, "text": "trace-canary.person@example.invalid"},
+                    {"category": "secret",          "start": 36, "end":  69, "score": 0.99, "text": "tc_canary_secret_0123456789abcdef"},
+                    {"category": "private_address", "start": 70, "end": 104, "score": 0.99, "text": "/tmp/trace_canary_private/path.txt"}
                 ]
             }]
         })))
@@ -1309,34 +1346,57 @@ git commit -m "Add wiremock integration tests for NEAR AI privacy filter" --no-v
 
 ---
 
-## Task 9: Update binary call sites for fallible redactor construction
+## Task 9: Update production call sites for fallible redactor construction
 
-**Files:**
-- Modify: `crates/tracedao-server/src/bin/tracedao-ingest.rs` (and any other call sites)
-- Possibly: `crates/tracedao-server/src/bin/pilot_bootstrap/*.rs`
+**Files (verified by grep, non-test only):**
+- Modify: `crates/tracedao-server/src/bin/tracedao-ingest.rs:47016`
+- Modify: `crates/tracedao-server/src/bin/pilot_bootstrap/submitter.rs:213`
+- Modify: `crates/tracedao-protocol/src/trace_contribution.rs:2276` (the
+  internal helper around the `build_envelope` flow — read the
+  surrounding 40 lines first; if it's only reachable from tests,
+  leaving `default()` is fine, otherwise migrate.)
 
-- [ ] **Step 1: Find all call sites**
+The spec requires fail-closed: production binaries that misconfigure
+`TRACE_PRIVACY_FILTER_BACKEND` MUST refuse to start, not panic and
+not silently disable redaction.
 
-Run: `grep -rn 'DeterministicTraceRedactor::new\|DeterministicTraceRedactor::default\|DeterministicTraceRedactor::with_known_path_prefixes' --include='*.rs'`
+- [ ] **Step 1: Migrate `tracedao-ingest.rs:47016`**
 
-- [ ] **Step 2: For each call site, propagate the `Result`**
-
-The natural shape:
+Read the surrounding function to find the active `Result` type or
+`anyhow::Error`. Replace `DeterministicTraceRedactor::default()` with:
 
 ```rust
-let redactor = DeterministicTraceRedactor::try_default()
-    .map_err(|err| anyhow!("privacy filter config invalid: {err}"))?;
+DeterministicTraceRedactor::try_default()
+    .map_err(|err| anyhow::anyhow!("privacy filter config invalid: {err}"))?
 ```
 
-Use the binary's existing error type / `?` convention. Fail-closed: a
-binary that has misconfigured `TRACE_PRIVACY_FILTER_BACKEND` must
-refuse to start, not silently disable redaction.
+If the enclosing function does not return `Result`, walk up the call
+chain until it does (this is `main` or a setup helper called from
+`main`) and propagate via `?`. Never collapse the error to
+`.unwrap()`.
 
-For places that absolutely must remain infallible (e.g. tests), use
-`DeterministicTraceRedactor::default()` and accept its panic
-contract.
+- [ ] **Step 2: Migrate `pilot_bootstrap/submitter.rs:213`**
 
-- [ ] **Step 3: Run full workspace check and tests**
+Same shape. The pilot-bootstrap binary's `main` returns `Result`;
+propagate via `?` and log via the binary's existing observability
+hook.
+
+- [ ] **Step 3: Audit and migrate `trace_contribution.rs:2276`**
+
+Read 60 lines around it. If it's inside a `pub` function used by
+production, migrate. If it's a `#[cfg(test)]`-only helper or only
+reachable from tests, leave it alone — the `Default` impl's panic
+contract is acceptable for tests.
+
+- [ ] **Step 4: Re-grep to confirm no production `::default()` remains**
+
+Run:
+```bash
+grep -rn 'DeterministicTraceRedactor::default' --include='*.rs' | grep -v 'test'
+```
+Expected: only the `impl Default` line itself (or empty).
+
+- [ ] **Step 5: Run full workspace check and tests**
 
 Run: `RUSTFLAGS='-D warnings' cargo check -p tracedao-server --bins`
 Expected: PASS.
@@ -1347,7 +1407,7 @@ Expected: PASS.
 Run: `cargo test -p tracedao-server`
 Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add crates/tracedao-server/
