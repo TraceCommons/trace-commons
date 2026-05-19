@@ -1527,7 +1527,10 @@ pub fn synthetic_privacy_filter_canary_values() -> Vec<String> {
 
 pub async fn run_configured_privacy_filter_canary_from_env()
 -> Result<Option<PrivacyFilterCanaryReport>, TraceContributionError> {
-    let Some(adapter) = privacy_filter_adapter_from_env() else {
+    // TODO(task 6): propagate Result
+    let Some((adapter, _backend)) = privacy_filter_adapter_from_env()
+        .expect("privacy filter env misconfigured")
+    else {
         return Ok(None);
     };
     run_privacy_filter_canary(adapter.as_ref()).await.map(Some)
@@ -1821,44 +1824,119 @@ fn privacy_filter_bytes_hash(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(digest))
 }
 
-pub fn privacy_filter_adapter_from_env() -> Option<Arc<dyn PrivacyFilterAdapter>> {
-    let command = std::env::var("IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND").ok()?;
-    let command = command.trim();
-    if command.is_empty() {
-        return None;
+pub fn privacy_filter_adapter_from_env(
+) -> Result<Option<(Arc<dyn PrivacyFilterAdapter>, PrivacyFilterBackendTag)>, PrivacyFilterConfigError>
+{
+    let backend = match std::env::var("TRACE_PRIVACY_FILTER_BACKEND") {
+        Ok(value) => value.trim().to_string(),
+        Err(_) => String::new(),
+    };
+    if backend.is_empty() {
+        return Ok(None);
     }
+    match backend.as_str() {
+        "sidecar" => build_sidecar_adapter().map(|adapter| {
+            Some((adapter, PrivacyFilterBackendTag::Sidecar))
+        }),
+        "near-ai" => build_near_ai_adapter().map(|adapter| {
+            Some((adapter, PrivacyFilterBackendTag::NearAi))
+        }),
+        other => Err(PrivacyFilterConfigError::UnknownBackend {
+            value: other.to_string(),
+        }),
+    }
+}
 
-    let args = std::env::var("IRONCLAW_TRACE_PRIVACY_FILTER_ARGS")
-        .ok()
-        .map(|raw| {
-            raw.split_whitespace()
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+fn build_sidecar_adapter() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterConfigError> {
+    let command = read_privacy_env(
+        "TRACE_PRIVACY_FILTER_COMMAND",
+        "IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND",
+    )
+    .ok_or(PrivacyFilterConfigError::MissingEnv {
+        backend: "sidecar",
+        var: "TRACE_PRIVACY_FILTER_COMMAND",
+    })?;
+
+    let args = read_privacy_env(
+        "TRACE_PRIVACY_FILTER_ARGS",
+        "IRONCLAW_TRACE_PRIVACY_FILTER_ARGS",
+    )
+    .map(|raw| {
+        raw.split_whitespace()
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+
     let mut adapter = CommandPrivacyFilterAdapter::new(command).with_args(args);
-    if let Some(timeout_ms) = parse_usize_env("IRONCLAW_TRACE_PRIVACY_FILTER_TIMEOUT_MS") {
-        adapter = adapter.with_timeout(Duration::from_millis(timeout_ms as u64));
+    if let Some(value) = read_privacy_env(
+        "TRACE_PRIVACY_FILTER_TIMEOUT_MS",
+        "IRONCLAW_TRACE_PRIVACY_FILTER_TIMEOUT_MS",
+    ) {
+        let ms = value
+            .parse::<u64>()
+            .map_err(|err| PrivacyFilterConfigError::InvalidEnv {
+                var: "TRACE_PRIVACY_FILTER_TIMEOUT_MS",
+                reason: err.to_string(),
+            })?;
+        adapter = adapter.with_timeout(Duration::from_millis(ms));
     }
-    if let Some(max_input_bytes) = parse_usize_env("IRONCLAW_TRACE_PRIVACY_FILTER_MAX_INPUT_BYTES")
-    {
-        adapter = adapter.with_input_limit(max_input_bytes);
+    if let Some(value) = read_privacy_env(
+        "TRACE_PRIVACY_FILTER_MAX_INPUT_BYTES",
+        "IRONCLAW_TRACE_PRIVACY_FILTER_MAX_INPUT_BYTES",
+    ) {
+        let bytes = value
+            .parse::<usize>()
+            .map_err(|err| PrivacyFilterConfigError::InvalidEnv {
+                var: "TRACE_PRIVACY_FILTER_MAX_INPUT_BYTES",
+                reason: err.to_string(),
+            })?;
+        adapter = adapter.with_input_limit(bytes);
     }
-    let max_stdout = parse_usize_env("IRONCLAW_TRACE_PRIVACY_FILTER_MAX_STDOUT_BYTES");
-    let max_stderr = parse_usize_env("IRONCLAW_TRACE_PRIVACY_FILTER_MAX_STDERR_BYTES");
+    let max_stdout = read_privacy_env(
+        "TRACE_PRIVACY_FILTER_MAX_STDOUT_BYTES",
+        "IRONCLAW_TRACE_PRIVACY_FILTER_MAX_STDOUT_BYTES",
+    )
+    .map(|v| {
+        v.parse::<usize>()
+            .map_err(|err| PrivacyFilterConfigError::InvalidEnv {
+                var: "TRACE_PRIVACY_FILTER_MAX_STDOUT_BYTES",
+                reason: err.to_string(),
+            })
+    })
+    .transpose()?;
+    let max_stderr = read_privacy_env(
+        "TRACE_PRIVACY_FILTER_MAX_STDERR_BYTES",
+        "IRONCLAW_TRACE_PRIVACY_FILTER_MAX_STDERR_BYTES",
+    )
+    .map(|v| {
+        v.parse::<usize>()
+            .map_err(|err| PrivacyFilterConfigError::InvalidEnv {
+                var: "TRACE_PRIVACY_FILTER_MAX_STDERR_BYTES",
+                reason: err.to_string(),
+            })
+    })
+    .transpose()?;
     if max_stdout.is_some() || max_stderr.is_some() {
         adapter = adapter.with_output_limits(
             max_stdout.unwrap_or(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDOUT_BYTES),
             max_stderr.unwrap_or(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDERR_BYTES),
         );
     }
-    Some(Arc::new(adapter))
+    Ok(Arc::new(adapter))
 }
 
-fn parse_usize_env(name: &str) -> Option<usize> {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
+#[cfg(not(feature = "near-ai-privacy-filter"))]
+fn build_near_ai_adapter() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterConfigError> {
+    Err(PrivacyFilterConfigError::FeatureDisabled {
+        backend: "near-ai",
+        feature: "near-ai-privacy-filter",
+    })
+}
+
+#[cfg(feature = "near-ai-privacy-filter")]
+fn build_near_ai_adapter() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterConfigError> {
+    crate::privacy_filter_near_ai::build_from_env()
 }
 
 pub(crate) fn read_privacy_env(canonical: &str, legacy: &str) -> Option<String> {
@@ -2002,7 +2080,10 @@ impl DeterministicTraceRedactor {
         Self {
             leak_detector: SecretLeakDetector::new(),
             known_path_prefixes,
-            privacy_filter: privacy_filter_adapter_from_env(),
+            // TODO(task 6): propagate Result
+            privacy_filter: privacy_filter_adapter_from_env()
+                .expect("privacy filter env misconfigured")
+                .map(|(adapter, _backend)| adapter),
         }
     }
 
@@ -3711,5 +3792,83 @@ mod tests {
             redaction_pipeline_version(PrivacyFilterBackendTag::NearAi),
             format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-near-ai-v1")
         );
+    }
+
+    #[test]
+    fn privacy_filter_adapter_from_env_returns_none_when_unset() {
+        use super::privacy_filter_adapter_from_env;
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+        }
+        let result = privacy_filter_adapter_from_env().expect("should be Ok");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn privacy_filter_adapter_from_env_rejects_unknown_backend() {
+        use super::{privacy_filter_adapter_from_env, PrivacyFilterConfigError};
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "garbage");
+        }
+        match privacy_filter_adapter_from_env() {
+            Err(PrivacyFilterConfigError::UnknownBackend { value }) => {
+                assert_eq!(value, "garbage")
+            }
+            Err(other) => panic!("expected UnknownBackend, got err {other:?}"),
+            Ok(_) => panic!("expected UnknownBackend, got Ok"),
+        }
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+        }
+    }
+
+    #[test]
+    fn privacy_filter_adapter_from_env_requires_near_ai_key() {
+        use super::{privacy_filter_adapter_from_env, PrivacyFilterConfigError};
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "near-ai");
+            std::env::remove_var("TRACE_NEAR_AI_PRIVACY_API_KEY");
+        }
+        match privacy_filter_adapter_from_env() {
+            Err(PrivacyFilterConfigError::MissingEnv { backend, var }) => {
+                assert_eq!(backend, "near-ai");
+                assert_eq!(var, "TRACE_NEAR_AI_PRIVACY_API_KEY");
+            }
+            // When feature is off, FeatureDisabled is also acceptable here:
+            Err(PrivacyFilterConfigError::FeatureDisabled { backend, feature }) => {
+                assert_eq!(backend, "near-ai");
+                assert_eq!(feature, "near-ai-privacy-filter");
+            }
+            Err(other) => panic!("unexpected err: {other:?}"),
+            Ok(_) => panic!("expected MissingEnv or FeatureDisabled, got Ok"),
+        }
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+        }
+    }
+
+    #[test]
+    fn privacy_filter_adapter_from_env_requires_sidecar_command() {
+        use super::{privacy_filter_adapter_from_env, PrivacyFilterConfigError};
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "sidecar");
+            std::env::remove_var("TRACE_PRIVACY_FILTER_COMMAND");
+            std::env::remove_var("IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND");
+        }
+        match privacy_filter_adapter_from_env() {
+            Err(PrivacyFilterConfigError::MissingEnv { backend, var }) => {
+                assert_eq!(backend, "sidecar");
+                assert_eq!(var, "TRACE_PRIVACY_FILTER_COMMAND");
+            }
+            Err(other) => panic!("unexpected err: {other:?}"),
+            Ok(_) => panic!("expected MissingEnv, got Ok"),
+        }
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+        }
     }
 }
