@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use serde_json::json;
 use trace_commons_protocol::privacy_filter_near_ai::NearAiPrivacyFilterAdapter;
-use trace_commons_protocol::trace_contribution::{run_privacy_filter_canary, PrivacyFilterAdapter};
+use trace_commons_protocol::trace_contribution::{PrivacyFilterAdapter, run_privacy_filter_canary};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -41,7 +41,10 @@ async fn classifies_and_redacts_single_span() {
         .await
         .expect("call succeeds")
         .expect("non-empty redaction");
-    assert_eq!(result.redacted_text, "email me at [REDACTED:private_email] please");
+    assert_eq!(
+        result.redacted_text,
+        "email me at [REDACTED:private_email] please"
+    );
     assert_eq!(result.summary.span_count, 1);
 }
 
@@ -161,11 +164,9 @@ async fn empty_spans_passes_text_through_unchanged() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/privacy/classify"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({
-                "data": [{"spans": []}]
-            })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"spans": []}]
+        })))
         .mount(&server)
         .await;
 
@@ -209,5 +210,9 @@ async fn canary_run_against_mock_returns_healthy() {
     let report = run_privacy_filter_canary(&adapter(server.uri()))
         .await
         .expect("canary runs");
-    assert!(report.healthy, "canary should be healthy: {:?}", report.failures);
+    assert!(
+        report.healthy,
+        "canary should be healthy: {:?}",
+        report.failures
+    );
 }

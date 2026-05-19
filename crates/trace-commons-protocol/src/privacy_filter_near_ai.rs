@@ -10,9 +10,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::trace_contribution::{
-    PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES, PrivacyFilterAdapter,
-    PrivacyFilterConfigError, RedactionReport, SafePrivacyFilterRedaction,
-    SafePrivacyFilterSummary, TraceContributionError, safe_privacy_filter_label,
+    PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES, PrivacyFilterAdapter, PrivacyFilterConfigError,
+    RedactionReport, SafePrivacyFilterRedaction, SafePrivacyFilterSummary, TraceContributionError,
+    safe_privacy_filter_label,
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://cloud-api.near.ai/v1";
@@ -84,26 +84,28 @@ pub fn build_from_env() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterCo
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
     let timeout_ms = match std::env::var("TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS") {
-        Ok(value) => value
-            .trim()
-            .parse::<u64>()
-            .map_err(|err| PrivacyFilterConfigError::InvalidEnv {
-                var: "TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS",
-                reason: err.to_string(),
-            })?,
+        Ok(value) => {
+            value
+                .trim()
+                .parse::<u64>()
+                .map_err(|err| PrivacyFilterConfigError::InvalidEnv {
+                    var: "TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS",
+                    reason: err.to_string(),
+                })?
+        }
         Err(_) => DEFAULT_TIMEOUT_MS,
     };
 
-    let max_input_bytes = match std::env::var("TRACE_NEAR_AI_PRIVACY_MAX_INPUT_BYTES") {
-        Ok(value) => value
-            .trim()
-            .parse::<usize>()
-            .map_err(|err| PrivacyFilterConfigError::InvalidEnv {
-                var: "TRACE_NEAR_AI_PRIVACY_MAX_INPUT_BYTES",
-                reason: err.to_string(),
+    let max_input_bytes =
+        match std::env::var("TRACE_NEAR_AI_PRIVACY_MAX_INPUT_BYTES") {
+            Ok(value) => value.trim().parse::<usize>().map_err(|err| {
+                PrivacyFilterConfigError::InvalidEnv {
+                    var: "TRACE_NEAR_AI_PRIVACY_MAX_INPUT_BYTES",
+                    reason: err.to_string(),
+                }
             })?,
-        Err(_) => PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES,
-    };
+            Err(_) => PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES,
+        };
 
     let adapter = NearAiPrivacyFilterAdapter::new(
         base_url,
@@ -201,13 +203,14 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
                 .map_err(|err| TraceContributionError::RedactionFailed {
                     reason: format!("near-ai privacy classifier response parse error: {}", err),
                 })?;
-        let entry = parsed
-            .data
-            .into_iter()
-            .next()
-            .ok_or(TraceContributionError::RedactionFailed {
-                reason: "near-ai privacy classifier returned empty data array".to_string(),
-            })?;
+        let entry =
+            parsed
+                .data
+                .into_iter()
+                .next()
+                .ok_or(TraceContributionError::RedactionFailed {
+                    reason: "near-ai privacy classifier returned empty data array".to_string(),
+                })?;
 
         apply_spans(text, &entry.spans)
     }
@@ -315,7 +318,10 @@ mod tests {
         let text = "email me at alice@example.com please";
         let spans = vec![span("private_email", 12, 29, 0.99)];
         let result = apply_spans(text, &spans).unwrap().unwrap();
-        assert_eq!(result.redacted_text, "email me at [REDACTED:private_email] please");
+        assert_eq!(
+            result.redacted_text,
+            "email me at [REDACTED:private_email] please"
+        );
         assert_eq!(result.summary.span_count, 1);
         assert_eq!(result.summary.by_label.get("private_email"), Some(&1));
     }
@@ -357,11 +363,13 @@ mod tests {
         let spans = vec![span("brand_new_category", 0, 6, 0.5)];
         let result = apply_spans(text, &spans).unwrap().unwrap();
         assert_eq!(result.redacted_text, "[REDACTED:unknown]-text");
-        assert!(result
-            .report
-            .warnings
-            .iter()
-            .any(|w| w.to_lowercase().contains("unsupported")));
+        assert!(
+            result
+                .report
+                .warnings
+                .iter()
+                .any(|w| w.to_lowercase().contains("unsupported"))
+        );
     }
 
     #[test]
