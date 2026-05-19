@@ -1013,7 +1013,7 @@ impl Database for PgBackend {
             ("perplexity_failed".to_string(), perplexity_failed),
             ("both_failed".to_string(), both_failed),
         ];
-        gate_outcomes.sort_by(|a, b| b.1.cmp(&a.1));
+        gate_outcomes.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
         Ok(crate::db::CorpusAnalyticsSummary {
             total_submissions,
             total_accepted,
