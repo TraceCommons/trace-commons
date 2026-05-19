@@ -60208,6 +60208,112 @@ async fn community_profile_delete_returns_404_when_feature_flag_off() {
 }
 
 #[tokio::test]
+async fn community_leaderboard_returns_404_when_feature_flag_off() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/v1/community/leaderboard")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn community_analytics_returns_404_when_feature_flag_off() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/v1/community/analytics/summary")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn community_contributor_returns_404_when_feature_flag_off() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/v1/community/contributors/zaki")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn community_leaderboard_returns_503_when_flag_on_but_no_snapshot() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).community_leaderboard_enabled = true;
+    // db_mirror stays None; the handler returns 503 either because db_mirror
+    // is unset or because no snapshot exists. Both are 503.
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/v1/community/leaderboard")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn community_snapshot_recompute_requires_admin_token() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).community_leaderboard_enabled = true;
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/admin/community/snapshots/recompute")
+                .header(AUTHORIZATION, "Bearer token-a")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    // token-a is a contributor token in the test fixture; admin is required.
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn community_profile_put_returns_503_when_flag_on_but_no_db() {
     use axum::body::Body;
     use tower::ServiceExt;
