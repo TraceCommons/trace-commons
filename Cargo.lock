@@ -7113,6 +7113,7 @@ dependencies = [
  "toml 1.1.2+spec-1.1.0",
  "tower 0.5.3",
  "trace-commons-gate-enclave",
+ "trace-commons-operator-client",
  "trace-commons-protocol",
  "tracing",
  "tracing-subscriber",
