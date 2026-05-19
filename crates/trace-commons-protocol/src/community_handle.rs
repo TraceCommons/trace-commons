@@ -127,7 +127,10 @@ pub fn validate_bio(input: &str) -> Result<(), BioValidationError> {
     if input.len() > BIO_MAX_BYTES {
         return Err(BioValidationError::TooLong);
     }
-    if input.chars().any(|c| c == '\0' || c.is_control() && c != '\n') {
+    if input
+        .chars()
+        .any(|c| c == '\0' || c.is_control() && c != '\n')
+    {
         return Err(BioValidationError::InvalidCharacter);
     }
     Ok(())
@@ -160,10 +163,7 @@ mod tests {
 
     #[test]
     fn rejects_too_short() {
-        assert_eq!(
-            validate_handle("ab"),
-            Err(HandleValidationError::TooShort),
-        );
+        assert_eq!(validate_handle("ab"), Err(HandleValidationError::TooShort),);
     }
 
     #[test]
@@ -241,10 +241,7 @@ mod tests {
     #[test]
     fn validate_bio_caps_length() {
         let too_long = "a".repeat(BIO_MAX_BYTES + 1);
-        assert_eq!(
-            validate_bio(&too_long),
-            Err(BioValidationError::TooLong),
-        );
+        assert_eq!(validate_bio(&too_long), Err(BioValidationError::TooLong),);
     }
 
     #[test]
