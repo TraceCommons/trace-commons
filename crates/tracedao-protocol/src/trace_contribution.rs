@@ -29,6 +29,14 @@ pub const TRACE_CONTRIBUTION_SCHEMA_VERSION: &str = "ironclaw.trace_contribution
 pub const TRACE_CONTRIBUTION_POLICY_VERSION: &str = "2026-04-24";
 pub const DETERMINISTIC_REDACTION_PIPELINE_VERSION: &str = "ironclaw-deterministic-secret-path-v1";
 pub const PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX: &str = "privacy-filter-sidecar-v1";
+pub const PRIVACY_FILTER_NEAR_AI_PIPELINE_SUFFIX: &str = "privacy-filter-near-ai-v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivacyFilterBackendTag {
+    None,
+    Sidecar,
+    NearAi,
+}
 pub const SERVER_RESCRUB_PIPELINE_SUFFIX: &str = "server-rescrub-v1";
 pub const PRIVACY_FILTER_CANARY_VERSION: &str = "trace-privacy-filter-canary-v1";
 pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES: usize = 1024 * 1024;
@@ -1591,13 +1599,15 @@ fn merge_privacy_filter_summary(
     }
 }
 
-fn redaction_pipeline_version(privacy_filter_used: bool) -> String {
-    if privacy_filter_used {
-        format!(
+fn redaction_pipeline_version(backend: PrivacyFilterBackendTag) -> String {
+    match backend {
+        PrivacyFilterBackendTag::None => DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
+        PrivacyFilterBackendTag::Sidecar => format!(
             "{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+{PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX}"
-        )
-    } else {
-        DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string()
+        ),
+        PrivacyFilterBackendTag::NearAi => format!(
+            "{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+{PRIVACY_FILTER_NEAR_AI_PIPELINE_SUFFIX}"
+        ),
     }
 }
 
@@ -2231,9 +2241,11 @@ impl TraceRedactor for DeterministicTraceRedactor {
         let mut warnings = privacy_warnings(residual_pii_risk);
         warnings.extend(report.warnings.clone());
         let privacy = PrivacyMetadata {
-            redaction_pipeline_version: redaction_pipeline_version(
-                privacy_filter_summary.is_some(),
-            ),
+            redaction_pipeline_version: redaction_pipeline_version(if privacy_filter_summary.is_some() {
+                PrivacyFilterBackendTag::Sidecar
+            } else {
+                PrivacyFilterBackendTag::None
+            }),
             redaction_counts: report.counts,
             privacy_filter_summary,
             pii_labels_present: report.pii_labels_present,
@@ -3586,4 +3598,24 @@ pub fn apply_credit_estimate_to_envelope(envelope: &mut TraceContributionEnvelop
     envelope.value.explanation = estimate.explanation;
     envelope.value_card.scorecard = estimate.scorecard;
     envelope.value_card.user_visible_explanation = envelope.value.explanation.clone();
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn redaction_pipeline_version_emits_per_backend_suffix() {
+        use super::{redaction_pipeline_version, PrivacyFilterBackendTag, DETERMINISTIC_REDACTION_PIPELINE_VERSION};
+        assert_eq!(
+            redaction_pipeline_version(PrivacyFilterBackendTag::None),
+            DETERMINISTIC_REDACTION_PIPELINE_VERSION
+        );
+        assert_eq!(
+            redaction_pipeline_version(PrivacyFilterBackendTag::Sidecar),
+            format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-sidecar-v1")
+        );
+        assert_eq!(
+            redaction_pipeline_version(PrivacyFilterBackendTag::NearAi),
+            format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-near-ai-v1")
+        );
+    }
 }
