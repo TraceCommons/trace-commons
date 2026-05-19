@@ -1861,6 +1861,24 @@ fn parse_usize_env(name: &str) -> Option<usize> {
         .and_then(|value| value.trim().parse::<usize>().ok())
 }
 
+pub(crate) fn read_privacy_env(canonical: &str, legacy: &str) -> Option<String> {
+    if let Ok(value) = std::env::var(canonical) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Ok(value) = std::env::var(legacy) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            // One-shot deprecation log handled by caller; this helper
+            // is pure value-read.
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, Copy)]
 enum SecretLeakSeverity {
     High,
@@ -3614,6 +3632,39 @@ pub fn apply_credit_estimate_to_envelope(envelope: &mut TraceContributionEnvelop
 
 #[cfg(test)]
 mod tests {
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn read_privacy_env_prefers_canonical_then_legacy() {
+        use super::read_privacy_env;
+        let _guard = ENV_LOCK.lock().unwrap();
+        let canonical = "TRACE_PRIVACY_FILTER_TEST_CANONICAL_XYZ";
+        let legacy = "IRONCLAW_TRACE_PRIVACY_FILTER_TEST_CANONICAL_XYZ";
+        // SAFETY: holding ENV_LOCK serializes env mutation across all
+        // env-touching tests in this crate. Edition 2024 marks these
+        // unsafe because env is process-global state.
+        unsafe {
+            std::env::remove_var(canonical);
+            std::env::remove_var(legacy);
+            assert_eq!(read_privacy_env(canonical, legacy), None);
+
+            std::env::set_var(legacy, "legacy-value");
+            assert_eq!(
+                read_privacy_env(canonical, legacy).as_deref(),
+                Some("legacy-value")
+            );
+
+            std::env::set_var(canonical, "canonical-value");
+            assert_eq!(
+                read_privacy_env(canonical, legacy).as_deref(),
+                Some("canonical-value")
+            );
+
+            std::env::remove_var(canonical);
+            std::env::remove_var(legacy);
+        }
+    }
+
     #[test]
     fn privacy_filter_config_error_messages_are_stable() {
         use super::PrivacyFilterConfigError;
