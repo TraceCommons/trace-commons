@@ -40757,6 +40757,7 @@ fn consent_scope_name(consent_scope: ConsentScope) -> &'static str {
         ConsentScope::BenchmarkOnly => "benchmark_only",
         ConsentScope::RankingTraining => "ranking_training",
         ConsentScope::ModelTraining => "model_training",
+        ConsentScope::PublicAttribution => "public_attribution",
     }
 }
 
