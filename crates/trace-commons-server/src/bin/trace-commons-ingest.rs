@@ -11,7 +11,7 @@ use axum::extract::{DefaultBodyLimit, Query};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router, extract::Path as AxumPath, extract::State};
 use base64::Engine as _;
 use chrono::{DateTime, Duration, Utc};
@@ -313,6 +313,8 @@ const TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF: &str =
 const TRACE_COMMONS_KEK_PROVIDER: &str = "TRACE_COMMONS_KEK_PROVIDER";
 #[allow(dead_code)]
 const TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME: &str = "TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME";
+const TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED: &str =
+    "TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED";
 const TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW";
 const TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT: &str =
@@ -935,6 +937,7 @@ struct AppState {
     object_primary_derived_exports: bool,
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
+    community_leaderboard_enabled: bool,
     tenant_rollout_gates: TraceTenantRolloutGates,
     max_export_items_per_request: usize,
     analytics_min_cell_count: usize,
@@ -3017,6 +3020,7 @@ impl AppState {
             object_primary_derived_exports,
             require_db_reconciliation_clean,
             require_export_guardrails,
+            community_leaderboard_enabled: env_truthy(TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED),
             tenant_rollout_gates,
             max_export_items_per_request,
             analytics_min_cell_count,
@@ -5789,6 +5793,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/traces/{submission_id}/revoke",
             post(revoke_trace_handler),
+        )
+        .route(
+            "/v1/community/profile",
+            put(put_community_profile_handler).delete(delete_community_profile_handler),
         )
         .route("/v1/contributors/me/credit", get(credit_handler))
         .route(
@@ -10822,6 +10830,168 @@ async fn revoke_submission(
             .map_err(internal_error)?;
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CommunityProfilePutRequest {
+    display_handle: String,
+    #[serde(default)]
+    bio: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CommunityProfileResponse {
+    display_handle: String,
+    handle_normalized: String,
+    bio: Option<String>,
+    public_since: DateTime<Utc>,
+    last_updated_at: DateTime<Utc>,
+    update_count: i32,
+}
+
+/// Map [`HandleValidationError`] / [`BioValidationError`] to a 400 with a
+/// human-readable reason. The reason string IS surfaced to the caller, but
+/// the contributor's raw input is never logged.
+fn map_handle_validation_err(
+    err: trace_commons_protocol::community_handle::HandleValidationError,
+) -> (StatusCode, Json<ApiError>) {
+    use trace_commons_protocol::community_handle::HandleValidationError::*;
+    let reason = match err {
+        TooShort => "display_handle is too short",
+        TooLong => "display_handle is too long",
+        InvalidCharacter => "display_handle has invalid characters; allowed: [a-zA-Z0-9_-]",
+        InvalidBoundary => "display_handle must start and end with an alphanumeric character",
+        ConsecutiveSeparators => "display_handle cannot contain consecutive separators",
+        Reserved => "display_handle is reserved",
+    };
+    api_error(StatusCode::BAD_REQUEST, reason)
+}
+
+fn map_bio_validation_err(
+    err: trace_commons_protocol::community_handle::BioValidationError,
+) -> (StatusCode, Json<ApiError>) {
+    use trace_commons_protocol::community_handle::BioValidationError::*;
+    let reason = match err {
+        TooLong => "bio is too long (max 280 bytes)",
+        InvalidCharacter => "bio contains control characters",
+    };
+    api_error(StatusCode::BAD_REQUEST, reason)
+}
+
+fn community_profile_db(state: &AppState) -> ApiResult<Arc<dyn Database>> {
+    if !state.community_leaderboard_enabled {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "community surface is not enabled on this deployment",
+        ));
+    }
+    state.db_mirror.as_ref().cloned().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "community profile storage is not configured",
+        )
+    })
+}
+
+fn enforce_public_attribution_scope(tenant: &TenantCtx) -> ApiResult<()> {
+    if tenant
+        .auth()
+        .allowed_consent_scopes
+        .contains(&ConsentScope::PublicAttribution)
+    {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::FORBIDDEN,
+            "upload claim does not carry the public_attribution consent scope",
+        ))
+    }
+}
+
+async fn put_community_profile_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<CommunityProfilePutRequest>,
+) -> ApiResult<Json<CommunityProfileResponse>> {
+    let db = community_profile_db(state.as_ref())?;
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    enforce_public_attribution_scope(&tenant)?;
+    let validated = trace_commons_protocol::community_handle::validate_handle(&req.display_handle)
+        .map_err(map_handle_validation_err)?;
+    if let Some(bio) = req.bio.as_deref() {
+        trace_commons_protocol::community_handle::validate_bio(bio)
+            .map_err(map_bio_validation_err)?;
+    }
+    let action = if req.bio.is_some() { "update" } else { "opt_in" };
+    let row = db
+        .upsert_contributor_profile(
+            tenant.tenant_id(),
+            &tenant.auth().principal_ref,
+            &validated.display,
+            &validated.normalized,
+            req.bio.as_deref(),
+        )
+        .await
+        .map_err(|e| {
+            // Handle-uniqueness conflict surfaces as a Postgres unique-violation;
+            // surface as 409 so the contributor can pick a different handle.
+            let raw = format!("{e}");
+            if raw.contains("trace_contributor_profiles_tenant_id_handle_normalized_key") {
+                api_error(
+                    StatusCode::CONFLICT,
+                    "display_handle is already taken by another contributor",
+                )
+            } else {
+                internal_error(e)
+            }
+        })?;
+    db.append_contributor_profile_audit(
+        tenant.tenant_id(),
+        &tenant.auth().principal_ref,
+        action,
+        Some(&validated.normalized),
+        Some("public_attribution"),
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(CommunityProfileResponse {
+        display_handle: row.display_handle,
+        handle_normalized: row.handle_normalized,
+        bio: row.bio,
+        public_since: row.public_since,
+        last_updated_at: row.last_updated_at,
+        update_count: row.update_count,
+    }))
+}
+
+async fn delete_community_profile_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<StatusCode> {
+    let db = community_profile_db(state.as_ref())?;
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    enforce_public_attribution_scope(&tenant)?;
+    let withdrew = db
+        .withdraw_contributor_profile(tenant.tenant_id(), &tenant.auth().principal_ref)
+        .await
+        .map_err(internal_error)?;
+    db.append_contributor_profile_audit(
+        tenant.tenant_id(),
+        &tenant.auth().principal_ref,
+        "withdraw",
+        None,
+        Some("public_attribution"),
+    )
+    .await
+    .map_err(internal_error)?;
+    if withdrew {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        // Idempotent: nothing to withdraw means the caller's view is
+        // already "not public." 204 keeps the API simple and
+        // matches the spec's "withdrawal is idempotent" property.
+        Ok(StatusCode::NO_CONTENT)
+    }
 }
 
 async fn credit_handler(
