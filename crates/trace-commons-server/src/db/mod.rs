@@ -120,6 +120,121 @@ pub trait Database: TraceCorpusStore + Send + Sync {
             "append_contributor_profile_audit not implemented".to_string(),
         ))
     }
+
+    /// Compute the per-contributor leaderboard inputs across every tenant
+    /// for the given window. Iterates `trace_tenants`, setting the RLS
+    /// tenant GUC for each, so cross-tenant aggregation still respects
+    /// per-table RLS. Applies the `min_cell_count` threshold at the SQL
+    /// level — contributors with fewer than `min_cell_count` accepted
+    /// submissions in-window are not returned. Noise / privacy-budget
+    /// integration is deferred to a follow-up slice.
+    async fn compute_leaderboard_inputs(
+        &self,
+        _window_days: i32,
+        _min_cell_count: i64,
+    ) -> Result<Vec<LeaderboardContributorRow>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "compute_leaderboard_inputs not implemented".to_string(),
+        ))
+    }
+
+    /// Compute the corpus-wide aggregate summary for the given window.
+    /// Crosses tenants the same way `compute_leaderboard_inputs` does.
+    async fn compute_corpus_analytics_summary(
+        &self,
+        _window_days: i32,
+    ) -> Result<CorpusAnalyticsSummary, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "compute_corpus_analytics_summary not implemented".to_string(),
+        ))
+    }
+
+    /// Insert a pre-rendered leaderboard snapshot. `contents_jsonb` is
+    /// the wire-shape payload the read endpoints will serve verbatim.
+    async fn insert_leaderboard_snapshot(
+        &self,
+        _snapshot: LeaderboardSnapshotWrite,
+    ) -> Result<LeaderboardSnapshotRow, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "insert_leaderboard_snapshot not implemented".to_string(),
+        ))
+    }
+
+    /// Fetch the most recent snapshot matching `(window_label, metric)`.
+    /// Returns `Ok(None)` if no snapshot has ever been computed.
+    async fn latest_leaderboard_snapshot(
+        &self,
+        _window_label: &str,
+        _metric: &str,
+    ) -> Result<Option<LeaderboardSnapshotRow>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "latest_leaderboard_snapshot not implemented".to_string(),
+        ))
+    }
+}
+
+/// Per-contributor row returned by [`Database::compute_leaderboard_inputs`].
+/// The `*_in_window` columns count over the window the caller passed; the
+/// `total_*` columns are all-time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LeaderboardContributorRow {
+    pub tenant_id: String,
+    pub principal_ref: String,
+    pub display_handle: String,
+    pub handle_normalized: String,
+    pub bio: Option<String>,
+    pub public_since: chrono::DateTime<chrono::Utc>,
+    pub accepted_in_window: i64,
+    pub credit_in_window: f64,
+    pub total_accepted: i64,
+    pub total_credit: f64,
+}
+
+/// Corpus-wide aggregates for [`Database::compute_corpus_analytics_summary`].
+/// All counts are pre-noise; the snapshot worker is the right place to
+/// apply Laplace noise / privacy-budget accounting in a follow-up slice.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CorpusAnalyticsSummary {
+    pub total_submissions: i64,
+    pub total_accepted: i64,
+    pub total_rejected: i64,
+    /// Decimal in [0, 1]. Zero when there are no submissions.
+    pub accept_rate: f64,
+    /// `(bucket_micros, count)` sorted ascending by bucket. Bucket
+    /// width is 100_000 micros (10 buckets across [0, 1_000_000]).
+    pub novelty_histogram: Vec<(i64, i64)>,
+    /// `(outcome_label, count)` sorted descending by count.
+    /// Labels: `both_passed`, `novelty_failed`, `perplexity_failed`,
+    /// `both_failed`.
+    pub gate_outcomes: Vec<(String, i64)>,
+}
+
+/// Write-shape for [`Database::insert_leaderboard_snapshot`]. The caller
+/// computes `contents_sha256` and `noise_seed_hash`; the DB owns
+/// `computed_at`.
+#[derive(Debug, Clone)]
+pub struct LeaderboardSnapshotWrite {
+    pub snapshot_id: uuid::Uuid,
+    pub window_label: String,
+    pub metric: String,
+    pub contents: serde_json::Value,
+    pub contents_sha256: String,
+    pub min_cell_count: i32,
+    pub noise_seed_hash: String,
+}
+
+/// Read-shape returned by [`Database::insert_leaderboard_snapshot`] and
+/// [`Database::latest_leaderboard_snapshot`].
+#[derive(Debug, Clone)]
+pub struct LeaderboardSnapshotRow {
+    pub snapshot_id: uuid::Uuid,
+    pub computed_at: chrono::DateTime<chrono::Utc>,
+    pub window_label: String,
+    pub metric: String,
+    pub contents: serde_json::Value,
+    pub contents_sha256: String,
+    pub min_cell_count: i32,
+    pub noise_seed_hash: String,
 }
 
 /// Row returned by [`Database::upsert_contributor_profile`]. Mirrors the
