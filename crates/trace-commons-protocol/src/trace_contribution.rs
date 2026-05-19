@@ -29,6 +29,14 @@ pub const TRACE_CONTRIBUTION_SCHEMA_VERSION: &str = "ironclaw.trace_contribution
 pub const TRACE_CONTRIBUTION_POLICY_VERSION: &str = "2026-04-24";
 pub const DETERMINISTIC_REDACTION_PIPELINE_VERSION: &str = "ironclaw-deterministic-secret-path-v1";
 pub const PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX: &str = "privacy-filter-sidecar-v1";
+pub const PRIVACY_FILTER_NEAR_AI_PIPELINE_SUFFIX: &str = "privacy-filter-near-ai-v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivacyFilterBackendTag {
+    None,
+    Sidecar,
+    NearAi,
+}
 pub const SERVER_RESCRUB_PIPELINE_SUFFIX: &str = "server-rescrub-v1";
 pub const PRIVACY_FILTER_CANARY_VERSION: &str = "trace-privacy-filter-canary-v1";
 pub const PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES: usize = 1024 * 1024;
@@ -1373,18 +1381,18 @@ pub struct RedactionReport {
 }
 
 impl RedactionReport {
-    fn increment(&mut self, label: impl Into<String>) {
+    pub(crate) fn increment(&mut self, label: impl Into<String>) {
         *self.counts.entry(label.into()).or_insert(0) += 1;
     }
 
-    fn add_pii_label(&mut self, label: impl Into<String>) {
+    pub(crate) fn add_pii_label(&mut self, label: impl Into<String>) {
         let label = label.into();
         if !self.pii_labels_present.contains(&label) {
             self.pii_labels_present.push(label);
         }
     }
 
-    fn add_warning(&mut self, warning: impl Into<String>) {
+    pub(crate) fn add_warning(&mut self, warning: impl Into<String>) {
         let warning = warning.into();
         if !self.warnings.contains(&warning) {
             self.warnings.push(warning);
@@ -1465,7 +1473,10 @@ pub fn safe_privacy_filter_redaction_from_output(
     })
 }
 
-fn safe_privacy_filter_label(raw_label: Option<&str>, report: &mut RedactionReport) -> String {
+pub(crate) fn safe_privacy_filter_label(
+    raw_label: Option<&str>,
+    report: &mut RedactionReport,
+) -> String {
     let Some(raw_label) = raw_label else {
         return "unknown".to_string();
     };
@@ -1519,7 +1530,11 @@ pub fn synthetic_privacy_filter_canary_values() -> Vec<String> {
 
 pub async fn run_configured_privacy_filter_canary_from_env()
 -> Result<Option<PrivacyFilterCanaryReport>, TraceContributionError> {
-    let Some(adapter) = privacy_filter_adapter_from_env() else {
+    let Some((adapter, _backend)) =
+        privacy_filter_adapter_from_env().map_err(|err| TraceContributionError::RedactionFailed {
+            reason: err.to_string(),
+        })?
+    else {
         return Ok(None);
     };
     run_privacy_filter_canary(adapter.as_ref()).await.map(Some)
@@ -1591,13 +1606,15 @@ fn merge_privacy_filter_summary(
     }
 }
 
-fn redaction_pipeline_version(privacy_filter_used: bool) -> String {
-    if privacy_filter_used {
-        format!(
+fn redaction_pipeline_version(backend: PrivacyFilterBackendTag) -> String {
+    match backend {
+        PrivacyFilterBackendTag::None => DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
+        PrivacyFilterBackendTag::Sidecar => format!(
             "{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+{PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX}"
-        )
-    } else {
-        DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string()
+        ),
+        PrivacyFilterBackendTag::NearAi => format!(
+            "{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+{PRIVACY_FILTER_NEAR_AI_PIPELINE_SUFFIX}"
+        ),
     }
 }
 
@@ -1605,6 +1622,18 @@ fn redaction_pipeline_version(privacy_filter_used: bool) -> String {
 pub enum TraceContributionError {
     #[error("trace contribution redaction failed: {reason}")]
     RedactionFailed { reason: String },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PrivacyFilterConfigError {
+    #[error("unknown TRACE_PRIVACY_FILTER_BACKEND value: {value}")]
+    UnknownBackend { value: String },
+    #[error("missing required env var for backend {backend}: {var}")]
+    MissingEnv { backend: &'static str, var: &'static str },
+    #[error("invalid env var {var}: {reason}")]
+    InvalidEnv { var: &'static str, reason: String },
+    #[error("backend {backend} requires the {feature} cargo feature")]
+    FeatureDisabled { backend: &'static str, feature: &'static str },
 }
 
 #[async_trait]
@@ -1799,44 +1828,175 @@ fn privacy_filter_bytes_hash(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(digest))
 }
 
-pub fn privacy_filter_adapter_from_env() -> Option<Arc<dyn PrivacyFilterAdapter>> {
-    let command = std::env::var("IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND").ok()?;
-    let command = command.trim();
-    if command.is_empty() {
-        return None;
+pub fn privacy_filter_adapter_from_env(
+) -> Result<Option<(Arc<dyn PrivacyFilterAdapter>, PrivacyFilterBackendTag)>, PrivacyFilterConfigError>
+{
+    let backend = match std::env::var("TRACE_PRIVACY_FILTER_BACKEND") {
+        Ok(value) => value.trim().to_string(),
+        Err(_) => String::new(),
+    };
+    if backend.is_empty() {
+        return Ok(None);
     }
+    match backend.as_str() {
+        "sidecar" => build_sidecar_adapter().map(|adapter| {
+            Some((adapter, PrivacyFilterBackendTag::Sidecar))
+        }),
+        "near-ai" => build_near_ai_adapter().map(|adapter| {
+            Some((adapter, PrivacyFilterBackendTag::NearAi))
+        }),
+        other => Err(PrivacyFilterConfigError::UnknownBackend {
+            value: other.to_string(),
+        }),
+    }
+}
 
-    let args = std::env::var("IRONCLAW_TRACE_PRIVACY_FILTER_ARGS")
-        .ok()
-        .map(|raw| {
-            raw.split_whitespace()
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+fn build_sidecar_adapter() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterConfigError> {
+    let command = read_privacy_env(
+        "TRACE_PRIVACY_FILTER_COMMAND",
+        "IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND",
+    )
+    .ok_or(PrivacyFilterConfigError::MissingEnv {
+        backend: "sidecar",
+        var: "TRACE_PRIVACY_FILTER_COMMAND",
+    })?;
+
+    let args = read_privacy_env(
+        "TRACE_PRIVACY_FILTER_ARGS",
+        "IRONCLAW_TRACE_PRIVACY_FILTER_ARGS",
+    )
+    .map(|raw| {
+        raw.split_whitespace()
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+
     let mut adapter = CommandPrivacyFilterAdapter::new(command).with_args(args);
-    if let Some(timeout_ms) = parse_usize_env("IRONCLAW_TRACE_PRIVACY_FILTER_TIMEOUT_MS") {
-        adapter = adapter.with_timeout(Duration::from_millis(timeout_ms as u64));
+    if let Some(value) = read_privacy_env(
+        "TRACE_PRIVACY_FILTER_TIMEOUT_MS",
+        "IRONCLAW_TRACE_PRIVACY_FILTER_TIMEOUT_MS",
+    ) {
+        let ms = value
+            .parse::<u64>()
+            .map_err(|err| PrivacyFilterConfigError::InvalidEnv {
+                var: "TRACE_PRIVACY_FILTER_TIMEOUT_MS",
+                reason: err.to_string(),
+            })?;
+        adapter = adapter.with_timeout(Duration::from_millis(ms));
     }
-    if let Some(max_input_bytes) = parse_usize_env("IRONCLAW_TRACE_PRIVACY_FILTER_MAX_INPUT_BYTES")
-    {
-        adapter = adapter.with_input_limit(max_input_bytes);
+    if let Some(value) = read_privacy_env(
+        "TRACE_PRIVACY_FILTER_MAX_INPUT_BYTES",
+        "IRONCLAW_TRACE_PRIVACY_FILTER_MAX_INPUT_BYTES",
+    ) {
+        let bytes = value
+            .parse::<usize>()
+            .map_err(|err| PrivacyFilterConfigError::InvalidEnv {
+                var: "TRACE_PRIVACY_FILTER_MAX_INPUT_BYTES",
+                reason: err.to_string(),
+            })?;
+        adapter = adapter.with_input_limit(bytes);
     }
-    let max_stdout = parse_usize_env("IRONCLAW_TRACE_PRIVACY_FILTER_MAX_STDOUT_BYTES");
-    let max_stderr = parse_usize_env("IRONCLAW_TRACE_PRIVACY_FILTER_MAX_STDERR_BYTES");
+    let max_stdout = read_privacy_env(
+        "TRACE_PRIVACY_FILTER_MAX_STDOUT_BYTES",
+        "IRONCLAW_TRACE_PRIVACY_FILTER_MAX_STDOUT_BYTES",
+    )
+    .map(|v| {
+        v.parse::<usize>()
+            .map_err(|err| PrivacyFilterConfigError::InvalidEnv {
+                var: "TRACE_PRIVACY_FILTER_MAX_STDOUT_BYTES",
+                reason: err.to_string(),
+            })
+    })
+    .transpose()?;
+    let max_stderr = read_privacy_env(
+        "TRACE_PRIVACY_FILTER_MAX_STDERR_BYTES",
+        "IRONCLAW_TRACE_PRIVACY_FILTER_MAX_STDERR_BYTES",
+    )
+    .map(|v| {
+        v.parse::<usize>()
+            .map_err(|err| PrivacyFilterConfigError::InvalidEnv {
+                var: "TRACE_PRIVACY_FILTER_MAX_STDERR_BYTES",
+                reason: err.to_string(),
+            })
+    })
+    .transpose()?;
     if max_stdout.is_some() || max_stderr.is_some() {
         adapter = adapter.with_output_limits(
             max_stdout.unwrap_or(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDOUT_BYTES),
             max_stderr.unwrap_or(PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_STDERR_BYTES),
         );
     }
-    Some(Arc::new(adapter))
+    Ok(Arc::new(adapter))
 }
 
-fn parse_usize_env(name: &str) -> Option<usize> {
-    std::env::var(name)
+#[cfg(not(feature = "near-ai-privacy-filter"))]
+fn build_near_ai_adapter() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterConfigError> {
+    Err(PrivacyFilterConfigError::FeatureDisabled {
+        backend: "near-ai",
+        feature: "near-ai-privacy-filter",
+    })
+}
+
+#[cfg(feature = "near-ai-privacy-filter")]
+fn build_near_ai_adapter() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterConfigError> {
+    crate::privacy_filter_near_ai::build_from_env()
+}
+
+pub(crate) fn read_privacy_env(canonical: &str, legacy: &str) -> Option<String> {
+    let canonical_present = std::env::var(canonical)
         .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    if let Ok(value) = std::env::var(canonical) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Ok(value) = std::env::var(legacy) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            if !canonical_present {
+                emit_legacy_privacy_env_deprecation_warning_once();
+            }
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+static LEGACY_PRIVACY_ENV_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn emit_legacy_privacy_env_deprecation_warning_once() {
+    if LEGACY_PRIVACY_ENV_WARNED
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_ok()
+    {
+        eprintln!(
+            "warning: legacy IRONCLAW_TRACE_PRIVACY_FILTER_* environment variables are deprecated; \
+             rename to TRACE_PRIVACY_FILTER_* (legacy names will be removed in a future release)"
+        );
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_legacy_privacy_env_warning_for_tests() {
+    LEGACY_PRIVACY_ENV_WARNED.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn privacy_filter_backend_label(backend: PrivacyFilterBackendTag) -> &'static str {
+    match backend {
+        PrivacyFilterBackendTag::None => "none",
+        PrivacyFilterBackendTag::Sidecar => "sidecar",
+        PrivacyFilterBackendTag::NearAi => "near_ai",
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1935,10 +2095,40 @@ pub struct DeterministicTraceRedactor {
     leak_detector: SecretLeakDetector,
     known_path_prefixes: Vec<String>,
     privacy_filter: Option<Arc<dyn PrivacyFilterAdapter>>,
+    privacy_filter_backend: PrivacyFilterBackendTag,
 }
 
 impl Default for DeterministicTraceRedactor {
     fn default() -> Self {
+        Self::try_default().expect(
+            "DeterministicTraceRedactor::default(): privacy filter config invalid; use try_default()",
+        )
+    }
+}
+
+impl DeterministicTraceRedactor {
+    pub fn new(known_path_prefixes: Vec<String>) -> Result<Self, PrivacyFilterConfigError> {
+        let mut known_path_prefixes: Vec<String> = known_path_prefixes
+            .into_iter()
+            .filter(|prefix| !prefix.trim().is_empty())
+            .collect();
+        known_path_prefixes.sort_by_key(|prefix| std::cmp::Reverse(prefix.len()));
+        known_path_prefixes.dedup();
+
+        let (privacy_filter, privacy_filter_backend) = match privacy_filter_adapter_from_env()? {
+            Some((adapter, tag)) => (Some(adapter), tag),
+            None => (None, PrivacyFilterBackendTag::None),
+        };
+
+        Ok(Self {
+            leak_detector: SecretLeakDetector::new(),
+            known_path_prefixes,
+            privacy_filter,
+            privacy_filter_backend,
+        })
+    }
+
+    pub fn try_default() -> Result<Self, PrivacyFilterConfigError> {
         let mut known_path_prefixes = Vec::new();
         if let Some(home) = dirs::home_dir() {
             known_path_prefixes.push(path_to_string(home));
@@ -1948,26 +2138,14 @@ impl Default for DeterministicTraceRedactor {
         }
         Self::new(known_path_prefixes)
     }
-}
 
-impl DeterministicTraceRedactor {
-    pub fn new(known_path_prefixes: Vec<String>) -> Self {
-        let mut known_path_prefixes: Vec<String> = known_path_prefixes
-            .into_iter()
-            .filter(|prefix| !prefix.trim().is_empty())
-            .collect();
-        known_path_prefixes.sort_by_key(|prefix| std::cmp::Reverse(prefix.len()));
-        known_path_prefixes.dedup();
-
-        Self {
-            leak_detector: SecretLeakDetector::new(),
-            known_path_prefixes,
-            privacy_filter: privacy_filter_adapter_from_env(),
-        }
-    }
-
-    pub fn with_privacy_filter(mut self, adapter: Arc<dyn PrivacyFilterAdapter>) -> Self {
+    pub fn with_privacy_filter(
+        mut self,
+        adapter: Arc<dyn PrivacyFilterAdapter>,
+        backend: PrivacyFilterBackendTag,
+    ) -> Self {
         self.privacy_filter = Some(adapter);
+        self.privacy_filter_backend = backend;
         self
     }
 
@@ -1984,13 +2162,32 @@ impl DeterministicTraceRedactor {
             Ok(Some(redaction)) => redaction,
             Ok(None) => return Ok(text),
             Err(error) => {
-                let error_text = error.to_string();
-                report.increment("privacy_filter:sidecar_failure");
-                report.add_warning(format!(
-                    "Privacy Filter sidecar failed; deterministic redaction fallback was used. error_hash={}",
-                    canonical_hash(&error_text)
-                ));
-                return Ok(text);
+                match self.privacy_filter_backend {
+                    PrivacyFilterBackendTag::NearAi => {
+                        // Spec fail-closed: surface as RedactionFailed.
+                        return Err(error);
+                    }
+                    PrivacyFilterBackendTag::Sidecar => {
+                        let error_text = error.to_string();
+                        let backend_label = privacy_filter_backend_label(
+                            self.privacy_filter_backend,
+                        );
+                        report.increment(format!(
+                            "privacy_filter:{backend_label}_failure"
+                        ));
+                        report.add_warning(format!(
+                            "Privacy Filter {backend_label} backend failed; deterministic redaction fallback was used. error_hash={}",
+                            canonical_hash(&error_text)
+                        ));
+                        return Ok(text);
+                    }
+                    PrivacyFilterBackendTag::None => {
+                        // Unreachable: when backend tag is None, no adapter is
+                        // installed and we returned early above. Be defensive
+                        // and surface the error rather than silently swallow.
+                        return Err(error);
+                    }
+                }
             }
         };
 
@@ -1999,7 +2196,9 @@ impl DeterministicTraceRedactor {
         Ok(redaction.redacted_text)
     }
 
-    pub fn with_known_path_prefixes(prefixes: impl IntoIterator<Item = PathBuf>) -> Self {
+    pub fn with_known_path_prefixes(
+        prefixes: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Self, PrivacyFilterConfigError> {
         Self::new(prefixes.into_iter().map(path_to_string).collect())
     }
 
@@ -2231,9 +2430,7 @@ impl TraceRedactor for DeterministicTraceRedactor {
         let mut warnings = privacy_warnings(residual_pii_risk);
         warnings.extend(report.warnings.clone());
         let privacy = PrivacyMetadata {
-            redaction_pipeline_version: redaction_pipeline_version(
-                privacy_filter_summary.is_some(),
-            ),
+            redaction_pipeline_version: redaction_pipeline_version(self.privacy_filter_backend),
             redaction_counts: report.counts,
             privacy_filter_summary,
             pii_labels_present: report.pii_labels_present,
@@ -2272,9 +2469,12 @@ impl TraceRedactor for DeterministicTraceRedactor {
     }
 }
 
-pub fn rescrub_trace_envelope(envelope: &mut TraceContributionEnvelope) {
-    let redactor = DeterministicTraceRedactor::default();
+pub fn rescrub_trace_envelope(
+    envelope: &mut TraceContributionEnvelope,
+) -> Result<(), PrivacyFilterConfigError> {
+    let redactor = DeterministicTraceRedactor::try_default()?;
     rescrub_trace_envelope_with(&redactor, envelope);
+    Ok(())
 }
 
 pub fn rescrub_trace_envelope_with(
@@ -3586,4 +3786,292 @@ pub fn apply_credit_estimate_to_envelope(envelope: &mut TraceContributionEnvelop
     envelope.value.explanation = estimate.explanation;
     envelope.value_card.scorecard = estimate.scorecard;
     envelope.value_card.user_visible_explanation = envelope.value.explanation.clone();
+}
+
+#[cfg(test)]
+mod tests {
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn read_privacy_env_prefers_canonical_then_legacy() {
+        use super::read_privacy_env;
+        let _guard = ENV_LOCK.lock().unwrap();
+        let canonical = "TRACE_PRIVACY_FILTER_TEST_CANONICAL_XYZ";
+        let legacy = "IRONCLAW_TRACE_PRIVACY_FILTER_TEST_CANONICAL_XYZ";
+        // SAFETY: holding ENV_LOCK serializes env mutation across all
+        // env-touching tests in this crate. Edition 2024 marks these
+        // unsafe because env is process-global state.
+        unsafe {
+            std::env::remove_var(canonical);
+            std::env::remove_var(legacy);
+            assert_eq!(read_privacy_env(canonical, legacy), None);
+
+            std::env::set_var(legacy, "legacy-value");
+            assert_eq!(
+                read_privacy_env(canonical, legacy).as_deref(),
+                Some("legacy-value")
+            );
+
+            std::env::set_var(canonical, "canonical-value");
+            assert_eq!(
+                read_privacy_env(canonical, legacy).as_deref(),
+                Some("canonical-value")
+            );
+
+            std::env::remove_var(canonical);
+            std::env::remove_var(legacy);
+        }
+    }
+
+    #[test]
+    fn privacy_filter_config_error_messages_are_stable() {
+        use super::PrivacyFilterConfigError;
+        let e = PrivacyFilterConfigError::UnknownBackend { value: "junk".into() };
+        assert_eq!(e.to_string(), "unknown TRACE_PRIVACY_FILTER_BACKEND value: junk");
+        let e = PrivacyFilterConfigError::MissingEnv {
+            backend: "near-ai",
+            var: "TRACE_NEAR_AI_PRIVACY_API_KEY",
+        };
+        assert_eq!(
+            e.to_string(),
+            "missing required env var for backend near-ai: TRACE_NEAR_AI_PRIVACY_API_KEY"
+        );
+        let e = PrivacyFilterConfigError::FeatureDisabled {
+            backend: "near-ai",
+            feature: "near-ai-privacy-filter",
+        };
+        assert_eq!(
+            e.to_string(),
+            "backend near-ai requires the near-ai-privacy-filter cargo feature"
+        );
+        let e = PrivacyFilterConfigError::InvalidEnv {
+            var: "TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS",
+            reason: "not a number".into(),
+        };
+        assert_eq!(
+            e.to_string(),
+            "invalid env var TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS: not a number"
+        );
+    }
+
+    #[test]
+    fn redaction_pipeline_version_emits_per_backend_suffix() {
+        use super::{redaction_pipeline_version, PrivacyFilterBackendTag, DETERMINISTIC_REDACTION_PIPELINE_VERSION};
+        assert_eq!(
+            redaction_pipeline_version(PrivacyFilterBackendTag::None),
+            DETERMINISTIC_REDACTION_PIPELINE_VERSION
+        );
+        assert_eq!(
+            redaction_pipeline_version(PrivacyFilterBackendTag::Sidecar),
+            format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-sidecar-v1")
+        );
+        assert_eq!(
+            redaction_pipeline_version(PrivacyFilterBackendTag::NearAi),
+            format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-near-ai-v1")
+        );
+    }
+
+    #[test]
+    fn privacy_filter_adapter_from_env_returns_none_when_unset() {
+        use super::privacy_filter_adapter_from_env;
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+        }
+        let result = privacy_filter_adapter_from_env().expect("should be Ok");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn privacy_filter_adapter_from_env_rejects_unknown_backend() {
+        use super::{privacy_filter_adapter_from_env, PrivacyFilterConfigError};
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "garbage");
+        }
+        match privacy_filter_adapter_from_env() {
+            Err(PrivacyFilterConfigError::UnknownBackend { value }) => {
+                assert_eq!(value, "garbage")
+            }
+            Err(other) => panic!("expected UnknownBackend, got err {other:?}"),
+            Ok(_) => panic!("expected UnknownBackend, got Ok"),
+        }
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+        }
+    }
+
+    #[test]
+    fn privacy_filter_adapter_from_env_requires_near_ai_key() {
+        use super::{privacy_filter_adapter_from_env, PrivacyFilterConfigError};
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "near-ai");
+            std::env::remove_var("TRACE_NEAR_AI_PRIVACY_API_KEY");
+        }
+        match privacy_filter_adapter_from_env() {
+            Err(PrivacyFilterConfigError::MissingEnv { backend, var }) => {
+                assert_eq!(backend, "near-ai");
+                assert_eq!(var, "TRACE_NEAR_AI_PRIVACY_API_KEY");
+            }
+            // When feature is off, FeatureDisabled is also acceptable here:
+            Err(PrivacyFilterConfigError::FeatureDisabled { backend, feature }) => {
+                assert_eq!(backend, "near-ai");
+                assert_eq!(feature, "near-ai-privacy-filter");
+            }
+            Err(other) => panic!("unexpected err: {other:?}"),
+            Ok(_) => panic!("expected MissingEnv or FeatureDisabled, got Ok"),
+        }
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+        }
+    }
+
+    #[derive(Debug)]
+    struct AlwaysFailingPrivacyFilterAdapter;
+
+    #[async_trait::async_trait]
+    impl super::PrivacyFilterAdapter for AlwaysFailingPrivacyFilterAdapter {
+        async fn redact_text(
+            &self,
+            _text: &str,
+        ) -> Result<
+            Option<super::SafePrivacyFilterRedaction>,
+            super::TraceContributionError,
+        > {
+            Err(super::TraceContributionError::RedactionFailed {
+                reason: "synthetic adapter failure for tests".to_string(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn near_ai_runtime_error_propagates_fail_closed() {
+        use super::{
+            DeterministicTraceRedactor, PrivacyFilterBackendTag, RedactionReport,
+            TraceContributionError,
+        };
+        use std::sync::Arc;
+        let adapter = Arc::new(AlwaysFailingPrivacyFilterAdapter);
+        let redactor = DeterministicTraceRedactor::try_default()
+            .expect("default redactor")
+            .with_privacy_filter(adapter, PrivacyFilterBackendTag::NearAi);
+        let mut report = RedactionReport::default();
+        let mut summary = None;
+        let result = redactor
+            .apply_privacy_filter_to_text(
+                "alice@example.com".to_string(),
+                &mut report,
+                &mut summary,
+            )
+            .await;
+        match result {
+            Err(TraceContributionError::RedactionFailed { reason }) => {
+                assert!(
+                    reason.contains("synthetic adapter failure"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            Ok(text) => panic!("expected error; got Ok({text:?})"),
+        }
+        // No fallback warning or counter should be emitted in fail-closed
+        // mode.
+        let dump = format!("{:?}", report);
+        assert!(
+            !dump.contains("sidecar_failure")
+                && !dump.contains("near_ai_failure"),
+            "fail-closed must not emit a backend_failure counter: {dump}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sidecar_runtime_error_falls_back_with_backend_label() {
+        use super::{
+            DeterministicTraceRedactor, PrivacyFilterBackendTag, RedactionReport,
+        };
+        use std::sync::Arc;
+        let adapter = Arc::new(AlwaysFailingPrivacyFilterAdapter);
+        let redactor = DeterministicTraceRedactor::try_default()
+            .expect("default redactor")
+            .with_privacy_filter(adapter, PrivacyFilterBackendTag::Sidecar);
+        let mut report = RedactionReport::default();
+        let mut summary = None;
+        let text = redactor
+            .apply_privacy_filter_to_text(
+                "alice@example.com".to_string(),
+                &mut report,
+                &mut summary,
+            )
+            .await
+            .expect("sidecar must swallow runtime errors");
+        // Original text is returned to the caller (sidecar legacy
+        // contract).
+        assert_eq!(text, "alice@example.com");
+        let dump = format!("{:?}", report);
+        assert!(
+            dump.contains("privacy_filter:sidecar_failure"),
+            "expected sidecar_failure counter to be incremented; got {dump}"
+        );
+        assert!(
+            dump.contains("sidecar backend failed"),
+            "expected backend-aware warning; got {dump}"
+        );
+    }
+
+    #[test]
+    fn legacy_privacy_env_emits_deprecation_warning_once() {
+        use super::{read_privacy_env, reset_legacy_privacy_env_warning_for_tests};
+        let _guard = ENV_LOCK.lock().unwrap();
+        reset_legacy_privacy_env_warning_for_tests();
+        let canonical = "TRACE_PRIVACY_FILTER_TEST_DEPR_ABCDEF";
+        let legacy = "IRONCLAW_TRACE_PRIVACY_FILTER_TEST_DEPR_ABCDEF";
+        unsafe {
+            std::env::remove_var(canonical);
+            std::env::set_var(legacy, "legacy-only");
+        }
+        // First read should trigger the warning (best-effort: we cannot
+        // capture stderr without extra deps, but we can verify the
+        // atomic transitioned). The call itself must not panic.
+        assert_eq!(
+            read_privacy_env(canonical, legacy).as_deref(),
+            Some("legacy-only")
+        );
+        // After the first emission, the atomic is set; subsequent reads
+        // must not reset it.
+        assert!(
+            super::LEGACY_PRIVACY_ENV_WARNED
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "warning latch must be set after first legacy read"
+        );
+        // Second read; latch should remain true (idempotent).
+        let _ = read_privacy_env(canonical, legacy);
+        assert!(super::LEGACY_PRIVACY_ENV_WARNED
+            .load(std::sync::atomic::Ordering::SeqCst));
+        unsafe {
+            std::env::remove_var(legacy);
+        }
+        reset_legacy_privacy_env_warning_for_tests();
+    }
+
+    #[test]
+    fn privacy_filter_adapter_from_env_requires_sidecar_command() {
+        use super::{privacy_filter_adapter_from_env, PrivacyFilterConfigError};
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "sidecar");
+            std::env::remove_var("TRACE_PRIVACY_FILTER_COMMAND");
+            std::env::remove_var("IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND");
+        }
+        match privacy_filter_adapter_from_env() {
+            Err(PrivacyFilterConfigError::MissingEnv { backend, var }) => {
+                assert_eq!(backend, "sidecar");
+                assert_eq!(var, "TRACE_PRIVACY_FILTER_COMMAND");
+            }
+            Err(other) => panic!("unexpected err: {other:?}"),
+            Ok(_) => panic!("expected MissingEnv, got Ok"),
+        }
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+        }
+    }
 }
