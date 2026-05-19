@@ -119,6 +119,12 @@ pub enum ConsentScope {
     BenchmarkOnly,
     RankingTraining,
     ModelTraining,
+    /// Contributor has explicitly consented to map their pseudonymous
+    /// principal_ref to a publicly-visible handle via the community
+    /// surface. Does NOT grant any trace-content allowed-uses on its
+    /// own — it gates the /v1/community/profile endpoints. A claim
+    /// scoped to ONLY public_attribution cannot submit traces.
+    PublicAttribution,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2461,6 +2467,14 @@ fn default_allowed_uses_for_scope(scope: ConsentScope) -> Vec<TraceAllowedUse> {
             TraceAllowedUse::ModelTraining,
             TraceAllowedUse::AggregateAnalytics,
         ],
+        // public_attribution is a profile-management consent, not a
+        // trace-content use. It grants the contributor's pseudonym to
+        // be linked to a publicly-visible handle via the community
+        // surface; it does NOT permit any new operations on envelope
+        // bodies. Returning empty here means a claim scoped to only
+        // public_attribution cannot submit traces (the envelope
+        // validation refuses an empty allowed_uses list).
+        ConsentScope::PublicAttribution => Vec::new(),
     }
 }
 

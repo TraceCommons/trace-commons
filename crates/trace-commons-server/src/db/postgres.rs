@@ -46,6 +46,8 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_ranking_preference_labels",
     "trace_ranking_calibration_runs",
     "trace_ranking_worker_runs",
+    "trace_contributor_profiles",
+    "trace_contributor_profile_audit",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -534,6 +536,26 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&26_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V26__trace_contributor_profiles.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&26_i32, &"trace_contributor_profiles"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -734,6 +756,7 @@ mod tests {
         let central_policy_migrations = [
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
+            include_str!("../../../../migrations/V26__trace_contributor_profiles.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
@@ -742,6 +765,7 @@ mod tests {
             include_str!("../../../../migrations/V15__trace_benchmark_registry_outbox.sql"),
             include_str!("../../../../migrations/V16__trace_ranking_calibration_datasets.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
+            include_str!("../../../../migrations/V26__trace_contributor_profiles.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {
