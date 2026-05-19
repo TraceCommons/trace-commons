@@ -183,6 +183,35 @@ export TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true
 export TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY=true
 ```
 
+### Privacy filter backend (pilot)
+
+Pilot builds must include the `near-ai-privacy-filter` Cargo feature to enable
+the hosted backend:
+
+```sh
+cargo build --release -p tracedao-server \
+  --features gcs-client,gcp-kms,local-gpu-models-cuda,near-ai-privacy-filter
+```
+
+Set these additional env vars before starting the binary:
+
+```sh
+# --- Privacy filter (NEAR AI hosted backend) ---
+export TRACE_PRIVACY_FILTER_BACKEND=near-ai
+export TRACE_NEAR_AI_PRIVACY_API_KEY=<near-ai-bearer-token>   # never logged; rotate by restart
+# Optional overrides — defaults are production-safe:
+# export TRACE_NEAR_AI_PRIVACY_BASE_URL=https://privacy-filter.completions.near.ai/v1
+# export TRACE_NEAR_AI_PRIVACY_MODEL=openai/privacy-filter
+# export TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS=10000
+```
+
+Before admitting real traces, the privacy-filter canary must report healthy.
+The canary submits a synthetic PII smoke payload and verifies the filter
+removes it; it reuses the existing `run_privacy_filter_canary` path in the
+rollout-smoke suite. Check the result via `GET /v1/admin/config-status` —
+the `privacy_filter_canary_status.healthy` field must be `true` before you
+enable live contributor traffic.
+
 At least one of the three gate floors must be positive — the binary
 refuses to start if all are zero. Under the A2.5 pilot-launch defaults
 the novelty floor (`TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS=500000`,

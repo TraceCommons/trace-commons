@@ -341,6 +341,33 @@ procedure.
 | `TRACE_COMMONS_RANKING_MAX_LABELER_ISSUE_RATE_MICROS` | optional | — | Ceiling. |
 | `TRACE_COMMONS_RANKING_MIN_LABELER_RELIABILITY_LABEL_COUNT` | optional | — | Floor. |
 
+## 15. Privacy filter backend
+
+The privacy filter backend is selected explicitly — there is no auto-fallback.
+Unknown values for `TRACE_PRIVACY_FILTER_BACKEND` are refused at startup so
+misconfigurations surface immediately rather than silently degrading to a
+weaker path.
+
+The `near-ai` backend requires the `near-ai-privacy-filter` Cargo feature;
+pilot builds enable it. When `near-ai` is active, the pipeline-version suffix
+appended to envelope records is `+privacy-filter-near-ai-v1`; this value is
+audit-relevant and is included in gate version hash derivation.
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_PRIVACY_FILTER_BACKEND` | optional | unset | `sidecar` \| `near-ai` \| unset. Unset = deterministic-only redaction. Unknown values refuse startup. |
+| `TRACE_PRIVACY_FILTER_COMMAND` | when `sidecar` | (none) | Path to sidecar binary. Legacy name `IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND` still read with a one-shot deprecation warning. |
+| `TRACE_PRIVACY_FILTER_ARGS` | optional | empty | Whitespace-separated argv. Legacy: `IRONCLAW_TRACE_PRIVACY_FILTER_ARGS`. |
+| `TRACE_PRIVACY_FILTER_TIMEOUT_MS` | optional | `10000` | Sidecar timeout. Legacy: `IRONCLAW_TRACE_PRIVACY_FILTER_TIMEOUT_MS`. |
+| `TRACE_PRIVACY_FILTER_MAX_INPUT_BYTES` | optional | (sidecar default) | Max stdin bytes per call. Legacy: `IRONCLAW_*`. |
+| `TRACE_PRIVACY_FILTER_MAX_STDOUT_BYTES` | optional | (sidecar default) | Max stdout bytes. Legacy: `IRONCLAW_*`. |
+| `TRACE_PRIVACY_FILTER_MAX_STDERR_BYTES` | optional | (sidecar default) | Max stderr bytes. Legacy: `IRONCLAW_*`. |
+| `TRACE_NEAR_AI_PRIVACY_API_KEY` | when `near-ai` | (none) | NEAR AI Cloud bearer token. Never logged; rotation is restart-only. |
+| `TRACE_NEAR_AI_PRIVACY_BASE_URL` | optional | `https://cloud-api.near.ai/v1` | Hosted endpoint; supports `privacy-filter.completions.near.ai/v1` faster path. |
+| `TRACE_NEAR_AI_PRIVACY_MODEL` | optional | `openai/privacy-filter` | Model slug. |
+| `TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS` | optional | `10000` | HTTP request timeout. |
+| `TRACE_NEAR_AI_PRIVACY_MAX_INPUT_BYTES` | optional | (sidecar default) | Refuses inputs above this size. |
+
 ---
 
 ## Build-time features (Cargo)
@@ -353,6 +380,7 @@ These aren't env vars but they gate which envs even matter at runtime.
 | `gcp-kms` | Compiles `google-cloud-kms`. Required for `TRACE_COMMONS_KEK_PROVIDER=gcp_kms`. |
 | `local-gpu-models` | Compiles the mistralrs perplexity scorer + fastembed embedder + usearch vector index. Required for `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu`. A2.3 migrated the scorer off candle-direct; architecture is auto-detected from `config.json`. |
 | `local-gpu-models-cuda` | Implies `local-gpu-models`, adds the mistralrs CUDA backend. Required when `TRACE_COMMONS_PERPLEXITY_DEVICE=cuda*`. |
+| `near-ai-privacy-filter` | Compiles the NEAR AI Cloud privacy-filter backend. Required when `TRACE_PRIVACY_FILTER_BACKEND=near-ai`. Pilot builds enable this feature. |
 
 Production build command:
 
