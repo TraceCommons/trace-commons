@@ -1381,18 +1381,18 @@ pub struct RedactionReport {
 }
 
 impl RedactionReport {
-    fn increment(&mut self, label: impl Into<String>) {
+    pub(crate) fn increment(&mut self, label: impl Into<String>) {
         *self.counts.entry(label.into()).or_insert(0) += 1;
     }
 
-    fn add_pii_label(&mut self, label: impl Into<String>) {
+    pub(crate) fn add_pii_label(&mut self, label: impl Into<String>) {
         let label = label.into();
         if !self.pii_labels_present.contains(&label) {
             self.pii_labels_present.push(label);
         }
     }
 
-    fn add_warning(&mut self, warning: impl Into<String>) {
+    pub(crate) fn add_warning(&mut self, warning: impl Into<String>) {
         let warning = warning.into();
         if !self.warnings.contains(&warning) {
             self.warnings.push(warning);
@@ -1473,7 +1473,10 @@ pub fn safe_privacy_filter_redaction_from_output(
     })
 }
 
-fn safe_privacy_filter_label(raw_label: Option<&str>, report: &mut RedactionReport) -> String {
+pub(crate) fn safe_privacy_filter_label(
+    raw_label: Option<&str>,
+    report: &mut RedactionReport,
+) -> String {
     let Some(raw_label) = raw_label else {
         return "unknown".to_string();
     };
