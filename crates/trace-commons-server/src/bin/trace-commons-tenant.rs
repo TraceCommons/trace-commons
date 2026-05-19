@@ -6,22 +6,25 @@
 //! share a single `--bearer-token-env` defaulting to
 //! `TRACE_COMMONS_TENANT_BEARER`. Two subcommands (`tenant-principal-ref`,
 //! `privacy-filter-canary`) do not hit the server: the first derives a
-//! principal ref locally; the second is intentionally stubbed in this
-//! operator binary because the underlying privacy-filter sidecar is not yet
-//! ported off the Ironclaw runtime.
+//! principal ref locally; the second spawns a locally configured
+//! privacy-filter sidecar subprocess and confirms it scrubs canary tokens.
+//! See `docs/operator/operator-binaries.md` for the sidecar env-var
+//! contract.
 
 #[path = "operator_common/mod.rs"]
 mod operator_common;
 
-use std::io::{stdout, Write};
+use std::io::{Write, stdout};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::Method;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use trace_commons_operator_client::{format as oc_format, host_allowlist::HostAllowlist, Client};
+use trace_commons_operator_client::privacy_filter;
+use trace_commons_operator_client::{Client, format as oc_format, host_allowlist::HostAllowlist};
 use uuid::Uuid;
 
 use operator_common::{render_items, render_kv_fields, sanitized_url};
@@ -78,7 +81,7 @@ pub(crate) enum TenantSubcommand {
     AuditEvents(AuditEventsArgs),
     /// List central trace metadata with optional reviewer filters.
     ListTraces(ListTracesArgs),
-    /// Run a local Privacy Filter sidecar canary check (stub in operator binary).
+    /// Run a local Privacy Filter sidecar canary check.
     PrivacyFilterCanary(PrivacyFilterCanaryArgs),
 }
 
@@ -363,10 +366,8 @@ async fn dispatch(cli: Cli) -> Result<()> {
         TenantSubcommand::TenantPrincipalRef(args) => {
             return tenant_principal_ref(args, cli.json);
         }
-        TenantSubcommand::PrivacyFilterCanary(_args) => {
-            anyhow::bail!(
-                "privacy-filter-canary is not yet ported to the operator binary; run the local sidecar canary via legacy Ironclaw tooling"
-            );
+        TenantSubcommand::PrivacyFilterCanary(args) => {
+            return privacy_filter_canary(args, cli.json).await;
         }
         _ => {}
     }
@@ -423,7 +424,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
 
 async fn tenant_policy_get(client: &Client, endpoint: &str, json: bool) -> Result<()> {
     let path = "/v1/admin/tenant-policy";
-    let value: Value = client.call_json::<(), Value>(Method::GET, path, &[], None).await?;
+    let value: Value = client
+        .call_json::<(), Value>(Method::GET, path, &[], None)
+        .await?;
     if json {
         emit_json(endpoint, "GET", path, &value)?;
     } else {
@@ -685,7 +688,9 @@ async fn ranker_training_export(
         owned.push(("privacy_risk", risk.as_str().to_string()));
     }
     let query = borrow_query(&owned);
-    let raw = client.call_raw::<()>(Method::GET, path, &query, None).await?;
+    let raw = client
+        .call_raw::<()>(Method::GET, path, &query, None)
+        .await?;
     let value: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
 
     if let Some(output) = args.output.as_ref() {
@@ -858,11 +863,16 @@ fn tenant_principal_ref(args: &TenantPrincipalRefArgs, json: bool) -> Result<()>
         }
         ("static_token", principal_storage_ref(&token))
     } else {
-        let tenant_id = signed_tenant_id
-            .ok_or_else(|| anyhow::anyhow!("--signed-tenant-id is required with --signed-actor-ref"))?;
-        let actor_ref = signed_actor_ref
-            .ok_or_else(|| anyhow::anyhow!("--signed-actor-ref is required with --signed-tenant-id"))?;
-        ("signed_claim", signed_claim_principal_ref(&tenant_id, &actor_ref))
+        let tenant_id = signed_tenant_id.ok_or_else(|| {
+            anyhow::anyhow!("--signed-tenant-id is required with --signed-actor-ref")
+        })?;
+        let actor_ref = signed_actor_ref.ok_or_else(|| {
+            anyhow::anyhow!("--signed-actor-ref is required with --signed-tenant-id")
+        })?;
+        (
+            "signed_claim",
+            signed_claim_principal_ref(&tenant_id, &actor_ref),
+        )
     };
 
     if json {
@@ -870,7 +880,12 @@ fn tenant_principal_ref(args: &TenantPrincipalRefArgs, json: bool) -> Result<()>
             "mode": mode,
             "principal_ref": principal_ref,
         });
-        oc_format::emit_json(&mut stdout(), "LOCAL", "trace-commons-tenant/principal-ref", &value)?;
+        oc_format::emit_json(
+            &mut stdout(),
+            "LOCAL",
+            "trace-commons-tenant/principal-ref",
+            &value,
+        )?;
     } else {
         println!("{principal_ref}");
     }
@@ -889,6 +904,91 @@ fn signed_claim_principal_ref(tenant_id: &str, actor_ref: &str) -> String {
 fn sha256_prefixed(value: &str) -> String {
     let digest = Sha256::digest(value.as_bytes());
     format!("sha256:{}", hex::encode(digest))
+}
+
+async fn privacy_filter_canary(args: &PrivacyFilterCanaryArgs, json: bool) -> Result<()> {
+    let adapter = privacy_filter::adapter_from_env().ok_or_else(|| {
+        anyhow::anyhow!(
+            "TRACE_COMMONS_PRIVACY_FILTER_COMMAND is not set; no local privacy filter sidecar is configured"
+        )
+    })?;
+    let timeout = Duration::from_secs(args.timeout_seconds.max(1));
+    let redaction = tokio::time::timeout(timeout, adapter.redact_text(&args.text))
+        .await
+        .map_err(|_| anyhow::anyhow!("privacy filter canary timed out after {:?}", timeout))?
+        .map_err(|e| anyhow::anyhow!("privacy filter canary failed: {e}"))?;
+    let Some(redaction) = redaction else {
+        anyhow::bail!("privacy filter sidecar returned no redaction for canary text");
+    };
+    let leaked_tokens = privacy_filter::canary_leaked_tokens(&args.text, &redaction.redacted_text);
+    let passed = leaked_tokens.is_empty();
+    let input_hash = privacy_filter::canonical_hash(&args.text);
+    let redacted_hash = privacy_filter::canonical_hash(&redaction.redacted_text);
+
+    if json {
+        let value = serde_json::json!({
+            "canary_version": "trace-commons-privacy-filter-canary-v1",
+            "passed": passed,
+            "input_hash": input_hash,
+            "redacted_output_hash": redacted_hash,
+            "summary": redaction.summary,
+            "report": redaction.report,
+            "leaked_token_hashes": leaked_tokens,
+        });
+        oc_format::emit_json(
+            &mut stdout(),
+            "LOCAL",
+            "trace-commons-tenant/privacy-filter-canary",
+            &value,
+        )?;
+    } else {
+        let mut out = stdout();
+        writeln!(
+            out,
+            "privacy-filter canary: {}",
+            if passed { "PASS" } else { "FAIL" }
+        )?;
+        writeln!(out, "  input_hash:           {input_hash}")?;
+        writeln!(out, "  redacted_output_hash: {redacted_hash}")?;
+        writeln!(
+            out,
+            "  span_count:           {}",
+            redaction.summary.span_count
+        )?;
+        writeln!(
+            out,
+            "  schema_version:       {}",
+            redaction.summary.schema_version
+        )?;
+        writeln!(
+            out,
+            "  decoded_mismatch:     {}",
+            redaction.summary.decoded_mismatch
+        )?;
+        if !redaction.summary.by_label.is_empty() {
+            writeln!(out, "  by_label:")?;
+            for (label, count) in &redaction.summary.by_label {
+                writeln!(out, "    {label}: {count}")?;
+            }
+        }
+        if redaction.report.blocked_secret_detected {
+            writeln!(out, "  blocked_secret_detected: true")?;
+        }
+        for warning in &redaction.report.warnings {
+            writeln!(out, "  warning: {warning}")?;
+        }
+        if !leaked_tokens.is_empty() {
+            writeln!(out, "  leaked_token_hashes:")?;
+            for h in &leaked_tokens {
+                writeln!(out, "    {h}")?;
+            }
+        }
+    }
+
+    if !passed {
+        anyhow::bail!("privacy filter canary failed: sidecar output retained canary token(s)");
+    }
+    Ok(())
 }
 
 // --- helpers ---
@@ -1035,11 +1135,7 @@ mod tests {
     #[test]
     fn cli_parses_tenant_principal_ref_with_token_env() {
         // No --endpoint required for this subcommand.
-        let cli = parse_no_endpoint(&[
-            "tenant-principal-ref",
-            "--token-env",
-            "SOME_TOKEN_VAR",
-        ]);
+        let cli = parse_no_endpoint(&["tenant-principal-ref", "--token-env", "SOME_TOKEN_VAR"]);
         match cli.command {
             TenantSubcommand::TenantPrincipalRef(args) => {
                 assert_eq!(args.token_env.as_deref(), Some("SOME_TOKEN_VAR"));
@@ -1132,7 +1228,10 @@ mod tests {
     #[test]
     fn cli_parses_ranker_training_pairs() {
         let cli = parse(&["ranker-training-pairs", "--limit", "5"]);
-        assert!(matches!(cli.command, TenantSubcommand::RankerTrainingPairs(_)));
+        assert!(matches!(
+            cli.command,
+            TenantSubcommand::RankerTrainingPairs(_)
+        ));
     }
 
     #[test]
@@ -1182,6 +1281,38 @@ mod tests {
                 assert_eq!(args.timeout_seconds, 10);
             }
             other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn privacy_filter_canary_errors_when_unconfigured() {
+        // Capture and clear the env vars the adapter reads so this test
+        // is hermetic regardless of operator-level configuration.
+        let keys = [
+            "TRACE_COMMONS_PRIVACY_FILTER_COMMAND",
+            "IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND",
+        ];
+        let prior: Vec<_> = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        for k in &keys {
+            unsafe { std::env::remove_var(k) };
+        }
+        let args = PrivacyFilterCanaryArgs {
+            text: "trace-canary.person@example.invalid".to_string(),
+            timeout_seconds: 2,
+        };
+        let err = privacy_filter_canary(&args, true).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("TRACE_COMMONS_PRIVACY_FILTER_COMMAND"),
+            "expected env-var error, got: {msg}"
+        );
+        // Confirm we no longer emit the legacy stub message.
+        assert!(!msg.contains("not yet ported"), "stub message must be gone");
+        for (k, v) in prior {
+            match v {
+                Some(value) => unsafe { std::env::set_var(k, value) },
+                None => unsafe { std::env::remove_var(k) },
+            }
         }
     }
 
@@ -1283,21 +1414,21 @@ mod tests {
         Mock::given(method("GET"))
             .and(wm_path("/v1/admin/tenant-policy"))
             .and(header("authorization", "Bearer tenant-secret"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "tenant_id": "t-1",
-                    "policy_version": "v1",
-                    "allowed_consent_scopes": ["benchmark_only"],
-                    "allowed_uses": ["benchmark_generation"],
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tenant_id": "t-1",
+                "policy_version": "v1",
+                "allowed_consent_scopes": ["benchmark_only"],
+                "allowed_uses": ["benchmark_generation"],
+            })))
             .expect(1)
             .mount(&server)
             .await;
         let env = unique_bearer_env();
         let _g = EnvGuard::set(env.clone(), "tenant-secret");
         let client = Client::builder(server.uri(), env).build().unwrap();
-        tenant_policy_get(&client, &server.uri(), true).await.unwrap();
+        tenant_policy_get(&client, &server.uri(), true)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1310,11 +1441,9 @@ mod tests {
                 "allowed_consent_scopes": ["benchmark_only", "model_training"],
                 "allowed_uses": ["benchmark_generation"],
             })))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "policy_version": "v2",
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "policy_version": "v2",
+            })))
             .expect(1)
             .mount(&server)
             .await;
@@ -1461,10 +1590,13 @@ mod tests {
         let server = MockServer::start().await;
         let id = Uuid::new_v4();
         Mock::given(method("POST"))
-            .and(wm_path(format!("/v1/admin/tenant-access-grants/{id}/revoke")))
+            .and(wm_path(format!(
+                "/v1/admin/tenant-access-grants/{id}/revoke"
+            )))
             .and(body_json(serde_json::json!({ "reason": "key compromise" })))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "status": "revoked" })),
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "status": "revoked" })),
             )
             .expect(1)
             .mount(&server)
@@ -1549,13 +1681,11 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(wm_path("/v1/ranker/training-candidates"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "candidates": [
-                        {"submission_id": "s-1", "ranker_score": 0.9}
-                    ]
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "candidates": [
+                    {"submission_id": "s-1", "ranker_score": 0.9}
+                ]
+            })))
             .expect(1)
             .mount(&server)
             .await;

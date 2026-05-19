@@ -74,10 +74,25 @@ consume a bearer:
 
 - `tenant-principal-ref` — derives the stored `principal_ref` locally from
   either a static token or a signed-claim `(tenant_id, actor_ref)` pair.
-- `privacy-filter-canary` — stubbed in the operator binary; the underlying
-  local sidecar is not yet ported off the Ironclaw runtime. The subcommand
-  fails fast with a clear message; run the canary via legacy local tooling
-  until A2.8 ports the sidecar.
+- `privacy-filter-canary` — spawns the locally configured privacy-filter
+  sidecar, pipes a canary string through it, and verifies no canary token
+  survives the redaction. The subcommand reads its configuration from
+  environment variables:
+
+  | Canonical | Legacy fallback | Purpose |
+  |---|---|---|
+  | `TRACE_COMMONS_PRIVACY_FILTER_COMMAND` | `IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND` | Sidecar executable path. Required. |
+  | `TRACE_COMMONS_PRIVACY_FILTER_ARGS` | `IRONCLAW_TRACE_PRIVACY_FILTER_ARGS` | Whitespace-separated argv. |
+  | `TRACE_COMMONS_PRIVACY_FILTER_TIMEOUT_MS` | `IRONCLAW_TRACE_PRIVACY_FILTER_TIMEOUT_MS` | Wall-clock timeout (ms). |
+  | `TRACE_COMMONS_PRIVACY_FILTER_MAX_INPUT_BYTES` | `IRONCLAW_TRACE_PRIVACY_FILTER_MAX_INPUT_BYTES` | Refuse oversized inputs. |
+  | `TRACE_COMMONS_PRIVACY_FILTER_MAX_STDOUT_BYTES` | `IRONCLAW_TRACE_PRIVACY_FILTER_MAX_STDOUT_BYTES` | Cap captured stdout. |
+  | `TRACE_COMMONS_PRIVACY_FILTER_MAX_STDERR_BYTES` | `IRONCLAW_TRACE_PRIVACY_FILTER_MAX_STDERR_BYTES` | Cap captured stderr. |
+
+  When both names are set, the canonical `TRACE_COMMONS_*` value wins; a
+  one-shot `tracing::warn!` is emitted whenever the legacy name is used so
+  operators know to migrate. The subcommand exits non-zero if no command is
+  configured, the sidecar times out, or the redacted output retains a
+  canary token (hash-only diagnostics, never the raw token).
 
 ## Common workflows
 
@@ -210,5 +225,5 @@ binary surfaces each as `Error: <variant-name>: <message>`.
 - New subcommand in any binary: add a row to the binaries-at-a-glance
   table and (if it introduces a new bearer surface) the env-var matrix.
 - New foundation `Error` variant: add a row to the troubleshooting table.
-- The `privacy-filter-canary` stub is replaced by a real port: remove
-  the deferred-note from the binaries section and add a workflow row.
+- New `TRACE_COMMONS_PRIVACY_FILTER_*` env var added to the sidecar
+  contract: add a row to the table under `privacy-filter-canary` above.

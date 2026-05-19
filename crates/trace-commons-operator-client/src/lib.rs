@@ -19,6 +19,11 @@ pub mod client;
 pub mod error;
 pub mod format;
 pub mod host_allowlist;
+pub mod privacy_filter;
 
 pub use client::Client;
 pub use error::{Error, Result};
+pub use privacy_filter::{
+    CommandPrivacyFilterAdapter, PrivacyFilterAdapter, SafePrivacyFilterRedaction,
+    adapter_from_env, canary_leaked_tokens,
+};
