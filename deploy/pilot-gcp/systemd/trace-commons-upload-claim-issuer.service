@@ -1,0 +1,26 @@
+[Unit]
+Description=trace-commons-upload-claim-issuer (TraceCommons pilot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tracecommons
+Group=tracecommons
+EnvironmentFile=/etc/tracecommons/issuer.env
+ExecStart=/opt/tracecommons/bin/trace-commons-upload-claim-issuer
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/var/log/tracecommons/issuer.log
+StandardError=append:/var/log/tracecommons/issuer.err
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadWritePaths=/var/log/tracecommons
+
+[Install]
+WantedBy=multi-user.target

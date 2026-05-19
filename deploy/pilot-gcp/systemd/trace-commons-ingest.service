@@ -1,0 +1,30 @@
+[Unit]
+Description=trace-commons-ingest (TraceCommons pilot)
+After=network-online.target cloud-sql-proxy.service
+Wants=network-online.target
+Requires=cloud-sql-proxy.service
+
+[Service]
+Type=simple
+User=tracecommons
+Group=tracecommons
+EnvironmentFile=/etc/tracecommons/ingest.env
+ExecStart=/opt/tracecommons/bin/trace-commons-ingest
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/var/log/tracecommons/ingest.log
+StandardError=append:/var/log/tracecommons/ingest.err
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+# TRACE_COMMONS_DATA_DIR + embedder/vector index live under /var/lib and
+# /var/cache. Logs are appended to /var/log/tracecommons. ProtectHome
+# blocks the binary's default ~/.ironclaw fallback, which is intentional.
+ReadWritePaths=/var/cache/trace-commons-embedder /var/lib/trace-commons-vector-index /var/log/tracecommons /var/lib/trace-commons-data
+
+[Install]
+WantedBy=multi-user.target

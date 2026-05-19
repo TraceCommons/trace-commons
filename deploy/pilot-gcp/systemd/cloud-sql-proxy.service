@@ -1,0 +1,29 @@
+[Unit]
+Description=Cloud SQL Auth Proxy (TraceCommons pilot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tracecommons
+Group=tracecommons
+# Resolves the runtime service account via the GCE metadata server. Grant
+# the SA roles/cloudsql.client at the project scope before enabling.
+# Replace the instance connection name with the Cloud SQL instance for
+# your project (format: PROJECT:REGION:INSTANCE).
+ExecStart=/usr/local/bin/cloud-sql-proxy \
+  --address 127.0.0.1 \
+  --port 5432 \
+  --auto-iam-authn=false \
+  ${TC_GCP_PROJECT}:${TC_GCP_REGION}:${TC_CLOUD_SQL_INSTANCE}
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+
+[Install]
+WantedBy=multi-user.target

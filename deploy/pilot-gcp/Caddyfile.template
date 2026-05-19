@@ -1,0 +1,48 @@
+# TraceCommons pilot reverse proxy. Caddy fetches Let's Encrypt certs
+# automatically for both subdomains (nip.io resolves the IP).
+#
+# Render with envsubst before staging as /etc/caddy/Caddyfile.
+#
+# Placeholders:
+#   ${TC_PUBLIC_HOST}  e.g. 34-41-15-28.nip.io
+#   ${TC_LE_EMAIL}     ACME account email
+#
+# Layout:
+#   ingest.${TC_PUBLIC_HOST}  -> 127.0.0.1:3907 (trace-commons-ingest)
+#   issuer.${TC_PUBLIC_HOST}  -> 127.0.0.1:3917 (upload-claim-issuer)
+#
+# Both daemons bind loopback only; Caddy is the public TLS edge. Admin
+# endpoints (e.g. issuer's :8081) stay loopback and are not exposed.
+
+{
+	email ${TC_LE_EMAIL}
+	servers {
+		max_header_size 32KB
+	}
+}
+
+ingest.${TC_PUBLIC_HOST} {
+	encode gzip
+	reverse_proxy 127.0.0.1:3907 {
+		header_up Host {host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+	log {
+		output file /var/log/caddy/ingest-access.log
+		format json
+	}
+}
+
+issuer.${TC_PUBLIC_HOST} {
+	encode gzip
+	reverse_proxy 127.0.0.1:3917 {
+		header_up Host {host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+	log {
+		output file /var/log/caddy/issuer-access.log
+		format json
+	}
+}

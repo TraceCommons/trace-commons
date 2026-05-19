@@ -22,6 +22,7 @@ the link.
 | If you are... | Start with |
 |---|---|
 | First-time deploying `trace-commons-server` | [`./deployment.md`](./deployment.md) |
+| Bringing up the GCP pilot end-to-end | [`./pilot-gcp-deployment.md`](./pilot-gcp-deployment.md) |
 | Setting gate floors or calibrating thresholds | [`./calibration.md`](./calibration.md) |
 | Validating a deployment before promoting | [`./smoke-test.md`](./smoke-test.md) |
 | Running the model bake-off | [`./calibration.md`](./calibration.md) (Phase 0) + [`./agent-traces-bakeoff-run.md`](./agent-traces-bakeoff-run.md) |
