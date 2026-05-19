@@ -1527,9 +1527,10 @@ pub fn synthetic_privacy_filter_canary_values() -> Vec<String> {
 
 pub async fn run_configured_privacy_filter_canary_from_env()
 -> Result<Option<PrivacyFilterCanaryReport>, TraceContributionError> {
-    // TODO(task 6): propagate Result
-    let Some((adapter, _backend)) = privacy_filter_adapter_from_env()
-        .expect("privacy filter env misconfigured")
+    let Some((adapter, _backend)) =
+        privacy_filter_adapter_from_env().map_err(|err| TraceContributionError::RedactionFailed {
+            reason: err.to_string(),
+        })?
     else {
         return Ok(None);
     };
@@ -2053,10 +2054,40 @@ pub struct DeterministicTraceRedactor {
     leak_detector: SecretLeakDetector,
     known_path_prefixes: Vec<String>,
     privacy_filter: Option<Arc<dyn PrivacyFilterAdapter>>,
+    privacy_filter_backend: PrivacyFilterBackendTag,
 }
 
 impl Default for DeterministicTraceRedactor {
     fn default() -> Self {
+        Self::try_default().expect(
+            "DeterministicTraceRedactor::default(): privacy filter config invalid; use try_default()",
+        )
+    }
+}
+
+impl DeterministicTraceRedactor {
+    pub fn new(known_path_prefixes: Vec<String>) -> Result<Self, PrivacyFilterConfigError> {
+        let mut known_path_prefixes: Vec<String> = known_path_prefixes
+            .into_iter()
+            .filter(|prefix| !prefix.trim().is_empty())
+            .collect();
+        known_path_prefixes.sort_by_key(|prefix| std::cmp::Reverse(prefix.len()));
+        known_path_prefixes.dedup();
+
+        let (privacy_filter, privacy_filter_backend) = match privacy_filter_adapter_from_env()? {
+            Some((adapter, tag)) => (Some(adapter), tag),
+            None => (None, PrivacyFilterBackendTag::None),
+        };
+
+        Ok(Self {
+            leak_detector: SecretLeakDetector::new(),
+            known_path_prefixes,
+            privacy_filter,
+            privacy_filter_backend,
+        })
+    }
+
+    pub fn try_default() -> Result<Self, PrivacyFilterConfigError> {
         let mut known_path_prefixes = Vec::new();
         if let Some(home) = dirs::home_dir() {
             known_path_prefixes.push(path_to_string(home));
@@ -2066,29 +2097,14 @@ impl Default for DeterministicTraceRedactor {
         }
         Self::new(known_path_prefixes)
     }
-}
 
-impl DeterministicTraceRedactor {
-    pub fn new(known_path_prefixes: Vec<String>) -> Self {
-        let mut known_path_prefixes: Vec<String> = known_path_prefixes
-            .into_iter()
-            .filter(|prefix| !prefix.trim().is_empty())
-            .collect();
-        known_path_prefixes.sort_by_key(|prefix| std::cmp::Reverse(prefix.len()));
-        known_path_prefixes.dedup();
-
-        Self {
-            leak_detector: SecretLeakDetector::new(),
-            known_path_prefixes,
-            // TODO(task 6): propagate Result
-            privacy_filter: privacy_filter_adapter_from_env()
-                .expect("privacy filter env misconfigured")
-                .map(|(adapter, _backend)| adapter),
-        }
-    }
-
-    pub fn with_privacy_filter(mut self, adapter: Arc<dyn PrivacyFilterAdapter>) -> Self {
+    pub fn with_privacy_filter(
+        mut self,
+        adapter: Arc<dyn PrivacyFilterAdapter>,
+        backend: PrivacyFilterBackendTag,
+    ) -> Self {
         self.privacy_filter = Some(adapter);
+        self.privacy_filter_backend = backend;
         self
     }
 
@@ -2120,7 +2136,9 @@ impl DeterministicTraceRedactor {
         Ok(redaction.redacted_text)
     }
 
-    pub fn with_known_path_prefixes(prefixes: impl IntoIterator<Item = PathBuf>) -> Self {
+    pub fn with_known_path_prefixes(
+        prefixes: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Self, PrivacyFilterConfigError> {
         Self::new(prefixes.into_iter().map(path_to_string).collect())
     }
 
@@ -2352,11 +2370,7 @@ impl TraceRedactor for DeterministicTraceRedactor {
         let mut warnings = privacy_warnings(residual_pii_risk);
         warnings.extend(report.warnings.clone());
         let privacy = PrivacyMetadata {
-            redaction_pipeline_version: redaction_pipeline_version(if privacy_filter_summary.is_some() {
-                PrivacyFilterBackendTag::Sidecar
-            } else {
-                PrivacyFilterBackendTag::None
-            }),
+            redaction_pipeline_version: redaction_pipeline_version(self.privacy_filter_backend),
             redaction_counts: report.counts,
             privacy_filter_summary,
             pii_labels_present: report.pii_labels_present,
