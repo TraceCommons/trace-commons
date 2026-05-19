@@ -10922,7 +10922,11 @@ async fn put_community_profile_handler(
         trace_commons_protocol::community_handle::validate_bio(bio)
             .map_err(map_bio_validation_err)?;
     }
-    let action = if req.bio.is_some() { "update" } else { "opt_in" };
+    let action = if req.bio.is_some() {
+        "update"
+    } else {
+        "opt_in"
+    };
     let row = db
         .upsert_contributor_profile(
             tenant.tenant_id(),
