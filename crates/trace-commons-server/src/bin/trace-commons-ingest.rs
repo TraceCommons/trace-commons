@@ -5798,7 +5798,10 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/community/profile",
             put(put_community_profile_handler).delete(delete_community_profile_handler),
         )
-        .route("/v1/community/leaderboard", get(community_leaderboard_handler))
+        .route(
+            "/v1/community/leaderboard",
+            get(community_leaderboard_handler),
+        )
         .route(
             "/v1/community/contributors/{handle}",
             get(community_contributor_handler),
