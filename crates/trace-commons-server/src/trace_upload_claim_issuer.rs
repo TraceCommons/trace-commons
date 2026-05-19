@@ -1789,6 +1789,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn issues_claim_with_public_attribution_scope() {
+        // public_attribution is a profile-management consent. A workload
+        // token that allows it can mint an upload claim scoped to ONLY
+        // public_attribution with no allowed_uses — the claim is used to
+        // authenticate /v1/community/profile, not to submit traces.
+        let state = test_config().build_state().expect("state builds");
+        let workload = WorkloadClaims {
+            sub: Some("principal:agent-1".to_string()),
+            principal_ref: None,
+            tenant_id: Some("tenant-a".to_string()),
+            iss: None,
+            aud: None,
+            exp: Utc::now().timestamp() + 60,
+            iat: Some(Utc::now().timestamp()),
+            allowed_consent_scopes: vec![ConsentScope::PublicAttribution],
+            allowed_uses: Vec::new(),
+            invite_code: None,
+        };
+        let request = TraceUploadClaimRequest {
+            schema_version: TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION.to_string(),
+            tenant_id: Some("tenant-a".to_string()),
+            audience: Some("trace-commons-upload".to_string()),
+            trace_id: None,
+            submission_id: None,
+            consent_scopes: vec![ConsentScope::PublicAttribution],
+            allowed_uses: Vec::new(),
+            requested_at: Utc::now(),
+        };
+        let response = state
+            .issue_claim(&workload, request)
+            .await
+            .expect("issue succeeds");
+        let token_parts: Vec<&str> = response.access_token.split('.').collect();
+        assert_eq!(token_parts.len(), 3, "JWT shape");
+        let payload = base64_url_decode(token_parts[1]);
+        assert!(
+            payload.contains("public_attribution"),
+            "minted claim carries the requested scope: {payload}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_public_attribution_request_when_workload_lacks_it() {
+        let state = test_config().build_state().expect("state builds");
+        let workload = WorkloadClaims {
+            sub: Some("principal:agent-1".to_string()),
+            principal_ref: None,
+            tenant_id: Some("tenant-a".to_string()),
+            iss: None,
+            aud: None,
+            exp: Utc::now().timestamp() + 60,
+            iat: Some(Utc::now().timestamp()),
+            allowed_consent_scopes: vec![ConsentScope::DebuggingEvaluation],
+            allowed_uses: vec![TraceAllowedUse::Debugging],
+            invite_code: None,
+        };
+        let request = TraceUploadClaimRequest {
+            schema_version: TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION.to_string(),
+            tenant_id: Some("tenant-a".to_string()),
+            audience: Some("trace-commons-upload".to_string()),
+            trace_id: None,
+            submission_id: None,
+            consent_scopes: vec![ConsentScope::PublicAttribution],
+            allowed_uses: Vec::new(),
+            requested_at: Utc::now(),
+        };
+        assert!(
+            state.issue_claim(&workload, request).await.is_err(),
+            "workload scope allowlist gates public_attribution requests",
+        );
+    }
+
+    #[tokio::test]
+    async fn issues_claim_with_mixed_public_attribution_and_trace_scopes() {
+        // Common pilot case: contributor has a workload token that
+        // grants both submitting traces and managing their profile.
+        let state = test_config().build_state().expect("state builds");
+        let workload = WorkloadClaims {
+            sub: Some("principal:agent-1".to_string()),
+            principal_ref: None,
+            tenant_id: Some("tenant-a".to_string()),
+            iss: None,
+            aud: None,
+            exp: Utc::now().timestamp() + 60,
+            iat: Some(Utc::now().timestamp()),
+            allowed_consent_scopes: vec![
+                ConsentScope::DebuggingEvaluation,
+                ConsentScope::PublicAttribution,
+            ],
+            allowed_uses: vec![
+                TraceAllowedUse::Debugging,
+                TraceAllowedUse::Evaluation,
+                TraceAllowedUse::AggregateAnalytics,
+            ],
+            invite_code: None,
+        };
+        let request = TraceUploadClaimRequest {
+            schema_version: TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION.to_string(),
+            tenant_id: Some("tenant-a".to_string()),
+            audience: Some("trace-commons-upload".to_string()),
+            trace_id: None,
+            submission_id: None,
+            consent_scopes: vec![
+                ConsentScope::DebuggingEvaluation,
+                ConsentScope::PublicAttribution,
+            ],
+            allowed_uses: vec![TraceAllowedUse::Debugging],
+            requested_at: Utc::now(),
+        };
+        let response = state
+            .issue_claim(&workload, request)
+            .await
+            .expect("issue succeeds");
+        let token_parts: Vec<&str> = response.access_token.split('.').collect();
+        let payload = base64_url_decode(token_parts[1]);
+        assert!(payload.contains("debugging_evaluation"));
+        assert!(payload.contains("public_attribution"));
+    }
+
+    fn base64_url_decode(input: &str) -> String {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(input)
+            .expect("base64");
+        String::from_utf8(bytes).expect("utf8")
+    }
+
+    #[tokio::test]
     async fn rejects_requests_exceeding_workload_allowances() {
         let state = test_config().build_state().expect("state builds");
         let workload = WorkloadClaims {
