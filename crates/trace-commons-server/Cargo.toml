@@ -97,6 +97,14 @@ path = "src/bin/trace-commons-review.rs"
 name = "trace-commons-admin"
 path = "src/bin/trace-commons-admin.rs"
 
+[[bin]]
+name = "trace-commons-worker"
+path = "src/bin/trace-commons-worker.rs"
+
+[[bin]]
+name = "trace-commons-tenant"
+path = "src/bin/trace-commons-tenant.rs"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 wiremock = "0.6"
