@@ -10193,7 +10193,8 @@ async fn submit_trace_handler(
         state.require_tenant_submission_policy,
     )?;
 
-    rescrub_trace_envelope(&mut envelope);
+    rescrub_trace_envelope(&mut envelope)
+        .map_err(|err| internal_error(format!("privacy filter config invalid: {err}")))?;
     bind_envelope_server_tenant_scope_for_storage(&mut envelope, tenant.tenant_id());
     let existing_revocations = read_revocations_for_submit(state.as_ref(), tenant.tenant_id())
         .await

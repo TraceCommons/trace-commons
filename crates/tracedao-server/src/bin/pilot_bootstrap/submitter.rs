@@ -210,7 +210,8 @@ pub async fn build_envelope_from_draft(
         ..Default::default()
     };
     let raw = RawTraceContribution::from_recorded_trace(&trace, options);
-    let mut envelope = DeterministicTraceRedactor::default()
+    let mut envelope = DeterministicTraceRedactor::try_default()
+        .map_err(|err| anyhow::anyhow!("privacy filter config invalid: {err}"))?
         .redact_trace(raw)
         .await
         .context("redact pilot-bootstrap trace")?;

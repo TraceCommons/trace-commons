@@ -2412,9 +2412,12 @@ impl TraceRedactor for DeterministicTraceRedactor {
     }
 }
 
-pub fn rescrub_trace_envelope(envelope: &mut TraceContributionEnvelope) {
-    let redactor = DeterministicTraceRedactor::default();
+pub fn rescrub_trace_envelope(
+    envelope: &mut TraceContributionEnvelope,
+) -> Result<(), PrivacyFilterConfigError> {
+    let redactor = DeterministicTraceRedactor::try_default()?;
     rescrub_trace_envelope_with(&redactor, envelope);
+    Ok(())
 }
 
 pub fn rescrub_trace_envelope_with(
