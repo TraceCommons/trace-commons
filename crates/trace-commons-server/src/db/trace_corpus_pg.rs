@@ -1188,7 +1188,7 @@ fn row_to_revocation_propagation_item(
 }
 
 impl PgBackend {
-    async fn ensure_trace_tenant(&self, tenant_id: &str) -> Result<(), DatabaseError> {
+    pub(super) async fn ensure_trace_tenant(&self, tenant_id: &str) -> Result<(), DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         tx.execute(
@@ -1202,7 +1202,7 @@ impl PgBackend {
         Ok(())
     }
 
-    async fn begin_trace_tenant_transaction<'a>(
+    pub(super) async fn begin_trace_tenant_transaction<'a>(
         client: &'a mut deadpool_postgres::Client,
         tenant_id: &str,
     ) -> Result<deadpool_postgres::Transaction<'a>, DatabaseError> {
