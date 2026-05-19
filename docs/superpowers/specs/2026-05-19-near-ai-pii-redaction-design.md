@@ -38,13 +38,47 @@ configuration. No envelope schema changes are required.
 Selection is **explicit**, never inferred. Fail-closed when configuration is
 incomplete.
 
-`privacy_filter_adapter_from_env()` gains a new dispatch step:
+`privacy_filter_adapter_from_env()` currently has signature
+`fn() -> Option<Arc<dyn PrivacyFilterAdapter>>` and silently returns `None`
+when nothing is set. It changes to:
+
+```rust
+fn() -> Result<Option<Arc<dyn PrivacyFilterAdapter>>, PrivacyFilterConfigError>
+```
+
+with a new dedicated error type (not `TraceContributionError`, which is
+reserved for per-trace redaction failures):
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum PrivacyFilterConfigError {
+    #[error("unknown TRACE_PRIVACY_FILTER_BACKEND value: {value}")]
+    UnknownBackend { value: String },
+    #[error("missing required env var for backend {backend}: {var}")]
+    MissingEnv { backend: &'static str, var: &'static str },
+    #[error("invalid env var {var}: {reason}")]
+    InvalidEnv { var: &'static str, reason: String },
+    #[error("backend {backend} requires the {feature} cargo feature")]
+    FeatureDisabled { backend: &'static str, feature: &'static str },
+}
+```
+
+Every existing call site (notably the two in `trace_contribution.rs` —
+the canary entry point around line 1522 and the redactor construction
+around line 1965) becomes fallible. Binaries propagate the error and
+refuse to start; failure to construct the adapter must never silently
+fall back to deterministic-only redaction.
+
+Dispatch:
 
 1. Read `TRACE_PRIVACY_FILTER_BACKEND`.
-2. If unset or empty → no adapter (current behavior; deterministic
-   redaction only).
-3. If `=sidecar` → require `IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND`;
-   construct `CommandPrivacyFilterAdapter` as today.
+2. If unset or empty → `Ok(None)` (deterministic redaction only,
+   current behavior). The default `cargo check -p tracedao-protocol`
+   build with no features set and no env vars set continues to compile
+   and behave exactly as today.
+3. If `=sidecar` → require `TRACE_PRIVACY_FILTER_COMMAND`. Construct
+   `CommandPrivacyFilterAdapter`. See "Env var naming" below for the
+   `IRONCLAW_TRACE_PRIVACY_FILTER_*` back-compat policy.
 4. If `=near-ai` → require `TRACE_NEAR_AI_PRIVACY_API_KEY`; construct
    `NearAiPrivacyFilterAdapter`. Optional knobs:
    - `TRACE_NEAR_AI_PRIVACY_BASE_URL` (default
@@ -54,34 +88,63 @@ incomplete.
    - `TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS` (default `10000`).
    - `TRACE_NEAR_AI_PRIVACY_MAX_INPUT_BYTES` (default
      `PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES`).
-5. Any other value → return a typed configuration error (fail-closed). The
-   binary refuses to start; it must not silently disable redaction.
-6. If `=near-ai` and the API key env var is missing/empty → typed error,
-   same fail-closed semantics.
+   - If the `near-ai-privacy-filter` cargo feature is not built in,
+     return `FeatureDisabled { backend: "near-ai", feature: "near-ai-privacy-filter" }`.
+5. Any other value → `UnknownBackend`.
+6. If a required env var is missing/empty → `MissingEnv`.
 
-Sidecar env vars (`IRONCLAW_TRACE_PRIVACY_FILTER_*`) continue to work
-unchanged when `BACKEND=sidecar`. We deliberately do not auto-detect from
-their presence — explicit backend selection prevents
-deployment-by-environment-drift.
+We deliberately do not auto-detect from env presence — explicit
+backend selection prevents deployment-by-environment-drift.
+
+### Env var naming
+
+The repo is mid-rename from Ironclaw to Trace Commons. The sidecar
+backend currently reads `IRONCLAW_TRACE_PRIVACY_FILTER_*`. This spec
+standardizes on the `TRACE_` prefix for **all** privacy-filter env vars
+going forward:
+
+- New canonical: `TRACE_PRIVACY_FILTER_BACKEND`,
+  `TRACE_PRIVACY_FILTER_COMMAND`, `TRACE_PRIVACY_FILTER_ARGS`,
+  `TRACE_PRIVACY_FILTER_TIMEOUT_MS`, `TRACE_PRIVACY_FILTER_MAX_INPUT_BYTES`,
+  `TRACE_PRIVACY_FILTER_MAX_STDOUT_BYTES`,
+  `TRACE_PRIVACY_FILTER_MAX_STDERR_BYTES`.
+- Back-compat: each canonical name falls back to the corresponding
+  `IRONCLAW_TRACE_PRIVACY_FILTER_*` value if the canonical one is unset.
+  When the back-compat path fires, log a one-shot warning at startup
+  ("env var IRONCLAW_TRACE_PRIVACY_FILTER_X is deprecated; rename to
+  TRACE_PRIVACY_FILTER_X"). Removal of the back-compat path is a
+  follow-up after the pilot host is migrated.
 
 ## Module layout
 
 - New module `crates/tracedao-protocol/src/privacy_filter_near_ai.rs`
   behind a new Cargo feature `near-ai-privacy-filter`. Pattern mirrors the
   existing `near-ai-scorer` feature in `tracedao-gate-enclave`.
-- `reqwest` is added as an optional dep of `tracedao-protocol`, gated on
-  this feature, with `default-features = false` and
-  `features = ["json", "rustls-tls-native-roots"]` (async; not blocking —
-  the trait is `async`). This is a new direct dep on this crate but
-  `reqwest` is already in the workspace via `tracedao-gate-enclave`, so
-  it is **not** a new transitive surface and does not require fresh
-  approval under the dependency policy. I will note the addition in the
-  PR description for explicit review.
 - The dispatch glue in `privacy_filter_adapter_from_env()` lives in the
   existing `trace_contribution.rs` and is compiled unconditionally; the
   `near-ai` branch is `#[cfg(feature = "near-ai-privacy-filter")]` and
-  returns a typed "feature not built in" error otherwise (still
-  fail-closed).
+  returns `FeatureDisabled` otherwise (still fail-closed).
+
+### Dependencies (explicit approval requested)
+
+Per the dependency policy in CLAUDE.md, both additions below are
+**new direct deps on `tracedao-protocol`** and need explicit approval
+before plan stage proceeds. They are already in the workspace via
+other crates, but the policy keys on direct deps, not transitive.
+
+- **`reqwest` 0.12** as `optional = true, default-features = false,
+  features = ["json", "rustls-tls-native-roots"]`, gated on the
+  `near-ai-privacy-filter` feature. Already used in
+  `tracedao-gate-enclave/src/perplexity_near_ai.rs`. Required for the
+  async HTTP client.
+- **`wiremock`** as a dev-dependency for HTTP-level tests. Pure-rust,
+  widely adopted, no native deps. If approval is withheld, fall back to
+  a hand-rolled `hyper::Server` test harness on `127.0.0.1:0` — that
+  fallback decision should be made before plan stage to avoid a
+  round-trip during implementation. **Default recommendation: use
+  `wiremock`.**
+
+Neither dep is added until the user approves them on this spec.
 
 ## Request/response handling
 
@@ -114,13 +177,33 @@ For each `span`:
    highest-score category. Adjacent same-category spans are left as-is
    (two adjacent replacements is fine).
 
-The adapter then constructs the existing `SafePrivacyFilterRedaction`
-shape directly (does **not** round-trip through the sidecar JSON
-contract); each span contributes one entry to `summary.by_label` and one
-`report.increment("privacy_filter:{label}")`. Labels are normalized via
-the existing `safe_privacy_filter_label()` function, so any category
-NEAR adds in the future that isn't in our allow-list still maps to
-`unknown` with a warning — matching sidecar behavior.
+### Span accounting and label normalization
+
+The new adapter constructs `SafePrivacyFilterRedaction` directly (no
+round-trip through the sidecar JSON contract). To stay drop-in
+compatible with the sidecar path, the counting model **matches the
+sidecar exactly**:
+
+- `summary.span_count` = the count of **raw spans returned by the API**,
+  not the post-collapse count. This matches
+  `safe_privacy_filter_redaction_from_output` at line 1460
+  (`detected_spans.len()`).
+- `summary.by_label` increments **once per raw span**, even when spans
+  are collapsed for replacement in `redacted_text`. So
+  `redacted_text.len()` and `span_count` may disagree when overlaps
+  exist; that is the same divergence the sidecar would produce if
+  fed identical spans.
+- `report.increment("privacy_filter:{label}")` is called once per raw
+  span. `report.pii_labels_present` is deduped (matches existing logic
+  inside `safe_privacy_filter_redaction_from_output`).
+
+Label normalization goes through the existing
+`safe_privacy_filter_label(raw_label, &mut report)` function. The new
+module owns its `RedactionReport` value, threads `&mut report` through
+the per-span loop, and returns it inside `SafePrivacyFilterRedaction`.
+Any category NEAR adds in the future that isn't in our allow-list
+(lines 1483–1499) still maps to `"unknown"` with a warning pushed to
+`report.warnings` — matching sidecar behavior.
 
 NEAR's documented categories (`private_email`, `private_phone`,
 `account_number`, `private_address`, `private_name`, `secret`) are all
@@ -134,18 +217,45 @@ Add a new constant in `trace_contribution.rs`:
 pub const PRIVACY_FILTER_NEAR_AI_PIPELINE_SUFFIX: &str = "privacy-filter-near-ai-v1";
 ```
 
-`redaction_pipeline_version()` becomes backend-aware: it takes the active
-backend (`None | Sidecar | NearAi`) instead of a bool, and emits one of:
+Introduce a small enum to carry the backend identity:
 
-- `<deterministic>` (no adapter)
-- `<deterministic>+privacy-filter-sidecar-v1`
-- `<deterministic>+privacy-filter-near-ai-v1`
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivacyFilterBackendTag {
+    None,
+    Sidecar,
+    NearAi,
+}
+```
+
+`redaction_pipeline_version` changes from `fn(bool) -> String` to
+`fn(PrivacyFilterBackendTag) -> String` and emits one of:
+
+- `<deterministic>` (`None`)
+- `<deterministic>+privacy-filter-sidecar-v1` (`Sidecar`)
+- `<deterministic>+privacy-filter-near-ai-v1` (`NearAi`)
+
+### Where the tag is stored
+
+`DeterministicTraceRedactor` (the only `TraceRedactor` impl, around
+line 1934) gains a `privacy_filter_backend: PrivacyFilterBackendTag`
+field set at construction time. The constructor that wires a
+`PrivacyFilterAdapter` in (today inferring `bool` from
+`Option::is_some`) is updated to take the tag explicitly. The
+adapter-builder path is the single place that knows which backend was
+constructed, so it returns both the `Arc<dyn PrivacyFilterAdapter>`
+and the `PrivacyFilterBackendTag` to the redactor constructor.
+
+Existing call site at line 2234
+(`redaction_pipeline_version(privacy_filter_summary.is_some())`) is
+replaced with a read of `self.privacy_filter_backend`. The local
+fallback when `privacy_filter_summary` is `None` after a successful
+adapter call (which can happen for empty input) still emits the
+backend-tagged version string — running an adapter that no-ops on
+empty input is still "this backend was active for this envelope."
 
 This is the only auditable schema change. Envelope structure is
 unchanged; only the string value is new. Existing rows are unaffected.
-
-Call sites of `redaction_pipeline_version(bool)` are updated to pass the
-backend tag. The tag is recorded on the redactor at construction time.
 
 ## Fail-closed behavior
 
@@ -228,12 +338,38 @@ a `near-ai` case to its existing tests.
    part of pilot bootstrap; refuse to admit traces until the canary is
    healthy.
 
+## Operational semantics (explicit)
+
+To prevent the implementer from inventing behavior, the following
+choices are pinned now:
+
+- **Retries: none.** A single HTTP attempt per `redact_text` call. A
+  429 or 5xx response surfaces as `RedactionFailed`, the per-trace
+  ingest path bubbles the error, and the trace is rejected. The
+  pilot's NEAR AI usage is modest; we will add retry/backoff in a
+  follow-up if rate-limit data justifies it.
+- **Key rotation: restart-only.** The API key is read at adapter
+  construction. To rotate, redeploy the binary. We do not poll or
+  re-read env at runtime.
+- **Runtime on/off: restart-only.** No SIGHUP, no admin endpoint to
+  flip backends. To switch backends, change `TRACE_PRIVACY_FILTER_BACKEND`
+  and restart.
+- **Request-id propagation: out of scope for v1.** Not propagated to
+  NEAR. Add later if NEAR exposes a server-side trace correlation hook
+  we want to bind to.
+- **Telemetry: out of scope for v1.** The sidecar path emits no
+  per-call metrics today. We will not add metrics solely for the
+  hosted backend; metrics for both backends are a single follow-up
+  ticket.
+- **Concurrency: rely on ingest's existing per-trace concurrency cap.**
+  No semaphore at the adapter level for v1. Revisit if pilot traffic
+  triggers 429s — at which point the right answer is likely a queue
+  upstream of ingest, not a semaphore in the adapter.
+
 ## Open questions for plan stage
 
 - Should the hand-rolled secret wrapper live in `tracedao-protocol` or
   reuse the `secrecy` crate? Decide during plan-writing — if `secrecy`
   is already transitively present we lean toward reuse; otherwise the
-  hand-rolled newtype is fewer than 30 lines.
-- Concurrency: hosted endpoint will be the rate-limit choke point. Plan
-  stage to confirm whether we need a semaphore at the adapter level or
-  whether ingest's existing per-trace concurrency cap is sufficient.
+  hand-rolled newtype is fewer than 30 lines and avoids a new
+  approval round.
