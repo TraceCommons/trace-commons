@@ -712,6 +712,105 @@ impl Database for PgBackend {
             tenant_context_transaction_local,
         }))
     }
+
+    async fn upsert_contributor_profile(
+        &self,
+        tenant_id: &str,
+        principal_ref: &str,
+        display_handle: &str,
+        handle_normalized: &str,
+        bio: Option<&str>,
+    ) -> Result<crate::db::ContributorProfileRow, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let bio_opt: Option<&str> = bio;
+        let row = tx
+            .query_one(
+                "INSERT INTO trace_contributor_profiles (
+                    tenant_id, principal_ref, display_handle, handle_normalized, bio
+                 ) VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (tenant_id, principal_ref) DO UPDATE SET
+                    display_handle = excluded.display_handle,
+                    handle_normalized = excluded.handle_normalized,
+                    bio = excluded.bio,
+                    last_updated_at = NOW(),
+                    update_count = trace_contributor_profiles.update_count + 1,
+                    withdrawn_at = NULL
+                 RETURNING tenant_id, principal_ref, display_handle, handle_normalized,
+                           bio, public_since, last_updated_at, update_count",
+                &[
+                    &tenant_id,
+                    &principal_ref,
+                    &display_handle,
+                    &handle_normalized,
+                    &bio_opt,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(crate::db::ContributorProfileRow {
+            tenant_id: row.get("tenant_id"),
+            principal_ref: row.get("principal_ref"),
+            display_handle: row.get("display_handle"),
+            handle_normalized: row.get("handle_normalized"),
+            bio: row.get("bio"),
+            public_since: row.get("public_since"),
+            last_updated_at: row.get("last_updated_at"),
+            update_count: row.get("update_count"),
+        })
+    }
+
+    async fn withdraw_contributor_profile(
+        &self,
+        tenant_id: &str,
+        principal_ref: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let affected = tx
+            .execute(
+                "UPDATE trace_contributor_profiles
+                    SET withdrawn_at = NOW(), last_updated_at = NOW()
+                  WHERE tenant_id = $1 AND principal_ref = $2 AND withdrawn_at IS NULL",
+                &[&tenant_id, &principal_ref],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(affected > 0)
+    }
+
+    async fn append_contributor_profile_audit(
+        &self,
+        tenant_id: &str,
+        principal_ref: &str,
+        action: &str,
+        handle_normalized: Option<&str>,
+        reason: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "INSERT INTO trace_contributor_profile_audit (
+                tenant_id, principal_ref, action, handle_normalized, reason
+             ) VALUES ($1, $2, $3, $4, $5)",
+            &[
+                &tenant_id,
+                &principal_ref,
+                &action,
+                &handle_normalized,
+                &reason,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
 }
 
 fn sha256_prefixed(input: &str) -> String {

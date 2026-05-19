@@ -69,6 +69,72 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<Option<TraceCorpusRlsDiagnostics>, DatabaseError> {
         Ok(None)
     }
+
+    /// Upsert a contributor's public profile (display handle + optional bio).
+    /// Creates a row if none exists for `(tenant_id, principal_ref)`; otherwise
+    /// updates handle/bio and bumps `update_count` + `last_updated_at`. Always
+    /// clears `withdrawn_at` so a withdrawn contributor can re-opt-in.
+    ///
+    /// Caller is responsible for handle/bio validation. The unique
+    /// `(tenant_id, handle_normalized)` constraint may surface as
+    /// [`DatabaseError`] when a different principal already claimed the
+    /// handle; callers should map that to a 409 conflict.
+    async fn upsert_contributor_profile(
+        &self,
+        _tenant_id: &str,
+        _principal_ref: &str,
+        _display_handle: &str,
+        _handle_normalized: &str,
+        _bio: Option<&str>,
+    ) -> Result<ContributorProfileRow, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "upsert_contributor_profile not implemented".to_string(),
+        ))
+    }
+
+    /// Soft-delete by stamping `withdrawn_at = NOW()`. Idempotent. Returns
+    /// `Ok(false)` if no row exists for `(tenant_id, principal_ref)`.
+    async fn withdraw_contributor_profile(
+        &self,
+        _tenant_id: &str,
+        _principal_ref: &str,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "withdraw_contributor_profile not implemented".to_string(),
+        ))
+    }
+
+    /// Append an audit row for any profile mutation (opt_in / update /
+    /// withdraw / rejected). Caller passes the action verb and any
+    /// human-readable reason that is safe to surface back to the
+    /// contributor.
+    async fn append_contributor_profile_audit(
+        &self,
+        _tenant_id: &str,
+        _principal_ref: &str,
+        _action: &str,
+        _handle_normalized: Option<&str>,
+        _reason: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool(
+            "append_contributor_profile_audit not implemented".to_string(),
+        ))
+    }
+}
+
+/// Row returned by [`Database::upsert_contributor_profile`]. Mirrors the
+/// columns of `trace_contributor_profiles` that the API surfaces back
+/// to the contributor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContributorProfileRow {
+    pub tenant_id: String,
+    pub principal_ref: String,
+    pub display_handle: String,
+    pub handle_normalized: String,
+    pub bio: Option<String>,
+    pub public_since: chrono::DateTime<chrono::Utc>,
+    pub last_updated_at: chrono::DateTime<chrono::Utc>,
+    pub update_count: i32,
 }
 
 pub async fn connect_from_config(

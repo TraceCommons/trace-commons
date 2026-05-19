@@ -786,6 +786,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         object_primary_derived_exports: false,
         require_db_reconciliation_clean: false,
         require_export_guardrails,
+        community_leaderboard_enabled: false,
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
         max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
         analytics_min_cell_count: 0,
@@ -20141,6 +20142,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         object_primary_derived_exports: false,
         require_db_reconciliation_clean: false,
         require_export_guardrails: false,
+        community_leaderboard_enabled: false,
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
         max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
         analytics_min_cell_count: 0,
@@ -60151,4 +60153,80 @@ async fn enclave_local_gpu_init_returns_local_perplexity_scorer_init_failed() {
             || chain.contains("LocalPerplexityScorerLoadFailed"),
         "expected LocalPerplexityScorer* error class, got: {chain}"
     );
+}
+
+// -----------------------------------------------------------------------------
+// /v1/community/profile (server slice 1c)
+// -----------------------------------------------------------------------------
+//
+// These tests cover the routing + auth gates that are pure logic (no DB
+// needed). Real DB-backed integration is exercised manually against the
+// pilot Postgres after Slice 1a's migration applies.
+
+#[tokio::test]
+async fn community_profile_put_returns_404_when_feature_flag_off() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    // community_leaderboard_enabled defaults to false in test_state.
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PUT")
+                .uri("/v1/community/profile")
+                .header(AUTHORIZATION, "Bearer token-a")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"display_handle":"zaki"}"#))
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn community_profile_delete_returns_404_when_feature_flag_off() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("DELETE")
+                .uri("/v1/community/profile")
+                .header(AUTHORIZATION, "Bearer token-a")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn community_profile_put_returns_503_when_flag_on_but_no_db() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).community_leaderboard_enabled = true;
+    // db_mirror stays None — flag on but storage not configured.
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PUT")
+                .uri("/v1/community/profile")
+                .header(AUTHORIZATION, "Bearer token-a")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"display_handle":"zaki"}"#))
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
