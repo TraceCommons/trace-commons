@@ -5798,6 +5798,22 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/community/profile",
             put(put_community_profile_handler).delete(delete_community_profile_handler),
         )
+        .route(
+            "/v1/community/leaderboard",
+            get(community_leaderboard_handler),
+        )
+        .route(
+            "/v1/community/contributors/{handle}",
+            get(community_contributor_handler),
+        )
+        .route(
+            "/v1/community/analytics/summary",
+            get(community_analytics_summary_handler),
+        )
+        .route(
+            "/v1/admin/community/snapshots/recompute",
+            post(recompute_community_snapshot_handler),
+        )
         .route("/v1/contributors/me/credit", get(credit_handler))
         .route(
             "/v1/contributors/me/credit-events",
@@ -10906,6 +10922,305 @@ fn enforce_public_attribution_scope(tenant: &TenantCtx) -> ApiResult<()> {
             "upload claim does not carry the public_attribution consent scope",
         ))
     }
+}
+
+// Snapshot-shape types. These match the wire-shape pre-rendered into
+// `trace_leaderboard_snapshots.contents_jsonb` and served verbatim by
+// the GET /v1/community/* read endpoints.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LeaderboardEntry {
+    rank: i64,
+    display_handle: String,
+    /// Score in the snapshot's primary metric.
+    score: f64,
+    accepted_count: i64,
+    /// Decimal in [0, 1].
+    accept_rate: f64,
+    public_since: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LeaderboardContributorPublicProfile {
+    display_handle: String,
+    bio: Option<String>,
+    public_since: DateTime<Utc>,
+    total_accepted: i64,
+    total_credit: f64,
+    rolling_7d_accepted: i64,
+    rolling_7d_credit: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CommunityCorpusAnalytics {
+    window: String,
+    total_submissions: i64,
+    total_accepted: i64,
+    total_rejected: i64,
+    accept_rate: f64,
+    novelty_histogram: Vec<NoveltyHistogramBucket>,
+    gate_outcomes: BTreeMap<String, i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NoveltyHistogramBucket {
+    bucket_micros: i64,
+    count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CommunitySnapshotContents {
+    snapshot_id: Uuid,
+    computed_at: DateTime<Utc>,
+    window: String,
+    metric: String,
+    min_cell_count: i32,
+    leaderboard: Vec<LeaderboardEntry>,
+    contributors: BTreeMap<String, LeaderboardContributorPublicProfile>,
+    analytics: CommunityCorpusAnalytics,
+}
+
+const COMMUNITY_LEADERBOARD_WINDOW_LABEL: &str = "7d";
+const COMMUNITY_LEADERBOARD_METRIC: &str = "novelty_credit";
+const COMMUNITY_LEADERBOARD_WINDOW_DAYS: i32 = 7;
+const COMMUNITY_LEADERBOARD_LIMIT: usize = 50;
+const COMMUNITY_LEADERBOARD_NOISE_SEED_HASH: &str = "v1:no_noise_yet";
+
+/// Compute a fresh snapshot from current DB state and persist it.
+/// Returns the inserted snapshot row so the admin handler can echo
+/// the snapshot_id back to the operator who triggered the recompute.
+async fn recompute_community_snapshot(
+    state: &AppState,
+) -> Result<trace_commons_server::db::LeaderboardSnapshotRow, (StatusCode, Json<ApiError>)> {
+    let db = state.db_mirror.as_ref().cloned().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "community snapshot recompute requires the DB mirror to be configured",
+        )
+    })?;
+    let min_cell_count = state.analytics_min_cell_count as i64;
+    let inputs = db
+        .compute_leaderboard_inputs(COMMUNITY_LEADERBOARD_WINDOW_DAYS, min_cell_count)
+        .await
+        .map_err(internal_error)?;
+    let analytics = db
+        .compute_corpus_analytics_summary(COMMUNITY_LEADERBOARD_WINDOW_DAYS)
+        .await
+        .map_err(internal_error)?;
+
+    // Rank by novelty_credit (rolling 7d).
+    let mut sorted = inputs;
+    sorted.sort_by(|a, b| {
+        b.credit_in_window
+            .partial_cmp(&a.credit_in_window)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.handle_normalized.cmp(&b.handle_normalized))
+    });
+
+    let mut leaderboard = Vec::with_capacity(sorted.len().min(COMMUNITY_LEADERBOARD_LIMIT));
+    let mut contributors = BTreeMap::new();
+    for (i, row) in sorted.iter().enumerate().take(COMMUNITY_LEADERBOARD_LIMIT) {
+        let accept_rate = if row.accepted_in_window > 0 {
+            row.credit_in_window / (row.credit_in_window + 1.0)
+        } else {
+            0.0
+        };
+        leaderboard.push(LeaderboardEntry {
+            rank: (i as i64) + 1,
+            display_handle: row.display_handle.clone(),
+            score: row.credit_in_window,
+            accepted_count: row.accepted_in_window,
+            // Pilot heuristic: accept rate is the ratio of in-window
+            // accepted credit events to the contributor's total credit
+            // events. Real per-submission accept-rate joins land with
+            // the follow-up "real noise + per-submission outcome
+            // labels" slice; for now this is a stable monotone proxy.
+            accept_rate,
+            public_since: row.public_since,
+        });
+        contributors.insert(
+            row.display_handle.clone(),
+            LeaderboardContributorPublicProfile {
+                display_handle: row.display_handle.clone(),
+                bio: row.bio.clone(),
+                public_since: row.public_since,
+                total_accepted: row.total_accepted,
+                total_credit: row.total_credit,
+                rolling_7d_accepted: row.accepted_in_window,
+                rolling_7d_credit: row.credit_in_window,
+            },
+        );
+    }
+
+    let snapshot_id = Uuid::new_v4();
+    let computed_at = Utc::now();
+    let contents = CommunitySnapshotContents {
+        snapshot_id,
+        computed_at,
+        window: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
+        metric: COMMUNITY_LEADERBOARD_METRIC.to_string(),
+        min_cell_count: state.analytics_min_cell_count as i32,
+        leaderboard,
+        contributors,
+        analytics: CommunityCorpusAnalytics {
+            window: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
+            total_submissions: analytics.total_submissions,
+            total_accepted: analytics.total_accepted,
+            total_rejected: analytics.total_rejected,
+            accept_rate: analytics.accept_rate,
+            novelty_histogram: analytics
+                .novelty_histogram
+                .into_iter()
+                .map(|(bucket_micros, count)| NoveltyHistogramBucket {
+                    bucket_micros,
+                    count,
+                })
+                .collect(),
+            gate_outcomes: analytics.gate_outcomes.into_iter().collect(),
+        },
+    };
+    let contents_json = serde_json::to_value(&contents).map_err(internal_error)?;
+    let contents_canonical = serde_json::to_string(&contents).map_err(internal_error)?;
+    let contents_sha256 = format!("sha256:{:x}", Sha256::digest(contents_canonical.as_bytes()));
+    let write = trace_commons_server::db::LeaderboardSnapshotWrite {
+        snapshot_id,
+        window_label: COMMUNITY_LEADERBOARD_WINDOW_LABEL.to_string(),
+        metric: COMMUNITY_LEADERBOARD_METRIC.to_string(),
+        contents: contents_json,
+        contents_sha256,
+        min_cell_count: state.analytics_min_cell_count as i32,
+        noise_seed_hash: COMMUNITY_LEADERBOARD_NOISE_SEED_HASH.to_string(),
+    };
+    db.insert_leaderboard_snapshot(write)
+        .await
+        .map_err(internal_error)
+}
+
+async fn recompute_community_snapshot_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !state.community_leaderboard_enabled {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "community surface is not enabled on this deployment",
+        ));
+    }
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_admin(&tenant)?;
+    let row = recompute_community_snapshot(state.as_ref()).await?;
+    Ok(Json(serde_json::json!({
+        "snapshot_id": row.snapshot_id,
+        "computed_at": row.computed_at,
+        "window_label": row.window_label,
+        "metric": row.metric,
+        "contents_sha256": row.contents_sha256,
+        "min_cell_count": row.min_cell_count,
+    })))
+}
+
+async fn community_leaderboard_handler(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !state.community_leaderboard_enabled {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "community surface is not enabled on this deployment",
+        ));
+    }
+    let db = state.db_mirror.as_ref().cloned().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "community surface is not configured",
+        )
+    })?;
+    let snapshot = db
+        .latest_leaderboard_snapshot(
+            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+            COMMUNITY_LEADERBOARD_METRIC,
+        )
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no community snapshot has been computed yet",
+            )
+        })?;
+    Ok(Json(snapshot.contents))
+}
+
+async fn community_contributor_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(handle): axum::extract::Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !state.community_leaderboard_enabled {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "community surface is not enabled on this deployment",
+        ));
+    }
+    let db = state.db_mirror.as_ref().cloned().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "community surface is not configured",
+        )
+    })?;
+    let snapshot = db
+        .latest_leaderboard_snapshot(
+            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+            COMMUNITY_LEADERBOARD_METRIC,
+        )
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no community snapshot has been computed yet",
+            )
+        })?;
+    let parsed: CommunitySnapshotContents =
+        serde_json::from_value(snapshot.contents).map_err(internal_error)?;
+    let profile = parsed
+        .contributors
+        .get(&handle)
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "contributor not in current snapshot"))?;
+    Ok(Json(serde_json::to_value(profile).map_err(internal_error)?))
+}
+
+async fn community_analytics_summary_handler(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !state.community_leaderboard_enabled {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "community surface is not enabled on this deployment",
+        ));
+    }
+    let db = state.db_mirror.as_ref().cloned().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "community surface is not configured",
+        )
+    })?;
+    let snapshot = db
+        .latest_leaderboard_snapshot(
+            COMMUNITY_LEADERBOARD_WINDOW_LABEL,
+            COMMUNITY_LEADERBOARD_METRIC,
+        )
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no community snapshot has been computed yet",
+            )
+        })?;
+    let parsed: CommunitySnapshotContents =
+        serde_json::from_value(snapshot.contents).map_err(internal_error)?;
+    Ok(Json(
+        serde_json::to_value(&parsed.analytics).map_err(internal_error)?,
+    ))
 }
 
 async fn put_community_profile_handler(

@@ -556,6 +556,26 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&27_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V27__trace_leaderboard_snapshots.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&27_i32, &"trace_leaderboard_snapshots"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -810,6 +830,267 @@ impl Database for PgBackend {
         .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(())
+    }
+
+    async fn compute_leaderboard_inputs(
+        &self,
+        window_days: i32,
+        min_cell_count: i64,
+    ) -> Result<Vec<crate::db::LeaderboardContributorRow>, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tenant_ids: Vec<String> = client
+            .query("SELECT tenant_id FROM trace_tenants", &[])
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .into_iter()
+            .map(|row| row.get::<_, String>("tenant_id"))
+            .collect();
+        let mut rows = Vec::new();
+        for tenant_id in &tenant_ids {
+            let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+            // We bind `window_days` via interval arithmetic in SQL so the
+            // window is consistent across rows even if the transaction
+            // straddles a clock tick.
+            let pg_rows = tx
+                .query(
+                    "SELECT
+                        cp.tenant_id,
+                        cp.principal_ref,
+                        cp.display_handle,
+                        cp.handle_normalized,
+                        cp.bio,
+                        cp.public_since,
+                        COUNT(*) FILTER (
+                            WHERE cl.event_type = 'accepted'
+                              AND cl.created_at >= NOW() - ($1 || ' days')::interval
+                        ) AS accepted_in_window,
+                        COALESCE(SUM(cl.points_delta::float8) FILTER (
+                            WHERE cl.event_type = 'accepted'
+                              AND cl.created_at >= NOW() - ($1 || ' days')::interval
+                        ), 0.0) AS credit_in_window,
+                        COUNT(*) FILTER (WHERE cl.event_type = 'accepted') AS total_accepted,
+                        COALESCE(SUM(cl.points_delta::float8) FILTER (
+                            WHERE cl.event_type = 'accepted'
+                        ), 0.0) AS total_credit
+                     FROM trace_contributor_profiles cp
+                     LEFT JOIN trace_credit_ledger cl
+                            ON cl.tenant_id = cp.tenant_id
+                           AND cl.credit_account_ref = cp.principal_ref
+                     WHERE cp.withdrawn_at IS NULL
+                     GROUP BY cp.tenant_id, cp.principal_ref, cp.display_handle,
+                              cp.handle_normalized, cp.bio, cp.public_since
+                     HAVING COUNT(*) FILTER (
+                        WHERE cl.event_type = 'accepted'
+                          AND cl.created_at >= NOW() - ($1 || ' days')::interval
+                     ) >= $2",
+                    &[&window_days.to_string(), &min_cell_count],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            for pg_row in pg_rows {
+                rows.push(crate::db::LeaderboardContributorRow {
+                    tenant_id: pg_row.get("tenant_id"),
+                    principal_ref: pg_row.get("principal_ref"),
+                    display_handle: pg_row.get("display_handle"),
+                    handle_normalized: pg_row.get("handle_normalized"),
+                    bio: pg_row.get("bio"),
+                    public_since: pg_row.get("public_since"),
+                    accepted_in_window: pg_row.get("accepted_in_window"),
+                    credit_in_window: pg_row.get("credit_in_window"),
+                    total_accepted: pg_row.get("total_accepted"),
+                    total_credit: pg_row.get("total_credit"),
+                });
+            }
+        }
+        Ok(rows)
+    }
+
+    async fn compute_corpus_analytics_summary(
+        &self,
+        window_days: i32,
+    ) -> Result<crate::db::CorpusAnalyticsSummary, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tenant_ids: Vec<String> = client
+            .query("SELECT tenant_id FROM trace_tenants", &[])
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .into_iter()
+            .map(|row| row.get::<_, String>("tenant_id"))
+            .collect();
+
+        let mut total_submissions = 0_i64;
+        let mut total_accepted = 0_i64;
+        let mut total_rejected = 0_i64;
+        // Histogram buckets: 0, 100k, ..., 900k (the 10th absorbs >=1M).
+        let mut histogram: [(i64, i64); 11] = [
+            (0, 0),
+            (100_000, 0),
+            (200_000, 0),
+            (300_000, 0),
+            (400_000, 0),
+            (500_000, 0),
+            (600_000, 0),
+            (700_000, 0),
+            (800_000, 0),
+            (900_000, 0),
+            (1_000_000, 0),
+        ];
+        let mut both_passed = 0_i64;
+        let mut novelty_failed = 0_i64;
+        let mut perplexity_failed = 0_i64;
+        let mut both_failed = 0_i64;
+
+        for tenant_id in &tenant_ids {
+            let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+            // Submission counts.
+            let counts = tx
+                .query_one(
+                    "SELECT
+                        COUNT(*) AS total,
+                        COUNT(*) FILTER (WHERE status = 'accepted') AS accepted,
+                        COUNT(*) FILTER (WHERE status IN ('rejected', 'quarantined', 'revoked')) AS rejected
+                     FROM trace_submissions
+                     WHERE received_at >= NOW() - ($1 || ' days')::interval",
+                    &[&window_days.to_string()],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            total_submissions += counts.get::<_, i64>("total");
+            total_accepted += counts.get::<_, i64>("accepted");
+            total_rejected += counts.get::<_, i64>("rejected");
+            // Novelty score histogram + gate outcomes.
+            let buckets = tx
+                .query(
+                    "SELECT
+                        LEAST(novelty_score_micros / 100000, 10) AS bucket_idx,
+                        COUNT(*) AS bucket_count
+                     FROM trace_gate_decisions
+                     WHERE decided_at >= NOW() - ($1 || ' days')::interval
+                     GROUP BY 1",
+                    &[&window_days.to_string()],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            for row in buckets {
+                let idx: i64 = row.get("bucket_idx");
+                let count: i64 = row.get("bucket_count");
+                let idx = idx.clamp(0, 10) as usize;
+                histogram[idx].1 += count;
+            }
+            let outcomes = tx
+                .query(
+                    "SELECT
+                        COUNT(*) FILTER (WHERE perplexity_passed AND novelty_passed) AS both_passed,
+                        COUNT(*) FILTER (WHERE perplexity_passed AND NOT novelty_passed) AS novelty_failed,
+                        COUNT(*) FILTER (WHERE NOT perplexity_passed AND novelty_passed) AS perplexity_failed,
+                        COUNT(*) FILTER (WHERE NOT perplexity_passed AND NOT novelty_passed) AS both_failed
+                     FROM trace_gate_decisions
+                     WHERE decided_at >= NOW() - ($1 || ' days')::interval",
+                    &[&window_days.to_string()],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            let outcome = outcomes
+                .first()
+                .ok_or_else(|| DatabaseError::Pool("expected 1 row".to_string()))?;
+            both_passed += outcome.get::<_, i64>("both_passed");
+            novelty_failed += outcome.get::<_, i64>("novelty_failed");
+            perplexity_failed += outcome.get::<_, i64>("perplexity_failed");
+            both_failed += outcome.get::<_, i64>("both_failed");
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+        }
+
+        let accept_rate = if total_submissions > 0 {
+            total_accepted as f64 / total_submissions as f64
+        } else {
+            0.0
+        };
+        let novelty_histogram = histogram.into_iter().collect();
+        let mut gate_outcomes = vec![
+            ("both_passed".to_string(), both_passed),
+            ("novelty_failed".to_string(), novelty_failed),
+            ("perplexity_failed".to_string(), perplexity_failed),
+            ("both_failed".to_string(), both_failed),
+        ];
+        gate_outcomes.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+        Ok(crate::db::CorpusAnalyticsSummary {
+            total_submissions,
+            total_accepted,
+            total_rejected,
+            accept_rate,
+            novelty_histogram,
+            gate_outcomes,
+        })
+    }
+
+    async fn insert_leaderboard_snapshot(
+        &self,
+        write: crate::db::LeaderboardSnapshotWrite,
+    ) -> Result<crate::db::LeaderboardSnapshotRow, DatabaseError> {
+        let client = self.trace_pool().get().await?;
+        let row = client
+            .query_one(
+                "INSERT INTO trace_leaderboard_snapshots (
+                    snapshot_id, window_label, metric, contents_jsonb,
+                    contents_sha256, min_cell_count, noise_seed_hash
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 RETURNING snapshot_id, computed_at, window_label, metric,
+                           contents_jsonb, contents_sha256, min_cell_count,
+                           noise_seed_hash",
+                &[
+                    &write.snapshot_id,
+                    &write.window_label,
+                    &write.metric,
+                    &write.contents,
+                    &write.contents_sha256,
+                    &write.min_cell_count,
+                    &write.noise_seed_hash,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(crate::db::LeaderboardSnapshotRow {
+            snapshot_id: row.get("snapshot_id"),
+            computed_at: row.get("computed_at"),
+            window_label: row.get("window_label"),
+            metric: row.get("metric"),
+            contents: row.get("contents_jsonb"),
+            contents_sha256: row.get("contents_sha256"),
+            min_cell_count: row.get("min_cell_count"),
+            noise_seed_hash: row.get("noise_seed_hash"),
+        })
+    }
+
+    async fn latest_leaderboard_snapshot(
+        &self,
+        window_label: &str,
+        metric: &str,
+    ) -> Result<Option<crate::db::LeaderboardSnapshotRow>, DatabaseError> {
+        let client = self.trace_pool().get().await?;
+        let row = client
+            .query_opt(
+                "SELECT snapshot_id, computed_at, window_label, metric,
+                        contents_jsonb, contents_sha256, min_cell_count,
+                        noise_seed_hash
+                 FROM trace_leaderboard_snapshots
+                 WHERE window_label = $1 AND metric = $2
+                 ORDER BY computed_at DESC
+                 LIMIT 1",
+                &[&window_label, &metric],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(row.map(|row| crate::db::LeaderboardSnapshotRow {
+            snapshot_id: row.get("snapshot_id"),
+            computed_at: row.get("computed_at"),
+            window_label: row.get("window_label"),
+            metric: row.get("metric"),
+            contents: row.get("contents_jsonb"),
+            contents_sha256: row.get("contents_sha256"),
+            min_cell_count: row.get("min_cell_count"),
+            noise_seed_hash: row.get("noise_seed_hash"),
+        }))
     }
 }
 
