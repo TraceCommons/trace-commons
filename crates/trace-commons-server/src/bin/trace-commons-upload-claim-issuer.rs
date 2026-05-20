@@ -20,7 +20,12 @@ SUBCOMMANDS:
                                  and 1 with a hash-only reason on failure
     --mint-test-claim            Mint a test upload claim for a hardcoded test
                                  tenant/principal and print the JWT to stdout
-                                 (FOR TESTING / DEPLOY PROBES ONLY)
+                                 (FOR TESTING / DEPLOY PROBES ONLY).
+                                 Set TRACE_COMMONS_MINT_TEST_CLAIM_CONSENT_SCOPES
+                                 and TRACE_COMMONS_MINT_TEST_CLAIM_ALLOWED_USES
+                                 to comma-separated snake_case variant lists to
+                                 populate the corresponding claim fields (both
+                                 default to empty).
     --hash-invite-code <CODE>    Print the canonical sha256: hash of an invite
                                  code (the value the operator pastes into the
                                  pilot allowlist JSON file). Reads CODE from the

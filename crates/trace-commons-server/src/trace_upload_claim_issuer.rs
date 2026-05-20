@@ -954,6 +954,11 @@ pub async fn run_upload_claim_issuer_health_check() -> UploadClaimIssuerHealthCh
 
 /// Mint a test claim for a hardcoded principal/tenant. For deploy smoke checks
 /// only — must not be exposed as a production code path.
+///
+/// `TRACE_COMMONS_MINT_TEST_CLAIM_CONSENT_SCOPES` and
+/// `TRACE_COMMONS_MINT_TEST_CLAIM_ALLOWED_USES`, when set to a comma-separated
+/// list of snake_case enum variants, populate the corresponding fields on the
+/// minted claim. Both default to empty (the pre-existing behavior).
 pub fn mint_test_upload_claim() -> anyhow::Result<String> {
     let config = TraceUploadClaimIssuerConfig::from_env()
         .context("failed to read upload-claim issuer config from env")?;
@@ -962,6 +967,10 @@ pub fn mint_test_upload_claim() -> anyhow::Result<String> {
     let expires_at = now
         .checked_add_signed(Duration::seconds(state.max_ttl_seconds))
         .context("max_ttl_seconds overflow")?;
+    let allowed_consent_scopes =
+        parse_csv_env::<ConsentScope>("TRACE_COMMONS_MINT_TEST_CLAIM_CONSENT_SCOPES")?;
+    let allowed_uses =
+        parse_csv_env::<TraceAllowedUse>("TRACE_COMMONS_MINT_TEST_CLAIM_ALLOWED_USES")?;
     let claims = UploadClaimClaims {
         iss: state.issuer.clone(),
         aud: state.audience.clone(),
@@ -974,14 +983,34 @@ pub fn mint_test_upload_claim() -> anyhow::Result<String> {
         jti: Uuid::new_v4().to_string(),
         trace_id: None,
         submission_id: None,
-        allowed_consent_scopes: Vec::new(),
-        allowed_uses: Vec::new(),
+        allowed_consent_scopes,
+        allowed_uses,
         policy_label: None,
     };
     let mut header = Header::new(Algorithm::EdDSA);
     header.kid = Some(state.signing_kid.clone());
     jsonwebtoken::encode(&header, &claims, &state.signing_key)
         .context("failed to mint test upload claim")
+}
+
+fn parse_csv_env<T>(name: &str) -> anyhow::Result<Vec<T>>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let Some(raw) = std::env::var_os(name) else {
+        return Ok(Vec::new());
+    };
+    let raw = raw
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("{name} contains non-UTF-8 bytes"))?;
+    raw.split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| {
+            serde_json::from_value::<T>(serde_json::Value::String(item.to_string()))
+                .with_context(|| format!("{name}: unknown variant {item:?}"))
+        })
+        .collect()
 }
 
 async fn wait_for_shutdown_signal() {
