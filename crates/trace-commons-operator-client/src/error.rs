@@ -121,24 +121,21 @@ impl Error {
     /// the full Debug form is for verbose logging only.
     pub fn user_diagnostic(&self) -> String {
         match self {
-            Error::BearerMissing { env_var } => format!(
-                "credential refused: ${env_var} not set"
-            ),
+            Error::BearerMissing { env_var } => format!("credential refused: ${env_var} not set"),
             Error::InvalidEndpoint { endpoint, .. } => format!(
                 "endpoint URL is malformed: {}",
                 sanitize_url_for_display(endpoint)
             ),
-            Error::HostNotAllowed { host, allowed } => format!(
-                "host {host} blocked by allowed-hosts list ({allowed})"
-            ),
+            Error::HostNotAllowed { host, allowed } => {
+                format!("host {host} blocked by allowed-hosts list ({allowed})")
+            }
             Error::Transport { url, source } => format!(
                 "request to {} failed: {source}",
                 sanitize_url_for_display(url)
             ),
-            Error::HttpFailure { url, status, .. } => format!(
-                "{} returned HTTP {status}",
-                sanitize_url_for_display(url)
-            ),
+            Error::HttpFailure { url, status, .. } => {
+                format!("{} returned HTTP {status}", sanitize_url_for_display(url))
+            }
             Error::ServerLabel {
                 url, status, label, ..
             } => format!(

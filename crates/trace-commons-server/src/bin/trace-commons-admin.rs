@@ -7,14 +7,14 @@
 #[path = "operator_common/mod.rs"]
 mod operator_common;
 
-use std::io::{stdout, Write};
+use std::io::{Write, stdout};
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::Method;
 use serde_json::Value;
-use trace_commons_operator_client::{format as oc_format, host_allowlist::HostAllowlist, Client};
+use trace_commons_operator_client::{Client, format as oc_format, host_allowlist::HostAllowlist};
 use uuid::Uuid;
 
 use operator_common::{render_items, render_json_map, render_kv_fields, sanitized_url};
@@ -395,14 +395,11 @@ fn build_client(cli: &Cli) -> Result<Client> {
     Ok(builder.build()?)
 }
 
-async fn dispatch(
-    client: &Client,
-    endpoint: &str,
-    cmd: AdminSubcommand,
-    json: bool,
-) -> Result<()> {
+async fn dispatch(client: &Client, endpoint: &str, cmd: AdminSubcommand, json: bool) -> Result<()> {
     match cmd {
-        AdminSubcommand::MaintenanceRun(args) => maintenance_run(client, endpoint, args, json).await,
+        AdminSubcommand::MaintenanceRun(args) => {
+            maintenance_run(client, endpoint, args, json).await
+        }
         AdminSubcommand::RetentionJobsList(args) => {
             retention_jobs_list(client, endpoint, args, json).await
         }
@@ -492,10 +489,19 @@ async fn maintenance_run(
                 ("  derived marked revoked", "derived_marked_revoked"),
                 ("  derived marked expired", "derived_marked_expired"),
                 ("  export cache files pruned", "export_cache_files_pruned"),
-                ("  export provenance invalidated", "export_provenance_invalidated"),
-                ("  benchmark artifacts invalidated", "benchmark_artifacts_invalidated"),
+                (
+                    "  export provenance invalidated",
+                    "export_provenance_invalidated",
+                ),
+                (
+                    "  benchmark artifacts invalidated",
+                    "benchmark_artifacts_invalidated",
+                ),
                 ("  trace object files deleted", "trace_object_files_deleted"),
-                ("  encrypted artifacts deleted", "encrypted_artifacts_deleted"),
+                (
+                    "  encrypted artifacts deleted",
+                    "encrypted_artifacts_deleted",
+                ),
                 ("  DB mirror backfilled", "db_mirror_backfilled"),
                 ("  vectors indexed", "vector_entries_indexed"),
             ],
@@ -519,7 +525,9 @@ async fn retention_jobs_list(
         owned.push(("status", status.as_str().to_string()));
     }
     let query = borrow_query(&owned);
-    let value: Value = client.call_json::<(), Value>(Method::GET, path, &query, None).await?;
+    let value: Value = client
+        .call_json::<(), Value>(Method::GET, path, &query, None)
+        .await?;
     if json {
         emit_json(endpoint, "GET", path, &value)?;
     } else {
@@ -561,7 +569,9 @@ async fn retention_job_items(
         owned.push(("status", status.as_str().to_string()));
     }
     let query = borrow_query(&owned);
-    let value: Value = client.call_json::<(), Value>(Method::GET, &path, &query, None).await?;
+    let value: Value = client
+        .call_json::<(), Value>(Method::GET, &path, &query, None)
+        .await?;
     if json {
         emit_json(endpoint, "GET", &path, &value)?;
     } else {
@@ -600,7 +610,9 @@ async fn export_access_grants_list(
         owned.push(("dataset_kind", kind));
     }
     let query = borrow_query(&owned);
-    let value: Value = client.call_json::<(), Value>(Method::GET, path, &query, None).await?;
+    let value: Value = client
+        .call_json::<(), Value>(Method::GET, path, &query, None)
+        .await?;
     if json {
         emit_json(endpoint, "GET", path, &value)?;
     } else {
@@ -641,7 +653,9 @@ async fn export_jobs_list(
         owned.push(("dataset_kind", kind));
     }
     let query = borrow_query(&owned);
-    let value: Value = client.call_json::<(), Value>(Method::GET, path, &query, None).await?;
+    let value: Value = client
+        .call_json::<(), Value>(Method::GET, path, &query, None)
+        .await?;
     if json {
         emit_json(endpoint, "GET", path, &value)?;
     } else {
@@ -761,7 +775,9 @@ async fn benchmark_lifecycle_update(
         body.insert("evaluation".into(), Value::Object(evaluation));
     }
     if body.is_empty() {
-        anyhow::bail!("benchmark lifecycle update requires at least one registry or evaluation field");
+        anyhow::bail!(
+            "benchmark lifecycle update requires at least one registry or evaluation field"
+        );
     }
     if let Some(reason) = args.reason {
         body.insert("reason".into(), Value::String(reason));
@@ -883,7 +899,9 @@ async fn replay_dataset_export(
 
 async fn replay_export_manifests(client: &Client, endpoint: &str, json: bool) -> Result<()> {
     let path = "/v1/datasets/replay/manifests";
-    let value: Value = client.call_json::<(), Value>(Method::GET, path, &[], None).await?;
+    let value: Value = client
+        .call_json::<(), Value>(Method::GET, path, &[], None)
+        .await?;
     if json {
         emit_json(endpoint, "GET", path, &value)?;
     } else {
@@ -906,7 +924,9 @@ async fn replay_export_manifests(client: &Client, endpoint: &str, json: bool) ->
 
 async fn analytics_summary(client: &Client, endpoint: &str, json: bool) -> Result<()> {
     let path = "/v1/analytics/summary";
-    let value: Value = client.call_json::<(), Value>(Method::GET, path, &[], None).await?;
+    let value: Value = client
+        .call_json::<(), Value>(Method::GET, path, &[], None)
+        .await?;
     if json {
         emit_json(endpoint, "GET", path, &value)?;
     } else {
@@ -943,7 +963,9 @@ async fn analytics_summary(client: &Client, endpoint: &str, json: bool) -> Resul
 
 async fn operational_summary(client: &Client, endpoint: &str, json: bool) -> Result<()> {
     let path = "/v1/admin/operational-summary";
-    let value: Value = client.call_json::<(), Value>(Method::GET, path, &[], None).await?;
+    let value: Value = client
+        .call_json::<(), Value>(Method::GET, path, &[], None)
+        .await?;
     if json {
         emit_json(endpoint, "GET", path, &value)?;
     } else {
@@ -975,7 +997,9 @@ async fn operational_summary(client: &Client, endpoint: &str, json: bool) -> Res
 
 async fn config_status(client: &Client, endpoint: &str, _json: bool) -> Result<()> {
     let path = "/v1/admin/config-status";
-    let value: Value = client.call_json::<(), Value>(Method::GET, path, &[], None).await?;
+    let value: Value = client
+        .call_json::<(), Value>(Method::GET, path, &[], None)
+        .await?;
     emit_json(endpoint, "GET", path, &value)
 }
 
@@ -1311,20 +1335,20 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/v1/analytics/summary"))
             .and(header("authorization", "Bearer admin-secret"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "tenant_id": "tenant-1",
-                    "submissions_total": 42,
-                    "by_status": {"accepted": 30, "rejected": 12},
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tenant_id": "tenant-1",
+                "submissions_total": 42,
+                "by_status": {"accepted": 30, "rejected": 12},
+            })))
             .expect(1)
             .mount(&server)
             .await;
         let env = unique_bearer_env();
         let _g = EnvGuard::set(env.clone(), "admin-secret");
         let client = Client::builder(server.uri(), env).build().unwrap();
-        analytics_summary(&client, &server.uri(), true).await.unwrap();
+        analytics_summary(&client, &server.uri(), true)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1336,12 +1360,10 @@ mod tests {
                 "purpose": "weekly",
                 "limit": 50,
             })))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "conversion_id": "conv-1",
-                    "item_count": 5,
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "conversion_id": "conv-1",
+                "item_count": 5,
+            })))
             .expect(1)
             .mount(&server)
             .await;
@@ -1372,11 +1394,9 @@ mod tests {
             .and(path("/v1/admin/retention/jobs"))
             .and(query_param("limit", "5"))
             .and(query_param("status", "running"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "items": []
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": []
+            })))
             .expect(1)
             .mount(&server)
             .await;
@@ -1451,8 +1471,6 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("registry or evaluation"));
+        assert!(err.to_string().contains("registry or evaluation"));
     }
 }

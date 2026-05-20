@@ -8,13 +8,13 @@
 #[path = "operator_common/mod.rs"]
 mod operator_common;
 
-use std::io::{stdout, Write};
+use std::io::{Write, stdout};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::Method;
 use serde_json::Value;
-use trace_commons_operator_client::{format as oc_format, Client, host_allowlist::HostAllowlist};
+use trace_commons_operator_client::{Client, format as oc_format, host_allowlist::HostAllowlist};
 use uuid::Uuid;
 
 use operator_common::{render_items, render_kv_fields, sanitized_url};
@@ -246,11 +246,15 @@ async fn dispatch(
     json: bool,
 ) -> Result<()> {
     match cmd {
-        ReviewSubcommand::QuarantineList(args) => quarantine_list(client, endpoint, args, json).await,
+        ReviewSubcommand::QuarantineList(args) => {
+            quarantine_list(client, endpoint, args, json).await
+        }
         ReviewSubcommand::ActiveLearningReviewQueue(args) => {
             active_learning(client, endpoint, args, json).await
         }
-        ReviewSubcommand::ReviewDecision(args) => review_decision(client, endpoint, args, json).await,
+        ReviewSubcommand::ReviewDecision(args) => {
+            review_decision(client, endpoint, args, json).await
+        }
         ReviewSubcommand::ReviewLeaseClaim(args) => lease_claim(client, endpoint, args, json).await,
         ReviewSubcommand::ReviewLeaseClaimNext(args) => {
             lease_claim_next(client, endpoint, args, json).await
@@ -279,7 +283,9 @@ async fn quarantine_list(
         owned.push(("lease_filter", filter.as_str().to_string()));
     }
     let query = borrow_query(&owned);
-    let value: Value = client.call_json::<(), Value>(Method::GET, path, &query, None).await?;
+    let value: Value = client
+        .call_json::<(), Value>(Method::GET, path, &query, None)
+        .await?;
     if json {
         emit_json(endpoint, "GET", path, &value)?;
     } else {
@@ -323,7 +329,9 @@ async fn active_learning(
         owned.push(("lease_filter", filter.as_str().to_string()));
     }
     let query = borrow_query(&owned);
-    let value: Value = client.call_json::<(), Value>(Method::GET, path, &query, None).await?;
+    let value: Value = client
+        .call_json::<(), Value>(Method::GET, path, &query, None)
+        .await?;
     if json {
         emit_json(endpoint, "GET", path, &value)?;
     } else {
@@ -371,7 +379,11 @@ async fn review_decision(
         emit_json(endpoint, "POST", &path, &value)?;
     } else {
         let mut out = stdout();
-        writeln!(out, "Recorded central review decision for {}", args.submission_id)?;
+        writeln!(
+            out,
+            "Recorded central review decision for {}",
+            args.submission_id
+        )?;
         render_kv_fields(
             &mut out,
             &value,
@@ -400,7 +412,11 @@ async fn lease_claim(
         emit_json(endpoint, "POST", &path, &value)?;
     } else {
         let mut out = stdout();
-        writeln!(out, "Claimed central review lease for {}", args.submission_id)?;
+        writeln!(
+            out,
+            "Claimed central review lease for {}",
+            args.submission_id
+        )?;
         render_lease_fields(&mut out, &value)?;
     }
     Ok(())
@@ -490,7 +506,11 @@ async fn lease_release(
         emit_json(endpoint, "DELETE", &path, &value)?;
     } else {
         let mut out = stdout();
-        writeln!(out, "Released central review lease for {}", args.submission_id)?;
+        writeln!(
+            out,
+            "Released central review lease for {}",
+            args.submission_id
+        )?;
         render_lease_fields(&mut out, &value)?;
     }
     Ok(())
@@ -518,7 +538,11 @@ async fn append_credit_event(
         emit_json(endpoint, "POST", &path, &value)?;
     } else {
         let mut out = stdout();
-        writeln!(out, "Appended central delayed credit event for {}", args.submission_id)?;
+        writeln!(
+            out,
+            "Appended central delayed credit event for {}",
+            args.submission_id
+        )?;
         render_kv_fields(
             &mut out,
             &value,
@@ -829,13 +853,11 @@ mod tests {
             .and(path("/v1/review/quarantine"))
             .and(query_param("lease_filter", "mine"))
             .and(header("authorization", "Bearer reviewer-secret"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "items": [
-                        {"submission_id": "sub-1", "privacy_risk": "low"}
-                    ]
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [
+                    {"submission_id": "sub-1", "privacy_risk": "low"}
+                ]
+            })))
             .expect(1)
             .mount(&server)
             .await;
@@ -867,12 +889,10 @@ mod tests {
                 "decision": "approve",
                 "reason": "looks fine",
             })))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "status": "approved",
-                    "credit_points_final": 1.0,
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "approved",
+                "credit_points_final": 1.0,
+            })))
             .expect(1)
             .mount(&server)
             .await;

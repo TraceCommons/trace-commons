@@ -12,14 +12,14 @@
 #[path = "operator_common/mod.rs"]
 mod operator_common;
 
-use std::io::{stdout, Write};
+use std::io::{Write, stdout};
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::Method;
 use serde_json::Value;
-use trace_commons_operator_client::{format as oc_format, host_allowlist::HostAllowlist, Client};
+use trace_commons_operator_client::{Client, format as oc_format, host_allowlist::HostAllowlist};
 use uuid::Uuid;
 
 use operator_common::{render_items, render_kv_fields, sanitized_url};
@@ -31,8 +31,7 @@ const VECTOR_WORKER_BEARER_ENV: &str = "TRACE_COMMONS_VECTOR_WORKER_BEARER";
 const BENCHMARK_WORKER_BEARER_ENV: &str = "TRACE_COMMONS_BENCHMARK_WORKER_BEARER";
 const EXPORT_WORKER_BEARER_ENV: &str = "TRACE_COMMONS_EXPORT_WORKER_BEARER";
 const RANKER_WORKER_BEARER_ENV: &str = "TRACE_COMMONS_RANKER_WORKER_BEARER";
-const PROCESS_EVALUATION_WORKER_BEARER_ENV: &str =
-    "TRACE_COMMONS_PROCESS_EVALUATION_WORKER_BEARER";
+const PROCESS_EVALUATION_WORKER_BEARER_ENV: &str = "TRACE_COMMONS_PROCESS_EVALUATION_WORKER_BEARER";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -334,7 +333,11 @@ fn bearer_env(cmd: &WorkerSubcommand) -> &str {
     }
 }
 
-fn build_client(endpoint: &str, bearer_token_env: &str, allowed_hosts: Option<&str>) -> Result<Client> {
+fn build_client(
+    endpoint: &str,
+    bearer_token_env: &str,
+    allowed_hosts: Option<&str>,
+) -> Result<Client> {
     let mut builder = Client::builder(endpoint, bearer_token_env);
     if let Some(csv) = allowed_hosts {
         builder = builder.host_allowlist(HostAllowlist::from_csv(csv));
@@ -483,8 +486,14 @@ async fn worker_retention_maintenance(
                 ("  records marked expired", "records_marked_expired"),
                 ("  records marked purged", "records_marked_purged"),
                 ("  export cache files pruned", "export_cache_files_pruned"),
-                ("  export provenance invalidated", "export_provenance_invalidated"),
-                ("  benchmark artifacts invalidated", "benchmark_artifacts_invalidated"),
+                (
+                    "  export provenance invalidated",
+                    "export_provenance_invalidated",
+                ),
+                (
+                    "  benchmark artifacts invalidated",
+                    "benchmark_artifacts_invalidated",
+                ),
             ],
         )?;
     }
@@ -562,7 +571,10 @@ async fn worker_benchmark_convert(
         emit_json(endpoint, "POST", path, &value)?;
     } else {
         let mut out = stdout();
-        writeln!(out, "Trace Commons benchmark conversion (worker) requested.")?;
+        writeln!(
+            out,
+            "Trace Commons benchmark conversion (worker) requested."
+        )?;
         render_kv_fields(
             &mut out,
             &value,
@@ -605,7 +617,9 @@ async fn worker_replay_dataset_export(
         owned.push(("privacy_risk", risk.as_str().to_string()));
     }
     let query = borrow_query(&owned);
-    let raw = client.call_raw::<()>(Method::GET, path, &query, None).await?;
+    let raw = client
+        .call_raw::<()>(Method::GET, path, &query, None)
+        .await?;
     let value: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
 
     if let Some(output) = args.output.as_ref() {
@@ -677,7 +691,9 @@ async fn worker_ranker_training_export(
         owned.push(("privacy_risk", risk.as_str().to_string()));
     }
     let query = borrow_query(&owned);
-    let raw = client.call_raw::<()>(Method::GET, path, &query, None).await?;
+    let raw = client
+        .call_raw::<()>(Method::GET, path, &query, None)
+        .await?;
     let value: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
 
     if let Some(output) = args.output.as_ref() {
@@ -720,10 +736,7 @@ async fn worker_ranker_training_export(
     if json {
         emit_json(endpoint, "GET", path, &value)
     } else {
-        let items_value = value
-            .get(item_field)
-            .cloned()
-            .unwrap_or(Value::Null);
+        let items_value = value.get(item_field).cloned().unwrap_or(Value::Null);
         let envelope = serde_json::json!({ "items": items_value });
         render_items(
             &mut stdout(),
@@ -858,10 +871,7 @@ async fn process_evaluation_submit(
                 ("  process eval value", "process_eval_value"),
                 ("  review scorecard", "review_scorecard"),
                 ("  output object ref", "output_object_ref_id"),
-                (
-                    "  utility credit appended",
-                    "utility_credit_appended_count",
-                ),
+                ("  utility credit appended", "utility_credit_appended_count"),
                 (
                     "  utility credit skipped existing",
                     "utility_credit_skipped_existing_count",
@@ -1497,12 +1507,10 @@ mod tests {
                 "external_ref": "job-1",
                 "submission_ids": [sub],
             })))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "appended_count": 1,
-                    "skipped_existing_count": 0,
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "appended_count": 1,
+                "skipped_existing_count": 0,
+            })))
             .expect(1)
             .mount(&server)
             .await;
@@ -1651,14 +1659,12 @@ mod tests {
                 "dry_run": true,
                 "purpose": "reindex",
             })))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "audit_event_id": "a-1",
-                    "purpose": "reindex",
-                    "dry_run": true,
-                    "vector_entries_indexed": 0,
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "audit_event_id": "a-1",
+                "purpose": "reindex",
+                "dry_run": true,
+                "vector_entries_indexed": 0,
+            })))
             .expect(1)
             .mount(&server)
             .await;

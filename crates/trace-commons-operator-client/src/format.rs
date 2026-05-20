@@ -175,7 +175,7 @@ mod tests {
             &mut buf,
             &["id", "status"],
             &[
-                vec!["sub-1".into()], // skipped
+                vec!["sub-1".into()],                                    // skipped
                 vec!["sub-2".into(), "approved".into(), "extra".into()], // skipped
                 vec!["sub-3".into(), "leased".into()],
             ],

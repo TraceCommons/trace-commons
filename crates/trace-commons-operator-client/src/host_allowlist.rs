@@ -80,11 +80,7 @@ impl HostAllowlist {
         } else {
             Err(Error::HostNotAllowed {
                 host,
-                allowed: allowed
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(","),
+                allowed: allowed.iter().cloned().collect::<Vec<_>>().join(","),
             })
         }
     }
@@ -102,14 +98,18 @@ mod tests {
     fn permissive_allowlist_lets_anything_through() {
         let allowlist = HostAllowlist::permissive();
         assert!(!allowlist.is_enforcing());
-        allowlist.check(&url("https://evil.example/v1/traces")).unwrap();
+        allowlist
+            .check(&url("https://evil.example/v1/traces"))
+            .unwrap();
     }
 
     #[test]
     fn csv_allowlist_enforces_exact_match() {
         let allowlist = HostAllowlist::from_csv("api.example,staging.example");
         assert!(allowlist.is_enforcing());
-        allowlist.check(&url("https://api.example/v1/traces")).unwrap();
+        allowlist
+            .check(&url("https://api.example/v1/traces"))
+            .unwrap();
         allowlist
             .check(&url("https://staging.example/v1/traces"))
             .unwrap();

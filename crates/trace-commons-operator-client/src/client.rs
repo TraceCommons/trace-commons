@@ -12,10 +12,10 @@
 use std::time::Duration;
 
 use reqwest::Method;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
-use crate::error::{parse_error_label, Error, Result};
+use crate::error::{Error, Result, parse_error_label};
 use crate::host_allowlist::HostAllowlist;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -36,7 +36,10 @@ pub struct ClientBuilder {
 }
 
 impl Client {
-    pub fn builder(endpoint: impl Into<String>, bearer_token_env: impl Into<String>) -> ClientBuilder {
+    pub fn builder(
+        endpoint: impl Into<String>,
+        bearer_token_env: impl Into<String>,
+    ) -> ClientBuilder {
         ClientBuilder {
             endpoint: endpoint.into(),
             bearer_token_env: bearer_token_env.into(),
@@ -171,10 +174,11 @@ impl ClientBuilder {
     }
 
     pub fn build(self) -> Result<Client> {
-        let endpoint = url::Url::parse(&self.endpoint).map_err(|source| Error::InvalidEndpoint {
-            endpoint: self.endpoint.clone(),
-            source,
-        })?;
+        let endpoint =
+            url::Url::parse(&self.endpoint).map_err(|source| Error::InvalidEndpoint {
+                endpoint: self.endpoint.clone(),
+                source,
+            })?;
         // Pre-flight the allowlist before we even hand back a Client, so
         // operators see the rejection at startup rather than at first request.
         self.host_allowlist.check(&endpoint)?;
@@ -300,11 +304,9 @@ mod tests {
             .and(path("/v1/traces/quarantine"))
             .and(query_param("state", "leased"))
             .and(header("authorization", "Bearer secret"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "items": ["sub-1", "sub-2"],
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": ["sub-1", "sub-2"],
+            })))
             .expect(1)
             .mount(&server)
             .await;
