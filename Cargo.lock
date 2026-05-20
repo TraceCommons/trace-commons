@@ -7042,6 +7042,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "trace-commons-operator-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "hex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "trace-commons-protocol"
 version = "0.1.0"
 dependencies = [
@@ -7098,6 +7117,7 @@ dependencies = [
  "toml 1.1.2+spec-1.1.0",
  "tower 0.5.3",
  "trace-commons-gate-enclave",
+ "trace-commons-operator-client",
  "trace-commons-protocol",
  "tracing",
  "tracing-subscriber",

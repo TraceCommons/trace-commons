@@ -37,6 +37,7 @@ toml = "1"
 zstd = "0.13"
 tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
 trace-commons-gate-enclave = { path = "../trace-commons-gate-enclave" }
+trace-commons-operator-client = { path = "../trace-commons-operator-client" }
 trace-commons-protocol = { path = "../trace-commons-protocol" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -87,6 +88,22 @@ required-features = ["local-gpu-models"]
 [[bin]]
 name = "trace-commons-pilot-bootstrap"
 path = "src/bin/trace-commons-pilot-bootstrap.rs"
+
+[[bin]]
+name = "trace-commons-review"
+path = "src/bin/trace-commons-review.rs"
+
+[[bin]]
+name = "trace-commons-admin"
+path = "src/bin/trace-commons-admin.rs"
+
+[[bin]]
+name = "trace-commons-worker"
+path = "src/bin/trace-commons-worker.rs"
+
+[[bin]]
+name = "trace-commons-tenant"
+path = "src/bin/trace-commons-tenant.rs"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
