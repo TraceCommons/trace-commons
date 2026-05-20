@@ -82,7 +82,10 @@ Notes:
   analytics (matches what the operator mints into your workload JWT).
 - Don't pass `--include-message-text` or `--include-tool-payloads`
   unless you've explicitly decided to share them — both stay off by
-  default and the pilot accepts envelopes either way.
+  default. The pilot accepts envelopes either way, but envelopes that
+  include message text or tool payloads route to the privacy-review
+  queue instead of auto-accepting; see [Accepted vs. quarantined
+  outcomes](#accepted-vs-quarantined-outcomes).
 - Your `pseudonymous_contributor_id` is generated locally and stable
   per scope. You can override per-preview with `--contributor-id`, but
   there's no need.
@@ -105,14 +108,25 @@ ironclaw traces preview \
 ironclaw traces flush-queue
 ```
 
-A successful submit prints:
+A successful submit prints one of two outcomes. With the defaults
+(no `--include-message-text`, no `--include-tool-payloads`):
 
 ```
 {"status":"accepted","credit_points_pending":5.2,"explanation":["Accepted into the private redacted corpus.","Attributed to tenant tenant_sha256:..."]}
 ```
 
-Or `credit_points_pending: 0.0` if you've already submitted that exact
-content (the gate suppresses duplicates).
+With message text or tool payloads included:
+
+```
+{"status":"quarantined","credit_points_pending":0.0,"explanation":["Quarantined for privacy review; credit is pending review.","Attributed to tenant tenant_sha256:..."]}
+```
+
+Both are successes — the trace is stored and attributed in both cases.
+See [Accepted vs. quarantined outcomes](#accepted-vs-quarantined-outcomes)
+for what happens next in each lane.
+
+`credit_points_pending: 0.0` on the accepted lane means you've already
+submitted that exact content (the gate suppresses duplicates).
 
 Check what landed:
 
@@ -121,6 +135,33 @@ ironclaw traces list-submissions
 ironclaw traces credit
 ironclaw traces queue-status
 ```
+
+## Accepted vs. quarantined outcomes
+
+The pilot routes every successful submission into one of two lanes
+based on the envelope's residual PII risk:
+
+| Lane | When | Credit | What happens next |
+|---|---|---|---|
+| `accepted` | Metadata-only envelope (no message text, no tool payloads) | `credit_points_pending` populated immediately; settles after the gate worker scores it | Trace lands in the private redacted corpus and is available to downstream consumers |
+| `quarantined` | Envelope opted into `--include-message-text` or `--include-tool-payloads` | Held at `0.0` until a human reviewer processes it | Operator reviews the envelope and either releases it (credit mints) or revokes it (tombstone) |
+
+Quarantine is a privacy posture, not a punishment. The pilot treats
+any envelope that carries body text or tool payloads as needing a
+human eye before that content joins the shared corpus — there is
+currently no automatic downgrade path even after server-side
+re-scrubbing. The policy decision behind this (and whether to wire
+an auto-accept path off a successful privacy-filter pass) is tracked
+in [#131](https://github.com/TraceCommons/trace-commons-server/issues/131).
+
+Expected wait for the quarantine queue depends on operator capacity;
+ask the operator if your `credit_points_pending` has been at `0.0`
+for more than a few days. You can keep submitting in the meantime —
+each envelope is scored independently.
+
+To keep your traces in the auto-accept lane, leave
+`--include-message-text` and `--include-tool-payloads` off. You get
+less detailed traces, but they earn credit without manual review.
 
 ## Day-to-day usage
 
@@ -181,6 +222,7 @@ ironclaw traces revoke <submission-id> \
 | `403 consent scope ...` from issuer | The `--scope` you opted in with exceeds what the workload JWT permits | Re-run `opt-in` with a narrower `--scope`, or ask for a wider-scoped token |
 | `400 trace contribution requires a pseudonymous contributor id` | Local pseudonymous ID generation failed for the scope | Re-run `opt-in` (it seeds the local ID); if still failing, report to operator |
 | `500 trace commons operation failed` | Server-side error; logged hash-only on the server | Don't keep retrying. Send the operator your `pseudonymous_contributor_id` (from `traces status`) and the approximate timestamp |
+| `status: quarantined`, `credit_points_pending: 0.0` for days | Body-carrying envelope waiting on privacy review (see [Accepted vs. quarantined outcomes](#accepted-vs-quarantined-outcomes)) | Either wait for the operator review pass, or drop `--include-message-text` / `--include-tool-payloads` on future submits to stay in the auto-accept lane |
 
 ## Asking for help
 
