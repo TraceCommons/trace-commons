@@ -1,6 +1,10 @@
 # IronClaw Trace Commons
 
-Trace Commons is an opt-in pipeline for contributing locally redacted IronClaw traces to a private corpus. It is separate from replay trace fixtures: replay traces support deterministic tests, while contribution envelopes carry consent, redaction metadata, replayability metadata, scoring, revocation, and contributor credit.
+Trace Commons is an opt-in pipeline for contributing locally scrubbed IronClaw traces to a user-owned register of agent work. Capture and redaction both happen on the contributor's machine; only the scrubbed envelope reaches the server. There, two gates decide whether a record enters the register: a **novelty** gate asks whether it is genuinely different from everything already filed, and a **substance** gate asks whether it is substantive work rather than template-shaped filler. Both must pass. Accepted envelopes are signed, dated, and filed; frontier labs, auditors, and regulators can query the register under selective disclosure.
+
+A **Trace Credit** is the signed, on-chain record that a contributor's envelope was accepted into the register. Credits are non-transferable, settle on NEAR, and are how recognition flows back when buyers later pay to query the evidence. In Phase A, gating runs on regular GPU hardware inside NEAR AI's TEE-hosted vLLM; the Phase B milestone moves scoring inside attested hardware that even the operators of the server cannot read.
+
+This document is the on-the-wire envelope contract and threat model. It is separate from replay trace fixtures: replay traces support deterministic tests, while contribution envelopes carry consent, redaction metadata, replayability metadata, gate scores, revocation, and contributor credit.
 
 ## Local-First Rules
 

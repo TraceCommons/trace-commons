@@ -1,27 +1,43 @@
 # TraceCommons
 
-**A privacy-preserving commons for AI agent traces, with contributor rewards.**
+**A user-owned register of AI agent work.**
 
-TraceCommons is an opt-in pipeline that lets people who run AI agents
-contribute redacted traces of those interactions to a shared corpus, in
-exchange for non-transferable account credits proportional to the utility
-their contributions provide. It's designed for one specific failure mode of
-the current AI ecosystem: the most useful training and evaluation data lives
-in private user sessions that nobody can collect responsibly, so it never
-gets collected at all.
+When an AI agent does work for someone, it leaves a record of what actually
+happened: the tools it called, the places it failed, the result it gave back.
+That record is becoming valuable. The companies building the next generation
+of agents need millions of those records to train against, and most of them
+live inside private user sessions today — collected unilaterally by whoever
+runs the model, on terms the user never specifically agreed to.
 
-The contract is "local-first, opt-in, redaction before upload":
+TraceCommons keeps the record under the contributor's control. Capture and
+scrubbing both happen on the user's machine; only the scrubbed version moves
+to a shared server, where two checks decide whether the record is worth
+keeping. One asks whether the record is genuinely different from everything
+already filed. The other asks whether it is substantive work rather than
+template-shaped filler. Both must pass. Accepted records are signed, dated,
+and filed into a register. Frontier labs, auditors, and regulators can query
+the register under selective disclosure; they see what they need, and the
+rest stays encrypted.
+
+A **Trace Credit** is the signed, on-chain record that one of a contributor's
+submissions was accepted into the register. Credits are how recognition flows
+back when buyers later pay to query the evidence. They are non-transferable.
+
+The contract is "local-first, opt-in, scrub before upload":
 
 - Trace contribution is **off by default**. Raw traces stay on the user's
   device unless they explicitly opt in.
 - Uploads carry only `ironclaw.trace_contribution.v1` envelopes — text and
   tool payloads are stripped or replaced with stable placeholders during
-  local deterministic redaction.
-- The server scores incoming traces for novelty against a frontier model
-  running inside a hardware TEE, so the operator never sees plaintext.
-- Accepted, settled traces mint **Trace Credits** through a hash-only
-  utility-attestation pipeline. Credits are non-transferable and bound to
-  reviewed evidence; uploads alone don't pay.
+  local deterministic scrubbing.
+- The server gates incoming envelopes on **two** axes — novelty against the
+  existing register and substantive-work signal against a frontier model.
+  In Phase A this runs on regular GPU hardware in NEAR AI's TEE-hosted vLLM;
+  the Phase B milestone moves scoring inside attested hardware that even the
+  operators of the server cannot read.
+- Accepted, settled records mint **Trace Credits** through a hash-only
+  utility-attestation pipeline. Credits are non-transferable, bound to
+  reviewed evidence, and settle on-chain via NEAR; uploads alone don't pay.
 
 This repository — `trace-commons-server` — is the hosted control plane:
 ingest, review, retention, revocation, encrypted artifact storage,
