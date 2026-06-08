@@ -17,7 +17,7 @@ This runbook is intended to be readable end-to-end in under ten minutes.
 | `trace-commons-review` | Reviewers | `TRACE_COMMONS_REVIEWER_BEARER` | 8 |
 | `trace-commons-admin` | Hosted-service admins | `TRACE_COMMONS_ADMIN_BEARER` | 12 |
 | `trace-commons-worker` | Per-route worker operators | one per subcommand (see below) | 8 |
-| `trace-commons-tenant` | Tenant-policy operators | `TRACE_COMMONS_TENANT_BEARER` | 11 |
+| `trace-commons-tenant` | Tenant-policy operators | `TRACE_COMMONS_TENANT_BEARER` | 12 |
 
 Each binary takes:
 
@@ -55,7 +55,7 @@ keep their tokens under non-default names.
 |---|---|---|
 | `TRACE_COMMONS_REVIEWER_BEARER` | reviewer role | `trace-commons-review` (all 8 subcommands) |
 | `TRACE_COMMONS_ADMIN_BEARER` | admin role | `trace-commons-admin` (all 12 subcommands) |
-| `TRACE_COMMONS_TENANT_BEARER` | admin role (tenant ops use the same gate) | `trace-commons-tenant` (9 server-backed subcommands) |
+| `TRACE_COMMONS_TENANT_BEARER` | admin role (tenant ops use the same gate) | `trace-commons-tenant` (10 server-backed subcommands) |
 | `TRACE_COMMONS_UTILITY_CREDIT_WORKER_BEARER` | utility-credit worker | `trace-commons-worker worker-utility-credit` |
 | `TRACE_COMMONS_RETENTION_WORKER_BEARER` | retention worker | `trace-commons-worker worker-retention-maintenance` |
 | `TRACE_COMMONS_VECTOR_WORKER_BEARER` | vector-index worker | `trace-commons-worker worker-vector-index` |

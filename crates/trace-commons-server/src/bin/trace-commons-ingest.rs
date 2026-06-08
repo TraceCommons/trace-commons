@@ -8,8 +8,8 @@ use std::time::Duration as StdDuration;
 
 use anyhow::Context;
 use axum::extract::{DefaultBodyLimit, Query};
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router, extract::Path as AxumPath, extract::State};
@@ -22,6 +22,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use trace_commons_protocol::trace_contribution::{
     ConsentScope, EmbeddingAnalysisMetadata, ProcessEvalRating, ProcessEvaluationLabels,
     ResidualPiiRisk, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse, TraceContributionEnvelope,
@@ -33,6 +34,7 @@ use trace_commons_server::audit_chain::{
     AUDIT_CHAIN_DRIFT_REJECTED_CLASS, audit_event_matches_writeback,
 };
 use trace_commons_server::config::DatabaseConfig;
+use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
 use trace_commons_server::db::{Database, TraceCorpusRlsDiagnostics};
 use trace_commons_server::error::DatabaseError;
 use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
@@ -315,6 +317,7 @@ const TRACE_COMMONS_KEK_PROVIDER: &str = "TRACE_COMMONS_KEK_PROVIDER";
 const TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME: &str = "TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME";
 const TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED: &str =
     "TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED";
+const TRACE_COMMONS_COMMUNITY_CORS_ORIGINS: &str = "TRACE_COMMONS_COMMUNITY_CORS_ORIGINS";
 const TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW";
 const TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT: &str =
@@ -5780,20 +5783,8 @@ fn parse_trace_rollout_tenant_ids(key: &str, configured: &str) -> anyhow::Result
     Ok(tenant_ids)
 }
 
-fn app(state: Arc<AppState>) -> Router {
+fn community_routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/health", get(health_handler))
-        .route(
-            "/v1/traces",
-            get(list_traces_handler)
-                .post(submit_trace_handler)
-                .delete(revoke_trace_body_handler),
-        )
-        .route("/v1/traces/{submission_id}", delete(revoke_trace_handler))
-        .route(
-            "/v1/traces/{submission_id}/revoke",
-            post(revoke_trace_handler),
-        )
         .route(
             "/v1/community/profile",
             put(put_community_profile_handler).delete(delete_community_profile_handler),
@@ -5810,6 +5801,52 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/community/analytics/summary",
             get(community_analytics_summary_handler),
         )
+        .layer(community_cors_layer())
+}
+
+fn community_cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(community_cors_origins()))
+        .allow_methods([Method::GET, Method::PUT, Method::DELETE])
+        .allow_headers([ACCEPT, AUTHORIZATION, CONTENT_TYPE])
+        .max_age(StdDuration::from_secs(600))
+}
+
+fn community_cors_origins() -> Vec<HeaderValue> {
+    let configured = std::env::var(TRACE_COMMONS_COMMUNITY_CORS_ORIGINS).unwrap_or_else(|_| {
+        "https://tracecommons.ai,http://localhost:8788,http://127.0.0.1:8788".to_string()
+    });
+    let mut origins = configured
+        .split(',')
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty())
+        .map(|origin| {
+            HeaderValue::from_str(origin).unwrap_or_else(|error| {
+                panic!("{TRACE_COMMONS_COMMUNITY_CORS_ORIGINS} contains invalid origin {origin:?}: {error}")
+            })
+        })
+        .collect::<Vec<_>>();
+    if origins.is_empty() {
+        origins.push(HeaderValue::from_static("https://tracecommons.ai"));
+    }
+    origins
+}
+
+fn app(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/health", get(health_handler))
+        .route(
+            "/v1/traces",
+            get(list_traces_handler)
+                .post(submit_trace_handler)
+                .delete(revoke_trace_body_handler),
+        )
+        .route("/v1/traces/{submission_id}", delete(revoke_trace_handler))
+        .route(
+            "/v1/traces/{submission_id}/revoke",
+            post(revoke_trace_handler),
+        )
+        .merge(community_routes())
         .route(
             "/v1/admin/community/snapshots/recompute",
             post(recompute_community_snapshot_handler),
@@ -5938,6 +5975,11 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/tenant-access-grants/{grant_id}/revoke",
             post(revoke_tenant_access_grant_handler),
+        )
+        .route("/v1/admin/device-keys", get(device_keys_handler))
+        .route(
+            "/v1/admin/device-keys/{device_key_id}/revoke",
+            post(revoke_device_key_handler),
         )
         .route("/v1/admin/retention/jobs", get(retention_jobs_handler))
         .route(
@@ -9093,6 +9135,14 @@ struct TraceTenantAccessGrantsQuery {
     principal_ref: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct DeviceKeysQuery {
+    limit: Option<usize>,
+    tenant: Option<String>,
+    #[serde(default)]
+    include_revoked: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct TraceTenantPolicyResponse {
     tenant_id: String,
@@ -9126,6 +9176,17 @@ struct TraceTenantAccessGrantResponse {
     metadata: BTreeMap<String, String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct DeviceKeyResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    device_key_id: String,
+    invite_subject_hash: String,
+    client_info: serde_json::Value,
+    created_at: DateTime<Utc>,
+    revoked_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -10282,6 +10343,60 @@ async fn revoke_tenant_access_grant_handler(
     Ok(Json(response))
 }
 
+async fn device_keys_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<DeviceKeysQuery>,
+) -> ApiResult<Json<Vec<DeviceKeyResponse>>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_admin(&tenant)?;
+    if let Some(requested_tenant) = trimmed_optional_string(query.tenant)
+        && requested_tenant != tenant.tenant_id
+    {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "device key tenant must match authenticated tenant",
+        ));
+    }
+    let limit = validate_trace_read_limit(query.limit)?;
+    let db = device_keys_db(state.as_ref())?;
+    let records = db
+        .list_device_keys(&tenant.tenant_id)
+        .await
+        .map_err(internal_error)?;
+    let responses = records
+        .into_iter()
+        .rev()
+        .filter(|record| query.include_revoked || record.revoked_at.is_none())
+        .take(limit)
+        .map(device_key_response)
+        .collect::<Vec<_>>();
+    append_control_plane_read_audit(state.as_ref(), &tenant, "device_keys", responses.len())
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(responses))
+}
+
+async fn revoke_device_key_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(device_key_id): AxumPath<String>,
+) -> ApiResult<Json<DeviceKeyResponse>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_admin(&tenant)?;
+    let device_key_id = validate_trace_sha256_hash(&device_key_id, "device_key_id")?;
+    let db = device_keys_db(state.as_ref())?;
+    let record = db
+        .revoke_device_key(&tenant.tenant_id, &device_key_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "device key not found"))?;
+    append_control_plane_read_audit(state.as_ref(), &tenant, "device_key_revoke", 1)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(device_key_response(record)))
+}
+
 fn trace_tenant_policy_db(state: &AppState) -> ApiResult<Arc<dyn Database>> {
     state.db_mirror.as_ref().cloned().ok_or_else(|| {
         api_error(
@@ -10296,6 +10411,15 @@ fn trace_tenant_access_grants_db(state: &AppState) -> ApiResult<Arc<dyn Database
         api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "trace tenant access grants DB is not configured",
+        )
+    })
+}
+
+fn device_keys_db(state: &AppState) -> ApiResult<Arc<dyn Database>> {
+    state.db_mirror.as_ref().cloned().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "device key registry DB is not configured",
         )
     })
 }
@@ -10365,6 +10489,18 @@ fn trace_tenant_access_grant_response(
         metadata: grant.metadata,
         created_at: grant.created_at,
         updated_at: grant.updated_at,
+    }
+}
+
+fn device_key_response(record: StorageDeviceKeyRecord) -> DeviceKeyResponse {
+    DeviceKeyResponse {
+        tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
+        tenant_id: record.tenant_id,
+        device_key_id: record.device_key_id,
+        invite_subject_hash: record.invite_subject_hash,
+        client_info: record.client_info,
+        created_at: record.created_at,
+        revoked_at: record.revoked_at,
     }
 }
 

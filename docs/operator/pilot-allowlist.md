@@ -12,8 +12,13 @@ Implementation plan: `docs/superpowers/plans/2026-05-17-pilot-allowlist.md`.
 When the issuer is configured with `TRACE_COMMONS_ALLOWLIST_SOURCE`, the
 `POST /v1/trace-upload-claim` handler refuses any workload token that
 either omits `invite_code` or carries an invite code whose hash is not in
-the current allowlist snapshot. Refusals use four explicit error labels
-that operators can grep for in client error logs:
+the current allowlist snapshot. The same snapshot powers
+`POST /v1/onboard`, where an Ironclaw agent exchanges an invite code plus
+device public key for tenant-scoped onboarding metadata and a registered
+device key.
+
+Upload-claim refusals use four explicit error labels that operators can
+grep for in client error logs:
 
 | Label | HTTP | Meaning |
 |---|---|---|
@@ -24,6 +29,18 @@ that operators can grep for in client error logs:
 
 No raw invite codes or contributor identities appear in any log line,
 audit row, or admin response.
+
+Onboarding refusals use these public labels:
+
+| Label | HTTP | Meaning |
+|---|---|---|
+| `InviteMalformed` | 400 | Invite schema/version/format is invalid |
+| `DeviceKeyMalformed` | 400 | Device public key is not base64 Ed25519 public-key bytes |
+| `InviteNotValid` | 403 | Invite hash is not allowlisted, revoked, or out of uses |
+| `OnboardAllowlistNotConfigured` | 503 | Issuer has no allowlist source |
+| `OnboardRegistryNotConfigured` | 503 | Device-key registry DB is not enabled |
+| `OnboardTenantConfigMissing` | 503 | Issuer is missing the onboarding URL config returned to clients |
+| `OnboardAllowlistStale` | 503 | Cached snapshot is stale and the source has not reloaded successfully |
 
 ## Provisioning an invite code
 
@@ -62,7 +79,8 @@ trace-commons-upload-claim-issuer --hash-invite-code INV9K3RT5FBQ72JX
     {
       "subject_hash": "sha256:8b1a...",
       "tenant_id": "tenant-zaki-pilot",
-      "note_label": "closed-alpha-batch-1"
+      "note_label": "closed-alpha-batch-1",
+      "max_uses": 1
     }
   ]
 }
@@ -81,8 +99,13 @@ trace-commons-upload-claim-issuer --hash-invite-code INV9K3RT5FBQ72JX
   the existing workload-claim flow already resolves the minted tenant —
   but it's stored for future cross-checks and operator-side auditing of
   "who is allowed where".
-- `note_label`: operator-facing free text. Never returned to clients,
-  never logged.
+- `note_label`: optional pseudonymous/batch label. It is returned as
+  `contributor_label` from `/v1/onboard` and never appears in logs or
+  admin responses. Do not put a legal name, email, account id, Slack
+  handle, or any identifying reference here.
+- `max_uses`: positive integer. Defaults to `1` when omitted. The
+  workload-claim path treats this as metadata, while `/v1/onboard`
+  enforces it through the PostgreSQL `onboarding_invites` counter.
 
 The issuer re-reads the file every
 `TRACE_COMMONS_ALLOWLIST_REFRESH_INTERVAL_SECONDS` (default 60), so a
@@ -103,6 +126,23 @@ export TRACE_COMMONS_ALLOWLIST_REFRESH_INTERVAL_SECONDS=60
 export TRACE_COMMONS_ALLOWLIST_MAX_STALE_SECONDS=3600
 export TRACE_COMMONS_ISSUER_ADMIN_BIND=127.0.0.1:3918   # see "Admin endpoint"
 ```
+
+For agent-driven onboarding, also enable the device-key registry and
+return URLs:
+
+```bash
+export TRACE_COMMONS_ONBOARDING_DEVICE_KEY_REGISTRY_ENABLED=true
+export DATABASE_URL=postgres://app:<password>@127.0.0.1:5432/trace-commons
+export TRACE_COMMONS_ONBOARDING_INGEST_URL=https://ingest.tracecommons.ai
+export TRACE_COMMONS_ONBOARDING_COMMUNITY_URL=https://tracecommons.ai
+export TRACE_COMMONS_ONBOARDING_PROFILE_URL=https://tracecommons.ai/profile
+export TRACE_COMMONS_ONBOARDING_LEADERBOARD_URL=https://tracecommons.ai/leaderboard
+```
+
+`TRACE_COMMONS_ONBOARDING_DEVICE_KEY_REGISTRY_ENABLED=true` makes the
+issuer connect to PostgreSQL at startup, run migrations through the
+shared Trace Commons DB path, and fail closed if the registry is not
+available.
 
 The issuer warms the source eagerly during startup; a missing or
 malformed file aborts the process with
@@ -180,6 +220,83 @@ If step 3 returns 200, the allowlist source is not wired up — confirm
    60s) — no restart, no redeploy.
 5. Confirm `entries` in `/v1/admin/allowlist-status` ticked up by one.
 
+## Agent-driven onboarding smoke
+
+After the allowlist and registry env are live, Ironclaw can exchange the
+invite for a tenant/device registration:
+
+```bash
+curl -sS https://issuer.tracecommons.ai/v1/onboard \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "schema_version":"trace_commons.onboard_request.v1",
+    "invite_code":"INV9K3RT5FBQ72JX",
+    "device_public_key":"<base64-ed25519-public-key>",
+    "client_info":{"agent":"ironclaw","version":"<version>"}
+  }' | jq
+```
+
+Expected success shape:
+
+```json
+{
+  "schema_version": "trace_commons.onboard_response.v1",
+  "tenant_id": "tenant-zaki-pilot",
+  "ingest_url": "https://ingest.tracecommons.ai",
+  "issuer_url": "https://issuer.tracecommons.ai",
+  "audience": "trace-commons-ingest",
+  "device_key_id": "sha256:<64-hex>",
+  "contributor_label": "closed-alpha-batch-1",
+  "community_url": "https://tracecommons.ai",
+  "profile_url": "https://tracecommons.ai/profile",
+  "leaderboard_url": "https://tracecommons.ai/leaderboard"
+}
+```
+
+The response is safe for Ironclaw to store in its local contribution
+profile. It contains only tenant/config labels and hash-derived device
+identity. It does not return the raw invite code, bearer tokens, or
+operator identity.
+
+## Managing registered device keys
+
+Agent-driven onboarding stores one post-invite device key per Ironclaw
+agent in the PostgreSQL `device_keys` registry. The admin surface is
+tenant-scoped and RLS-enforced; list and revoke operations use the
+authenticated tenant from the operator token. The optional `--tenant`
+flag is a guardrail and must match that authenticated tenant.
+
+List active device keys:
+
+```bash
+trace-commons-tenant \
+  --endpoint https://ingest.tracecommons.ai \
+  device-keys list \
+  --tenant tenant-zaki-pilot
+```
+
+Include revoked keys:
+
+```bash
+trace-commons-tenant \
+  --endpoint https://ingest.tracecommons.ai \
+  device-keys list \
+  --tenant tenant-zaki-pilot \
+  --include-revoked
+```
+
+Revoke one device key:
+
+```bash
+trace-commons-tenant \
+  --endpoint https://ingest.tracecommons.ai \
+  device-keys revoke sha256:<64-hex-device-key-id>
+```
+
+The response surfaces `device_key_id`, `invite_subject_hash`,
+`client_info`, and timestamps. It does not return raw invite codes,
+bearer tokens, contributor identities, or trace content.
+
 ## Rollback
 
 To turn the gate off:
@@ -207,6 +324,10 @@ diagnose — clear refusal class, exactly the right thing to grep for.
   `PilotAllowlistNearSourceNotImplemented`. The on-chain allowlist
   source ships in a later slice once the closed-alpha operational story
   is in.
+- The workload-token `/v1/trace-upload-claim` path still treats file
+  invite codes as admission checks. Atomic `max_uses` enforcement is on
+  the agent-driven `/v1/onboard` path through PostgreSQL
+  `onboarding_invites`.
 - Admin auth is loopback-only by default. If you need to expose
   `/v1/admin/allowlist-status` over a tunnel or behind an internal
   bearer-gated reverse proxy, set

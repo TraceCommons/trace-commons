@@ -130,6 +130,7 @@ mod tests {
                 subject_hash: hash_invite_code(c),
                 tenant_id: "tenant-a".into(),
                 note_label: None,
+                max_uses: 1,
             })
             .collect();
         let file = AllowlistFile {

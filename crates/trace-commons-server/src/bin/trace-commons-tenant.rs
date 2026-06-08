@@ -1,8 +1,9 @@
 //! `trace-commons-tenant` — tenant-audience operator CLI.
 //!
-//! Eleven subcommands covering tenant-policy management, tenant access-grant
+//! Twelve subcommands covering tenant-policy management, tenant access-grant
 //! lifecycle, ranker training exports, audit-event listing, trace listing,
-//! and a local privacy-filter canary helper. All HTTP-backed subcommands
+//! device-key registry operations, and a local privacy-filter canary helper.
+//! All HTTP-backed subcommands
 //! share a single `--bearer-token-env` defaulting to
 //! `TRACE_COMMONS_TENANT_BEARER`. Two subcommands (`tenant-principal-ref`,
 //! `privacy-filter-canary`) do not hit the server: the first derives a
@@ -67,6 +68,8 @@ pub(crate) enum TenantSubcommand {
     TenantPolicySet(TenantPolicySetArgs),
     /// List DB-backed tenant access grants for hosted-agent permissioning.
     TenantAccessGrantsList(TenantAccessGrantsListArgs),
+    /// List or revoke registered onboarding device keys.
+    DeviceKeys(DeviceKeysArgs),
     /// Derive the stored principal_ref used by tenant access grants.
     TenantPrincipalRef(TenantPrincipalRefArgs),
     /// Create a DB-backed tenant access grant for an issuer-authorized principal.
@@ -156,6 +159,35 @@ pub(crate) struct TenantAccessGrantRevokeArgs {
     pub grant_id: Uuid,
     #[arg(long)]
     pub reason: String,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct DeviceKeysArgs {
+    #[command(subcommand)]
+    pub command: DeviceKeysSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum DeviceKeysSubcommand {
+    /// List registered device keys for the authenticated tenant.
+    List(DeviceKeysListArgs),
+    /// Revoke one registered device key.
+    Revoke(DeviceKeyRevokeArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct DeviceKeysListArgs {
+    #[arg(long)]
+    pub tenant: Option<String>,
+    #[arg(long)]
+    pub limit: Option<usize>,
+    #[arg(long)]
+    pub include_revoked: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct DeviceKeyRevokeArgs {
+    pub device_key_id: String,
 }
 
 #[derive(Debug, clap::Args)]
@@ -382,6 +414,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         TenantSubcommand::TenantAccessGrantsList(args) => {
             tenant_access_grants_list(&client, &endpoint, args, json).await
         }
+        TenantSubcommand::DeviceKeys(args) => device_keys(&client, &endpoint, args, json).await,
         TenantSubcommand::TenantAccessGrantCreate(args) => {
             tenant_access_grant_create(&client, &endpoint, args, json).await
         }
@@ -632,6 +665,95 @@ async fn tenant_access_grant_revoke(
         let mut out = stdout();
         writeln!(out, "Trace Commons tenant access grant revoked.")?;
         render_grant_fields(&mut out, &value)?;
+    }
+    Ok(())
+}
+
+async fn device_keys(
+    client: &Client,
+    endpoint: &str,
+    args: DeviceKeysArgs,
+    json: bool,
+) -> Result<()> {
+    match args.command {
+        DeviceKeysSubcommand::List(args) => device_keys_list(client, endpoint, args, json).await,
+        DeviceKeysSubcommand::Revoke(args) => device_key_revoke(client, endpoint, args, json).await,
+    }
+}
+
+async fn device_keys_list(
+    client: &Client,
+    endpoint: &str,
+    args: DeviceKeysListArgs,
+    json: bool,
+) -> Result<()> {
+    let path = "/v1/admin/device-keys";
+    let mut owned: Vec<(&str, String)> = Vec::new();
+    if let Some(tenant) = args.tenant {
+        let trimmed = tenant.trim();
+        if !trimmed.is_empty() {
+            owned.push(("tenant", trimmed.to_string()));
+        }
+    }
+    if let Some(limit) = args.limit {
+        owned.push(("limit", limit.to_string()));
+    }
+    if args.include_revoked {
+        owned.push(("include_revoked", "true".to_string()));
+    }
+    let query = borrow_query(&owned);
+    let value: Value = client
+        .call_json::<(), Value>(Method::GET, path, &query, None)
+        .await?;
+    if json {
+        emit_json(endpoint, "GET", path, &value)?;
+    } else {
+        render_items(
+            &mut stdout(),
+            "Trace Commons device keys",
+            &value,
+            &[
+                "device_key_id",
+                "tenant_id",
+                "invite_subject_hash",
+                "created_at",
+                "revoked_at",
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+async fn device_key_revoke(
+    client: &Client,
+    endpoint: &str,
+    args: DeviceKeyRevokeArgs,
+    json: bool,
+) -> Result<()> {
+    let device_key_id = args.device_key_id.trim();
+    if device_key_id.is_empty() {
+        anyhow::bail!("device_key_id must not be empty");
+    }
+    let path = format!("/v1/admin/device-keys/{device_key_id}/revoke");
+    let value: Value = client
+        .call_json::<(), Value>(Method::POST, &path, &[], None)
+        .await?;
+    if json {
+        emit_json(endpoint, "POST", &path, &value)?;
+    } else {
+        let mut out = stdout();
+        writeln!(out, "Trace Commons device key revoked.")?;
+        render_kv_fields(
+            &mut out,
+            &value,
+            &[
+                ("  tenant", "tenant_id"),
+                ("  device key id", "device_key_id"),
+                ("  invite subject hash", "invite_subject_hash"),
+                ("  created at", "created_at"),
+                ("  revoked at", "revoked_at"),
+            ],
+        )?;
     }
     Ok(())
 }

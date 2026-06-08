@@ -17,24 +17,35 @@ redacted envelope leaves.
 
 ## What you receive from the operator
 
-The operator hands you four things over a secure channel (1Password,
-Signal, etc. — not email or Slack DMs):
+The operator hands you an invite link over an operator-approved private
+channel. For the first internal pilot this may be a manual Slack DM or
+similar direct handoff; do not post it in a shared channel.
 
-1. **Invite code.** 16 chars, e.g. `FMJD93VFPROQ5I4I`. The issuer
-   hashes this with sha256 and checks against its allowlist; the raw
-   code never lands in the DB.
-2. **Workload JWT** — a short-lived EdDSA JWT (typically 1h) the
-   operator minted with `sign-workload-token.py`. Ironclaw bearers it
-   to `/v1/trace-upload-claim`; the issuer then mints a separate
-   upload claim that ingest accepts. When yours expires, ask for a
-   fresh one (or move to per-contributor signing keys; see [Token
-   rotation](#token-rotation)).
-3. **Tenant ID.** All pilot contributors currently share
-   `tenant-zaki-pilot`. Per-contributor tenants are deferred until the
-   cohort grows.
-4. **Endpoint URLs**:
-   - Ingest: `https://ingest.34-41-15-28.nip.io`
-   - Issuer: `https://issuer.34-41-15-28.nip.io`
+The link carries an invite code and the issuer URL. The invite code is
+16 chars, e.g. `FMJD93VFPROQ5I4I`. The issuer hashes this with sha256
+and checks against its allowlist; the raw code never lands in the DB.
+Ironclaw uses the invite once to register a local device public key
+through `POST /v1/onboard`.
+
+The onboarding response gives Ironclaw the rest of the pilot config:
+
+- Tenant ID, usually `tenant-zaki-pilot` for the first cohort.
+- Ingest: `https://ingest.tracecommons.ai`
+- Issuer: `https://issuer.tracecommons.ai`
+- Community profile: `https://tracecommons.ai/profile`
+- Public leaderboard: `https://tracecommons.ai/leaderboard`
+- Device key id: `sha256:<64-hex>`, derived from your local public key.
+
+The response is safe for Ironclaw to store in its local contribution
+profile and expose to the agent. It contains only tenant/config labels,
+public URLs, and hash-derived device identity.
+
+After onboarding, Ironclaw signs each upload-claim request with the
+local device key. The issuer verifies the `x-trace-device-key-id` and
+`x-trace-device-signature` headers before returning the short-lived
+Bearer upload claim used by ingest. Older pilot clients may still use a
+temporary workload JWT fallback; treat that JWT as a bearer secret and
+keep it in your shell environment only.
 
 ## Prerequisites
 
@@ -46,25 +57,36 @@ Signal, etc. — not email or Slack DMs):
 
 ## Configure Ironclaw
 
-Trace contribution is a local-first, opt-in feature. There's no TOML
-config block to edit; you configure it once with `ironclaw traces
-opt-in`, which persists a standing policy under
-`~/.ironclaw/trace_contributions/`. The only env var the runtime
-reads at submission time is the one holding your workload JWT.
+Trace contribution is a local-first, opt-in feature. There is no TOML
+config block to edit; Ironclaw writes a standing policy under
+`~/.ironclaw/trace_contributions/`.
 
-Export the workload JWT first:
+Preferred pilot flow:
+
+```sh
+ironclaw traces onboard '<invite-link-from-operator>'
+```
+
+The Ironclaw onboarding command should:
+
+1. Generate or load a local Ed25519 device key.
+2. POST the invite code, base64 public key, and client info to
+   `https://issuer.tracecommons.ai/v1/onboard`.
+3. Persist the returned tenant id, ingest URL, issuer URL, audience,
+   device key id, profile URL, and leaderboard URL.
+4. Enable the standing contribution policy for the chosen consent
+   scope, usually `debugging-evaluation`.
+
+If your Ironclaw build still predates the registered device-key flow,
+use the temporary workload-JWT fallback:
 
 ```sh
 export IRONCLAW_TRACE_WORKLOAD_TOKEN='<jwt-from-operator>'
-```
 
-Then opt in:
-
-```sh
 ironclaw traces opt-in \
-  --endpoint https://ingest.34-41-15-28.nip.io \
-  --upload-token-issuer-url https://issuer.34-41-15-28.nip.io \
-  --upload-token-issuer-allowed-hosts issuer.34-41-15-28.nip.io \
+  --endpoint https://ingest.tracecommons.ai \
+  --upload-token-issuer-url https://issuer.tracecommons.ai \
+  --upload-token-issuer-allowed-hosts issuer.tracecommons.ai \
   --upload-token-audience trace-commons-ingest \
   --upload-token-tenant-id tenant-zaki-pilot \
   --upload-token-workload-token-env IRONCLAW_TRACE_WORKLOAD_TOKEN \
@@ -74,12 +96,12 @@ ironclaw traces opt-in \
 
 Notes:
 - `--upload-token-issuer-allowed-hosts` is a hostname allowlist Ironclaw
-  enforces on the issuer URL — protects against misconfigured DNS.
-- `--upload-token-invite-code` is required because the pilot issuer runs
-  with `TRACE_COMMONS_ALLOWLIST_SOURCE` set.
+  enforces on the issuer URL. It protects against misconfigured DNS.
+- `--upload-token-invite-code` is required on the fallback path because
+  the pilot issuer runs with `TRACE_COMMONS_ALLOWLIST_SOURCE` set.
 - `--scope` controls which uses your envelopes consent to.
-  `debugging-evaluation` covers debugging + evaluation + aggregate
-  analytics (matches what the operator mints into your workload JWT).
+  `debugging-evaluation` covers debugging, evaluation, and aggregate
+  analytics.
 - Don't pass `--include-message-text` or `--include-tool-payloads`
   unless you've explicitly decided to share them — both stay off by
   default. The pilot accepts envelopes either way, but envelopes that
@@ -135,6 +157,50 @@ ironclaw traces list-submissions
 ironclaw traces credit
 ironclaw traces queue-status
 ```
+
+## Set your public pilot handle
+
+The leaderboard uses your local pseudonymous contributor ID as the stable
+subject, then lets you opt in to a display handle. After onboarding,
+Ironclaw should expose the profile URL returned by `/v1/onboard` and help
+you mint or copy a short-lived public-attribution token for profile
+management. If you open the profile page directly:
+
+1. Open `https://tracecommons.ai/profile`.
+2. Paste the public-attribution token generated by Ironclaw. This is a
+   short-lived Bearer upload claim scoped to profile management; do not
+   paste your device private key or workload JWT into the browser.
+3. Enter your chosen display handle and optional bio.
+4. Save the profile. Withdrawing the profile from the same page removes
+   the public handle after the next snapshot recompute.
+
+The browser profile page does not sign device-key requests. Ironclaw keeps
+the local device key on your machine and uses it to request the
+public-attribution token from the issuer. Older fallback builds may still
+ask for workload-JWT context; keep that JWT in your shell environment only.
+
+Do not use a legal name, email address, Slack handle, account id, or
+anything else that would defeat the pseudonymous leaderboard. During the
+pilot, the operator can manually revoke or rotate a handle if someone
+picks one they later regret.
+
+## What appears on the community site
+
+`https://tracecommons.ai/leaderboard` shows the rolling 7-day ranking for
+accepted traces. It starts empty and updates only after accepted
+submissions exist and the community snapshot is recomputed by the server.
+`https://tracecommons.ai/analytics` shows aggregate counts for the same
+window. `https://tracecommons.ai/brief` shows the current cohort prompt,
+milestone targets, and operator cadence for the week.
+
+If you are in the auto-accept lane, you should expect a loop like this:
+
+1. Submit redacted traces locally with Ironclaw.
+2. Flush the queue.
+3. Check `ironclaw traces credit` for pending credit.
+4. Register or update your display handle on the profile page.
+5. Check the brief for the next suggested workflow.
+6. Watch the leaderboard after the next snapshot refresh.
 
 ## Accepted vs. quarantined outcomes
 
@@ -208,7 +274,7 @@ You can revoke a trace contribution any time:
 
 ```sh
 ironclaw traces revoke <submission-id> \
-  --endpoint https://ingest.34-41-15-28.nip.io
+  --endpoint https://ingest.tracecommons.ai
 ```
 
 (Find the `submission-id` via `ironclaw traces list-submissions`.)
@@ -217,6 +283,10 @@ ironclaw traces revoke <submission-id> \
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
+| `400 InviteMalformed` from onboarding | Invite link is malformed or was copied with extra characters | Ask the operator to resend the invite link |
+| `400 DeviceKeyMalformed` from onboarding | Ironclaw generated or encoded an invalid device public key | Upgrade Ironclaw and retry onboarding |
+| `403 InviteNotValid` from onboarding | Invite hash is not allowlisted, revoked, or already consumed | Ask the operator to confirm the invite entry and `max_uses` |
+| `503 OnboardRegistryNotConfigured` from onboarding | Issuer was deployed without the device-key registry DB | Operator needs to enable `TRACE_COMMONS_ONBOARDING_DEVICE_KEY_REGISTRY_ENABLED=true` |
 | `401 missing bearer token` | Workload JWT expired | Refresh `IRONCLAW_TRACE_WORKLOAD_TOKEN` and rerun |
 | `403 invite code not allowed` from issuer | Allowlist hasn't picked up your code yet (60s refresh) | Wait 60s, retry; if persistent, ask operator to confirm the hash landed |
 | `403 consent scope ...` from issuer | The `--scope` you opted in with exceeds what the workload JWT permits | Re-run `opt-in` with a narrower `--scope`, or ask for a wider-scoped token |
@@ -233,15 +303,13 @@ both are sensitive.
 
 ## Token rotation
 
-Workload JWTs are typically issued for 1h. When yours is close to
-expiry, request a fresh one from the operator and re-export
-`IRONCLAW_TRACE_WORKLOAD_TOKEN` (no need to re-run `opt-in` — only
-the env value changes).
+The preferred onboarding path registers a local device key, so ordinary
+participants should not need recurring workload JWT rotation. If you are
+using the temporary fallback, workload JWTs are typically issued for 1h.
+When yours is close to expiry, request a fresh one from the operator and
+re-export `IRONCLAW_TRACE_WORKLOAD_TOKEN` (no need to re-run `opt-in` -
+only the env value changes).
 
-If the cohort grows beyond a handful of devs, the pilot will move
-from operator-mints-on-demand to per-contributor signing keys (each
-contributor's pubkey loaded into the issuer's allowed-workload-key
-set); your client would then sign its own JWTs from a private key
-you hold locally. That path requires a small issuer change (the
-issuer today loads a single `_WORKLOAD_PUBLIC_KEY_FILE`) and is
-tracked as a pilot follow-up.
+Registered device-key claim issuance is the default server path for the
+pilot. Ironclaw signs claim requests with the private key it generated
+locally during onboarding; the private key never leaves the machine.

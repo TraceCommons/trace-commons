@@ -1,0 +1,9 @@
+{
+  "scripts": {
+    "check": "node scripts/check-community-site.mjs",
+    "deploy:pages": "npm run check && wrangler pages deploy public --project-name trace-commons-community --branch main --commit-dirty=true",
+    "deploy:pages:preview": "npm run check && wrangler pages deploy public --project-name trace-commons-community",
+    "serve": "node scripts/serve-community-site.mjs"
+  },
+  "devDependencies": {}
+}

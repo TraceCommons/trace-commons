@@ -31,8 +31,13 @@ envelope contract and `docs/trace-commons-storage.md` for the storage contract.
 | `TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_WORKLOAD_ISSUER` | Required `iss` on the inbound workload JWT | no | unchecked |
 | `TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_WORKLOAD_AUDIENCE` | Required `aud` on the inbound workload JWT | no | unchecked |
 | `TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_REQUIRE_TENANT_ACCESS_GRANTS` | When truthy (`1`/`true`/`yes`/`on`), require an active contributor grant in the tenant-access-grant store | no | `false` |
-| `DATABASE_URL` | PostgreSQL URL for the tenant-access-grant store | yes when grants are required | — |
-| `DATABASE_POOL_SIZE` | Pool size for the grant store | no | `5` |
+| `TRACE_COMMONS_ONBOARDING_DEVICE_KEY_REGISTRY_ENABLED` | When truthy, enable `POST /v1/onboard` device-key registration against PostgreSQL | no | `false` |
+| `TRACE_COMMONS_ONBOARDING_INGEST_URL` | Ingest URL returned by successful onboarding responses | yes when onboarding registry is enabled | — |
+| `TRACE_COMMONS_ONBOARDING_COMMUNITY_URL` | Optional community URL returned by onboarding | no | — |
+| `TRACE_COMMONS_ONBOARDING_PROFILE_URL` | Optional contributor profile URL returned by onboarding | no | — |
+| `TRACE_COMMONS_ONBOARDING_LEADERBOARD_URL` | Optional leaderboard URL returned by onboarding | no | — |
+| `DATABASE_URL` | PostgreSQL URL for the tenant-access-grant store and onboarding device-key registry | yes when grants or onboarding registry are required | — |
+| `DATABASE_POOL_SIZE` | Pool size for the grant/registry store | no | `5` |
 | `TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_SHUTDOWN_GRACE_SECONDS` | Window allowed for in-flight requests to drain after SIGTERM / Ctrl-C | no | `30` |
 | `TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_REQUEST_TIMEOUT_SECONDS` | Per-request timeout | no | `10` |
 | `TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_MAX_REQUEST_BYTES` | Body-size limit on `POST /v1/trace-upload-claim` | no | `65536` |
@@ -48,7 +53,8 @@ malformed and never falls back to a less-restricted backend.
 | --- | --- | --- |
 | `GET` | `/health` | Returns `200 {"status":"ok","checks":{...}}` when the signing key signs cleanly and the workload public key parses; `503 {"status":"degraded","checks":{...}}` otherwise. Check names are stable labels; failure detail is hash-only. |
 | `GET` | `/.well-known/trace-commons-ed25519-keyset.json` | Returns the issuer's public keyset (`kid`, `public_key_pem`). Consumers cache this through their guarded-refresh path. |
-| `POST` | `/v1/trace-upload-claim` | Mints a Bearer upload claim for an authenticated workload. Body schema is `ironclaw.trace_upload_claim_request.v1`. |
+| `POST` | `/v1/trace-upload-claim` | Mints a Bearer upload claim for either an authenticated workload JWT or a registered device key. Registered devices send `x-trace-device-key-id: sha256:<64-hex>` and `x-trace-device-signature: <base64-ed25519-signature>` over the exact JSON request body. Body schema is `ironclaw.trace_upload_claim_request.v1`. |
+| `POST` | `/v1/onboard` | Exchanges an invite code plus base64 Ed25519 device public key for tenant-scoped onboarding metadata and a registered device key. Body schema is `trace_commons.onboard_request.v1`; response schema is `trace_commons.onboard_response.v1`. |
 
 ## CLI subcommands
 

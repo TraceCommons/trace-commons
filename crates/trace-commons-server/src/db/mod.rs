@@ -171,6 +171,54 @@ pub trait Database: TraceCorpusStore + Send + Sync {
             "latest_leaderboard_snapshot not implemented".to_string(),
         ))
     }
+
+    async fn insert_device_key(
+        &self,
+        _device_key: DeviceKeyWrite,
+    ) -> Result<DeviceKeyRecord, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "insert_device_key not implemented".to_string(),
+        ))
+    }
+
+    async fn get_device_key(
+        &self,
+        _tenant_id: &str,
+        _device_key_id: &str,
+    ) -> Result<Option<DeviceKeyRecord>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "get_device_key not implemented".to_string(),
+        ))
+    }
+
+    async fn list_device_keys(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<Vec<DeviceKeyRecord>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "list_device_keys not implemented".to_string(),
+        ))
+    }
+
+    async fn revoke_device_key(
+        &self,
+        _tenant_id: &str,
+        _device_key_id: &str,
+    ) -> Result<Option<DeviceKeyRecord>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "revoke_device_key not implemented".to_string(),
+        ))
+    }
+
+    async fn onboard_device_key(
+        &self,
+        _device_key: DeviceKeyWrite,
+        _max_uses: i32,
+    ) -> Result<OnboardDeviceKeyRecord, OnboardDeviceKeyError> {
+        Err(OnboardDeviceKeyError::Database(DatabaseError::Pool(
+            "onboard_device_key not implemented".to_string(),
+        )))
+    }
 }
 
 /// Per-contributor row returned by [`Database::compute_leaderboard_inputs`].
@@ -250,6 +298,46 @@ pub struct ContributorProfileRow {
     pub public_since: chrono::DateTime<chrono::Utc>,
     pub last_updated_at: chrono::DateTime<chrono::Utc>,
     pub update_count: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeviceKeyWrite {
+    pub device_key_id: String,
+    pub tenant_id: String,
+    pub public_key: String,
+    pub invite_subject_hash: String,
+    pub client_info: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceKeyRecord {
+    pub device_key_id: String,
+    pub tenant_id: String,
+    pub public_key: String,
+    pub invite_subject_hash: String,
+    pub client_info: serde_json::Value,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnboardDeviceKeyStatus {
+    Registered,
+    Idempotent,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnboardDeviceKeyRecord {
+    pub device_key: DeviceKeyRecord,
+    pub status: OnboardDeviceKeyStatus,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OnboardDeviceKeyError {
+    #[error("invite not valid")]
+    InviteNotValid,
+    #[error("database error: {0}")]
+    Database(#[from] DatabaseError),
 }
 
 pub async fn connect_from_config(

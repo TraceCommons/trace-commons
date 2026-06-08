@@ -11,6 +11,8 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::Engine;
+use bytes::Bytes;
 use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::errors::ErrorKind as JwtErrorKind;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
@@ -27,6 +29,10 @@ use crate::trace_corpus_storage::{
 use crate::trace_upload_claim_allowlist::{
     AllowlistError, AllowlistSource, AllowlistSourceSpec, DenialCounter, FileAllowlistSource,
     hash_invite_code,
+};
+use trace_commons_protocol::onboarding::{
+    TRACE_ONBOARD_REQUEST_SCHEMA_VERSION, TraceOnboardErrorCode, TraceOnboardRequest,
+    TraceOnboardResponse, device_key_id_from_public_key_bytes,
 };
 use trace_commons_protocol::trace_contribution::{ConsentScope, TraceAllowedUse};
 
@@ -54,6 +60,16 @@ pub const TRACE_COMMONS_ALLOWLIST_MAX_STALE_SECONDS_ENV: &str =
 pub const TRACE_COMMONS_ISSUER_ADMIN_BIND_ENV: &str = "TRACE_COMMONS_ISSUER_ADMIN_BIND";
 pub const TRACE_COMMONS_ISSUER_ADMIN_BIND_ALLOW_PUBLIC_ENV: &str =
     "TRACE_COMMONS_ISSUER_ADMIN_BIND_ALLOW_PUBLIC";
+pub const TRACE_COMMONS_ONBOARDING_DEVICE_KEY_REGISTRY_ENABLED_ENV: &str =
+    "TRACE_COMMONS_ONBOARDING_DEVICE_KEY_REGISTRY_ENABLED";
+pub const TRACE_COMMONS_ONBOARDING_INGEST_URL_ENV: &str = "TRACE_COMMONS_ONBOARDING_INGEST_URL";
+pub const TRACE_COMMONS_ONBOARDING_COMMUNITY_URL_ENV: &str =
+    "TRACE_COMMONS_ONBOARDING_COMMUNITY_URL";
+pub const TRACE_COMMONS_ONBOARDING_PROFILE_URL_ENV: &str = "TRACE_COMMONS_ONBOARDING_PROFILE_URL";
+pub const TRACE_COMMONS_ONBOARDING_LEADERBOARD_URL_ENV: &str =
+    "TRACE_COMMONS_ONBOARDING_LEADERBOARD_URL";
+const TRACE_DEVICE_KEY_ID_HEADER: &str = "x-trace-device-key-id";
+const TRACE_DEVICE_SIGNATURE_HEADER: &str = "x-trace-device-signature";
 
 #[derive(Clone)]
 pub struct TraceUploadClaimIssuerConfig {
@@ -78,6 +94,11 @@ pub struct TraceUploadClaimIssuerConfig {
     pub allowlist_source: Option<AllowlistSourceSpec>,
     pub allowlist_refresh_interval_seconds: u64,
     pub allowlist_max_stale_seconds: u64,
+    pub onboarding_device_key_db: Option<Arc<dyn Database>>,
+    pub onboarding_ingest_url: Option<String>,
+    pub onboarding_community_url: Option<String>,
+    pub onboarding_profile_url: Option<String>,
+    pub onboarding_leaderboard_url: Option<String>,
     /// Optional second-bind for the operator admin endpoint
     /// (`/v1/admin/allowlist-status`). `None` = admin endpoint disabled.
     /// Must be a loopback address unless
@@ -118,6 +139,20 @@ impl fmt::Debug for TraceUploadClaimIssuerConfig {
             .field(
                 "allowlist_max_stale_seconds",
                 &self.allowlist_max_stale_seconds,
+            )
+            .field(
+                "onboarding_device_key_db",
+                &self
+                    .onboarding_device_key_db
+                    .as_ref()
+                    .map(|_| "<configured>"),
+            )
+            .field("onboarding_ingest_url", &self.onboarding_ingest_url)
+            .field("onboarding_community_url", &self.onboarding_community_url)
+            .field("onboarding_profile_url", &self.onboarding_profile_url)
+            .field(
+                "onboarding_leaderboard_url",
+                &self.onboarding_leaderboard_url,
             )
             .field("admin_bind", &self.admin_bind)
             .finish()
@@ -225,6 +260,15 @@ impl TraceUploadClaimIssuerConfig {
             allowlist_source,
             allowlist_refresh_interval_seconds,
             allowlist_max_stale_seconds,
+            onboarding_device_key_db: None,
+            onboarding_ingest_url: optional_env(TRACE_COMMONS_ONBOARDING_INGEST_URL_ENV)?
+                .and_then(|value| trim_optional(Some(value))),
+            onboarding_community_url: optional_env(TRACE_COMMONS_ONBOARDING_COMMUNITY_URL_ENV)?
+                .and_then(|value| trim_optional(Some(value))),
+            onboarding_profile_url: optional_env(TRACE_COMMONS_ONBOARDING_PROFILE_URL_ENV)?
+                .and_then(|value| trim_optional(Some(value))),
+            onboarding_leaderboard_url: optional_env(TRACE_COMMONS_ONBOARDING_LEADERBOARD_URL_ENV)?
+                .and_then(|value| trim_optional(Some(value))),
             admin_bind,
         })
     }
@@ -237,6 +281,12 @@ impl TraceUploadClaimIssuerConfig {
         let signing_private_key_pem =
             validate_eddsa_private_key_pem(&self.signing_private_key_pem)?;
         let signing_public_key_pem = validate_eddsa_public_key_pem(&self.signing_public_key_pem)?;
+        if self.onboarding_device_key_db.is_some() {
+            anyhow::ensure!(
+                self.onboarding_ingest_url.is_some(),
+                "{TRACE_COMMONS_ONBOARDING_INGEST_URL_ENV} is required when {TRACE_COMMONS_ONBOARDING_DEVICE_KEY_REGISTRY_ENABLED_ENV}=true"
+            );
+        }
         let workload_public_key_pem = validate_eddsa_public_key_pem(&self.workload_public_key_pem)?;
         let signing_key = EncodingKey::from_ed_pem(signing_private_key_pem.as_bytes())
             .context("invalid EdDSA signing private key")?;
@@ -312,6 +362,11 @@ impl TraceUploadClaimIssuerConfig {
             require_tenant_access_grants: self.require_tenant_access_grants,
             allowlist_source,
             allowlist_max_stale: StdDuration::from_secs(self.allowlist_max_stale_seconds),
+            onboarding_device_key_db: self.onboarding_device_key_db.clone(),
+            onboarding_ingest_url: self.onboarding_ingest_url.clone(),
+            onboarding_community_url: self.onboarding_community_url.clone(),
+            onboarding_profile_url: self.onboarding_profile_url.clone(),
+            onboarding_leaderboard_url: self.onboarding_leaderboard_url.clone(),
             denial_counter,
         }))
     }
@@ -329,9 +384,22 @@ pub async fn configure_tenant_access_grants_from_env(
     Ok(())
 }
 
+pub async fn configure_onboarding_device_key_registry_from_env(
+    config: &mut TraceUploadClaimIssuerConfig,
+) -> anyhow::Result<()> {
+    if !env_truthy(TRACE_COMMONS_ONBOARDING_DEVICE_KEY_REGISTRY_ENABLED_ENV) {
+        return Ok(());
+    }
+    let db = trace_upload_claim_issuer_db_from_env()
+        .await
+        .context("failed to configure Trace onboarding device-key registry DB")?;
+    config.onboarding_device_key_db = Some(db);
+    Ok(())
+}
+
 async fn trace_upload_claim_issuer_db_from_env() -> anyhow::Result<Arc<dyn Database>> {
     let url = std::env::var("DATABASE_URL")
-        .context("Trace upload-claim issuer tenant access grants require DATABASE_URL")?;
+        .context("Trace upload-claim issuer DB-backed features require DATABASE_URL")?;
     let pool_size = std::env::var("DATABASE_POOL_SIZE")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -359,6 +427,11 @@ struct TraceUploadClaimIssuerState {
     require_tenant_access_grants: bool,
     allowlist_source: Option<Arc<dyn AllowlistSource>>,
     allowlist_max_stale: StdDuration,
+    onboarding_device_key_db: Option<Arc<dyn Database>>,
+    onboarding_ingest_url: Option<String>,
+    onboarding_community_url: Option<String>,
+    onboarding_profile_url: Option<String>,
+    onboarding_leaderboard_url: Option<String>,
     denial_counter: Arc<DenialCounter>,
 }
 
@@ -484,6 +557,20 @@ struct WorkloadClaims {
     invite_code: Option<String>,
 }
 
+struct DeviceClaimAuth {
+    device_key_id: String,
+    signature: Vec<u8>,
+}
+
+struct AuthorizedUploadClaimActor {
+    actor: String,
+    tenant_id: String,
+    grant_principal_ref: String,
+    allowed_consent_scopes: Vec<ConsentScope>,
+    allowed_uses: Vec<TraceAllowedUse>,
+    policy_label: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct UploadClaimClaims {
     iss: String,
@@ -535,6 +622,48 @@ impl IssuerError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: "failed to issue upload claim",
         }
+    }
+
+    fn onboard_error(status: StatusCode, code: TraceOnboardErrorCode) -> Self {
+        Self {
+            status,
+            message: code.as_wire_str(),
+        }
+    }
+
+    fn onboard_allowlist_not_configured() -> Self {
+        Self::onboard_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            TraceOnboardErrorCode::OnboardAllowlistNotConfigured,
+        )
+    }
+
+    fn onboard_registry_not_configured() -> Self {
+        Self::onboard_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            TraceOnboardErrorCode::OnboardRegistryNotConfigured,
+        )
+    }
+
+    fn device_key_registry_not_configured() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "device key registry is not configured",
+        }
+    }
+
+    fn onboard_tenant_config_missing() -> Self {
+        Self::onboard_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            TraceOnboardErrorCode::OnboardTenantConfigMissing,
+        )
+    }
+
+    fn onboard_allowlist_stale() -> Self {
+        Self::onboard_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            TraceOnboardErrorCode::OnboardAllowlistStale,
+        )
     }
 
     /// Pilot allowlist refusal: invite code was valid syntactically but is
@@ -596,6 +725,7 @@ pub fn trace_upload_claim_issuer_router(
             get(keyset_handler),
         )
         .route("/v1/trace-upload-claim", post(issue_claim_handler))
+        .route("/v1/onboard", post(onboard_handler))
         .layer(DefaultBodyLimit::max(max_request_bytes))
         .layer(axum::middleware::from_fn(move |req, next| {
             request_timeout_middleware(req, next, request_timeout)
@@ -675,6 +805,7 @@ fn router_from_state(
             get(keyset_handler),
         )
         .route("/v1/trace-upload-claim", post(issue_claim_handler))
+        .route("/v1/onboard", post(onboard_handler))
         .layer(DefaultBodyLimit::max(max_request_bytes))
         .layer(axum::middleware::from_fn(move |req, next| {
             request_timeout_middleware(req, next, request_timeout)
@@ -1075,10 +1206,25 @@ async fn keyset_handler(
 async fn issue_claim_handler(
     State(state): State<Arc<TraceUploadClaimIssuerState>>,
     headers: HeaderMap,
-    Json(request): Json<TraceUploadClaimRequest>,
+    body: Bytes,
 ) -> Result<Json<TraceUploadClaimResponse>, IssuerError> {
-    let workload = state.authenticate_workload(&headers)?;
-    let response = state.issue_claim(&workload, request).await?;
+    let request = parse_upload_claim_request(&body)?;
+    let response = if let Some(device_auth) = device_claim_auth_from_headers(&headers)? {
+        state
+            .issue_claim_for_device_key(device_auth, &body, request)
+            .await?
+    } else {
+        let workload = state.authenticate_workload(&headers)?;
+        state.issue_claim(&workload, request).await?
+    };
+    Ok(Json(response))
+}
+
+async fn onboard_handler(
+    State(state): State<Arc<TraceUploadClaimIssuerState>>,
+    Json(request): Json<TraceOnboardRequest>,
+) -> Result<Json<TraceOnboardResponse>, IssuerError> {
+    let response = state.onboard(request).await?;
     Ok(Json(response))
 }
 
@@ -1156,27 +1302,7 @@ impl TraceUploadClaimIssuerState {
         // Allowlist gate first — refuses before any further work so denied
         // requests don't pay for schema/window/grant lookups.
         let policy_label = self.enforce_pilot_allowlist(workload)?;
-        if request.schema_version != TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION {
-            return Err(IssuerError::bad_request(
-                "unsupported request schema_version",
-            ));
-        }
-        let now = Utc::now();
-        if request.requested_at > now + Duration::minutes(5)
-            || request.requested_at < now - Duration::minutes(15)
-        {
-            return Err(IssuerError::bad_request(
-                "request requested_at is outside the accepted window",
-            ));
-        }
-        if let Some(audience) = request.audience.as_deref().map(str::trim)
-            && !audience.is_empty()
-            && audience != self.audience
-        {
-            return Err(IssuerError::bad_request(
-                "unsupported upload claim audience",
-            ));
-        }
+        let now = self.validate_upload_claim_request(&request)?;
         let tenant_id = normalized_required(
             request
                 .tenant_id
@@ -1211,12 +1337,111 @@ impl TraceUploadClaimIssuerState {
             "workload subject is required",
         )?;
         let grant_principal_ref = principal_storage_ref(&format!("signed:{tenant_id}:{actor}"));
+        self.issue_claim_for_authorized_actor(
+            AuthorizedUploadClaimActor {
+                actor,
+                tenant_id,
+                grant_principal_ref,
+                allowed_consent_scopes: workload.allowed_consent_scopes.clone(),
+                allowed_uses: workload.allowed_uses.clone(),
+                policy_label,
+            },
+            request,
+            now,
+        )
+        .await
+    }
+
+    async fn issue_claim_for_device_key(
+        &self,
+        auth: DeviceClaimAuth,
+        body: &Bytes,
+        request: TraceUploadClaimRequest,
+    ) -> Result<TraceUploadClaimResponse, IssuerError> {
+        let now = self.validate_upload_claim_request(&request)?;
+        let tenant_id = normalized_required(request.tenant_id.as_deref(), "tenant_id is required")?;
+        let db = self
+            .onboarding_device_key_db
+            .as_ref()
+            .ok_or_else(IssuerError::device_key_registry_not_configured)?;
+        let device_key = db
+            .get_device_key(&tenant_id, &auth.device_key_id)
+            .await
+            .map_err(|_| IssuerError::internal())?
+            .ok_or_else(|| IssuerError::forbidden("device key not registered"))?;
+        if device_key.revoked_at.is_some() {
+            return Err(IssuerError::forbidden("device key revoked"));
+        }
+        let public_key_bytes =
+            device_public_key_bytes(&device_key.public_key, &auth.device_key_id)?;
+        verify_device_claim_signature(&public_key_bytes, body, &auth.signature)?;
+        let actor = auth.device_key_id;
+        let grant_principal_ref = principal_storage_ref(&format!("device:{tenant_id}:{actor}"));
+        self.issue_claim_for_authorized_actor(
+            AuthorizedUploadClaimActor {
+                actor,
+                tenant_id,
+                grant_principal_ref,
+                allowed_consent_scopes: device_key_allowed_consent_scopes(),
+                allowed_uses: device_key_allowed_uses(),
+                policy_label: None,
+            },
+            request,
+            now,
+        )
+        .await
+    }
+
+    fn validate_upload_claim_request(
+        &self,
+        request: &TraceUploadClaimRequest,
+    ) -> Result<DateTime<Utc>, IssuerError> {
+        if request.schema_version != TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION {
+            return Err(IssuerError::bad_request(
+                "unsupported request schema_version",
+            ));
+        }
+        let now = Utc::now();
+        if request.requested_at > now + Duration::minutes(5)
+            || request.requested_at < now - Duration::minutes(15)
+        {
+            return Err(IssuerError::bad_request(
+                "request requested_at is outside the accepted window",
+            ));
+        }
+        if let Some(audience) = request.audience.as_deref().map(str::trim)
+            && !audience.is_empty()
+            && audience != self.audience
+        {
+            return Err(IssuerError::bad_request(
+                "unsupported upload claim audience",
+            ));
+        }
+        Ok(now)
+    }
+
+    async fn issue_claim_for_authorized_actor(
+        &self,
+        actor: AuthorizedUploadClaimActor,
+        request: TraceUploadClaimRequest,
+        now: DateTime<Utc>,
+    ) -> Result<TraceUploadClaimResponse, IssuerError> {
         let mut consent_scopes = request.consent_scopes;
         let mut allowed_uses = request.allowed_uses;
+        enforce_subset(
+            &consent_scopes,
+            &actor.allowed_consent_scopes,
+            "requested consent scopes exceed workload allowance",
+        )?;
+        enforce_subset(
+            &allowed_uses,
+            &actor.allowed_uses,
+            "requested allowed uses exceed workload allowance",
+        )?;
         self.enforce_tenant_access_grants(
-            &tenant_id,
-            &grant_principal_ref,
-            &actor,
+            &actor.tenant_id,
+            &actor.grant_principal_ref,
+            &actor.actor,
             &mut consent_scopes,
             &mut allowed_uses,
             now,
@@ -1228,9 +1453,9 @@ impl TraceUploadClaimIssuerState {
         let claims = UploadClaimClaims {
             iss: self.issuer.clone(),
             aud: self.audience.clone(),
-            sub: actor.clone(),
-            principal_ref: actor,
-            tenant_id,
+            sub: actor.actor.clone(),
+            principal_ref: actor.actor,
+            tenant_id: actor.tenant_id,
             role: "contributor",
             iat: now.timestamp(),
             exp: expires_at.timestamp(),
@@ -1239,7 +1464,7 @@ impl TraceUploadClaimIssuerState {
             submission_id: request.submission_id,
             allowed_consent_scopes: consent_scopes,
             allowed_uses,
-            policy_label,
+            policy_label: actor.policy_label,
         };
         let mut header = Header::new(Algorithm::EdDSA);
         header.kid = Some(self.signing_kid.clone());
@@ -1251,6 +1476,122 @@ impl TraceUploadClaimIssuerState {
             expires_at,
             expires_in: self.max_ttl_seconds,
         })
+    }
+
+    async fn onboard(
+        &self,
+        request: TraceOnboardRequest,
+    ) -> Result<TraceOnboardResponse, IssuerError> {
+        if request.schema_version != TRACE_ONBOARD_REQUEST_SCHEMA_VERSION {
+            return Err(IssuerError::onboard_error(
+                StatusCode::BAD_REQUEST,
+                TraceOnboardErrorCode::InviteMalformed,
+            ));
+        }
+        let invite_code = request.invite_code.trim();
+        if !valid_onboard_invite_code(invite_code) {
+            return Err(IssuerError::onboard_error(
+                StatusCode::BAD_REQUEST,
+                TraceOnboardErrorCode::InviteMalformed,
+            ));
+        }
+        let public_key_bytes = base64::engine::general_purpose::STANDARD
+            .decode(request.device_public_key.trim())
+            .map_err(|_| {
+                IssuerError::onboard_error(
+                    StatusCode::BAD_REQUEST,
+                    TraceOnboardErrorCode::DeviceKeyMalformed,
+                )
+            })?;
+        if public_key_bytes.len() != 32 {
+            return Err(IssuerError::onboard_error(
+                StatusCode::BAD_REQUEST,
+                TraceOnboardErrorCode::DeviceKeyMalformed,
+            ));
+        }
+
+        let subject_hash = hash_invite_code(invite_code);
+        let snapshot = self.onboard_allowlist_snapshot()?;
+        let Some(entry) = snapshot.entry(&subject_hash) else {
+            self.denial_counter.record();
+            return Err(IssuerError::onboard_error(
+                StatusCode::FORBIDDEN,
+                TraceOnboardErrorCode::InviteNotValid,
+            ));
+        };
+        let tenant_id = entry.tenant_id.clone();
+        let contributor_label = entry.contributor_label.clone();
+        let max_uses = i32::try_from(entry.max_uses).map_err(|_| {
+            IssuerError::onboard_error(
+                StatusCode::BAD_REQUEST,
+                TraceOnboardErrorCode::InviteMalformed,
+            )
+        })?;
+        let db = self
+            .onboarding_device_key_db
+            .as_ref()
+            .ok_or_else(IssuerError::onboard_registry_not_configured)?;
+        let ingest_url = self
+            .onboarding_ingest_url
+            .clone()
+            .ok_or_else(IssuerError::onboard_tenant_config_missing)?;
+        let device_key_id = device_key_id_from_public_key_bytes(&public_key_bytes);
+        let client_info = serde_json::to_value(&request.client_info).map_err(|_| {
+            IssuerError::onboard_error(
+                StatusCode::BAD_REQUEST,
+                TraceOnboardErrorCode::DeviceKeyMalformed,
+            )
+        })?;
+        let onboarded = db
+            .onboard_device_key(
+                crate::db::DeviceKeyWrite {
+                    device_key_id: device_key_id.clone(),
+                    tenant_id: tenant_id.clone(),
+                    public_key: request.device_public_key.trim().to_string(),
+                    invite_subject_hash: subject_hash,
+                    client_info,
+                },
+                max_uses,
+            )
+            .await
+            .map_err(|error| match error {
+                crate::db::OnboardDeviceKeyError::InviteNotValid => IssuerError::onboard_error(
+                    StatusCode::FORBIDDEN,
+                    TraceOnboardErrorCode::InviteNotValid,
+                ),
+                crate::db::OnboardDeviceKeyError::Database(_) => IssuerError::internal(),
+            })?;
+
+        Ok(TraceOnboardResponse {
+            schema_version:
+                trace_commons_protocol::onboarding::TRACE_ONBOARD_RESPONSE_SCHEMA_VERSION
+                    .to_string(),
+            tenant_id: onboarded.device_key.tenant_id,
+            ingest_url,
+            issuer_url: self.issuer.clone(),
+            audience: self.audience.clone(),
+            device_key_id,
+            contributor_label,
+            community_url: self.onboarding_community_url.clone(),
+            profile_url: self.onboarding_profile_url.clone(),
+            leaderboard_url: self.onboarding_leaderboard_url.clone(),
+        })
+    }
+
+    fn onboard_allowlist_snapshot(
+        &self,
+    ) -> Result<crate::trace_upload_claim_allowlist::AllowlistSnapshot, IssuerError> {
+        let Some(source) = self.allowlist_source.as_ref() else {
+            return Err(IssuerError::onboard_allowlist_not_configured());
+        };
+        let snapshot = source
+            .snapshot()
+            .map_err(|_| IssuerError::onboard_allowlist_stale())?;
+        let snapshot_age = snapshot.loaded_at.elapsed();
+        if snapshot_age > self.allowlist_max_stale {
+            return Err(IssuerError::onboard_allowlist_stale());
+        }
+        Ok(snapshot)
     }
 
     /// Apply the pilot allowlist gate. Returns `None` when no allowlist is
@@ -1373,6 +1714,13 @@ fn audience_claim_contains(audience: Option<&serde_json::Value>, expected: &str)
     }
 }
 
+fn valid_onboard_invite_code(invite_code: &str) -> bool {
+    invite_code.len() == 16
+        && invite_code
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+}
+
 fn bearer_token(headers: &HeaderMap) -> Result<&str, IssuerError> {
     let value = headers
         .get(header::AUTHORIZATION)
@@ -1384,6 +1732,124 @@ fn bearer_token(headers: &HeaderMap) -> Result<&str, IssuerError> {
         .map(str::trim)
         .filter(|token| !token.is_empty())
         .ok_or_else(|| IssuerError::forbidden("invalid workload token"))
+}
+
+fn parse_upload_claim_request(body: &Bytes) -> Result<TraceUploadClaimRequest, IssuerError> {
+    serde_json::from_slice(body)
+        .map_err(|_| IssuerError::bad_request("invalid upload claim request"))
+}
+
+fn device_claim_auth_from_headers(
+    headers: &HeaderMap,
+) -> Result<Option<DeviceClaimAuth>, IssuerError> {
+    let device_key_id =
+        trimmed_header_value(headers, TRACE_DEVICE_KEY_ID_HEADER, "invalid device key id")?;
+    let signature = trimmed_header_value(
+        headers,
+        TRACE_DEVICE_SIGNATURE_HEADER,
+        "invalid device key signature",
+    )?;
+    match (device_key_id, signature) {
+        (None, None) => Ok(None),
+        (Some(_), None) | (None, Some(_)) => Err(IssuerError::bad_request(
+            "device key auth requires id and signature",
+        )),
+        (Some(device_key_id), Some(signature)) => {
+            if !valid_device_key_id(&device_key_id) {
+                return Err(IssuerError::bad_request("invalid device key id"));
+            }
+            let signature = base64::engine::general_purpose::STANDARD
+                .decode(signature)
+                .map_err(|_| IssuerError::bad_request("invalid device key signature"))?;
+            if signature.len() != 64 {
+                return Err(IssuerError::bad_request("invalid device key signature"));
+            }
+            Ok(Some(DeviceClaimAuth {
+                device_key_id,
+                signature,
+            }))
+        }
+    }
+}
+
+fn trimmed_header_value(
+    headers: &HeaderMap,
+    name: &'static str,
+    error: &'static str,
+) -> Result<Option<String>, IssuerError> {
+    headers
+        .get(name)
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::trim)
+                .map(str::to_string)
+                .map_err(|_| IssuerError::bad_request(error))
+        })
+        .transpose()
+        .map(|value| value.filter(|value| !value.is_empty()))
+}
+
+fn valid_device_key_id(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64 && digest.chars().all(|ch| matches!(ch, '0'..='9' | 'a'..='f'))
+    })
+}
+
+fn device_key_allowed_consent_scopes() -> Vec<ConsentScope> {
+    vec![
+        ConsentScope::DebuggingEvaluation,
+        ConsentScope::PublicAttribution,
+    ]
+}
+
+fn device_key_allowed_uses() -> Vec<TraceAllowedUse> {
+    vec![
+        TraceAllowedUse::Debugging,
+        TraceAllowedUse::Evaluation,
+        TraceAllowedUse::AggregateAnalytics,
+    ]
+}
+
+fn device_public_key_bytes(
+    public_key: &str,
+    expected_device_key_id: &str,
+) -> Result<Vec<u8>, IssuerError> {
+    let public_key_bytes = base64::engine::general_purpose::STANDARD
+        .decode(public_key.trim())
+        .map_err(|_| {
+            tracing::warn!(
+                device_key_id = %expected_device_key_id,
+                "stored device public key is malformed"
+            );
+            IssuerError::internal()
+        })?;
+    if public_key_bytes.len() != 32 {
+        tracing::warn!(
+            device_key_id = %expected_device_key_id,
+            "stored device public key has invalid length"
+        );
+        return Err(IssuerError::internal());
+    }
+    let actual_device_key_id = device_key_id_from_public_key_bytes(&public_key_bytes);
+    if actual_device_key_id != expected_device_key_id {
+        tracing::warn!(
+            device_key_id = %expected_device_key_id,
+            "stored device public key does not match device key id"
+        );
+        return Err(IssuerError::internal());
+    }
+    Ok(public_key_bytes)
+}
+
+fn verify_device_claim_signature(
+    public_key_bytes: &[u8],
+    body: &[u8],
+    signature: &[u8],
+) -> Result<(), IssuerError> {
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public_key_bytes)
+        .verify(body, signature)
+        .map_err(|_| IssuerError::forbidden("invalid device key signature"))
 }
 
 fn enforce_subset<T: Ord>(
@@ -1617,6 +2083,7 @@ mod tests {
     use crate::trace_corpus_storage::{
         TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
     };
+    use trace_commons_protocol::onboarding::TRACE_ONBOARD_REQUEST_SCHEMA_VERSION;
     use trace_commons_protocol::trace_contribution::{ConsentScope, TraceAllowedUse};
 
     const TEST_EDDSA_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIAGfN68ko7YyCGJMb3lHVwTn5aiUtbIsAclIx/lX0p2R\n-----END PRIVATE KEY-----\n";
@@ -1644,6 +2111,11 @@ mod tests {
             allowlist_source: None,
             allowlist_refresh_interval_seconds: DEFAULT_ALLOWLIST_REFRESH_INTERVAL_SECONDS,
             allowlist_max_stale_seconds: DEFAULT_ALLOWLIST_MAX_STALE_SECONDS,
+            onboarding_device_key_db: None,
+            onboarding_ingest_url: Some("https://ingest.tracecommons.ai".to_string()),
+            onboarding_community_url: Some("https://tracecommons.ai".to_string()),
+            onboarding_profile_url: Some("https://tracecommons.ai/profile".to_string()),
+            onboarding_leaderboard_url: Some("https://tracecommons.ai/leaderboard".to_string()),
             admin_bind: None,
         }
     }
@@ -1697,6 +2169,70 @@ mod tests {
                     .uri("/v1/trace-upload-claim")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(body.to_string()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("body reads");
+        let json = serde_json::from_slice(&body).expect("json response");
+        (status, json)
+    }
+
+    async fn post_device_claim(
+        config: TraceUploadClaimIssuerConfig,
+        device_key_id: &str,
+        signature: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let router = trace_upload_claim_issuer_router(config).expect("router builds");
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/trace-upload-claim")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(TRACE_DEVICE_KEY_ID_HEADER, device_key_id)
+                    .header(TRACE_DEVICE_SIGNATURE_HEADER, signature)
+                    .body(Body::from(body.to_string()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("body reads");
+        let json = serde_json::from_slice(&body).expect("json response");
+        (status, json)
+    }
+
+    fn onboard_request(invite_code: &str) -> serde_json::Value {
+        json!({
+            "schema_version": TRACE_ONBOARD_REQUEST_SCHEMA_VERSION,
+            "invite_code": invite_code,
+            "device_public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "client_info": {
+                "agent": "ironclaw",
+                "version": "0.x.y"
+            }
+        })
+    }
+
+    async fn post_onboard(
+        config: TraceUploadClaimIssuerConfig,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let router = trace_upload_claim_issuer_router(config).expect("router builds");
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/onboard")
+                    .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(body.to_string()))
                     .expect("request builds"),
             )
@@ -2198,6 +2734,11 @@ mod tests {
                 require_tenant_access_grants: self.require_tenant_access_grants,
                 allowlist_source: self.allowlist_source.clone(),
                 allowlist_max_stale: self.allowlist_max_stale,
+                onboarding_device_key_db: self.onboarding_device_key_db.clone(),
+                onboarding_ingest_url: self.onboarding_ingest_url.clone(),
+                onboarding_community_url: self.onboarding_community_url.clone(),
+                onboarding_profile_url: self.onboarding_profile_url.clone(),
+                onboarding_leaderboard_url: self.onboarding_leaderboard_url.clone(),
                 denial_counter: Arc::clone(&self.denial_counter),
             }
         }
@@ -2319,6 +2860,124 @@ mod tests {
             parsed.get("policy_label").and_then(|v| v.as_str()),
             Some("pilot-2026-05"),
             "minted JWT carries policy_label"
+        );
+    }
+
+    #[tokio::test]
+    async fn onboard_requires_registry_db_after_allowlist_match() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("allowlist.json");
+        write_allowlist_file(&path, "pilot-2026-05", &["INVOK001INVOK001"]);
+        let config = config_with_file_allowlist(path);
+        let (status, body) = post_onboard(config, onboard_request("INVOK001INVOK001")).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("OnboardRegistryNotConfigured")
+        );
+    }
+
+    #[tokio::test]
+    async fn onboard_requires_allowlist_source() {
+        let (status, body) = post_onboard(test_config(), onboard_request("INVOK001INVOK001")).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("OnboardAllowlistNotConfigured")
+        );
+    }
+
+    #[tokio::test]
+    async fn onboard_refuses_malformed_device_public_key() {
+        let mut body = onboard_request("INVOK001INVOK001");
+        body["device_public_key"] = json!("not-base64");
+        let (status, body) = post_onboard(test_config(), body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("DeviceKeyMalformed")
+        );
+    }
+
+    #[tokio::test]
+    async fn onboard_refuses_unlisted_invite_with_named_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("allowlist.json");
+        write_allowlist_file(&path, "pilot-2026-05", &["INVOK001INVOK001"]);
+        let config = config_with_file_allowlist(path);
+        let (status, body) = post_onboard(config, onboard_request("MISS0001MISS0001")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("InviteNotValid")
+        );
+    }
+
+    #[tokio::test]
+    async fn device_key_claim_requires_well_formed_device_key_id() {
+        let (status, body) =
+            post_device_claim(test_config(), "not-a-key-id", "AA==", claim_request()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("invalid device key id")
+        );
+    }
+
+    #[tokio::test]
+    async fn device_key_claim_requires_base64_signature() {
+        let (status, body) = post_device_claim(
+            test_config(),
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "not-base64",
+            claim_request(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("invalid device key signature")
+        );
+    }
+
+    #[tokio::test]
+    async fn device_key_claim_uses_registry_gate_instead_of_workload_token() {
+        let (status, body) = post_device_claim(
+            test_config(),
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            claim_request(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("device key registry is not configured")
+        );
+    }
+
+    #[test]
+    fn device_key_signature_verifies_exact_claim_body() {
+        use ring::signature::KeyPair;
+
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("keypair generates");
+        let keypair =
+            ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair parses");
+        let public_key = keypair.public_key().as_ref();
+        let device_key_id = device_key_id_from_public_key_bytes(public_key);
+        let public_key_wire = base64::engine::general_purpose::STANDARD.encode(public_key);
+        let stored_public_key =
+            device_public_key_bytes(&public_key_wire, &device_key_id).expect("stored key parses");
+
+        let body = claim_request().to_string();
+        let signature = keypair.sign(body.as_bytes());
+        verify_device_claim_signature(&stored_public_key, body.as_bytes(), signature.as_ref())
+            .expect("signature verifies over exact body");
+        assert!(
+            verify_device_claim_signature(&stored_public_key, b"{}", signature.as_ref()).is_err(),
+            "signature must bind the exact serialized body"
         );
     }
 

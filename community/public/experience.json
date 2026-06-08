@@ -1,0 +1,61 @@
+{
+  "published_at": "2026-06-08T18:00:00Z",
+  "current_prompt": {
+    "window": "Pilot week 1",
+    "title": "Trace one real repair loop",
+    "summary": "Capture an Ironclaw session where the agent hits a bad assumption, inspects evidence, changes course, and finishes with a useful result.",
+    "target": "Leave message text and tool payload sharing off for the first run so the trace can stay in the auto-accept lane.",
+    "cta_label": "Set public handle",
+    "cta_href": "/profile"
+  },
+  "milestones": [
+    {
+      "label": "First public cohort",
+      "metric": "public_handles",
+      "target": 5,
+      "unit": "handles",
+      "description": "Enough opted-in handles for the board to feel inhabited."
+    },
+    {
+      "label": "First 250 accepted traces",
+      "metric": "accepted_traces",
+      "target": 250,
+      "unit": "accepted",
+      "description": "A useful calibration base before expanding the cohort."
+    },
+    {
+      "label": "Healthy acceptance",
+      "metric": "accept_rate",
+      "target": 0.7,
+      "unit": "acceptance",
+      "description": "A signal that participants understand the metadata-only path."
+    }
+  ],
+  "weekly_rhythm": [
+    {
+      "label": "Mon",
+      "title": "Prompt drop",
+      "description": "Operator posts the week prompt, onboard queue, and privacy reminder."
+    },
+    {
+      "label": "Tue",
+      "title": "First movement",
+      "description": "Refresh the snapshot and nudge contributors whose queues are still local."
+    },
+    {
+      "label": "Thu",
+      "title": "Quarantine pass",
+      "description": "Review held traces and tell contributors whether credit is waiting on review."
+    },
+    {
+      "label": "Fri",
+      "title": "Cohort recap",
+      "description": "Share public handle count, accepted traces, acceptance rate, and next prompt."
+    }
+  ],
+  "cohort_notes": [
+    "Useful traces are usually boring to read and valuable to compare: tool choice, recovery, and outcome matter more than a polished transcript.",
+    "The public board is opt-in identity only. Trace submission still works without publishing a handle.",
+    "If your accepted credit stalls at zero, try a metadata-only trace before escalating to the operator."
+  ]
+}

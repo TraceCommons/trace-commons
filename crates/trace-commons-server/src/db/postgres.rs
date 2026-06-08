@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use deadpool_postgres::Pool;
 use sha2::{Digest, Sha256};
+use tokio_postgres::Row;
 
 use crate::config::DatabaseConfig;
 use crate::db::{Database, TraceCorpusRlsDiagnostics};
@@ -48,6 +49,8 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_ranking_worker_runs",
     "trace_contributor_profiles",
     "trace_contributor_profile_audit",
+    "device_keys",
+    "onboarding_invites",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -636,6 +639,44 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&28_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!("../../../../migrations/V28__device_keys.sql"))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&28_i32, &"device_keys"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&29_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V29__onboarding_invites.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&29_i32, &"onboarding_invites"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -802,7 +843,7 @@ impl Database for PgBackend {
         bio: Option<&str>,
     ) -> Result<crate::db::ContributorProfileRow, DatabaseError> {
         self.ensure_trace_tenant(tenant_id).await?;
-        let mut client = self.trace_pool().get().await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let bio_opt: Option<&str> = bio;
         let row = tx
@@ -848,7 +889,7 @@ impl Database for PgBackend {
         principal_ref: &str,
     ) -> Result<bool, DatabaseError> {
         self.ensure_trace_tenant(tenant_id).await?;
-        let mut client = self.trace_pool().get().await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let affected = tx
             .execute(
@@ -1152,6 +1193,243 @@ impl Database for PgBackend {
             noise_seed_hash: row.get("noise_seed_hash"),
         }))
     }
+
+    async fn insert_device_key(
+        &self,
+        device_key: crate::db::DeviceKeyWrite,
+    ) -> Result<crate::db::DeviceKeyRecord, DatabaseError> {
+        self.ensure_trace_tenant(&device_key.tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &device_key.tenant_id).await?;
+        let row = tx
+            .query_one(
+                "INSERT INTO device_keys (
+                    device_key_id, tenant_id, public_key, invite_subject_hash, client_info
+                 ) VALUES ($1, $2, $3, $4, $5)
+                 RETURNING device_key_id, tenant_id, public_key, invite_subject_hash,
+                           client_info, created_at, revoked_at",
+                &[
+                    &device_key.device_key_id,
+                    &device_key.tenant_id,
+                    &device_key.public_key,
+                    &device_key.invite_subject_hash,
+                    &device_key.client_info,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(device_key_record_from_row(row))
+    }
+
+    async fn get_device_key(
+        &self,
+        tenant_id: &str,
+        device_key_id: &str,
+    ) -> Result<Option<crate::db::DeviceKeyRecord>, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT device_key_id, tenant_id, public_key, invite_subject_hash,
+                        client_info, created_at, revoked_at
+                   FROM device_keys
+                  WHERE tenant_id = $1 AND device_key_id = $2",
+                &[&tenant_id, &device_key_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(row.map(device_key_record_from_row))
+    }
+
+    async fn list_device_keys(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<crate::db::DeviceKeyRecord>, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT device_key_id, tenant_id, public_key, invite_subject_hash,
+                        client_info, created_at, revoked_at
+                   FROM device_keys
+                  WHERE tenant_id = $1
+                  ORDER BY created_at ASC, device_key_id ASC",
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(rows.into_iter().map(device_key_record_from_row).collect())
+    }
+
+    async fn revoke_device_key(
+        &self,
+        tenant_id: &str,
+        device_key_id: &str,
+    ) -> Result<Option<crate::db::DeviceKeyRecord>, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "UPDATE device_keys
+                    SET revoked_at = COALESCE(revoked_at, NOW())
+                  WHERE tenant_id = $1 AND device_key_id = $2
+                  RETURNING device_key_id, tenant_id, public_key, invite_subject_hash,
+                            client_info, created_at, revoked_at",
+                &[&tenant_id, &device_key_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(row.map(device_key_record_from_row))
+    }
+
+    async fn onboard_device_key(
+        &self,
+        device_key: crate::db::DeviceKeyWrite,
+        max_uses: i32,
+    ) -> Result<crate::db::OnboardDeviceKeyRecord, crate::db::OnboardDeviceKeyError> {
+        if max_uses <= 0 {
+            return Err(crate::db::OnboardDeviceKeyError::InviteNotValid);
+        }
+        self.ensure_trace_tenant(&device_key.tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &device_key.tenant_id).await?;
+
+        if let Some(existing) = tx
+            .query_opt(
+                "SELECT device_key_id, tenant_id, public_key, invite_subject_hash,
+                        client_info, created_at, revoked_at
+                   FROM device_keys
+                  WHERE tenant_id = $1 AND device_key_id = $2",
+                &[&device_key.tenant_id, &device_key.device_key_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+        {
+            let record = device_key_record_from_row(existing);
+            if record.public_key == device_key.public_key
+                && record.invite_subject_hash == device_key.invite_subject_hash
+                && record.revoked_at.is_none()
+            {
+                tx.commit().await.map_err(DatabaseError::Postgres)?;
+                return Ok(crate::db::OnboardDeviceKeyRecord {
+                    device_key: record,
+                    status: crate::db::OnboardDeviceKeyStatus::Idempotent,
+                });
+            }
+            return Err(crate::db::OnboardDeviceKeyError::InviteNotValid);
+        }
+
+        let invite_upsert = tx
+            .query_opt(
+                "INSERT INTO onboarding_invites (
+                    tenant_id, invite_subject_hash, max_uses
+                 ) VALUES ($1, $2, $3)
+                 ON CONFLICT (tenant_id, invite_subject_hash) DO UPDATE SET
+                    max_uses = GREATEST(onboarding_invites.consumed_uses, excluded.max_uses),
+                    updated_at = NOW()
+                 WHERE onboarding_invites.revoked_at IS NULL
+                 RETURNING invite_subject_hash",
+                &[
+                    &device_key.tenant_id,
+                    &device_key.invite_subject_hash,
+                    &max_uses,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        if invite_upsert.is_none() {
+            return Err(crate::db::OnboardDeviceKeyError::InviteNotValid);
+        }
+
+        let inserted = tx
+            .query_opt(
+                "INSERT INTO device_keys (
+                    device_key_id, tenant_id, public_key, invite_subject_hash, client_info
+                 ) VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (device_key_id) DO NOTHING
+                 RETURNING device_key_id, tenant_id, public_key, invite_subject_hash,
+                           client_info, created_at, revoked_at",
+                &[
+                    &device_key.device_key_id,
+                    &device_key.tenant_id,
+                    &device_key.public_key,
+                    &device_key.invite_subject_hash,
+                    &device_key.client_info,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+
+        let Some(inserted) = inserted else {
+            let existing = tx
+                .query_opt(
+                    "SELECT device_key_id, tenant_id, public_key, invite_subject_hash,
+                            client_info, created_at, revoked_at
+                       FROM device_keys
+                      WHERE tenant_id = $1 AND device_key_id = $2",
+                    &[&device_key.tenant_id, &device_key.device_key_id],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            if let Some(existing) = existing {
+                let record = device_key_record_from_row(existing);
+                if record.public_key == device_key.public_key
+                    && record.invite_subject_hash == device_key.invite_subject_hash
+                    && record.revoked_at.is_none()
+                {
+                    tx.commit().await.map_err(DatabaseError::Postgres)?;
+                    return Ok(crate::db::OnboardDeviceKeyRecord {
+                        device_key: record,
+                        status: crate::db::OnboardDeviceKeyStatus::Idempotent,
+                    });
+                }
+            }
+            return Err(crate::db::OnboardDeviceKeyError::InviteNotValid);
+        };
+
+        let consumed = tx
+            .query_opt(
+                "UPDATE onboarding_invites
+                    SET consumed_uses = consumed_uses + 1,
+                        updated_at = NOW()
+                  WHERE tenant_id = $1
+                    AND invite_subject_hash = $2
+                    AND revoked_at IS NULL
+                    AND consumed_uses < max_uses
+                  RETURNING consumed_uses",
+                &[&device_key.tenant_id, &device_key.invite_subject_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        if consumed.is_none() {
+            return Err(crate::db::OnboardDeviceKeyError::InviteNotValid);
+        }
+
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(crate::db::OnboardDeviceKeyRecord {
+            device_key: device_key_record_from_row(inserted),
+            status: crate::db::OnboardDeviceKeyStatus::Registered,
+        })
+    }
+}
+
+fn device_key_record_from_row(row: Row) -> crate::db::DeviceKeyRecord {
+    crate::db::DeviceKeyRecord {
+        device_key_id: row.get("device_key_id"),
+        tenant_id: row.get("tenant_id"),
+        public_key: row.get("public_key"),
+        invite_subject_hash: row.get("invite_subject_hash"),
+        client_info: row.get("client_info"),
+        created_at: row.get("created_at"),
+        revoked_at: row.get("revoked_at"),
+    }
 }
 
 fn sha256_prefixed(input: &str) -> String {
@@ -1197,6 +1475,8 @@ mod tests {
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
             include_str!("../../../../migrations/V26__trace_contributor_profiles.sql"),
+            include_str!("../../../../migrations/V28__device_keys.sql"),
+            include_str!("../../../../migrations/V29__onboarding_invites.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
@@ -1206,6 +1486,8 @@ mod tests {
             include_str!("../../../../migrations/V16__trace_ranking_calibration_datasets.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
             include_str!("../../../../migrations/V26__trace_contributor_profiles.sql"),
+            include_str!("../../../../migrations/V28__device_keys.sql"),
+            include_str!("../../../../migrations/V29__onboarding_invites.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {
@@ -1233,14 +1515,16 @@ mod tests {
             );
         }
 
-        let central_policy_count = central_policy_migrations
+        let central_policy_count = TRACE_COMMONS_RLS_TABLES
             .iter()
-            .map(|migration| {
-                migration
-                    .matches("CREATE POLICY trace_corpus_tenant_isolation ON trace_")
-                    .count()
+            .filter(|table| {
+                central_policy_migrations.iter().any(|migration| {
+                    migration.contains(&format!(
+                        "CREATE POLICY trace_corpus_tenant_isolation ON {table}"
+                    ))
+                })
             })
-            .sum::<usize>();
+            .count();
         assert_eq!(
             central_policy_count,
             TRACE_COMMONS_RLS_TABLES.len(),

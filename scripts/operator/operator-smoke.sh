@@ -46,7 +46,7 @@ EXPECTED_COUNTS=(
     "8"
     "12"
     "8"
-    "11"
+    "12"
 )
 REPRESENTATIVE_SUBCMDS=(
     "quarantine-list"
@@ -126,7 +126,7 @@ main() {
         check_subcommand_help "${BINARIES[$i]}" "${REPRESENTATIVE_SUBCMDS[$i]}"
     done
 
-    echo "SmokeOperatorBinariesOK: review=8 admin=12 worker=8 tenant=11"
+    echo "SmokeOperatorBinariesOK: review=8 admin=12 worker=8 tenant=12"
 }
 
 main "$@"

@@ -1,5 +1,6 @@
 pub mod community_handle;
 pub mod llm;
+pub mod onboarding;
 mod redaction;
 pub mod trace_contribution;
 

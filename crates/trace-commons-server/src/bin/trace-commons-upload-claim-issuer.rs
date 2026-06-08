@@ -1,8 +1,9 @@
 use trace_commons_server::trace_upload_claim_allowlist::hash_invite_code;
 use trace_commons_server::trace_upload_claim_issuer::{
     TraceUploadClaimIssuerConfig, UploadClaimIssuerHealthCheck,
-    configure_tenant_access_grants_from_env, generate_upload_claim_keypair, mint_test_upload_claim,
-    run_upload_claim_issuer_health_check, serve_trace_upload_claim_issuer,
+    configure_onboarding_device_key_registry_from_env, configure_tenant_access_grants_from_env,
+    generate_upload_claim_keypair, mint_test_upload_claim, run_upload_claim_issuer_health_check,
+    serve_trace_upload_claim_issuer,
 };
 
 const HELP_TEXT: &str = "trace-commons-upload-claim-issuer
@@ -120,5 +121,6 @@ async fn async_main() -> anyhow::Result<()> {
         .init();
     let mut config = TraceUploadClaimIssuerConfig::from_env()?;
     configure_tenant_access_grants_from_env(&mut config).await?;
+    configure_onboarding_device_key_registry_from_env(&mut config).await?;
     serve_trace_upload_claim_issuer(config).await
 }
