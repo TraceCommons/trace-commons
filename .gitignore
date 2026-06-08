@@ -5,3 +5,6 @@
 
 # Local git worktrees for parallel feature work
 .worktrees/
+
+# Local Cloudflare/Wrangler state
+community/.wrangler/

@@ -1,0 +1,103 @@
+{
+  "snapshot_id": "00000000-0000-4000-8000-000000000001",
+  "computed_at": "2026-06-08T18:00:00Z",
+  "window": "7d",
+  "metric": "novelty_credit",
+  "min_cell_count": 2,
+  "leaderboard": [
+    {
+      "rank": 1,
+      "display_handle": "proofsmith",
+      "score": 184.7,
+      "accepted_count": 31,
+      "accept_rate": 0.86,
+      "public_since": "2026-06-01T15:12:00Z"
+    },
+    {
+      "rank": 2,
+      "display_handle": "kernel-lane",
+      "score": 143.2,
+      "accepted_count": 26,
+      "accept_rate": 0.79,
+      "public_since": "2026-06-02T18:40:00Z"
+    },
+    {
+      "rank": 3,
+      "display_handle": "tracewright",
+      "score": 111.9,
+      "accepted_count": 19,
+      "accept_rate": 0.73,
+      "public_since": "2026-06-03T21:03:00Z"
+    },
+    {
+      "rank": 4,
+      "display_handle": "local-first",
+      "score": 77.5,
+      "accepted_count": 14,
+      "accept_rate": 0.68,
+      "public_since": "2026-06-04T09:25:00Z"
+    }
+  ],
+  "contributors": {
+    "proofsmith": {
+      "display_handle": "proofsmith",
+      "bio": "Agent traces from compiler, proof, and release work.",
+      "public_since": "2026-06-01T15:12:00Z",
+      "total_accepted": 94,
+      "total_credit": 492.8,
+      "rolling_7d_accepted": 31,
+      "rolling_7d_credit": 184.7
+    },
+    "kernel-lane": {
+      "display_handle": "kernel-lane",
+      "bio": "Low-level debugging runs and verification traces.",
+      "public_since": "2026-06-02T18:40:00Z",
+      "total_accepted": 71,
+      "total_credit": 350.4,
+      "rolling_7d_accepted": 26,
+      "rolling_7d_credit": 143.2
+    },
+    "tracewright": {
+      "display_handle": "tracewright",
+      "bio": "Careful traces from product, docs, and integration tasks.",
+      "public_since": "2026-06-03T21:03:00Z",
+      "total_accepted": 58,
+      "total_credit": 289.1,
+      "rolling_7d_accepted": 19,
+      "rolling_7d_credit": 111.9
+    },
+    "local-first": {
+      "display_handle": "local-first",
+      "bio": "Client-side capture and privacy-first workflow testing.",
+      "public_since": "2026-06-04T09:25:00Z",
+      "total_accepted": 37,
+      "total_credit": 166.6,
+      "rolling_7d_accepted": 14,
+      "rolling_7d_credit": 77.5
+    }
+  },
+  "analytics": {
+    "window": "7d",
+    "total_submissions": 164,
+    "total_accepted": 104,
+    "total_rejected": 60,
+    "accept_rate": 0.634,
+    "novelty_histogram": [
+      { "bucket_micros": 100000, "count": 6 },
+      { "bucket_micros": 200000, "count": 10 },
+      { "bucket_micros": 300000, "count": 18 },
+      { "bucket_micros": 400000, "count": 25 },
+      { "bucket_micros": 500000, "count": 31 },
+      { "bucket_micros": 600000, "count": 29 },
+      { "bucket_micros": 700000, "count": 22 },
+      { "bucket_micros": 800000, "count": 15 },
+      { "bucket_micros": 900000, "count": 8 }
+    ],
+    "gate_outcomes": {
+      "both_passed": 104,
+      "novelty_failed": 38,
+      "perplexity_failed": 7,
+      "both_failed": 15
+    }
+  }
+}

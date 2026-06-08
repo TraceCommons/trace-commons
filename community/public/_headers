@@ -1,0 +1,22 @@
+/*
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
+  Cross-Origin-Opener-Policy: same-origin
+  Content-Security-Policy: default-src 'self'; connect-src 'self' https://ingest.tracecommons.ai http://localhost:*; img-src 'self' data:; style-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'
+
+/snapshot.json
+  Cache-Control: public, max-age=300, stale-while-revalidate=120
+
+/experience.json
+  Cache-Control: public, max-age=300, stale-while-revalidate=120
+
+/styles.css
+  Cache-Control: public, max-age=3600
+
+/app.js
+  Cache-Control: public, max-age=3600
+
+/config.js
+  Cache-Control: public, max-age=60

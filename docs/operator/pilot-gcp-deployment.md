@@ -13,8 +13,9 @@ obvious from the source code or the broader operator docs.
 client (ironclaw)
    |
    v (HTTPS, public)
-ingest.<host>.nip.io  <--Caddy-->  127.0.0.1:3907  trace-commons-ingest
-issuer.<host>.nip.io  <--Caddy-->  127.0.0.1:3917  trace-commons-upload-claim-issuer
+tracecommons.ai         <--Cloudflare Pages-->  community/public
+ingest.tracecommons.ai  <--Caddy-->  127.0.0.1:3907  trace-commons-ingest
+issuer.tracecommons.ai  <--Caddy-->  127.0.0.1:3917  trace-commons-upload-claim-issuer
 
                                    127.0.0.1:5432  cloud-sql-proxy  --mTLS-->  Cloud SQL
                                                                    --IAM-->   tc-pilot-runtime@...
@@ -24,9 +25,9 @@ issuer.<host>.nip.io  <--Caddy-->  127.0.0.1:3917  trace-commons-upload-claim-is
 ```
 
 - Both daemons bind loopback only; Caddy is the public TLS edge.
-- The Cloud SQL Auth Proxy is the TLS terminator into Cloud SQL — the ingest
-  binary connects via `127.0.0.1:5432` with no SSL, the proxy upgrades to
-  mTLS using the runtime service account.
+- The Cloud SQL Auth Proxy is the TLS terminator into Cloud SQL. Ingest
+  and the onboarding-enabled issuer connect via `127.0.0.1:5432` with no
+  SSL; the proxy upgrades to mTLS using the runtime service account.
 - Public IP is exposed only on ports 80/443 (Caddy). The Cloud SQL
   instance has no `authorizedNetworks` — the proxy uses the admin API.
 
@@ -72,7 +73,7 @@ The files under `deploy/pilot-gcp/` are templates; render with `envsubst`
 export TC_GCP_PROJECT=tracecommons-pilot-2026
 export TC_GCP_REGION=us-central1
 export TC_CLOUD_SQL_INSTANCE=tc-pilot
-export TC_PUBLIC_HOST=34-41-15-28.nip.io
+export TC_PUBLIC_HOST=tracecommons.ai
 export TC_LE_EMAIL=ops@example.com
 export TC_KMS_KEY_NAME=projects/$TC_GCP_PROJECT/locations/$TC_GCP_REGION/keyRings/tc-pilot/cryptoKeys/kek-v1
 export TC_GCS_BUCKET=tc-pilot-artifacts-<DATE>
@@ -86,6 +87,21 @@ envsubst < deploy/pilot-gcp/systemd/cloud-sql-proxy.service > /tmp/cloud-sql-pro
 
 Copy rendered files plus the two `*.service` units that have no
 placeholders into `~/deploy/` on the host, then run `deploy.sh`.
+
+The issuer env template now includes `DATABASE_URL` plus
+`TRACE_COMMONS_ONBOARDING_DEVICE_KEY_REGISTRY_ENABLED=true`, so the
+Cloud SQL Auth Proxy must be running before the issuer starts. This lets
+`POST /v1/onboard` atomically register device keys and consume invite
+uses through PostgreSQL.
+
+The ingest env template enables the public community snapshot routes and
+allows the `https://${TC_PUBLIC_HOST}` browser origin through
+`TRACE_COMMONS_COMMUNITY_CORS_ORIGINS` for direct staging checks. The
+production Pages site serves browser traffic through same-origin
+`/api/v1/community/*`, then proxies to the ingest host. Deploy the static
+Pages site from [`../../community/`](../../community/) after the ingest host is
+reachable; details live in
+[`./tracecommons-ai-community-site.md`](./tracecommons-ai-community-site.md).
 
 ## Cloud SQL Auth Proxy
 
@@ -156,11 +172,24 @@ submit; don't re-submit a failed envelope.
 curl -sfS https://ingest.${TC_PUBLIC_HOST}/health
 curl -sfS https://issuer.${TC_PUBLIC_HOST}/health
 curl -sfS https://issuer.${TC_PUBLIC_HOST}/.well-known/trace-commons-ed25519-keyset.json | head -c 300
+curl -isS -X OPTIONS \
+  -H "origin: https://${TC_PUBLIC_HOST}" \
+  -H "access-control-request-method: GET" \
+  https://ingest.${TC_PUBLIC_HOST}/v1/community/leaderboard | head -20
+curl -isS https://${TC_PUBLIC_HOST}/api/v1/community/leaderboard | head -20
 ```
 
-Submit a real envelope end-to-end using `sign-workload-token.py` to mint
-the workload JWT, then call `/v1/trace-upload-claim` (issuer) followed by
-`/v1/traces` (ingest). The accepted-corpus response looks like:
+Smoke the onboarding route with an allowlisted invite and a generated
+Ed25519 public key. Expect `200` with `tenant_id`, `device_key_id`,
+`ingest_url`, `profile_url`, and `leaderboard_url`. A successful retry
+with the same public key is idempotent; a different public key after
+`max_uses` is exhausted should return `403 {"error":"InviteNotValid"}`.
+
+Submit a real envelope end-to-end using the newly onboarded Ironclaw
+device-key flow. For older pilot clients only, `sign-workload-token.py`
+can still mint the temporary workload JWT fallback. Then call
+`/v1/trace-upload-claim` (issuer) followed by `/v1/traces` (ingest).
+The accepted-corpus response looks like:
 
 ```
 {"status":"accepted","credit_points_pending":5.2,"explanation":["Accepted into the private redacted corpus.","Attributed to tenant tenant_sha256:<hash>"]}

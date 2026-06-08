@@ -60268,6 +60268,33 @@ async fn community_contributor_returns_404_when_feature_flag_off() {
 }
 
 #[tokio::test]
+async fn community_leaderboard_cors_preflight_allows_public_site() {
+    use axum::body::Body;
+    use axum::http::header::{ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_REQUEST_METHOD, ORIGIN};
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("OPTIONS")
+                .uri("/v1/community/leaderboard")
+                .header(ORIGIN, "https://tracecommons.ai")
+                .header(ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN),
+        Some(&HeaderValue::from_static("https://tracecommons.ai"))
+    );
+}
+
+#[tokio::test]
 async fn community_leaderboard_returns_503_when_flag_on_but_no_snapshot() {
     use axum::body::Body;
     use tower::ServiceExt;

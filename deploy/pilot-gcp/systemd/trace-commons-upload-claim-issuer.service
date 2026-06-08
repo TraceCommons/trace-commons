@@ -1,7 +1,7 @@
 [Unit]
 Description=trace-commons-upload-claim-issuer (TraceCommons pilot)
-After=network-online.target
-Wants=network-online.target
+After=network-online.target cloud-sql-proxy.service
+Wants=network-online.target cloud-sql-proxy.service
 
 [Service]
 Type=simple

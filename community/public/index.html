@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta
+      name="description"
+      content="TraceCommons community leaderboard, contributor profiles, and pilot corpus analytics."
+    >
+    <meta property="og:title" content="TraceCommons Community">
+    <meta
+      property="og:description"
+      content="Pseudonymous pilot leaderboard and aggregate TraceCommons corpus analytics."
+    >
+    <meta property="og:type" content="website">
+    <title>TraceCommons Community</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/config.js" defer></script>
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" data-route>
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>TraceCommons</span>
+      </a>
+      <nav class="nav" aria-label="Primary">
+        <a href="/leaderboard" data-route>Leaderboard</a>
+        <a href="/analytics" data-route>Analytics</a>
+        <a href="/brief" data-route>Brief</a>
+        <a href="/profile" data-route>Profile</a>
+        <a href="/about/privacy" data-route>Privacy</a>
+      </nav>
+      <div class="status-chip" id="source-chip">Loading</div>
+    </header>
+
+    <main id="app" class="app-shell" tabindex="-1">
+      <section class="loading-band" aria-live="polite">
+        <div>
+          <p class="eyebrow">Pilot surface</p>
+          <h1>Loading the current community snapshot.</h1>
+        </div>
+      </section>
+    </main>
+
+    <noscript>
+      <main class="app-shell">
+        <section class="panel">
+          <h1>TraceCommons Community</h1>
+          <p>This pilot surface needs JavaScript to render the snapshot.</p>
+        </section>
+      </main>
+    </noscript>
+  </body>
+</html>

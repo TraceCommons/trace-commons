@@ -24,6 +24,7 @@ the link.
 | First-time deploying `trace-commons-server` | [`./deployment.md`](./deployment.md) |
 | Bringing up the GCP pilot end-to-end | [`./pilot-gcp-deployment.md`](./pilot-gcp-deployment.md) |
 | Standing up the pilot operator dashboard | [`./pilot-dashboard.md`](./pilot-dashboard.md) |
+| Publishing the public `tracecommons.ai` leaderboard | [`./tracecommons-ai-community-site.md`](./tracecommons-ai-community-site.md) |
 | Setting gate floors or calibrating thresholds | [`./calibration.md`](./calibration.md) |
 | Validating a deployment before promoting | [`./smoke-test.md`](./smoke-test.md) |
 | Running the model bake-off | [`./calibration.md`](./calibration.md) (Phase 0) + [`./agent-traces-bakeoff-run.md`](./agent-traces-bakeoff-run.md) |
@@ -32,6 +33,7 @@ the link.
 | Running the pilot bootstrap harness | [`./pilot-bootstrap.md`](./pilot-bootstrap.md) (see also [`./pilot-bootstrap-dryrun-notes.md`](./pilot-bootstrap-dryrun-notes.md) — known real-data defects) |
 | Running the pilot-bootstrap first-100-traces dry run | [`./pilot-bootstrap-first-100-traces.md`](./pilot-bootstrap-first-100-traces.md) |
 | Gating the pilot to invited contributors only | [`./pilot-allowlist.md`](./pilot-allowlist.md) |
+| Onboarding an internal pilot contributor | [`./pilot-contributor-onboarding.md`](./pilot-contributor-onboarding.md) |
 | Managing the HuggingFace dataset / model cache | [`./hf-dataset-cache-hygiene.md`](./hf-dataset-cache-hygiene.md) |
 | Recording GPU instance spend | [`./gpu-cost-ledger.md`](./gpu-cost-ledger.md) |
 | Rotating cloud-KMS keys | [`./key-rotation.md`](./key-rotation.md) |
@@ -101,8 +103,14 @@ Every runbook in this directory, with a one-line description.
 - [`./pilot-bootstrap-first-100-traces.md`](./pilot-bootstrap-first-100-traces.md) —
   controlled first-100 dry run against staging to verify gate decision
   distribution and audit chain row counts before scaling.
+- [`./pilot-contributor-onboarding.md`](./pilot-contributor-onboarding.md) —
+  contributor-facing setup flow for invite code, workload JWT, Ironclaw
+  opt-in, profile handle registration, and leaderboard expectations.
 - [`./smoke-test.md`](./smoke-test.md) — post-deploy validation checklist
   that exercises every required drill plus a fixture gate evaluation.
+- [`./tracecommons-ai-community-site.md`](./tracecommons-ai-community-site.md) —
+  Cloudflare Pages deployment and pilot playbook for the public
+  pseudonymous leaderboard, contributor profiles, and aggregate analytics.
 - [`./troubleshooting.md`](./troubleshooting.md) — common failure modes by
   symptom, with hash-only signatures and fixes.
 - [`./vector-replay.md`](./vector-replay.md) — operator reference for the

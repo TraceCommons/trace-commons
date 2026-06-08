@@ -15,7 +15,7 @@
 //! that both the operator (via the `--hash-invite-code` CLI helper) and the
 //! issuance handler call. They cannot drift because there is one function.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -23,6 +23,10 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+
+fn default_allowlist_max_uses() -> u32 {
+    1
+}
 
 /// Canonical invite-code hashing. The `"invite:"` prefix namespaces the
 /// digest so a later subject type (NEAR account, EdDSA pubkey) cannot
@@ -98,6 +102,11 @@ pub struct AllowlistEntry {
     /// Operator-facing free text. Never returned to clients, never logged.
     #[serde(default)]
     pub note_label: Option<String>,
+    /// Maximum number of device registrations this invite can create.
+    /// Existing allowlist files omit the field and preserve single-use
+    /// onboarding semantics.
+    #[serde(default = "default_allowlist_max_uses")]
+    pub max_uses: u32,
 }
 
 /// Top-level file schema. Version 1 only; anything else is rejected.
@@ -112,10 +121,21 @@ pub struct AllowlistFile {
 /// Snapshot loaded from a source. Cheap to clone-by-reference; the
 /// `subject_hashes` set is the hot path.
 #[derive(Debug, Clone)]
+pub struct AllowlistSnapshotEntry {
+    pub subject_hash: String,
+    pub tenant_id: String,
+    pub contributor_label: Option<String>,
+    pub max_uses: u32,
+}
+
+/// Snapshot loaded from a source. Cheap to clone-by-reference; the
+/// `subject_hashes` set is the hot path.
+#[derive(Debug, Clone)]
 pub struct AllowlistSnapshot {
     pub policy_label: String,
     pub generated_at: DateTime<Utc>,
     pub subject_hashes: HashSet<String>,
+    entries_by_hash: HashMap<String, AllowlistSnapshotEntry>,
     pub loaded_at: Instant,
     pub source_label: String,
 }
@@ -137,6 +157,7 @@ impl AllowlistSnapshot {
             )));
         }
         let mut subject_hashes = HashSet::with_capacity(file.entries.len());
+        let mut entries_by_hash = HashMap::with_capacity(file.entries.len());
         for entry in &file.entries {
             // Strict: the file's hashes must already be canonical
             // sha256:<64 lower-hex>. We don't lowercase on read because
@@ -145,12 +166,38 @@ impl AllowlistSnapshot {
             // only.
             let trimmed = entry.subject_hash.trim();
             validate_subject_hash(trimmed)?;
+            let tenant_id = entry.tenant_id.trim();
+            if tenant_id.is_empty() {
+                return Err(AllowlistError::Malformed(
+                    "tenant_id must be non-empty".to_string(),
+                ));
+            }
+            if entry.max_uses == 0 {
+                return Err(AllowlistError::Malformed(
+                    "max_uses must be greater than zero".to_string(),
+                ));
+            }
+            let contributor_label = entry
+                .note_label
+                .as_deref()
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .map(ToString::to_string);
             subject_hashes.insert(trimmed.to_string());
+            entries_by_hash
+                .entry(trimmed.to_string())
+                .or_insert_with(|| AllowlistSnapshotEntry {
+                    subject_hash: trimmed.to_string(),
+                    tenant_id: tenant_id.to_string(),
+                    contributor_label,
+                    max_uses: entry.max_uses,
+                });
         }
         Ok(Self {
             policy_label: file.policy_label,
             generated_at: file.generated_at,
             subject_hashes,
+            entries_by_hash,
             loaded_at,
             source_label,
         })
@@ -158,6 +205,10 @@ impl AllowlistSnapshot {
 
     pub fn contains(&self, subject_hash: &str) -> bool {
         self.subject_hashes.contains(subject_hash)
+    }
+
+    pub fn entry(&self, subject_hash: &str) -> Option<&AllowlistSnapshotEntry> {
+        self.entries_by_hash.get(subject_hash)
     }
 }
 
@@ -414,6 +465,7 @@ mod tests {
                 subject_hash: "not-a-sha256".into(),
                 tenant_id: "t".into(),
                 note_label: None,
+                max_uses: 1,
             }],
         };
         assert!(matches!(
@@ -429,6 +481,7 @@ mod tests {
                 subject_hash: format!("sha256:{}", "A".repeat(64)),
                 tenant_id: "t".into(),
                 note_label: None,
+                max_uses: 1,
             }],
         };
         assert!(matches!(
@@ -449,17 +502,46 @@ mod tests {
                     subject_hash: h.clone(),
                     tenant_id: "t".into(),
                     note_label: None,
+                    max_uses: 1,
                 },
                 AllowlistEntry {
                     subject_hash: h.clone(),
                     tenant_id: "t2".into(),
                     note_label: Some("dup".into()),
+                    max_uses: 1,
                 },
             ],
         };
         let snap = AllowlistSnapshot::from_file(file, "test".into(), Instant::now()).expect("ok");
         assert_eq!(snap.subject_hashes.len(), 1);
         assert!(snap.contains(&h));
+    }
+
+    #[test]
+    fn snapshot_exposes_onboarding_entry_metadata() {
+        let h = hash_invite_code("INV-1");
+        let file: AllowlistFile = serde_json::from_str(&format!(
+            r#"{{
+                "version": 1,
+                "generated_at": "2026-05-17T00:00:00Z",
+                "policy_label": "pilot",
+                "entries": [{{
+                    "subject_hash": "{h}",
+                    "tenant_id": "tenant-zaki-pilot",
+                    "note_label": "closed-alpha-batch-1",
+                    "max_uses": 3
+                }}]
+            }}"#
+        ))
+        .expect("allowlist JSON parses");
+        let snap = AllowlistSnapshot::from_file(file, "test".into(), Instant::now()).expect("ok");
+        let entry = snap.entry(&h).expect("entry by hash");
+        assert_eq!(entry.tenant_id, "tenant-zaki-pilot");
+        assert_eq!(
+            entry.contributor_label.as_deref(),
+            Some("closed-alpha-batch-1")
+        );
+        assert_eq!(entry.max_uses, 3);
     }
 
     #[test]

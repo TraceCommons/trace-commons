@@ -41,6 +41,7 @@ trace-commons-operator-client = { path = "../trace-commons-operator-client" }
 trace-commons-protocol = { path = "../trace-commons-protocol" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tower-http = { version = "0.6", features = ["cors"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 google-cloud-storage = { version = "0.24", optional = true }
 google-cloud-kms = { version = "0.6", optional = true }
