@@ -261,8 +261,9 @@ impl TraceUploadClaimIssuerConfig {
             allowlist_refresh_interval_seconds,
             allowlist_max_stale_seconds,
             onboarding_device_key_db: None,
-            onboarding_ingest_url: optional_env(TRACE_COMMONS_ONBOARDING_INGEST_URL_ENV)?
-                .and_then(|value| trim_optional(Some(value))),
+            onboarding_ingest_url: normalize_onboarding_ingest_url(optional_env(
+                TRACE_COMMONS_ONBOARDING_INGEST_URL_ENV,
+            )?)?,
             onboarding_community_url: optional_env(TRACE_COMMONS_ONBOARDING_COMMUNITY_URL_ENV)?
                 .and_then(|value| trim_optional(Some(value))),
             onboarding_profile_url: optional_env(TRACE_COMMONS_ONBOARDING_PROFILE_URL_ENV)?
@@ -363,7 +364,9 @@ impl TraceUploadClaimIssuerConfig {
             allowlist_source,
             allowlist_max_stale: StdDuration::from_secs(self.allowlist_max_stale_seconds),
             onboarding_device_key_db: self.onboarding_device_key_db.clone(),
-            onboarding_ingest_url: self.onboarding_ingest_url.clone(),
+            onboarding_ingest_url: normalize_onboarding_ingest_url(
+                self.onboarding_ingest_url.clone(),
+            )?,
             onboarding_community_url: self.onboarding_community_url.clone(),
             onboarding_profile_url: self.onboarding_profile_url.clone(),
             onboarding_leaderboard_url: self.onboarding_leaderboard_url.clone(),
@@ -560,6 +563,19 @@ struct WorkloadClaims {
 struct DeviceClaimAuth {
     device_key_id: String,
     signature: Vec<u8>,
+}
+
+struct DeviceJwtAuth {
+    device_key_id: String,
+    token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceWorkloadClaims {
+    tenant_id: String,
+    exp: i64,
+    #[serde(default)]
+    iat: Option<i64>,
 }
 
 struct AuthorizedUploadClaimActor {
@@ -1213,6 +1229,10 @@ async fn issue_claim_handler(
         state
             .issue_claim_for_device_key(device_auth, &body, request)
             .await?
+    } else if let Some(device_auth) = device_jwt_auth_from_headers(&headers)? {
+        state
+            .issue_claim_for_device_jwt(device_auth, request)
+            .await?
     } else {
         let workload = state.authenticate_workload(&headers)?;
         state.issue_claim(&workload, request).await?
@@ -1381,6 +1401,49 @@ impl TraceUploadClaimIssuerState {
             AuthorizedUploadClaimActor {
                 actor,
                 tenant_id,
+                grant_principal_ref,
+                allowed_consent_scopes: device_key_allowed_consent_scopes(),
+                allowed_uses: device_key_allowed_uses(),
+                policy_label: None,
+            },
+            request,
+            now,
+        )
+        .await
+    }
+
+    async fn issue_claim_for_device_jwt(
+        &self,
+        auth: DeviceJwtAuth,
+        request: TraceUploadClaimRequest,
+    ) -> Result<TraceUploadClaimResponse, IssuerError> {
+        let now = self.validate_upload_claim_request(&request)?;
+        let tenant_id = normalized_required(request.tenant_id.as_deref(), "tenant_id is required")?;
+        let db = self
+            .onboarding_device_key_db
+            .as_ref()
+            .ok_or_else(IssuerError::device_key_registry_not_configured)?;
+        let device_key = db
+            .get_device_key(&tenant_id, &auth.device_key_id)
+            .await
+            .map_err(|_| IssuerError::internal())?
+            .ok_or_else(|| IssuerError::forbidden("device key not registered"))?;
+        if device_key.revoked_at.is_some() {
+            return Err(IssuerError::forbidden("device key revoked"));
+        }
+        let public_key_bytes =
+            device_public_key_bytes(&device_key.public_key, &auth.device_key_id)?;
+        // Device JWTs are minted from the onboarding policy, whose audience is
+        // the upload-claim audience returned here and validated on the request.
+        let claims =
+            verify_device_workload_jwt(&auth.token, &public_key_bytes, Some(&self.audience))?;
+        validate_device_workload_claims(&claims, &tenant_id)?;
+        let actor = auth.device_key_id;
+        let grant_principal_ref = principal_storage_ref(&format!("device:{tenant_id}:{actor}"));
+        self.issue_claim_for_authorized_actor(
+            AuthorizedUploadClaimActor {
+                actor,
+                tenant_id: tenant_id.to_string(),
                 grant_principal_ref,
                 allowed_consent_scopes: device_key_allowed_consent_scopes(),
                 allowed_uses: device_key_allowed_uses(),
@@ -1722,16 +1785,22 @@ fn valid_onboard_invite_code(invite_code: &str) -> bool {
 }
 
 fn bearer_token(headers: &HeaderMap) -> Result<&str, IssuerError> {
-    let value = headers
-        .get(header::AUTHORIZATION)
-        .ok_or_else(|| IssuerError::forbidden("missing workload token"))?
+    optional_bearer_token(headers)?.ok_or_else(|| IssuerError::forbidden("missing workload token"))
+}
+
+fn optional_bearer_token(headers: &HeaderMap) -> Result<Option<&str>, IssuerError> {
+    let Some(value) = headers.get(header::AUTHORIZATION) else {
+        return Ok(None);
+    };
+    let value = value
         .to_str()
         .map_err(|_| IssuerError::forbidden("invalid workload token"))?;
-    value
+    let token = value
         .strip_prefix("Bearer ")
         .map(str::trim)
         .filter(|token| !token.is_empty())
-        .ok_or_else(|| IssuerError::forbidden("invalid workload token"))
+        .ok_or_else(|| IssuerError::forbidden("invalid workload token"))?;
+    Ok(Some(token))
 }
 
 fn parse_upload_claim_request(body: &Bytes) -> Result<TraceUploadClaimRequest, IssuerError> {
@@ -1770,6 +1839,25 @@ fn device_claim_auth_from_headers(
             }))
         }
     }
+}
+
+fn device_jwt_auth_from_headers(headers: &HeaderMap) -> Result<Option<DeviceJwtAuth>, IssuerError> {
+    let Some(token) = optional_bearer_token(headers)? else {
+        return Ok(None);
+    };
+    let Ok(header) = jsonwebtoken::decode_header(token) else {
+        return Ok(None);
+    };
+    if header.alg != Algorithm::EdDSA {
+        return Ok(None);
+    }
+    let Some(device_key_id) = header.kid.filter(|kid| valid_device_key_id(kid)) else {
+        return Ok(None);
+    };
+    Ok(Some(DeviceJwtAuth {
+        device_key_id,
+        token: token.to_string(),
+    }))
 }
 
 fn trimmed_header_value(
@@ -1850,6 +1938,55 @@ fn verify_device_claim_signature(
     ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public_key_bytes)
         .verify(body, signature)
         .map_err(|_| IssuerError::forbidden("invalid device key signature"))
+}
+
+fn verify_device_workload_jwt(
+    token: &str,
+    public_key_bytes: &[u8],
+    expected_audience: Option<&str>,
+) -> Result<DeviceWorkloadClaims, IssuerError> {
+    let mut validation = Validation::new(Algorithm::EdDSA);
+    validation.validate_nbf = true;
+    let mut required_claims = vec!["exp".to_string()];
+    if let Some(audience) = expected_audience {
+        validation.set_audience(&[audience]);
+        required_claims.push("aud".to_string());
+    } else {
+        validation.validate_aud = false;
+    }
+    validation.set_required_spec_claims(&required_claims);
+    jsonwebtoken::decode::<DeviceWorkloadClaims>(
+        token,
+        &DecodingKey::from_ed_der(public_key_bytes),
+        &validation,
+    )
+    .map(|data| data.claims)
+    .map_err(|error| match error.kind() {
+        JwtErrorKind::ExpiredSignature => IssuerError::forbidden("expired device key token"),
+        JwtErrorKind::ImmatureSignature => IssuerError::forbidden("not-yet-valid device key token"),
+        _ => IssuerError::forbidden("invalid device key token"),
+    })
+}
+
+fn validate_device_workload_claims(
+    claims: &DeviceWorkloadClaims,
+    expected_tenant_id: &str,
+) -> Result<(), IssuerError> {
+    if claims.tenant_id.trim() != expected_tenant_id {
+        return Err(IssuerError::forbidden(
+            "device key tenant does not match request",
+        ));
+    }
+    let now = Utc::now().timestamp();
+    if claims.exp <= now {
+        return Err(IssuerError::forbidden("expired device key token"));
+    }
+    if let Some(iat) = claims.iat
+        && iat > now + 60
+    {
+        return Err(IssuerError::forbidden("not-yet-valid device key token"));
+    }
+    Ok(())
 }
 
 fn enforce_subset<T: Ord>(
@@ -2066,6 +2203,22 @@ fn trim_optional(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn normalize_onboarding_ingest_url(value: Option<String>) -> anyhow::Result<Option<String>> {
+    let Some(value) = trim_optional(value) else {
+        return Ok(None);
+    };
+    let mut parsed = reqwest::Url::parse(&value)
+        .with_context(|| format!("invalid {TRACE_COMMONS_ONBOARDING_INGEST_URL_ENV}"))?;
+    if parsed.path().is_empty() || parsed.path() == "/" {
+        parsed.set_path("/v1/traces");
+    }
+    anyhow::ensure!(
+        parsed.fragment().is_none(),
+        "{TRACE_COMMONS_ONBOARDING_INGEST_URL_ENV} must not include a fragment"
+    );
+    Ok(Some(parsed.to_string()))
 }
 
 #[cfg(test)]
@@ -2713,6 +2866,35 @@ mod tests {
         outcome.expect("serve returns Ok after graceful shutdown");
     }
 
+    #[test]
+    fn onboarding_ingest_url_origin_normalizes_to_submit_endpoint() {
+        assert_eq!(
+            normalize_onboarding_ingest_url(Some("https://ingest.tracecommons.ai".to_string()))
+                .expect("origin normalizes")
+                .as_deref(),
+            Some("https://ingest.tracecommons.ai/v1/traces")
+        );
+        assert_eq!(
+            normalize_onboarding_ingest_url(Some(
+                "https://ingest.tracecommons.ai/v1/traces".to_string()
+            ))
+            .expect("endpoint is preserved")
+            .as_deref(),
+            Some("https://ingest.tracecommons.ai/v1/traces")
+        );
+        assert_eq!(
+            normalize_onboarding_ingest_url(Some("   ".to_string())).expect("blank is absent"),
+            None
+        );
+        assert!(
+            normalize_onboarding_ingest_url(Some(
+                "https://ingest.tracecommons.ai/v1/traces#secret".to_string()
+            ))
+            .is_err(),
+            "onboarding ingest URL must not carry fragments"
+        );
+    }
+
     impl TraceUploadClaimIssuerState {
         fn clone_for_test(&self) -> TraceUploadClaimIssuerState {
             TraceUploadClaimIssuerState {
@@ -2978,6 +3160,46 @@ mod tests {
         assert!(
             verify_device_claim_signature(&stored_public_key, b"{}", signature.as_ref()).is_err(),
             "signature must bind the exact serialized body"
+        );
+    }
+
+    #[test]
+    fn device_key_workload_jwt_verifies_registered_public_key() {
+        use ring::signature::KeyPair;
+
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("keypair generates");
+        let keypair =
+            ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair parses");
+        let public_key = keypair.public_key().as_ref();
+        let device_key_id = device_key_id_from_public_key_bytes(public_key);
+        let now = Utc::now();
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some(device_key_id);
+        let token = jsonwebtoken::encode(
+            &header,
+            &json!({
+                "tenant_id": "tenant-a",
+                "aud": "trace-commons-ingest",
+                "iat": now.timestamp(),
+                "exp": (now + Duration::minutes(5)).timestamp(),
+            }),
+            &EncodingKey::from_ed_der(pkcs8.as_ref()),
+        )
+        .expect("device token signs");
+
+        let claims = verify_device_workload_jwt(&token, public_key, Some("trace-commons-ingest"))
+            .expect("registered public key verifies device token");
+        validate_device_workload_claims(&claims, "tenant-a").expect("tenant matches");
+        assert_eq!(claims.tenant_id, "tenant-a");
+        assert!(
+            validate_device_workload_claims(&claims, "tenant-b").is_err(),
+            "device JWT must not authorize another tenant"
+        );
+        assert!(
+            verify_device_workload_jwt(&token, public_key, Some("wrong-audience")).is_err(),
+            "device JWT audience must be enforced"
         );
     }
 
