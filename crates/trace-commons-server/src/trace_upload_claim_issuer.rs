@@ -51,6 +51,30 @@ const MINT_TEST_CLAIM_PRINCIPAL: &str = "principal:trace-upload-claim-issuer-tes
 const DEFAULT_ALLOWLIST_REFRESH_INTERVAL_SECONDS: u64 = 60;
 const DEFAULT_ALLOWLIST_MAX_STALE_SECONDS: u64 = 3600;
 const DEFAULT_DENIAL_COUNTER_WINDOW_SECONDS: u64 = 3600;
+const INVITE_LANDING_TEXT: &str = r#"Trace Commons invite link
+
+This GET route does not consume invites.
+
+Agents should onboard by sending a JSON POST to /v1/onboard on this origin:
+
+{
+  "schema_version": "trace_commons.onboard_request.v1",
+  "invite_code": "<code from the invite URL fragment or code query parameter>",
+  "device_public_key": "<base64 Ed25519 public key>",
+  "client_info": {
+    "agent": "ironclaw",
+    "version": "<agent version>"
+  }
+}
+
+After a successful response, store the returned device_key_id, tenant_id,
+issuer_url, ingest_url, and community URLs, then start Trace Commons trace
+submission using the registered device key.
+
+IronClaw users can run:
+
+ironclaw traces onboard '<full invite link>'
+"#;
 
 pub const TRACE_COMMONS_ALLOWLIST_SOURCE_ENV: &str = "TRACE_COMMONS_ALLOWLIST_SOURCE";
 pub const TRACE_COMMONS_ALLOWLIST_REFRESH_INTERVAL_SECONDS_ENV: &str =
@@ -740,6 +764,7 @@ pub fn trace_upload_claim_issuer_router(
             "/.well-known/trace-commons-ed25519-keyset.json",
             get(keyset_handler),
         )
+        .route("/onboard", get(invite_landing_handler))
         .route("/v1/trace-upload-claim", post(issue_claim_handler))
         .route("/v1/onboard", post(onboard_handler))
         .layer(DefaultBodyLimit::max(max_request_bytes))
@@ -762,6 +787,10 @@ async fn request_timeout_middleware(
         )
             .into_response(),
     }
+}
+
+async fn invite_landing_handler() -> &'static str {
+    INVITE_LANDING_TEXT
 }
 
 pub async fn serve_trace_upload_claim_issuer(
@@ -820,6 +849,7 @@ fn router_from_state(
             "/.well-known/trace-commons-ed25519-keyset.json",
             get(keyset_handler),
         )
+        .route("/onboard", get(invite_landing_handler))
         .route("/v1/trace-upload-claim", post(issue_claim_handler))
         .route("/v1/onboard", post(onboard_handler))
         .layer(DefaultBodyLimit::max(max_request_bytes))
@@ -2397,6 +2427,42 @@ mod tests {
             .expect("body reads");
         let json = serde_json::from_slice(&body).expect("json response");
         (status, json)
+    }
+
+    async fn get_text(config: TraceUploadClaimIssuerConfig, uri: &str) -> (StatusCode, String) {
+        let router = trace_upload_claim_issuer_router(config).expect("router builds");
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("body reads");
+        (
+            status,
+            String::from_utf8(body.to_vec()).expect("body is utf8"),
+        )
+    }
+
+    #[tokio::test]
+    async fn invite_landing_route_explains_agent_onboarding() {
+        let (status, body) = get_text(test_config(), "/onboard#INV9K3RT5FBQ72JX").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Trace Commons invite link"));
+        assert!(body.contains("POST to /v1/onboard"));
+        assert!(body.contains("trace_commons.onboard_request.v1"));
+        assert!(body.contains("invite_code"));
+        assert!(body.contains("device_public_key"));
+        assert!(body.contains("ironclaw traces onboard"));
+        assert!(!body.contains("INV9K3RT5FBQ72JX"));
     }
 
     #[tokio::test]
