@@ -16,6 +16,7 @@ client (ironclaw)
 tracecommons.ai         <--Cloudflare Pages-->  community/public
 ingest.tracecommons.ai  <--Caddy-->  127.0.0.1:3907  trace-commons-ingest
 issuer.tracecommons.ai  <--Caddy-->  127.0.0.1:3917  trace-commons-upload-claim-issuer
+  /v1/community/profile <--Caddy-->  127.0.0.1:3907  trace-commons-ingest
 
                                    127.0.0.1:5432  cloud-sql-proxy  --mTLS-->  Cloud SQL
                                                                    --IAM-->   tc-pilot-runtime@...
@@ -25,6 +26,9 @@ issuer.tracecommons.ai  <--Caddy-->  127.0.0.1:3917  trace-commons-upload-claim-
 ```
 
 - Both daemons bind loopback only; Caddy is the public TLS edge.
+- `issuer.tracecommons.ai/v1/community/profile` is a compatibility path
+  proxied to ingest because early IronClaw clients derive the profile API
+  from the issuer origin. The canonical community API owner remains ingest.
 - The Cloud SQL Auth Proxy is the TLS terminator into Cloud SQL. Ingest
   and the onboarding-enabled issuer connect via `127.0.0.1:5432` with no
   SSL; the proxy upgrades to mTLS using the runtime service account.
