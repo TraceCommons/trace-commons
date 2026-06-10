@@ -73,7 +73,8 @@ Two `trace-commons-tenant` subcommands do not hit the server and so do not
 consume a bearer:
 
 - `tenant-principal-ref` — derives the stored `principal_ref` locally from
-  either a static token or a signed-claim `(tenant_id, actor_ref)` pair.
+  a static token, signed-claim `(tenant_id, actor_ref)` pair, or onboarding
+  device-key `(tenant_id, device_key_id)` pair.
 - `privacy-filter-canary` — spawns the locally configured privacy-filter
   sidecar, pipes a canary string through it, and verifies no canary token
   survives the redaction. The subcommand reads its configuration from
@@ -151,6 +152,11 @@ trace-commons-tenant tenant-policy-set \
 
 # Derive the principal_ref for a new reviewer's static token.
 trace-commons-tenant tenant-principal-ref --token-env REVIEWER_BOB_TOKEN
+
+# Derive the principal_ref for an onboarded Ironclaw device key.
+trace-commons-tenant tenant-principal-ref \
+  --device-tenant-id tenant-zaki-pilot \
+  --device-key-id sha256:<64-hex-device-key-id>
 
 # Grant it. The grant_id is server-allocated unless --grant-id is passed.
 trace-commons-tenant tenant-access-grant-create \

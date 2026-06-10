@@ -113,7 +113,7 @@ pub(crate) struct TenantAccessGrantsListArgs {
 #[derive(Debug, clap::Args)]
 pub(crate) struct TenantPrincipalRefArgs {
     /// Env var name holding a static Trace Commons bearer token. Mutually
-    /// exclusive with the signed-claim flags below.
+    /// exclusive with the signed-claim and device-key flags below.
     #[arg(long)]
     pub token_env: Option<String>,
     /// Tenant ID for a signed-claim principal.
@@ -122,6 +122,12 @@ pub(crate) struct TenantPrincipalRefArgs {
     /// Signed-claim principal_ref or `sub` value.
     #[arg(long)]
     pub signed_actor_ref: Option<String>,
+    /// Tenant ID for an onboarding device-key principal.
+    #[arg(long)]
+    pub device_tenant_id: Option<String>,
+    /// Registered onboarding device_key_id.
+    #[arg(long)]
+    pub device_key_id: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -289,6 +295,7 @@ pub(crate) enum ConsentScope {
     BenchmarkOnly,
     RankingTraining,
     ModelTraining,
+    PublicAttribution,
 }
 
 impl ConsentScope {
@@ -299,6 +306,7 @@ impl ConsentScope {
             Self::BenchmarkOnly => "benchmark_only",
             Self::RankingTraining => "ranking_training",
             Self::ModelTraining => "model_training",
+            Self::PublicAttribution => "public_attribution",
         }
     }
     /// Query-string value (kebab-case, matches reviewer/admin filters).
@@ -308,6 +316,7 @@ impl ConsentScope {
             Self::BenchmarkOnly => "benchmark-only",
             Self::RankingTraining => "ranking-training",
             Self::ModelTraining => "model-training",
+            Self::PublicAttribution => "public-attribution",
         }
     }
 }
@@ -966,11 +975,18 @@ fn tenant_principal_ref(args: &TenantPrincipalRefArgs, json: bool) -> Result<()>
     let token_env = trimmed(args.token_env.as_deref());
     let signed_tenant_id = trimmed(args.signed_tenant_id.as_deref());
     let signed_actor_ref = trimmed(args.signed_actor_ref.as_deref());
+    let device_tenant_id = trimmed(args.device_tenant_id.as_deref());
+    let device_key_id = trimmed(args.device_key_id.as_deref());
     let has_token = token_env.is_some();
     let has_signed = signed_tenant_id.is_some() || signed_actor_ref.is_some();
-    if has_token == has_signed {
+    let has_device = device_tenant_id.is_some() || device_key_id.is_some();
+    let mode_count = [has_token, has_signed, has_device]
+        .into_iter()
+        .filter(|present| *present)
+        .count();
+    if mode_count != 1 {
         anyhow::bail!(
-            "provide either --token-env or both --signed-tenant-id and --signed-actor-ref"
+            "provide exactly one principal mode: --token-env, both signed-claim flags, or both device-key flags"
         );
     }
     let (mode, principal_ref) = if let Some(token_env) = token_env {
@@ -984,7 +1000,7 @@ fn tenant_principal_ref(args: &TenantPrincipalRefArgs, json: bool) -> Result<()>
             anyhow::bail!("{token_env} is empty; refusing to derive a principal_ref");
         }
         ("static_token", principal_storage_ref(&token))
-    } else {
+    } else if has_signed {
         let tenant_id = signed_tenant_id.ok_or_else(|| {
             anyhow::anyhow!("--signed-tenant-id is required with --signed-actor-ref")
         })?;
@@ -994,6 +1010,17 @@ fn tenant_principal_ref(args: &TenantPrincipalRefArgs, json: bool) -> Result<()>
         (
             "signed_claim",
             signed_claim_principal_ref(&tenant_id, &actor_ref),
+        )
+    } else {
+        let tenant_id = device_tenant_id.ok_or_else(|| {
+            anyhow::anyhow!("--device-tenant-id is required with --device-key-id")
+        })?;
+        let device_key_id = device_key_id.ok_or_else(|| {
+            anyhow::anyhow!("--device-key-id is required with --device-tenant-id")
+        })?;
+        (
+            "device_key",
+            device_key_principal_ref(&tenant_id, &device_key_id),
         )
     };
 
@@ -1019,7 +1046,12 @@ fn principal_storage_ref(value: &str) -> String {
 }
 
 fn signed_claim_principal_ref(tenant_id: &str, actor_ref: &str) -> String {
-    let composed = format!("{}:{}", tenant_id.trim(), actor_ref.trim());
+    let composed = format!("signed:{}:{}", tenant_id.trim(), actor_ref.trim());
+    principal_storage_ref(&composed)
+}
+
+fn device_key_principal_ref(tenant_id: &str, device_key_id: &str) -> String {
+    let composed = format!("device:{}:{}", tenant_id.trim(), device_key_id.trim());
     principal_storage_ref(&composed)
 }
 
@@ -1267,6 +1299,19 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_tenant_principal_ref_with_device_key() {
+        let parsed = Cli::try_parse_from([
+            "trace-commons-tenant",
+            "tenant-principal-ref",
+            "--device-tenant-id",
+            "tenant-zaki-pilot",
+            "--device-key-id",
+            "sha256:37315969b52410607889e9cc858382b55cb0f2fc35c7051c7a7ab7ce9dcd7b38",
+        ]);
+        assert!(parsed.is_ok(), "{parsed:?}");
+    }
+
+    #[test]
     fn cli_parses_tenant_access_grant_create() {
         let cli = parse(&[
             "tenant-access-grant-create",
@@ -1290,6 +1335,27 @@ mod tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn cli_parses_public_attribution_tenant_access_grant_create() {
+        let parsed = Cli::try_parse_from([
+            "trace-commons-tenant",
+            "--endpoint",
+            "https://api.example",
+            "tenant-access-grant-create",
+            "--principal-ref",
+            "principal_xyz",
+            "--role",
+            "contributor",
+            "--allowed-consent-scopes",
+            "public-attribution",
+            "--allowed-uses",
+            "debugging,aggregate-analytics",
+            "--reason",
+            "pilot profile setup",
+        ]);
+        assert!(parsed.is_ok(), "{parsed:?}");
     }
 
     #[test]
@@ -1458,6 +1524,8 @@ mod tests {
             token_env: Some(env.clone()),
             signed_tenant_id: None,
             signed_actor_ref: None,
+            device_tenant_id: None,
+            device_key_id: None,
         };
         tenant_principal_ref(&args, true).expect("derive works");
         // Re-derive directly to confirm format.
@@ -1471,10 +1539,28 @@ mod tests {
             token_env: None,
             signed_tenant_id: Some("tenant-1".into()),
             signed_actor_ref: Some("actor-xyz".into()),
+            device_tenant_id: None,
+            device_key_id: None,
         };
         tenant_principal_ref(&args, false).expect("derive works");
         let p = signed_claim_principal_ref("tenant-1", "actor-xyz");
         assert!(p.starts_with("principal_sha256:"));
+    }
+
+    #[test]
+    fn tenant_principal_ref_signed_claim_mode_matches_issuer_hash_input() {
+        assert_eq!(
+            signed_claim_principal_ref("tenant-1", "actor-xyz"),
+            principal_storage_ref("signed:tenant-1:actor-xyz")
+        );
+    }
+
+    #[test]
+    fn tenant_principal_ref_device_key_mode_matches_issuer_hash_input() {
+        assert_eq!(
+            device_key_principal_ref("tenant-1", "sha256:device-key"),
+            principal_storage_ref("device:tenant-1:sha256:device-key")
+        );
     }
 
     #[test]
@@ -1483,9 +1569,11 @@ mod tests {
             token_env: Some("X".into()),
             signed_tenant_id: Some("t".into()),
             signed_actor_ref: Some("a".into()),
+            device_tenant_id: None,
+            device_key_id: None,
         };
         let err = tenant_principal_ref(&args, false).unwrap_err();
-        assert!(err.to_string().contains("either"));
+        assert!(err.to_string().contains("exactly one"));
     }
 
     #[test]
@@ -1494,9 +1582,11 @@ mod tests {
             token_env: None,
             signed_tenant_id: None,
             signed_actor_ref: None,
+            device_tenant_id: None,
+            device_key_id: None,
         };
         let err = tenant_principal_ref(&args, false).unwrap_err();
-        assert!(err.to_string().contains("either"));
+        assert!(err.to_string().contains("exactly one"));
     }
 
     #[test]
@@ -1505,6 +1595,8 @@ mod tests {
             token_env: None,
             signed_tenant_id: Some("t".into()),
             signed_actor_ref: None,
+            device_tenant_id: None,
+            device_key_id: None,
         };
         let err = tenant_principal_ref(&args, false).unwrap_err();
         assert!(err.to_string().contains("signed-actor-ref"));

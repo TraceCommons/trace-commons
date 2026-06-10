@@ -297,6 +297,50 @@ The response surfaces `device_key_id`, `invite_subject_hash`,
 `client_info`, and timestamps. It does not return raw invite codes,
 bearer tokens, contributor identities, or trace content.
 
+## Repairing profile setup after onboarding
+
+If an onboarded Ironclaw agent says the operator needs to check invite
+device-key status before it can set a public profile, verify the device
+key is registered and grant that device principal profile-management
+scope.
+
+First list active device keys and confirm the participant's
+`device_key_id` is present:
+
+```bash
+trace-commons-tenant \
+  --endpoint https://ingest.tracecommons.ai \
+  device-keys list \
+  --tenant tenant-zaki-pilot
+```
+
+Then derive the tenant access-grant principal for that device key:
+
+```bash
+trace-commons-tenant tenant-principal-ref \
+  --device-tenant-id tenant-zaki-pilot \
+  --device-key-id sha256:<64-hex-device-key-id>
+```
+
+Grant the device contributor access with both normal pilot trace scopes
+and the separate public-profile scope:
+
+```bash
+trace-commons-tenant \
+  --endpoint https://ingest.tracecommons.ai \
+  tenant-access-grant-create \
+  --principal-ref principal_sha256:<64-hex-principal-ref> \
+  --role contributor \
+  --allowed-consent-scopes debugging-evaluation,public-attribution \
+  --allowed-uses debugging,evaluation,aggregate-analytics \
+  --reason "grant pilot device-key trace and profile access"
+```
+
+The `principal_ref` is already device-specific. Only add optional
+`--issuer`, `--audience`, or `--subject` filters when you are certain they
+match the live issuer claim values; a mismatch will make claim issuance
+fail closed.
+
 ## Rollback
 
 To turn the gate off:
