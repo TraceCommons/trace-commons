@@ -317,6 +317,9 @@ const TRACE_COMMONS_KEK_PROVIDER: &str = "TRACE_COMMONS_KEK_PROVIDER";
 const TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME: &str = "TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME";
 const TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED: &str =
     "TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED";
+const TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS: &str =
+    "TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS";
+const TRACE_COMMONS_COMMUNITY_TENANT_IDS: &str = "TRACE_COMMONS_COMMUNITY_TENANT_IDS";
 const TRACE_COMMONS_COMMUNITY_CORS_ORIGINS: &str = "TRACE_COMMONS_COMMUNITY_CORS_ORIGINS";
 const TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_SUBMIT_REVIEW";
@@ -941,6 +944,8 @@ struct AppState {
     require_db_reconciliation_clean: bool,
     require_export_guardrails: bool,
     community_leaderboard_enabled: bool,
+    accept_medium_risk_submissions: bool,
+    community_tenant_ids: Arc<Vec<String>>,
     tenant_rollout_gates: TraceTenantRolloutGates,
     max_export_items_per_request: usize,
     analytics_min_cell_count: usize,
@@ -2645,6 +2650,10 @@ impl AppState {
         let require_export_guardrails = env_truthy("TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS");
         let max_export_items_per_request = parse_max_export_items_per_request_from_env()?;
         let analytics_min_cell_count = parse_analytics_min_cell_count_from_env()?;
+        let community_tenant_ids =
+            parse_trace_rollout_tenant_ids_from_env(TRACE_COMMONS_COMMUNITY_TENANT_IDS)?
+                .into_iter()
+                .collect::<Vec<_>>();
         let analytics_broad_release_noise = parse_analytics_noise_from_env()?;
         let analytics_broad_release_privacy_accounting =
             parse_analytics_privacy_accounting_from_env()?;
@@ -3024,6 +3033,10 @@ impl AppState {
             require_db_reconciliation_clean,
             require_export_guardrails,
             community_leaderboard_enabled: env_truthy(TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED),
+            accept_medium_risk_submissions: env_truthy(
+                TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS,
+            ),
+            community_tenant_ids: Arc::new(community_tenant_ids),
             tenant_rollout_gates,
             max_export_items_per_request,
             analytics_min_cell_count,
@@ -10653,7 +10666,10 @@ async fn submit_trace_handler(
     enforce_submission_quota(state.as_ref(), &tenant)?;
     apply_embedding_precheck(&mut envelope, &derived_precheck);
     apply_credit_estimate_to_envelope(&mut envelope);
-    let corpus_status = status_for_risk(envelope.privacy.residual_pii_risk);
+    let corpus_status = status_for_risk(
+        envelope.privacy.residual_pii_risk,
+        state.accept_medium_risk_submissions,
+    );
     if corpus_status != TraceCorpusStatus::Accepted {
         envelope.value.credit_points_pending = 0.0;
         envelope.value.explanation = vec![
@@ -11137,11 +11153,18 @@ async fn recompute_community_snapshot(
     })?;
     let min_cell_count = state.analytics_min_cell_count as i64;
     let inputs = db
-        .compute_leaderboard_inputs(COMMUNITY_LEADERBOARD_WINDOW_DAYS, min_cell_count)
+        .compute_leaderboard_inputs(
+            COMMUNITY_LEADERBOARD_WINDOW_DAYS,
+            min_cell_count,
+            state.community_tenant_ids.as_ref(),
+        )
         .await
         .map_err(internal_error)?;
     let analytics = db
-        .compute_corpus_analytics_summary(COMMUNITY_LEADERBOARD_WINDOW_DAYS)
+        .compute_corpus_analytics_summary(
+            COMMUNITY_LEADERBOARD_WINDOW_DAYS,
+            state.community_tenant_ids.as_ref(),
+        )
         .await
         .map_err(internal_error)?;
 
@@ -44385,9 +44408,13 @@ fn reviewer_credit_for_record(record: &TraceCommonsSubmissionRecord) -> f32 {
     (0.5 + record.submission_score).clamp(0.5, 2.0)
 }
 
-fn status_for_risk(risk: ResidualPiiRisk) -> TraceCorpusStatus {
+fn status_for_risk(
+    risk: ResidualPiiRisk,
+    accept_medium_risk_submissions: bool,
+) -> TraceCorpusStatus {
     match risk {
         ResidualPiiRisk::Low => TraceCorpusStatus::Accepted,
+        ResidualPiiRisk::Medium if accept_medium_risk_submissions => TraceCorpusStatus::Accepted,
         ResidualPiiRisk::Medium | ResidualPiiRisk::High => TraceCorpusStatus::Quarantined,
     }
 }

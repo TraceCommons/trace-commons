@@ -121,28 +121,31 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
-    /// Compute the per-contributor leaderboard inputs across every tenant
-    /// for the given window. Iterates `trace_tenants`, setting the RLS
-    /// tenant GUC for each, so cross-tenant aggregation still respects
-    /// per-table RLS. Applies the `min_cell_count` threshold at the SQL
-    /// level — contributors with fewer than `min_cell_count` accepted
-    /// submissions in-window are not returned. Noise / privacy-budget
-    /// integration is deferred to a follow-up slice.
+    /// Compute the per-contributor leaderboard inputs for the given
+    /// community tenant set and window. Implementations set the RLS tenant
+    /// GUC for each tenant, so aggregation still respects per-table RLS.
+    /// Applies the `min_cell_count` threshold at the SQL level —
+    /// contributors with fewer than `min_cell_count` accepted submissions
+    /// in-window are not returned. Noise / privacy-budget integration is
+    /// deferred to a follow-up slice.
     async fn compute_leaderboard_inputs(
         &self,
         _window_days: i32,
         _min_cell_count: i64,
+        _tenant_ids: &[String],
     ) -> Result<Vec<LeaderboardContributorRow>, DatabaseError> {
         Err(DatabaseError::Pool(
             "compute_leaderboard_inputs not implemented".to_string(),
         ))
     }
 
-    /// Compute the corpus-wide aggregate summary for the given window.
-    /// Crosses tenants the same way `compute_leaderboard_inputs` does.
+    /// Compute the corpus-wide aggregate summary for the given community
+    /// tenant set and window. Crosses tenants the same way
+    /// `compute_leaderboard_inputs` does.
     async fn compute_corpus_analytics_summary(
         &self,
         _window_days: i32,
+        _tenant_ids: &[String],
     ) -> Result<CorpusAnalyticsSummary, DatabaseError> {
         Err(DatabaseError::Pool(
             "compute_corpus_analytics_summary not implemented".to_string(),
@@ -336,6 +339,8 @@ pub struct OnboardDeviceKeyRecord {
 pub enum OnboardDeviceKeyError {
     #[error("invite not valid")]
     InviteNotValid,
+    #[error("invite already consumed")]
+    InviteAlreadyConsumed,
     #[error("database error: {0}")]
     Database(#[from] DatabaseError),
 }

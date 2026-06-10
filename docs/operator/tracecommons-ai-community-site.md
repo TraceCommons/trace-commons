@@ -48,9 +48,10 @@ proxied to `https://ingest.tracecommons.ai/v1/community/*`.
    milestone targets, and weekly rhythm. This is the participant-facing
    brief at `https://tracecommons.ai/brief`.
 
-4. Seed invite codes with the allowlist flow in
+4. Seed invite codes with the batch helper in
    [`./pilot-allowlist.md`](./pilot-allowlist.md). For the initial cohort,
-   one invite per contributor keeps troubleshooting simple.
+   one invite per contributor keeps troubleshooting simple; use the default
+   retry budget so client retries do not burn the whole invitation.
 
 5. Hand-provision each candidate over a private Slack DM or equivalent.
    Send only the invite link, the expected `ironclaw traces onboard`

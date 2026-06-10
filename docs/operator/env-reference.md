@@ -129,6 +129,7 @@ procedure.
 | `TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST` | optional | — | Page cap for export endpoints. |
 | `TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR` | optional | — | Rate-limit budget per tenant. |
 | `TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR` | optional | — | Rate-limit budget per principal. |
+| `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS` | optional | `false` | When `true`, accepts medium residual-risk submissions after server-side re-scrub. High residual-risk submissions still quarantine. Intended for tightly scoped pilots where message text/tool payloads are included. |
 
 ## 8. Auth / signed-token surface
 
@@ -166,6 +167,7 @@ procedure.
 | `TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_EPSILON_MICROS` | optional | — | Configured epsilon. |
 | `TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_MAX_EPSILON_MICROS` | optional | — | Refuse epsilons above this. |
 | `TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED` | optional | `false` | Enables `/v1/community/*` profile, leaderboard, contributor, and analytics snapshot routes. Requires the DB mirror for real data. |
+| `TRACE_COMMONS_COMMUNITY_TENANT_IDS` | optional | — | Comma-separated tenant ids included in community snapshot recompute. Set this when the runtime DB role is non-bypassing and forced RLS would hide `trace_tenants` enumeration. |
 | `TRACE_COMMONS_COMMUNITY_CORS_ORIGINS` | optional | `https://tracecommons.ai,http://localhost:8788,http://127.0.0.1:8788` | Comma-separated browser origins allowed to call `/v1/community/*`. Keep this to the public Pages site plus local preview origins. |
 
 ## 10. Credit / NEAR surface

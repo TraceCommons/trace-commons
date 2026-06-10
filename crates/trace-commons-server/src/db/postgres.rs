@@ -61,6 +61,58 @@ const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
 
 const ONBOARDING_DEVICE_GRANT_REASON: &str = "onboarding device-key default pilot access";
 
+const LEADERBOARD_INPUTS_SQL: &str = "SELECT
+                        cp.tenant_id,
+                        cp.principal_ref,
+                        cp.display_handle,
+                        cp.handle_normalized,
+                        cp.bio,
+                        cp.public_since,
+                        COUNT(*) FILTER (
+                            WHERE cl.event_type = 'accepted'
+                              AND COALESCE(ts.received_at, cl.occurred_at)
+                                  >= NOW() - ($1 || ' days')::interval
+                        ) AS accepted_in_window,
+                        COALESCE(SUM(cl.points_delta::float8) FILTER (
+                            WHERE cl.event_type = 'accepted'
+                              AND COALESCE(ts.received_at, cl.occurred_at)
+                                  >= NOW() - ($1 || ' days')::interval
+                        ), 0.0) AS credit_in_window,
+                        COUNT(*) FILTER (WHERE cl.event_type = 'accepted') AS total_accepted,
+                        COALESCE(SUM(cl.points_delta::float8) FILTER (
+                            WHERE cl.event_type = 'accepted'
+                        ), 0.0) AS total_credit
+                     FROM trace_contributor_profiles cp
+                     LEFT JOIN trace_credit_ledger cl
+                            ON cl.tenant_id = cp.tenant_id
+                           AND (
+                                cl.credit_account_ref = cp.principal_ref
+                                OR EXISTS (
+                                    SELECT 1
+                                    FROM trace_submissions ts_match
+                                    WHERE ts_match.tenant_id = cl.tenant_id
+                                      AND ts_match.submission_id = cl.submission_id
+                                      AND (
+                                           ts_match.auth_principal_ref = cp.principal_ref
+                                           OR COALESCE(
+                                                ts_match.contributor_pseudonym,
+                                                ts_match.auth_principal_ref
+                                           ) = cp.principal_ref
+                                      )
+                                )
+                           )
+                     LEFT JOIN trace_submissions ts
+                            ON ts.tenant_id = cl.tenant_id
+                           AND ts.submission_id = cl.submission_id
+                     WHERE cp.withdrawn_at IS NULL
+                     GROUP BY cp.tenant_id, cp.principal_ref, cp.display_handle,
+                              cp.handle_normalized, cp.bio, cp.public_since
+                     HAVING COUNT(*) FILTER (
+                        WHERE cl.event_type = 'accepted'
+                          AND COALESCE(ts.received_at, cl.occurred_at)
+                              >= NOW() - ($1 || ' days')::interval
+                     ) >= $2";
+
 impl PgBackend {
     pub async fn new(config: &DatabaseConfig) -> Result<Self, DatabaseError> {
         let pg_config = config
@@ -940,15 +992,20 @@ impl Database for PgBackend {
         &self,
         window_days: i32,
         min_cell_count: i64,
+        configured_tenant_ids: &[String],
     ) -> Result<Vec<crate::db::LeaderboardContributorRow>, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
-        let tenant_ids: Vec<String> = client
-            .query("SELECT tenant_id FROM trace_tenants", &[])
-            .await
-            .map_err(DatabaseError::Postgres)?
-            .into_iter()
-            .map(|row| row.get::<_, String>("tenant_id"))
-            .collect();
+        let tenant_ids: Vec<String> = if configured_tenant_ids.is_empty() {
+            client
+                .query("SELECT tenant_id FROM trace_tenants", &[])
+                .await
+                .map_err(DatabaseError::Postgres)?
+                .into_iter()
+                .map(|row| row.get::<_, String>("tenant_id"))
+                .collect()
+        } else {
+            configured_tenant_ids.to_vec()
+        };
         let mut rows = Vec::new();
         for tenant_id in &tenant_ids {
             let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
@@ -957,36 +1014,7 @@ impl Database for PgBackend {
             // straddles a clock tick.
             let pg_rows = tx
                 .query(
-                    "SELECT
-                        cp.tenant_id,
-                        cp.principal_ref,
-                        cp.display_handle,
-                        cp.handle_normalized,
-                        cp.bio,
-                        cp.public_since,
-                        COUNT(*) FILTER (
-                            WHERE cl.event_type = 'accepted'
-                              AND cl.created_at >= NOW() - ($1 || ' days')::interval
-                        ) AS accepted_in_window,
-                        COALESCE(SUM(cl.points_delta::float8) FILTER (
-                            WHERE cl.event_type = 'accepted'
-                              AND cl.created_at >= NOW() - ($1 || ' days')::interval
-                        ), 0.0) AS credit_in_window,
-                        COUNT(*) FILTER (WHERE cl.event_type = 'accepted') AS total_accepted,
-                        COALESCE(SUM(cl.points_delta::float8) FILTER (
-                            WHERE cl.event_type = 'accepted'
-                        ), 0.0) AS total_credit
-                     FROM trace_contributor_profiles cp
-                     LEFT JOIN trace_credit_ledger cl
-                            ON cl.tenant_id = cp.tenant_id
-                           AND cl.credit_account_ref = cp.principal_ref
-                     WHERE cp.withdrawn_at IS NULL
-                     GROUP BY cp.tenant_id, cp.principal_ref, cp.display_handle,
-                              cp.handle_normalized, cp.bio, cp.public_since
-                     HAVING COUNT(*) FILTER (
-                        WHERE cl.event_type = 'accepted'
-                          AND cl.created_at >= NOW() - ($1 || ' days')::interval
-                     ) >= $2",
+                    LEADERBOARD_INPUTS_SQL,
                     &[&window_days.to_string(), &min_cell_count],
                 )
                 .await
@@ -1013,15 +1041,20 @@ impl Database for PgBackend {
     async fn compute_corpus_analytics_summary(
         &self,
         window_days: i32,
+        configured_tenant_ids: &[String],
     ) -> Result<crate::db::CorpusAnalyticsSummary, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
-        let tenant_ids: Vec<String> = client
-            .query("SELECT tenant_id FROM trace_tenants", &[])
-            .await
-            .map_err(DatabaseError::Postgres)?
-            .into_iter()
-            .map(|row| row.get::<_, String>("tenant_id"))
-            .collect();
+        let tenant_ids: Vec<String> = if configured_tenant_ids.is_empty() {
+            client
+                .query("SELECT tenant_id FROM trace_tenants", &[])
+                .await
+                .map_err(DatabaseError::Postgres)?
+                .into_iter()
+                .map(|row| row.get::<_, String>("tenant_id"))
+                .collect()
+        } else {
+            configured_tenant_ids.to_vec()
+        };
 
         let mut total_submissions = 0_i64;
         let mut total_accepted = 0_i64;
@@ -1424,7 +1457,7 @@ impl Database for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
         if consumed.is_none() {
-            return Err(crate::db::OnboardDeviceKeyError::InviteNotValid);
+            return Err(crate::db::OnboardDeviceKeyError::InviteAlreadyConsumed);
         }
 
         upsert_onboarding_device_tenant_access_grant(
@@ -1583,6 +1616,30 @@ mod tests {
         assert_eq!(first, second);
         assert_ne!(first, other_device);
         assert_ne!(first, other_tenant);
+    }
+
+    #[test]
+    fn leaderboard_inputs_credit_device_key_profiles_by_submission_principal() {
+        assert!(
+            LEADERBOARD_INPUTS_SQL.contains("FROM trace_submissions ts_match"),
+            "leaderboard rows must bridge accepted credit events through the source submission"
+        );
+        assert!(
+            LEADERBOARD_INPUTS_SQL.contains("ts_match.auth_principal_ref = cp.principal_ref"),
+            "device-key public profiles are keyed by auth principal, not trace pseudonym"
+        );
+        assert!(
+            LEADERBOARD_INPUTS_SQL.contains("ts_match.contributor_pseudonym"),
+            "leaderboard rows must also support profiles keyed by trace credit pseudonym"
+        );
+        assert!(
+            LEADERBOARD_INPUTS_SQL.contains("COALESCE(ts.received_at, cl.occurred_at)"),
+            "leaderboard recency should prefer trace receive time over ledger backfill time"
+        );
+        assert!(
+            LEADERBOARD_INPUTS_SQL.contains("cl.credit_account_ref = cp.principal_ref"),
+            "legacy credit-account joins must remain supported"
+        );
     }
 
     #[test]

@@ -101,7 +101,14 @@ uses through PostgreSQL.
 The ingest env template enables the public community snapshot routes and
 allows the `https://${TC_PUBLIC_HOST}` browser origin through
 `TRACE_COMMONS_COMMUNITY_CORS_ORIGINS` for direct staging checks. The
-production Pages site serves browser traffic through same-origin
+template pins `TRACE_COMMONS_COMMUNITY_TENANT_IDS=${TC_TENANT_ID}` because the
+runtime PostgreSQL role is non-bypassing under forced RLS; without an explicit
+community tenant list, snapshot recompute cannot enumerate `trace_tenants`.
+The
+template also enables `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS=true` so
+message-text/tool-payload pilot traces accepted by server-side re-scrub do not
+all sit in manual quarantine; high residual-risk secret-like traces still
+quarantine. The production Pages site serves browser traffic through same-origin
 `/api/v1/community/*`, then proxies to the ingest host. Deploy the static
 Pages site from [`../../community/`](../../community/) after the ingest host is
 reachable; details live in
@@ -187,7 +194,8 @@ Smoke the onboarding route with an allowlisted invite and a generated
 Ed25519 public key. Expect `200` with `tenant_id`, `device_key_id`,
 `ingest_url`, `profile_url`, and `leaderboard_url`. A successful retry
 with the same public key is idempotent; a different public key after
-`max_uses` is exhausted should return `403 {"error":"InviteNotValid"}`.
+`max_uses` is exhausted should return
+`403 {"error":"InviteAlreadyConsumed"}`.
 
 Submit a real envelope end-to-end using the newly onboarded Ironclaw
 device-key flow. For older pilot clients only, `sign-workload-token.py`

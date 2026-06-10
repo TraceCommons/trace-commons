@@ -787,6 +787,8 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         require_db_reconciliation_clean: false,
         require_export_guardrails,
         community_leaderboard_enabled: false,
+        accept_medium_risk_submissions: false,
+        community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
         max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
         analytics_min_cell_count: 0,
@@ -1495,6 +1497,30 @@ async fn submit_rescrubs_and_stores_under_authenticated_tenant() {
         .expect("stored envelope reads");
     assert!(stored.contains("server-rescrub-v1"));
     assert!(!stored.contains("/tmp/ironclaw/private/token.txt"));
+}
+
+#[tokio::test]
+async fn submit_accepts_medium_risk_when_pilot_flag_enabled() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
+    let envelope = sample_envelope().await;
+    assert_eq!(envelope.privacy.residual_pii_risk, ResidualPiiRisk::Medium);
+
+    let Json(receipt) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope.clone()),
+    )
+    .await
+    .expect("submission succeeds");
+
+    assert_eq!(receipt.status, "accepted");
+    let record = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(record.status, TraceCorpusStatus::Accepted);
+    assert!(record.credit_points_pending >= 0.0);
 }
 
 #[tokio::test]
@@ -20143,6 +20169,8 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         require_db_reconciliation_clean: false,
         require_export_guardrails: false,
         community_leaderboard_enabled: false,
+        accept_medium_risk_submissions: false,
+        community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
         max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
         analytics_min_cell_count: 0,
