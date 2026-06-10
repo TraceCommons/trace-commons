@@ -297,12 +297,20 @@ The response surfaces `device_key_id`, `invite_subject_hash`,
 `client_info`, and timestamps. It does not return raw invite codes,
 bearer tokens, contributor identities, or trace content.
 
-## Repairing profile setup after onboarding
+## Repairing legacy profile setup after onboarding
+
+Current `/v1/onboard` registrations create a default contributor tenant
+access grant for the device key. That grant includes the normal pilot trace
+scopes plus the separate `public_attribution` profile-management scope, so
+operators should not need to hand-grant profile access for new invites.
+
+Use this repair flow only for devices onboarded before the default grant was
+created automatically, or for a device whose default grant was removed by an
+operator.
 
 If an onboarded Ironclaw agent says the operator needs to check invite
-device-key status before it can set a public profile, verify the device
-key is registered and grant that device principal profile-management
-scope.
+device-key status before it can set a public profile, verify the device key is
+registered and grant that device principal profile-management scope.
 
 First list active device keys and confirm the participant's
 `device_key_id` is present:

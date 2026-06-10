@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use deadpool_postgres::Pool;
 use sha2::{Digest, Sha256};
 use tokio_postgres::Row;
+use uuid::Uuid;
 
 use crate::config::DatabaseConfig;
 use crate::db::{Database, TraceCorpusRlsDiagnostics};
@@ -57,6 +58,8 @@ const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
     "(tenant_id = trace_current_tenant_id())",
     "(tenant_id = public.trace_current_tenant_id())",
 ];
+
+const ONBOARDING_DEVICE_GRANT_REASON: &str = "onboarding device-key default pilot access";
 
 impl PgBackend {
     pub async fn new(config: &DatabaseConfig) -> Result<Self, DatabaseError> {
@@ -1317,6 +1320,12 @@ impl Database for PgBackend {
                 && record.invite_subject_hash == device_key.invite_subject_hash
                 && record.revoked_at.is_none()
             {
+                upsert_onboarding_device_tenant_access_grant(
+                    &tx,
+                    &device_key.tenant_id,
+                    &device_key.device_key_id,
+                )
+                .await?;
                 tx.commit().await.map_err(DatabaseError::Postgres)?;
                 return Ok(crate::db::OnboardDeviceKeyRecord {
                     device_key: record,
@@ -1384,6 +1393,12 @@ impl Database for PgBackend {
                     && record.invite_subject_hash == device_key.invite_subject_hash
                     && record.revoked_at.is_none()
                 {
+                    upsert_onboarding_device_tenant_access_grant(
+                        &tx,
+                        &device_key.tenant_id,
+                        &device_key.device_key_id,
+                    )
+                    .await?;
                     tx.commit().await.map_err(DatabaseError::Postgres)?;
                     return Ok(crate::db::OnboardDeviceKeyRecord {
                         device_key: record,
@@ -1412,6 +1427,13 @@ impl Database for PgBackend {
             return Err(crate::db::OnboardDeviceKeyError::InviteNotValid);
         }
 
+        upsert_onboarding_device_tenant_access_grant(
+            &tx,
+            &device_key.tenant_id,
+            &device_key.device_key_id,
+        )
+        .await?;
+
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(crate::db::OnboardDeviceKeyRecord {
             device_key: device_key_record_from_row(inserted),
@@ -1430,6 +1452,79 @@ fn device_key_record_from_row(row: Row) -> crate::db::DeviceKeyRecord {
         created_at: row.get("created_at"),
         revoked_at: row.get("revoked_at"),
     }
+}
+
+async fn upsert_onboarding_device_tenant_access_grant(
+    tx: &tokio_postgres::Transaction<'_>,
+    tenant_id: &str,
+    device_key_id: &str,
+) -> Result<(), DatabaseError> {
+    let grant_id = onboarding_device_tenant_access_grant_id(tenant_id, device_key_id);
+    let principal_ref = onboarding_device_principal_ref(tenant_id, device_key_id);
+    let allowed_consent_scopes = serde_json::json!(["debugging_evaluation", "public_attribution"]);
+    let allowed_uses = serde_json::json!(["debugging", "evaluation", "aggregate_analytics"]);
+    let metadata_json =
+        serde_json::json!({"source": "onboarding_device_key", "capability": "pilot_default"});
+
+    tx.execute(
+        "INSERT INTO trace_tenant_access_grants (
+            tenant_id, grant_id, principal_ref, role, status,
+            allowed_consent_scopes, allowed_uses, issuer, audience, subject,
+            issued_at, expires_at, revoked_at, created_by_principal_ref,
+            revoked_by_principal_ref, reason, metadata_json
+         ) VALUES ($1, $2, $3, 'contributor', 'active',
+            $4, $5, NULL, NULL, NULL, NOW(), NULL, NULL,
+            'system:onboard_device_key', NULL, $6, $7)
+         ON CONFLICT (tenant_id, grant_id) DO UPDATE SET
+            principal_ref = excluded.principal_ref,
+            role = excluded.role,
+            status = excluded.status,
+            allowed_consent_scopes = excluded.allowed_consent_scopes,
+            allowed_uses = excluded.allowed_uses,
+            issuer = excluded.issuer,
+            audience = excluded.audience,
+            subject = excluded.subject,
+            expires_at = excluded.expires_at,
+            revoked_at = excluded.revoked_at,
+            created_by_principal_ref = excluded.created_by_principal_ref,
+            reason = excluded.reason,
+            metadata_json = excluded.metadata_json,
+            updated_at = NOW()
+          WHERE trace_tenant_access_grants.status <> 'revoked'",
+        &[
+            &tenant_id,
+            &grant_id,
+            &principal_ref,
+            &allowed_consent_scopes,
+            &allowed_uses,
+            &ONBOARDING_DEVICE_GRANT_REASON,
+            &metadata_json,
+        ],
+    )
+    .await
+    .map_err(DatabaseError::Postgres)?;
+    Ok(())
+}
+
+fn onboarding_device_tenant_access_grant_id(tenant_id: &str, device_key_id: &str) -> Uuid {
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!(
+            "tracecommons:onboarding-device-access-grant:{}:{}",
+            tenant_id.trim(),
+            device_key_id.trim()
+        )
+        .as_bytes(),
+    )
+}
+
+fn onboarding_device_principal_ref(tenant_id: &str, device_key_id: &str) -> String {
+    let digest = Sha256::digest(format!(
+        "device:{}:{}",
+        tenant_id.trim(),
+        device_key_id.trim()
+    ));
+    format!("principal_sha256:{}", hex::encode(digest))
 }
 
 fn sha256_prefixed(input: &str) -> String {
@@ -1468,6 +1563,27 @@ async fn trace_tenant_context_is_transaction_local(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn onboarding_device_principal_ref_matches_issuer_hash_input() {
+        assert_eq!(
+            onboarding_device_principal_ref("tenant-1", "sha256:device-key"),
+            "principal_sha256:2bf5c8fb2e00d4b044f1e3d24aaf864d21197baaaca9de3da5de631a951caf9d"
+        );
+    }
+
+    #[test]
+    fn onboarding_device_grant_id_is_stable_and_device_scoped() {
+        let first = onboarding_device_tenant_access_grant_id("tenant-1", "sha256:device-key");
+        let second = onboarding_device_tenant_access_grant_id("tenant-1", "sha256:device-key");
+        let other_device = onboarding_device_tenant_access_grant_id("tenant-1", "sha256:other");
+        let other_tenant =
+            onboarding_device_tenant_access_grant_id("tenant-2", "sha256:device-key");
+
+        assert_eq!(first, second);
+        assert_ne!(first, other_device);
+        assert_ne!(first, other_tenant);
+    }
 
     #[test]
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {

@@ -93,15 +93,20 @@ The short form is:
 2. Run `ironclaw traces onboard '<invite-link>'`.
 3. Submit a metadata-only fixture trace.
 4. Check `ironclaw traces credit` and queue status.
-5. Generate or copy a short-lived public-attribution token from Ironclaw.
-6. Open `https://tracecommons.ai/profile`, set a pseudonymous handle, and
-   watch `https://tracecommons.ai/leaderboard` after the next snapshot.
+5. Ask Ironclaw to set a pseudonymous public profile handle, or copy a
+   short-lived public-attribution token from Ironclaw into the browser
+   profile page.
+6. Open `https://tracecommons.ai/profile` to review or withdraw the public
+   handle, and watch `https://tracecommons.ai/leaderboard` after the next
+   snapshot.
 7. Open `https://tracecommons.ai/brief` for the current trace prompt and
    cohort milestones.
 
-The browser page never asks for the device private key or workload JWT. If a
-participant is on an older fallback build, keep the workload JWT in their
-shell environment and rotate it manually.
+Current invite onboarding grants the device key both normal pilot trace
+capability and the separate `public_attribution` profile-management
+capability by default. The browser page never asks for the device private key
+or workload JWT. If a participant is on an older fallback build, keep the
+workload JWT in their shell environment and rotate it manually.
 
 ## Rich pilot loop
 
