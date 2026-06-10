@@ -36,10 +36,22 @@ ingest.${TC_PUBLIC_HOST} {
 
 issuer.${TC_PUBLIC_HOST} {
 	encode gzip
-	reverse_proxy 127.0.0.1:3917 {
-		header_up Host {host}
-		header_up X-Forwarded-For {remote_host}
-		header_up X-Forwarded-Proto {scheme}
+	# Some IronClaw clients derive the community profile API from the
+	# upload-claim issuer origin. Keep that path working at the edge while
+	# the canonical ingest host remains the service owner for community APIs.
+	handle /v1/community/profile* {
+		reverse_proxy 127.0.0.1:3907 {
+			header_up Host {host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+	handle {
+		reverse_proxy 127.0.0.1:3917 {
+			header_up Host {host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
 	}
 	log {
 		output file /var/log/caddy/issuer-access.log
