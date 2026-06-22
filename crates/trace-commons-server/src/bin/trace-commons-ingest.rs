@@ -11874,47 +11874,38 @@ async fn confirm_login_handler(
         Ok(None) | Err(_) => return redeem_generic_deny(),
     };
 
-    // Single atomic consume inside the resolved tenant's RLS-scoped tx. The
-    // always-run UPDATE means unknown/expired/consumed/wrong-tenant all yield
-    // None -> same deny. No SELECT-then-branch, no enumeration.
-    let consumed = match db.consume_login_link(&tenant, &code_hash).await {
-        Ok(Some(consumed)) => consumed,
-        Ok(None) | Err(_) => return redeem_generic_deny(),
-    };
-
     // Mint the session secret (>=128-bit CSPRNG). Store ONLY its hash.
     let secret = generate_session_secret();
     let token_hash = hash_secret(&secret);
     let expires_at = Utc::now() + Duration::days(ACCOUNT_SESSION_TTL_DAYS);
-    let session_id = match db
-        .insert_session(&tenant, consumed.account_id, &token_hash, "web", expires_at)
-        .await
-    {
-        Ok(session_id) => session_id,
-        Err(_) => return redeem_generic_deny(),
-    };
 
-    // Hash-only / label-only redeem audit. Actor is the account-actor ref;
-    // created-vs-reused is not knowable here (account already existed at mint),
-    // so outcome is the coarse `success`. NEVER the code/secret/url.
-    let account = AccountId::from_uuid(consumed.account_id);
-    if let Err(_) = db
-        .append_account_audit(
+    // Atomic redeem: consume + session insert + hash-only audit in ONE RLS-scoped
+    // tx. The always-run UPDATE means unknown/expired/consumed/wrong-tenant all
+    // yield Ok(None) -> same deny (and the link stays UNconsumed/retryable). Any
+    // error also collapses to the uniform deny. No SELECT-then-branch, no
+    // enumeration; created-vs-reused is not knowable here (account existed at
+    // mint), so outcome is the coarse `success`. NEVER the code/secret/url.
+    let redeemed = match db
+        .redeem_login_link(
             &tenant,
-            "account_login_redeem",
-            &account_actor_ref(&account),
-            "success",
-            serde_json::json!({ "client_kind": "web" }),
+            &code_hash,
+            trace_commons_server::db::NewSession {
+                token_hash: &token_hash,
+                client_kind: "web",
+                expires_at,
+            },
+            trace_commons_server::db::RedeemAudit {
+                action: "account_login_redeem".to_string(),
+                outcome: "success".to_string(),
+                metadata: serde_json::json!({ "client_kind": "web" }),
+            },
         )
         .await
     {
-        // Audit failure after a committed consume must not hand the session to the
-        // caller without a trail; collapse to the uniform deny. The link is
-        // already consumed (single-use preserved); the session row is orphaned and
-        // expires.
-        let _ = session_id;
-        return redeem_generic_deny();
-    }
+        Ok(Some(redeemed)) => redeemed,
+        Ok(None) | Err(_) => return redeem_generic_deny(),
+    };
+    let _ = redeemed.session_id; // server-assigned; not surfaced to the client.
 
     // Build the session cookie: Secure + HttpOnly + SameSite=Strict + Path=/,
     // value = raw secret, Max-Age matching the 7d TTL.

@@ -1714,11 +1714,13 @@ impl Database for PgBackend {
             .map_err(|error| DatabaseError::Pool(error.to_string()))
     }
 
-    async fn consume_login_link(
+    async fn redeem_login_link(
         &self,
         tenant_id: &str,
         code_hash: &str,
-    ) -> Result<Option<crate::db::ConsumedLoginLink>, DatabaseError> {
+        session: crate::db::NewSession<'_>,
+        audit: crate::db::RedeemAudit,
+    ) -> Result<Option<crate::db::RedeemedSession>, DatabaseError> {
         self.ensure_trace_tenant(tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
@@ -1727,41 +1729,28 @@ impl Database for PgBackend {
         // SELECT-then-branch. Unknown / expired / already-consumed / wrong-tenant
         // codes all affect zero rows. The explicit tenant predicate is
         // belt-and-suspenders on top of RLS; `code_hash` is globally UNIQUE.
-        let row = tx
+        let consumed = tx
             .query_opt(
                 "UPDATE trace_login_links SET consumed_at = now()
                   WHERE code_hash = $1
                     AND tenant_id = trace_current_tenant_id()
                     AND consumed_at IS NULL
                     AND expires_at > now()
-                  RETURNING account_id, created_principal_ref",
+                  RETURNING account_id",
                 &[&code_hash],
             )
             .await
             .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        let Some(consumed) = consumed else {
+            // No row consumed: commit the no-op tx so the link stays UNconsumed and
+            // retryable, and return None for the uniform deny upstream.
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            return Ok(None);
+        };
+        let account_id: Uuid = consumed.get("account_id");
 
-        // `query_opt` returns at most one row; the WHERE clause guarantees
-        // rows_affected is 0 or 1. None => generic deny upstream.
-        Ok(row.map(|row| crate::db::ConsumedLoginLink {
-            account_id: row.get("account_id"),
-            created_principal_ref: row.get("created_principal_ref"),
-        }))
-    }
-
-    async fn insert_session(
-        &self,
-        tenant_id: &str,
-        account_id: Uuid,
-        token_hash: &str,
-        client_kind: &str,
-        expires_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<Uuid, DatabaseError> {
-        self.ensure_trace_tenant(tenant_id).await?;
-        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
-        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
-        // Server-assigned session id; never client-supplied.
-        let session_id = Uuid::new_v4();
+        // Same RLS-scoped tx: insert the session (hash-only token) ...
+        let session_id = Uuid::new_v4(); // server-assigned; never client-supplied.
         tx.execute(
             "INSERT INTO trace_sessions (
                 tenant_id, session_id, account_id, token_hash,
@@ -1772,15 +1761,36 @@ impl Database for PgBackend {
             &[
                 &session_id,
                 &account_id,
-                &token_hash,
-                &client_kind,
-                &expires_at,
+                &session.token_hash,
+                &session.client_kind,
+                &session.expires_at,
             ],
         )
         .await
         .map_err(DatabaseError::Postgres)?;
+
+        // ... and the hash-only / label-only audit row. Actor is derived from the
+        // consumed account_id (reserved-prefix, never sha-shaped). If any of these
+        // fail the whole redeem rolls back: link stays reusable, no orphaned
+        // session, no un-audited state change.
+        let actor_ref =
+            crate::account_session::account_actor_ref(&crate::account_session::AccountId::from_uuid(
+                account_id,
+            ));
+        tx.execute(
+            "INSERT INTO trace_account_audit (
+                tenant_id, action, actor_ref, outcome, safe_metadata
+             ) VALUES (trace_current_tenant_id(), $1, $2, $3, $4)",
+            &[&audit.action, &actor_ref, &audit.outcome, &audit.metadata],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
         tx.commit().await.map_err(DatabaseError::Postgres)?;
-        Ok(session_id)
+        Ok(Some(crate::db::RedeemedSession {
+            account_id,
+            session_id,
+        }))
     }
 }
 

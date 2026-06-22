@@ -232,6 +232,14 @@ async fn confirm_login_issues_single_use_session_cookie() {
         set_cookie.contains("SameSite=Strict"),
         "cookie must be SameSite=Strict"
     );
+    assert!(
+        set_cookie.contains("Max-Age="),
+        "cookie must carry a Max-Age lifetime: {set_cookie}"
+    );
+    assert!(
+        set_cookie.contains("Path=/"),
+        "cookie must be scoped to Path=/: {set_cookie}"
+    );
     // The raw code/secret must never appear in the cookie value beyond the
     // server-minted secret; the login code must not leak into the session.
     assert!(

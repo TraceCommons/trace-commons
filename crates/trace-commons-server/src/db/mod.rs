@@ -294,47 +294,59 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
-    /// Atomically consume a single-use login link inside the resolved tenant's
-    /// RLS-scoped transaction. The conditional UPDATE is ALWAYS executed (never a
+    /// Atomically redeem a single-use login link: consume + session insert +
+    /// audit insert in ONE RLS-scoped transaction, so redeem is all-or-nothing.
+    ///
+    /// The conditional consume UPDATE is ALWAYS executed (never a
     /// SELECT-then-branch): unknown / expired / already-consumed / wrong-tenant
-    /// codes all affect zero rows and return `None`. Returns `Some` exactly once
-    /// per link, on the single redemption that wins the consume. The
-    /// `tenant_id = trace_current_tenant_id()` predicate is belt-and-suspenders
-    /// on top of RLS.
-    async fn consume_login_link(
+    /// codes all affect zero rows → `Ok(None)`, and the transaction commits with
+    /// nothing changed, leaving the link UNconsumed and retryable. On a winning
+    /// consume, the session row (hash-only `session_token_hash`) and the hash-only
+    /// audit row are inserted and the whole transaction commits together; any
+    /// failure rolls everything back (link stays reusable, no orphaned session, no
+    /// un-audited state change). The `tenant_id = trace_current_tenant_id()`
+    /// predicate is belt-and-suspenders on top of RLS. The raw code and the raw
+    /// session secret never reach the database. `session_id` is server-assigned.
+    async fn redeem_login_link(
         &self,
         _tenant_id: &str,
         _code_hash: &str,
-    ) -> Result<Option<ConsumedLoginLink>, DatabaseError> {
+        _session: NewSession<'_>,
+        _audit: RedeemAudit,
+    ) -> Result<Option<RedeemedSession>, DatabaseError> {
         Err(DatabaseError::Pool(
-            "consume_login_link not implemented".to_string(),
-        ))
-    }
-
-    /// Insert a freshly-minted session row, storing ONLY the `token_hash`
-    /// (sha256:-shaped). The raw session secret never reaches the database.
-    /// Returns the server-assigned `session_id`. The client never supplies it.
-    async fn insert_session(
-        &self,
-        _tenant_id: &str,
-        _account_id: uuid::Uuid,
-        _token_hash: &str,
-        _client_kind: &str,
-        _expires_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<uuid::Uuid, DatabaseError> {
-        Err(DatabaseError::Pool(
-            "insert_session not implemented".to_string(),
+            "redeem_login_link not implemented".to_string(),
         ))
     }
 }
 
-/// Result of a successful single-use login-link consume. Carries only the
-/// durable account id and the principal that minted the link; never the raw
-/// code or any secret material.
+/// The session row to create on a winning redeem. `token_hash` is sha256-shaped;
+/// the raw secret never reaches the database. `session_id` is server-assigned by
+/// the implementation, never carried here.
+#[derive(Debug, Clone, Copy)]
+pub struct NewSession<'a> {
+    pub token_hash: &'a str,
+    pub client_kind: &'a str,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// The hash-only / label-only audit row written inside the redeem transaction.
+/// The actor is derived by the implementation from the consumed account id;
+/// callers supply only the action label, outcome label, and safe metadata.
 #[derive(Debug, Clone)]
-pub struct ConsumedLoginLink {
+pub struct RedeemAudit {
+    pub action: String,
+    pub outcome: String,
+    pub metadata: serde_json::Value,
+}
+
+/// Result of a successful atomic login-link redeem. Carries only the durable
+/// account id and the server-assigned session id; never the raw code or any
+/// secret material.
+#[derive(Debug, Clone)]
+pub struct RedeemedSession {
     pub account_id: uuid::Uuid,
-    pub created_principal_ref: String,
+    pub session_id: uuid::Uuid,
 }
 
 /// Per-contributor row returned by [`Database::compute_leaderboard_inputs`].
