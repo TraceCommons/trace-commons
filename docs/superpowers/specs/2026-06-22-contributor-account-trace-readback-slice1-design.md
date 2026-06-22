@@ -73,10 +73,17 @@ pure *attach-session* operation. Mint is idempotent under concurrency via
 - **Restricted-role tenant resolver** — the single RLS-bypass touchpoint, used only
   to resolve `tenant_id` from a `code_hash` during the unauthenticated redeem
   (see Hardening D).
-- **No new dependencies.** Cookie + CSPRNG hand-rolled (<30 LOC) over in-tree
-  `rand`/crypto, per the repo dependency policy. Flagged to escalate to a vetted
-  session/cookie crate (with explicit approval) if hand-rolling proves insufficient
-  under code review.
+- **Cookie handling uses the well-known `cookie` crate (0.18)**, promoted from a
+  transitive to a direct dependency (it is already compiled into the tree via the
+  lockfile, so this adds **zero new compiled crates**). Default features only;
+  `signed`/`private` are **not** enabled (the server does not sign or encrypt the
+  cookie — the cookie value is the random session secret and the server stores only
+  its `sha256`). The CSPRNG session secret and its hashing use the **existing
+  direct deps** `rand 0.8` + `sha2 0.10` (already used by `src/secrets.rs`). No
+  other new dependencies. `tower-sessions` was rejected (its session-store
+  abstraction conflicts with the bespoke hash-only `trace_sessions` table);
+  `axum-extra`'s cookie feature was rejected as unnecessary surface for setting and
+  reading a single cookie.
 
 ## Data model (V30, exact repo convention)
 
@@ -426,9 +433,10 @@ identity.
    correctness** — the single highest-priority implementation-review item.
 4. **Per-account outstanding-link budget multiplies across devices in Slice 3**
    until the cap is re-keyed. Zero impact in Slice 1 (one principal per account).
-5. **Hand-rolled cookie + CSPRNG (<30 LOC)** instead of a vetted session crate.
-   Accepted under the repo dependency policy; flagged to escalate (with approval)
-   to a vetted crate if hand-rolling proves insufficient under review.
+5. **Cookie handling delegated to the `cookie` crate (0.18)** rather than
+   hand-rolled — approved, and adds zero new compiled crates (already transitive).
+   CSPRNG + hashing on existing `rand`/`sha2`. No residual risk here beyond
+   tracking the crate for advisories like any other dependency.
 6. **Redeem timing uniformity depends on a sleep-to-floor**, not genuinely
    constant-time DB work. Accepted: a fixed-latency floor above worst-case DB
    latency removes the practical oracle; the entropy backstop makes residual signal
