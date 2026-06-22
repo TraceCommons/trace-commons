@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS trace_account_principals (
     unlinked_at   TIMESTAMPTZ,
     PRIMARY KEY (tenant_id, account_id, principal_ref),
     FOREIGN KEY (tenant_id, account_id)
-        REFERENCES trace_accounts(tenant_id, account_id),
+        REFERENCES trace_accounts(tenant_id, account_id) ON DELETE CASCADE,
     UNIQUE (tenant_id, principal_ref)
 );
 
@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS trace_login_links (
     consumed_at           TIMESTAMPTZ,
     PRIMARY KEY (tenant_id, link_id),
     FOREIGN KEY (tenant_id, account_id)
-        REFERENCES trace_accounts(tenant_id, account_id),
+        REFERENCES trace_accounts(tenant_id, account_id) ON DELETE CASCADE,
     UNIQUE (code_hash)
 );
 
@@ -107,7 +107,7 @@ CREATE TABLE IF NOT EXISTS trace_sessions (
     revoked_at   TIMESTAMPTZ,
     PRIMARY KEY (tenant_id, session_id),
     FOREIGN KEY (tenant_id, account_id)
-        REFERENCES trace_accounts(tenant_id, account_id),
+        REFERENCES trace_accounts(tenant_id, account_id) ON DELETE CASCADE,
     UNIQUE (token_hash)
 );
 
@@ -125,7 +125,7 @@ CREATE POLICY trace_corpus_tenant_isolation ON trace_sessions
 -- trace_account_audit: hash-only / label-only account-action audit trail.
 CREATE TABLE IF NOT EXISTS trace_account_audit (
     tenant_id      TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
-    audit_sequence BIGINT NOT NULL,
+    audit_sequence BIGSERIAL,
     action         TEXT NOT NULL,
     actor_ref      TEXT NOT NULL,
     outcome        TEXT NOT NULL,
