@@ -166,6 +166,138 @@ async fn mint_login_link_is_idempotent_per_principal_and_returns_login_url() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+#[tokio::test]
+async fn confirm_login_issues_single_use_session_cookie() {
+    use axum::response::IntoResponse;
+
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // Mint a link via the Task 5 path; extract the raw code from the URL.
+    let Json(mint) = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint succeeds");
+    let code = mint
+        .url
+        .split("code=")
+        .nth(1)
+        .expect("url carries code")
+        .to_string();
+
+    // Same-origin confirm: redeem succeeds and sets the session cookie.
+    let mut same_origin = HeaderMap::new();
+    same_origin.insert(
+        "sec-fetch-site",
+        HeaderValue::from_static("same-origin"),
+    );
+    let response = confirm_login_handler(
+        State(state.clone()),
+        same_origin.clone(),
+        ConfirmLoginForm(ConfirmLoginBody { code: code.clone() }),
+    )
+    .await
+    .into_response();
+    assert_eq!(
+        response.status(),
+        StatusCode::SEE_OTHER,
+        "first redeem must succeed"
+    );
+    let set_cookie = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .expect("session cookie set")
+        .to_str()
+        .expect("ascii cookie");
+    assert!(
+        set_cookie.starts_with("tc_account_session="),
+        "cookie name must be tc_account_session: {set_cookie}"
+    );
+    assert!(set_cookie.contains("HttpOnly"), "cookie must be HttpOnly");
+    assert!(set_cookie.contains("Secure"), "cookie must be Secure");
+    assert!(
+        set_cookie.contains("SameSite=Strict"),
+        "cookie must be SameSite=Strict"
+    );
+    // The raw code/secret must never appear in the cookie value beyond the
+    // server-minted secret; the login code must not leak into the session.
+    assert!(
+        !set_cookie.contains(&code),
+        "session cookie must not echo the login code"
+    );
+
+    // Second redeem of the SAME code -> uniform generic deny (single-use).
+    let reused = confirm_login_handler(
+        State(state.clone()),
+        same_origin.clone(),
+        ConfirmLoginForm(ConfirmLoginBody { code: code.clone() }),
+    )
+    .await
+    .into_response();
+    let reused_status = reused.status();
+    let reused_body = axum::body::to_bytes(reused.into_body(), usize::MAX)
+        .await
+        .expect("reused body");
+
+    // Bogus code -> the SAME uniform generic deny (status + body identical).
+    let bogus = confirm_login_handler(
+        State(state.clone()),
+        same_origin,
+        ConfirmLoginForm(ConfirmLoginBody {
+            code: "totally-bogus-code".to_string(),
+        }),
+    )
+    .await
+    .into_response();
+    let bogus_status = bogus.status();
+    let bogus_body = axum::body::to_bytes(bogus.into_body(), usize::MAX)
+        .await
+        .expect("bogus body");
+
+    assert_eq!(
+        reused_status, bogus_status,
+        "reused and bogus must share one status"
+    );
+    assert_eq!(
+        reused_status,
+        StatusCode::BAD_REQUEST,
+        "uniform deny status"
+    );
+    assert_eq!(
+        reused_body, bogus_body,
+        "reused and bogus must share one body (non-enumerating)"
+    );
+
+    // Cross-site POST -> the same uniform deny, no consume attempted.
+    let mut cross_site = HeaderMap::new();
+    cross_site.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+    let cross = confirm_login_handler(
+        State(state.clone()),
+        cross_site,
+        ConfirmLoginForm(ConfirmLoginBody {
+            code: "another-code".to_string(),
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(cross.status(), StatusCode::BAD_REQUEST, "cross-site deny");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 #[test]
 fn file_backed_control_plane_appends_reject_cross_tenant_records_before_write() {
     let temp = tempfile::tempdir().expect("temp dir");

@@ -1701,6 +1701,87 @@ impl Database for PgBackend {
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(())
     }
+
+    async fn resolve_login_link_tenant(
+        &self,
+        code_hash: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        // Delegate to the inherent implementation (narrow resolver pool); map its
+        // anyhow error onto the trait's DatabaseError. The fail-closed
+        // unconfigured-resolver path surfaces here as a Pool error.
+        PgBackend::resolve_login_link_tenant(self, code_hash)
+            .await
+            .map_err(|error| DatabaseError::Pool(error.to_string()))
+    }
+
+    async fn consume_login_link(
+        &self,
+        tenant_id: &str,
+        code_hash: &str,
+    ) -> Result<Option<crate::db::ConsumedLoginLink>, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+
+        // Single atomic conditional consume (Hardening D/G): ALWAYS executed, never
+        // SELECT-then-branch. Unknown / expired / already-consumed / wrong-tenant
+        // codes all affect zero rows. The explicit tenant predicate is
+        // belt-and-suspenders on top of RLS; `code_hash` is globally UNIQUE.
+        let row = tx
+            .query_opt(
+                "UPDATE trace_login_links SET consumed_at = now()
+                  WHERE code_hash = $1
+                    AND tenant_id = trace_current_tenant_id()
+                    AND consumed_at IS NULL
+                    AND expires_at > now()
+                  RETURNING account_id, created_principal_ref",
+                &[&code_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+
+        // `query_opt` returns at most one row; the WHERE clause guarantees
+        // rows_affected is 0 or 1. None => generic deny upstream.
+        Ok(row.map(|row| crate::db::ConsumedLoginLink {
+            account_id: row.get("account_id"),
+            created_principal_ref: row.get("created_principal_ref"),
+        }))
+    }
+
+    async fn insert_session(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        token_hash: &str,
+        client_kind: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Uuid, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Server-assigned session id; never client-supplied.
+        let session_id = Uuid::new_v4();
+        tx.execute(
+            "INSERT INTO trace_sessions (
+                tenant_id, session_id, account_id, token_hash,
+                client_kind, created_at, last_seen_at, expires_at
+             ) VALUES (
+                trace_current_tenant_id(), $1, $2, $3, $4, now(), now(), $5
+             )",
+            &[
+                &session_id,
+                &account_id,
+                &token_hash,
+                &client_kind,
+                &expires_at,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(session_id)
+    }
 }
 
 fn device_key_record_from_row(row: Row) -> crate::db::DeviceKeyRecord {

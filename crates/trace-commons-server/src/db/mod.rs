@@ -278,6 +278,63 @@ pub trait Database: TraceCorpusStore + Send + Sync {
             "append_account_audit not implemented".to_string(),
         ))
     }
+
+    /// Resolve the tenant for a login `code_hash` via the NARROW restricted-role
+    /// resolver pool (separate role, column-scoped SELECT, no BYPASSRLS).
+    /// Returns the tenant only. Fail-closed: an unconfigured resolver pool MUST
+    /// error with a safe missing-control name, never fall back to the runtime
+    /// pool. The caller re-confirms tenant inside an RLS-scoped tx before any
+    /// write.
+    async fn resolve_login_link_tenant(
+        &self,
+        _code_hash: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "resolve_login_link_tenant not implemented".to_string(),
+        ))
+    }
+
+    /// Atomically consume a single-use login link inside the resolved tenant's
+    /// RLS-scoped transaction. The conditional UPDATE is ALWAYS executed (never a
+    /// SELECT-then-branch): unknown / expired / already-consumed / wrong-tenant
+    /// codes all affect zero rows and return `None`. Returns `Some` exactly once
+    /// per link, on the single redemption that wins the consume. The
+    /// `tenant_id = trace_current_tenant_id()` predicate is belt-and-suspenders
+    /// on top of RLS.
+    async fn consume_login_link(
+        &self,
+        _tenant_id: &str,
+        _code_hash: &str,
+    ) -> Result<Option<ConsumedLoginLink>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "consume_login_link not implemented".to_string(),
+        ))
+    }
+
+    /// Insert a freshly-minted session row, storing ONLY the `token_hash`
+    /// (sha256:-shaped). The raw session secret never reaches the database.
+    /// Returns the server-assigned `session_id`. The client never supplies it.
+    async fn insert_session(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _token_hash: &str,
+        _client_kind: &str,
+        _expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<uuid::Uuid, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "insert_session not implemented".to_string(),
+        ))
+    }
+}
+
+/// Result of a successful single-use login-link consume. Carries only the
+/// durable account id and the principal that minted the link; never the raw
+/// code or any secret material.
+#[derive(Debug, Clone)]
+pub struct ConsumedLoginLink {
+    pub account_id: uuid::Uuid,
+    pub created_principal_ref: String,
 }
 
 /// Per-contributor row returned by [`Database::compute_leaderboard_inputs`].

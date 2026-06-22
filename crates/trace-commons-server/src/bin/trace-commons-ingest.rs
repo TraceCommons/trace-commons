@@ -34,7 +34,7 @@ use trace_commons_server::audit_chain::{
     AUDIT_CHAIN_DRIFT_REJECTED_CLASS, audit_event_matches_writeback,
 };
 use trace_commons_server::account_session::{
-    account_actor_ref, generate_login_code, hash_secret, AccountId,
+    account_actor_ref, generate_login_code, generate_session_secret, hash_secret, AccountId,
 };
 use trace_commons_server::config::DatabaseConfig;
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
@@ -5880,6 +5880,11 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/account/login-links",
             post(mint_login_link_handler),
         )
+        // Browser-facing redeem flow. Intentionally NOT under /v1 and
+        // un-authenticated: the single-use code IS the credential. The mint URL
+        // (`/account/login?code=...`) points here.
+        .route("/account/login", get(login_interstitial_handler))
+        .route("/account/login/confirm", post(confirm_login_handler))
         .route("/v1/analytics/summary", get(analytics_handler))
         .route("/v1/review/quarantine", get(review_quarantine_handler))
         .route(
@@ -11676,6 +11681,274 @@ async fn mint_login_link_handler(
         account_id: account_id.to_string(),
         url,
     }))
+}
+
+/// Body extractor for the confirm POST. Accepts both a browser form post
+/// (`application/x-www-form-urlencoded`, the default) and a JSON body. On ANY
+/// extraction failure it rejects with the uniform redeem deny so a malformed
+/// body cannot be distinguished from a bad code.
+struct ConfirmLoginForm(ConfirmLoginBody);
+
+impl<S> axum::extract::FromRequest<S> for ConfirmLoginForm
+where
+    S: Send + Sync,
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request(
+        req: axum::extract::Request,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let is_json = req
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|ct| ct.starts_with("application/json"))
+            .unwrap_or(false);
+        if is_json {
+            match axum::Json::<ConfirmLoginBody>::from_request(req, state).await {
+                Ok(axum::Json(body)) => Ok(ConfirmLoginForm(body)),
+                Err(_) => Err(redeem_generic_deny()),
+            }
+        } else {
+            match axum::Form::<ConfirmLoginBody>::from_request(req, state).await {
+                Ok(axum::Form(body)) => Ok(ConfirmLoginForm(body)),
+                Err(_) => Err(redeem_generic_deny()),
+            }
+        }
+    }
+}
+
+/// Issued session lifetime. Matches the spec's ~7d browser session.
+const ACCOUNT_SESSION_TTL_DAYS: i64 = 7;
+
+/// The session cookie name. Value is the raw CSPRNG secret; only its sha256
+/// hash is persisted server-side.
+const ACCOUNT_SESSION_COOKIE: &str = "tc_account_session";
+
+/// Code-free account view path the redeem flow redirects to. The view itself is
+/// a later concern (Tasks 9-10); redirecting here keeps the secret out of any
+/// URL or Referer.
+const ACCOUNT_VIEW_PATH: &str = "/account";
+
+/// Query parameters for the GET interstitial. The raw `code` is carried in the
+/// URL ONLY on this device->browser hand-off; it is never logged or persisted.
+#[derive(Debug, Deserialize)]
+struct LoginInterstitialQuery {
+    code: String,
+}
+
+/// Body for `POST /account/login/confirm`. Accepts either a form post (browser
+/// default) or a JSON body carrying `code`.
+#[derive(Debug, Deserialize)]
+struct ConfirmLoginBody {
+    code: String,
+}
+
+/// The ONE uniform, non-enumerating deny used for EVERY redeem failure mode:
+/// unknown / expired / consumed / wrong-tenant / cross-origin /
+/// unconfigured-resolver all collapse to this identical status + body. Do NOT
+/// vary status or body by cause (timing uniformity is Task 11).
+fn redeem_generic_deny() -> axum::response::Response {
+    // Fixed status + body; no-store / no-referrer so nothing about the attempt
+    // leaks via cache or Referer.
+    let mut response = (
+        StatusCode::BAD_REQUEST,
+        "login link invalid or expired",
+    )
+        .into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    headers.insert(
+        axum::http::header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
+}
+
+/// Enforce same-origin on the confirm POST using fetch-metadata + `Origin`.
+/// Returns `true` when the request is same-origin (or a non-browser caller that
+/// omits both signals, which carries no ambient cross-site authority). Rejects
+/// any request a browser marks as cross-site. This is the minimal CSRF defense
+/// for an unauthenticated, cookie-issuing endpoint; the cookie itself is
+/// `SameSite=Strict`.
+fn confirm_is_same_origin(headers: &HeaderMap) -> bool {
+    // `Sec-Fetch-Site` is the authoritative fetch-metadata signal in modern
+    // browsers. Accept only same-origin / same-site / direct navigation.
+    if let Some(site) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+        return matches!(site, "same-origin" | "same-site" | "none");
+    }
+    // Fallback for browsers without fetch metadata: if an `Origin` header is
+    // present it MUST match the request `Host`. A cross-site form post carries a
+    // foreign `Origin`; reject it.
+    if let Some(origin) = headers.get(axum::http::header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        let host = headers
+            .get(axum::http::header::HOST)
+            .and_then(|v| v.to_str().ok());
+        return match host {
+            Some(host) => origin
+                .rsplit_once("://")
+                .map(|(_, authority)| authority == host)
+                .unwrap_or(false),
+            None => false,
+        };
+    }
+    // Neither signal present: not a credentialed cross-site browser request.
+    true
+}
+
+/// `GET /account/login?code=...` — minimal "Activate" interstitial.
+///
+/// Renders a self-contained HTML page with a form that POSTs the code to
+/// `/account/login/confirm`. NO consumption, NO DB write here. The interstitial
+/// exists so the single-use consume happens on an explicit user action (a POST),
+/// not on a link prefetch / preview that a GET would trigger.
+async fn login_interstitial_handler(
+    Query(query): Query<LoginInterstitialQuery>,
+) -> axum::response::Response {
+    // Task 11: IP rate-limit attaches here.
+    // Minimal, self-contained HTML; the code rides in a hidden field. HTML-escape
+    // it so a crafted code cannot break out of the attribute context.
+    let escaped_code = query
+        .code
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;");
+    let body = format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+<title>Activate account</title></head><body>\
+<main><h1>Activate your account</h1>\
+<p>Confirm to sign in on this browser.</p>\
+<form method=\"post\" action=\"/account/login/confirm\">\
+<input type=\"hidden\" name=\"code\" value=\"{escaped_code}\">\
+<button type=\"submit\">Activate</button></form></main></body></html>"
+    );
+    let mut response = axum::response::Html(body).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    headers.insert(
+        axum::http::header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
+}
+
+/// `POST /account/login/confirm` — redeem a login link and issue a session.
+///
+/// Single atomic single-use consume, then a fresh session cookie. EVERY failure
+/// mode returns the identical uniform generic deny (status + body). The raw code
+/// and the session secret are never logged, persisted, or audited.
+async fn confirm_login_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: ConfirmLoginForm,
+) -> axum::response::Response {
+    // Task 11: fixed-latency floor wrapper + IP/global/per-code rate limits
+    // attach here, wrapping the whole body below.
+    let code = body.0.code;
+
+    // Same-origin enforcement: a cross-site POST collapses to the SAME deny.
+    if !confirm_is_same_origin(&headers) {
+        return redeem_generic_deny();
+    }
+
+    // Resolver runs on the narrow pool and returns tenant only. Any error
+    // (including the fail-closed unconfigured-resolver path) or a miss collapses
+    // to the uniform deny: never a 500 stacktrace, never a runtime-pool fallback.
+    let db = match account_db(state.as_ref()) {
+        Ok(db) => db,
+        Err(_) => return redeem_generic_deny(),
+    };
+    let code_hash = hash_secret(&code);
+    let tenant = match db.resolve_login_link_tenant(&code_hash).await {
+        Ok(Some(tenant)) => tenant,
+        Ok(None) | Err(_) => return redeem_generic_deny(),
+    };
+
+    // Single atomic consume inside the resolved tenant's RLS-scoped tx. The
+    // always-run UPDATE means unknown/expired/consumed/wrong-tenant all yield
+    // None -> same deny. No SELECT-then-branch, no enumeration.
+    let consumed = match db.consume_login_link(&tenant, &code_hash).await {
+        Ok(Some(consumed)) => consumed,
+        Ok(None) | Err(_) => return redeem_generic_deny(),
+    };
+
+    // Mint the session secret (>=128-bit CSPRNG). Store ONLY its hash.
+    let secret = generate_session_secret();
+    let token_hash = hash_secret(&secret);
+    let expires_at = Utc::now() + Duration::days(ACCOUNT_SESSION_TTL_DAYS);
+    let session_id = match db
+        .insert_session(&tenant, consumed.account_id, &token_hash, "web", expires_at)
+        .await
+    {
+        Ok(session_id) => session_id,
+        Err(_) => return redeem_generic_deny(),
+    };
+
+    // Hash-only / label-only redeem audit. Actor is the account-actor ref;
+    // created-vs-reused is not knowable here (account already existed at mint),
+    // so outcome is the coarse `success`. NEVER the code/secret/url.
+    let account = AccountId::from_uuid(consumed.account_id);
+    if let Err(_) = db
+        .append_account_audit(
+            &tenant,
+            "account_login_redeem",
+            &account_actor_ref(&account),
+            "success",
+            serde_json::json!({ "client_kind": "web" }),
+        )
+        .await
+    {
+        // Audit failure after a committed consume must not hand the session to the
+        // caller without a trail; collapse to the uniform deny. The link is
+        // already consumed (single-use preserved); the session row is orphaned and
+        // expires.
+        let _ = session_id;
+        return redeem_generic_deny();
+    }
+
+    // Build the session cookie: Secure + HttpOnly + SameSite=Strict + Path=/,
+    // value = raw secret, Max-Age matching the 7d TTL.
+    let cookie = cookie::Cookie::build((ACCOUNT_SESSION_COOKIE, secret))
+        .secure(true)
+        .http_only(true)
+        .same_site(cookie::SameSite::Strict)
+        .path("/")
+        .max_age(cookie::time::Duration::days(ACCOUNT_SESSION_TTL_DAYS))
+        .build();
+
+    // 303 See Other to the code-free account view. no-store + no-referrer so the
+    // secret never leaks via cache or Referer.
+    let mut response = StatusCode::SEE_OTHER.into_response();
+    let resp_headers = response.headers_mut();
+    resp_headers.insert(
+        axum::http::header::LOCATION,
+        HeaderValue::from_static(ACCOUNT_VIEW_PATH),
+    );
+    match HeaderValue::from_str(&cookie.to_string()) {
+        Ok(value) => {
+            resp_headers.insert(axum::http::header::SET_COOKIE, value);
+        }
+        Err(_) => return redeem_generic_deny(),
+    }
+    resp_headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    resp_headers.insert(
+        axum::http::header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
 }
 
 async fn analytics_handler(
