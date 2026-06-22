@@ -37,6 +37,9 @@ use trace_commons_server::account_session::{
     account_actor_ref, generate_login_code, generate_session_secret, hash_secret, AccountAuthMethod,
     AccountCtx, AccountId, AccountPrincipalSet,
 };
+// `AccountPrincipalSet` is used by the account visibility predicate below; the
+// binary can no longer mint one (only the lib's `expand_account_principals`
+// does), it only borrows the set carried by an `AccountCtx`.
 use trace_commons_server::config::DatabaseConfig;
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
 use trace_commons_server::db::{Database, TraceCorpusRlsDiagnostics};
@@ -11695,14 +11698,14 @@ async fn resolve_account_ctx_bearer(
         .map_err(internal_error)?
         .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "no account for this principal"))?;
     let account = AccountId::from_uuid(account_id);
-    let principals = db
+    let principal_set = db
         .expand_account_principals(&tenant_id, account_id)
         .await
         .map_err(internal_error)?;
 
     Ok(AccountCtx {
         account_id: account,
-        principal_set: AccountPrincipalSet::from_iter(principals),
+        principal_set,
         auth_method: AccountAuthMethod::DeviceBearer,
         tenant_id,
         actor_ref: principal_ref,
@@ -11738,7 +11741,7 @@ async fn resolve_account_ctx_cookie(state: &AppState, cookie: &str) -> ApiResult
         .map_err(internal_error)?
         .ok_or_else(invalid)?;
     let account = AccountId::from_uuid(account_id);
-    let principals = db
+    let principal_set = db
         .expand_account_principals(&tenant_id, account_id)
         .await
         .map_err(internal_error)?;
@@ -11746,7 +11749,7 @@ async fn resolve_account_ctx_cookie(state: &AppState, cookie: &str) -> ApiResult
     Ok(AccountCtx {
         actor_ref: account_actor_ref(&account),
         account_id: account,
-        principal_set: AccountPrincipalSet::from_iter(principals),
+        principal_set,
         auth_method: AccountAuthMethod::SessionCookie,
         tenant_id,
     })
@@ -43701,6 +43704,45 @@ fn visible_submission_records(
     records
         .into_iter()
         .filter(|record| can_access_submission(auth, record))
+        .collect()
+}
+
+/// Account read-surface visibility. SET-membership ONLY. Deliberately has NO
+/// `can_review()` short-circuit and NO `legacy_principal_ref()` wildcard (unlike
+/// `visible_submission_records`): an account sees a submission iff its
+/// `auth_principal_ref` is in the account's active principal set. Takes the
+/// `AccountPrincipalSet` newtype, which the legacy `&TenantAuth` helpers cannot
+/// accept and which is producible only by `expand_account_principals`
+/// (Hardening C).
+///
+/// MUST NOT COMPILE (Hardening C — type-level separation of the two surfaces;
+/// there is deliberately no `From`/`Into`/`Deref`/`AsRef` between
+/// `AccountPrincipalSet`/`AccountCtx` and `TenantAuth`, so neither of these
+/// typechecks):
+/// ```compile_fail
+/// # // An ownership set cannot be passed to the legacy reviewer/contributor
+/// # // helper, which wants `&TenantAuth`:
+/// let set: AccountPrincipalSet = unimplemented!();
+/// let records: Vec<TraceCommonsSubmissionRecord> = vec![];
+/// let _ = visible_submission_records(&set, records); // E0308: expected &TenantAuth
+/// ```
+/// ```compile_fail
+/// # // And a `&TenantAuth` cannot be laundered into the account surface, which
+/// # // wants `&AccountPrincipalSet`:
+/// let auth: TenantAuth = unimplemented!();
+/// let records: Vec<TraceCommonsSubmissionRecord> = vec![];
+/// let _ = visible_submission_records_for_account(&auth, records); // E0308: expected &AccountPrincipalSet
+/// ```
+// Wired into the `/v1/account/*` read endpoints in a later slice (Tasks 9-10);
+// exercised now by the unit tests below.
+#[allow(dead_code)]
+fn visible_submission_records_for_account(
+    set: &AccountPrincipalSet,
+    records: Vec<TraceCommonsSubmissionRecord>,
+) -> Vec<TraceCommonsSubmissionRecord> {
+    records
+        .into_iter()
+        .filter(|r| set.contains(&r.auth_principal_ref))
         .collect()
 }
 

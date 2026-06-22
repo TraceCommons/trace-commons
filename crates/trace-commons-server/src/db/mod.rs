@@ -356,12 +356,15 @@ pub trait Database: TraceCorpusStore + Send + Sync {
 
     /// Expand an account's ACTIVE principal memberships — the ONLY sanctioned
     /// ownership-bearing expansion (Hardening A). MUST filter `unlinked_at IS
-    /// NULL`; an unlinked principal is absent from the returned set.
+    /// NULL`; an unlinked principal is absent from the returned set. Returns the
+    /// `AccountPrincipalSet` newtype directly so the only mint site for an
+    /// ownership-bearing set stays inside this crate (Hardening C); callers in
+    /// the bins cannot construct one themselves.
     async fn expand_account_principals(
         &self,
         _tenant_id: &str,
         _account_id: uuid::Uuid,
-    ) -> Result<Vec<String>, DatabaseError> {
+    ) -> Result<crate::account_session::AccountPrincipalSet, DatabaseError> {
         Err(DatabaseError::Pool(
             "expand_account_principals not implemented".to_string(),
         ))

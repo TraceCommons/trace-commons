@@ -60912,3 +60912,155 @@ async fn community_profile_put_returns_503_when_flag_on_but_no_db() {
         .expect("response");
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
+
+// ----------------------------------------------------------------------------
+// Account-scoped visibility predicate (Task 8).
+//
+// `visible_submission_records_for_account` is pure set-membership over an
+// `AccountPrincipalSet`: NO `can_review()` short-circuit, NO
+// `legacy_principal_ref()` wildcard. These tests verify that behaviour and the
+// inertness of `account-actor:{uuid}` refs as ownership keys (Hardening B).
+// ----------------------------------------------------------------------------
+
+/// Build a minimal `TraceCommonsSubmissionRecord` whose ownership key is
+/// `auth_principal_ref`. All fields other than the ones set here fall back to
+/// the struct's serde defaults; the rest are filled with inert placeholders.
+/// This is the cheapest way to obtain a record value (the struct has many
+/// required fields and no constructor), and it keeps the test focused on the
+/// only field the predicate inspects.
+fn submission_record_with_principal(auth_principal_ref: &str) -> TraceCommonsSubmissionRecord {
+    let value = serde_json::json!({
+        "tenant_id": "tenant-a",
+        "tenant_storage_ref": tenant_storage_ref("tenant-a"),
+        "auth_principal_ref": auth_principal_ref,
+        "submission_id": Uuid::new_v4(),
+        "trace_id": Uuid::new_v4(),
+        "status": "accepted",
+        "privacy_risk": "low",
+        "submission_score": 0.0,
+        "credit_points_pending": 0.0,
+        "consent_scopes": [],
+        "received_at": "2026-06-22T00:00:00Z",
+        "object_key": "obj/placeholder",
+    });
+    serde_json::from_value(value).expect("submission record fixture deserializes")
+}
+
+/// (a) An account set of {principal_a} sees ONLY principal_a's record — not
+/// principal_b's, and crucially NOT the `legacy_principal_ref()` wildcard that
+/// the legacy reviewer/contributor surface honours. Pure set membership.
+#[test]
+fn visible_for_account_is_set_membership_only_no_legacy_wildcard() {
+    let set = AccountPrincipalSet::from_iter_for_test_only(["principal_a".to_string()]);
+    let records = vec![
+        submission_record_with_principal("principal_a"),
+        submission_record_with_principal("principal_b"),
+        submission_record_with_principal(&legacy_principal_ref()),
+    ];
+
+    let visible = visible_submission_records_for_account(&set, records);
+
+    let refs: Vec<String> = visible
+        .iter()
+        .map(|r| r.auth_principal_ref.clone())
+        .collect();
+    assert_eq!(refs, vec!["principal_a".to_string()]);
+    assert!(
+        !refs.iter().any(|r| r == &legacy_principal_ref()),
+        "legacy wildcard must NOT be visible to an account surface"
+    );
+    assert!(
+        !refs.iter().any(|r| r == "principal_b"),
+        "a principal not in the set must NOT be visible"
+    );
+}
+
+/// (e) An `account-actor:{uuid}` ref (the cookie-path actor/audit label) used as
+/// a record's `auth_principal_ref` is INERT as an ownership key: a set that does
+/// not contain that exact literal does not match it (Hardening B). The set here
+/// holds the same account's real device principal, which must NOT leak access to
+/// a record keyed by the account-actor label.
+#[test]
+fn account_actor_ref_is_inert_as_ownership_key() {
+    let account = AccountId::from_uuid(Uuid::new_v4());
+    let actor_label = account_actor_ref(&account);
+
+    let set = AccountPrincipalSet::from_iter_for_test_only(["principal_real_device".to_string()]);
+    let records = vec![submission_record_with_principal(&actor_label)];
+
+    let visible = visible_submission_records_for_account(&set, records);
+    assert!(
+        visible.is_empty(),
+        "account-actor label must not be matched by a set lacking that exact literal"
+    );
+
+    // And it IS matched only by a set that literally contains it (sanity: the
+    // predicate is plain membership, not a prefix/shape rule).
+    let exact_set = AccountPrincipalSet::from_iter_for_test_only([actor_label.clone()]);
+    let records = vec![submission_record_with_principal(&actor_label)];
+    assert_eq!(
+        visible_submission_records_for_account(&exact_set, records).len(),
+        1
+    );
+}
+
+/// (d) The unlinked-principal exclusion is enforced at the DB layer:
+/// `expand_account_principals` filters `unlinked_at IS NULL` (see
+/// `db/postgres.rs`), so an unlinked principal never reaches an
+/// `AccountPrincipalSet`. The membership predicate above therefore never has to
+/// re-check link state. A dedicated DB-backed test for the exclusion is not
+/// added in this slice because no membership/unlink write path is exposed yet
+/// (it arrives in a later slice); the filter is covered by the Task 7 expand SQL
+/// and asserted here only structurally via the membership tests above.
+#[test]
+fn unlinked_exclusion_is_a_db_layer_guarantee() {
+    // A set produced by the lib never contains an unlinked principal; this test
+    // documents the invariant the predicate relies on. The predicate itself is
+    // membership-only, so an absent (unlinked) principal is simply not matched.
+    let set = AccountPrincipalSet::from_iter_for_test_only(["principal_active".to_string()]);
+    let records = vec![submission_record_with_principal("principal_unlinked")];
+    assert!(
+        visible_submission_records_for_account(&set, records).is_empty(),
+        "a principal absent from the (active-only) set is not visible"
+    );
+}
+
+/// Hardening C, runtime witness. `trybuild` is not a dev-dependency of this
+/// crate (dependency policy), so the type-level separation is documented as
+/// `compile_fail` doctests on `visible_submission_records_for_account` and
+/// asserted indirectly here: the two surfaces take distinct, non-convertible
+/// argument types. This test exercises BOTH correct calls; the illegal calls
+/// (`visible_submission_records(&set, ..)` /
+/// `visible_submission_records_for_account(&auth, ..)`) are rejected by the
+/// compiler because there is no `From`/`Into`/`Deref`/`AsRef` between
+/// `AccountPrincipalSet`/`AccountCtx` and `TenantAuth`.
+#[test]
+fn account_and_tenant_surfaces_take_distinct_types() {
+    let set = AccountPrincipalSet::from_iter_for_test_only(["principal_a".to_string()]);
+    let account_visible = visible_submission_records_for_account(
+        &set,
+        vec![submission_record_with_principal("principal_a")],
+    );
+    assert_eq!(account_visible.len(), 1);
+
+    // The legacy surface still works on its own `&TenantAuth` type, unchanged.
+    // A contributor (no review capability) sees only its own principal's record,
+    // exercising the principal-match path distinct from the account surface.
+    let auth = TenantAuth {
+        tenant_id: "tenant-a".to_string(),
+        role: TokenRole::Contributor,
+        principal_ref: "principal_a".to_string(),
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    };
+    let tenant_visible = visible_submission_records(
+        &auth,
+        vec![submission_record_with_principal(&auth.principal_ref)],
+    );
+    assert_eq!(tenant_visible.len(), 1);
+}

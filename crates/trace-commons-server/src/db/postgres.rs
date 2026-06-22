@@ -1885,7 +1885,7 @@ impl Database for PgBackend {
         &self,
         tenant_id: &str,
         account_id: Uuid,
-    ) -> Result<Vec<String>, DatabaseError> {
+    ) -> Result<crate::account_session::AccountPrincipalSet, DatabaseError> {
         self.ensure_trace_tenant(tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
@@ -1901,10 +1901,10 @@ impl Database for PgBackend {
             )
             .await
             .map_err(DatabaseError::Postgres)?;
-        let principals = rows
-            .into_iter()
-            .map(|row| row.get::<_, String>("principal_ref"))
-            .collect();
+        let principals = crate::account_session::AccountPrincipalSet::from_iter(
+            rows.into_iter()
+                .map(|row| row.get::<_, String>("principal_ref")),
+        );
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(principals)
     }

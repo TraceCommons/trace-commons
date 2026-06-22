@@ -22,21 +22,41 @@ impl AccountId {
 #[derive(Debug, Clone)]
 pub struct AccountPrincipalSet(BTreeSet<String>);
 impl AccountPrincipalSet {
-    /// The ONLY way to mint a principal set. Used by this module's tests and by
-    /// the `AccountCtx` resolver in `trace-commons-ingest`, which feeds it the
-    /// result of the active-membership expansion (`unlinked_at IS NULL`,
-    /// Hardening A) — the single sanctioned source of ownership-bearing
-    /// principals. Kept narrow: it is `pub` to the crate's bins but the type's
-    /// only consumers (`AccountCtx`, the account visibility predicate) cannot be
-    /// coerced into the legacy `&TenantAuth` surface (Hardening C).
+    /// The ONLY way to mint a principal set, and `pub(crate)` so only this crate
+    /// can call it. The single sanctioned mint site is
+    /// `Database::expand_account_principals`, which feeds it the result of the
+    /// active-membership expansion (`unlinked_at IS NULL`, Hardening A). The bins
+    /// receive an already-built `AccountPrincipalSet` from that method and cannot
+    /// construct one themselves: an ownership-bearing set is producible only
+    /// inside the lib (Hardening C). The type's consumers (`AccountCtx`, the
+    /// account visibility predicate) cannot be coerced into the legacy
+    /// `&TenantAuth` surface.
     // Intentionally named `from_iter` (the slice's chosen vocabulary) without
     // implementing `std::iter::FromIterator`: a `FromIterator` impl would make
     // the set constructible by anything in scope via `.collect()`, eroding the
-    // "only the resolver mints a set" guarantee. Local allow only; not a CI
+    // "only the lib mints a set" guarantee. Local allow only; not a CI
     // allow-list change.
     #[allow(clippy::should_implement_trait)]
-    pub fn from_iter<I: IntoIterator<Item = String>>(it: I) -> Self {
+    pub(crate) fn from_iter<I: IntoIterator<Item = String>>(it: I) -> Self {
         Self(it.into_iter().collect())
+    }
+
+    /// TEST-SUPPORT mint. The production `from_iter` is `pub(crate)` and so is
+    /// unreachable from the binary crate; this helper exists ONLY so the binary
+    /// crate's `#[cfg(test)]` unit tests can build a set to exercise the
+    /// binary-local account visibility predicate. It cannot be `#[cfg(test)]`-
+    /// gated because the lib is compiled WITHOUT its own test cfg when the bin
+    /// crate's tests are built, so a cfg-gated item would be invisible there;
+    /// and a Cargo feature would not be enabled under the repo's pinned plain
+    /// `cargo test --no-run` gate. It is therefore `pub` but `#[doc(hidden)]`
+    /// and loudly named: production bin code constructs an `AccountPrincipalSet`
+    /// ONLY via `Database::expand_account_principals` (the single sanctioned
+    /// mint site, Hardening A/C); calling this from non-test code would be an
+    /// obvious review red flag. Grep-guarded by convention, not the type system.
+    #[doc(hidden)]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_iter_for_test_only<I: IntoIterator<Item = String>>(it: I) -> Self {
+        Self::from_iter(it)
     }
     pub fn contains(&self, principal_ref: &str) -> bool {
         self.0.contains(principal_ref)
