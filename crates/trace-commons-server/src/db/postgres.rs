@@ -1554,6 +1554,153 @@ impl Database for PgBackend {
             status: crate::db::OnboardDeviceKeyStatus::Registered,
         })
     }
+
+    async fn create_or_reuse_account(
+        &self,
+        tenant_id: &str,
+        principal_ref: &str,
+    ) -> Result<Uuid, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+
+        // Fast path: an active link for this principal already maps to an account.
+        if let Some(row) = tx
+            .query_opt(
+                "SELECT account_id FROM trace_account_principals
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND principal_ref = $1
+                    AND unlinked_at IS NULL",
+                &[&principal_ref],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+        {
+            let account_id: Uuid = row.get("account_id");
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            return Ok(account_id);
+        }
+
+        // No active link: mint a fresh account and link the principal. The link
+        // insert is ON CONFLICT DO NOTHING against the UNIQUE (tenant_id,
+        // principal_ref) constraint so a concurrent mint that won the race does
+        // not error us out; we re-select the authoritative account below.
+        let new_account_id = Uuid::new_v4();
+        tx.execute(
+            "INSERT INTO trace_accounts (tenant_id, account_id)
+             VALUES (trace_current_tenant_id(), $1)",
+            &[&new_account_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.execute(
+            "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+             VALUES (trace_current_tenant_id(), $1, $2)
+             ON CONFLICT (tenant_id, principal_ref) DO NOTHING",
+            &[&new_account_id, &principal_ref],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        // Re-select the authoritative account for this principal. If a
+        // concurrent mint inserted the link first, this returns ITS account_id
+        // and our freshly-inserted (now orphaned) trace_accounts row is harmless
+        // (no principal links to it). If we won, it returns new_account_id.
+        let row = tx
+            .query_one(
+                "SELECT account_id FROM trace_account_principals
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND principal_ref = $1
+                    AND unlinked_at IS NULL",
+                &[&principal_ref],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let account_id: Uuid = row.get("account_id");
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(account_id)
+    }
+
+    async fn count_outstanding_login_links(
+        &self,
+        tenant_id: &str,
+        created_principal_ref: &str,
+    ) -> Result<i64, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_one(
+                "SELECT count(*) AS outstanding
+                   FROM trace_login_links
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND created_principal_ref = $1
+                    AND consumed_at IS NULL
+                    AND expires_at > now()",
+                &[&created_principal_ref],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let outstanding: i64 = row.get("outstanding");
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(outstanding)
+    }
+
+    async fn insert_login_link(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        code_hash: &str,
+        created_principal_ref: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let link_id = Uuid::new_v4();
+        tx.execute(
+            "INSERT INTO trace_login_links (
+                tenant_id, link_id, account_id, code_hash,
+                created_principal_ref, created_at, expires_at
+             ) VALUES (
+                trace_current_tenant_id(), $1, $2, $3, $4, now(), $5
+             )",
+            &[
+                &link_id,
+                &account_id,
+                &code_hash,
+                &created_principal_ref,
+                &expires_at,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
+    async fn append_account_audit(
+        &self,
+        tenant_id: &str,
+        action: &str,
+        actor_ref: &str,
+        outcome: &str,
+        safe_metadata: serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "INSERT INTO trace_account_audit (
+                tenant_id, action, actor_ref, outcome, safe_metadata
+             ) VALUES (trace_current_tenant_id(), $1, $2, $3, $4)",
+            &[&action, &actor_ref, &outcome, &safe_metadata],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
 }
 
 fn device_key_record_from_row(row: Row) -> crate::db::DeviceKeyRecord {

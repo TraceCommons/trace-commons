@@ -222,6 +222,62 @@ pub trait Database: TraceCorpusStore + Send + Sync {
             "onboard_device_key not implemented".to_string(),
         )))
     }
+
+    /// Create-or-reuse the durable account for `principal_ref` within `tenant_id`.
+    /// Returns the stable `account_id`. Idempotent: repeated calls for the same
+    /// active principal return the same account. Tolerates a concurrent racing
+    /// mint by re-selecting after an `ON CONFLICT DO NOTHING` link insert.
+    async fn create_or_reuse_account(
+        &self,
+        _tenant_id: &str,
+        _principal_ref: &str,
+    ) -> Result<uuid::Uuid, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "create_or_reuse_account not implemented".to_string(),
+        ))
+    }
+
+    /// Count this principal's outstanding (unconsumed, unexpired) login links.
+    /// Used by the mint endpoint to cap per-principal outstanding links.
+    async fn count_outstanding_login_links(
+        &self,
+        _tenant_id: &str,
+        _created_principal_ref: &str,
+    ) -> Result<i64, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "count_outstanding_login_links not implemented".to_string(),
+        ))
+    }
+
+    /// Insert a single-use login link. Stores ONLY the `code_hash`
+    /// (sha256:-shaped); the raw code never reaches the database.
+    async fn insert_login_link(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _code_hash: &str,
+        _created_principal_ref: &str,
+        _expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool(
+            "insert_login_link not implemented".to_string(),
+        ))
+    }
+
+    /// Append a hash-only / label-only row to `trace_account_audit`. Actor and
+    /// metadata MUST be reserved-prefix or hash-shaped; never raw codes/URLs.
+    async fn append_account_audit(
+        &self,
+        _tenant_id: &str,
+        _action: &str,
+        _actor_ref: &str,
+        _outcome: &str,
+        _safe_metadata: serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool(
+            "append_account_audit not implemented".to_string(),
+        ))
+    }
 }
 
 /// Per-contributor row returned by [`Database::compute_leaderboard_inputs`].

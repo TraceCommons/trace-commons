@@ -33,6 +33,9 @@ use trace_commons_protocol::trace_contribution::{
 use trace_commons_server::audit_chain::{
     AUDIT_CHAIN_DRIFT_REJECTED_CLASS, audit_event_matches_writeback,
 };
+use trace_commons_server::account_session::{
+    account_actor_ref, generate_login_code, hash_secret, AccountId,
+};
 use trace_commons_server::config::DatabaseConfig;
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
 use trace_commons_server::db::{Database, TraceCorpusRlsDiagnostics};
@@ -5873,6 +5876,10 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/contributors/me/submission-status",
             post(submission_status_handler),
         )
+        .route(
+            "/v1/account/login-links",
+            post(mint_login_link_handler),
+        )
         .route("/v1/analytics/summary", get(analytics_handler))
         .route("/v1/review/quarantine", get(review_quarantine_handler))
         .route(
@@ -11566,6 +11573,105 @@ async fn submission_status_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(statuses))
+}
+
+/// Max outstanding (unconsumed, unexpired) login links a single principal may
+/// hold. A coarse, DB-enforced per-principal cap that bounds link-flooding by
+/// an authenticated device. Broader IP/global rate-limiting is Task 11.
+const ACCOUNT_LOGIN_LINK_OUTSTANDING_CAP: i64 = 5;
+
+/// Login links expire quickly: they are an ephemeral device->browser hand-off,
+/// not a durable credential. Matches the V30 migration's ~5min intent.
+const ACCOUNT_LOGIN_LINK_TTL_MINUTES: i64 = 5;
+
+/// Response for `POST /v1/account/login-links`. The raw single-use `code`
+/// appears ONLY inside `url`; it is never persisted or logged. `account_id`
+/// is the durable pseudonymous account the link will authenticate.
+#[derive(Debug, Clone, Serialize)]
+struct MintLoginLinkResponse {
+    account_id: String,
+    url: String,
+}
+
+fn account_db(state: &AppState) -> ApiResult<Arc<dyn Database>> {
+    state.db_mirror.as_ref().cloned().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "account registry DB is not configured",
+        )
+    })
+}
+
+/// Mint a single-use login link for the authenticated device's principal.
+///
+/// Creates-or-reuses the durable account for the device principal, then issues
+/// an ephemeral single-use code. Only the code's sha256 hash is stored; the raw
+/// code is returned exactly once inside the link URL and never logged or
+/// audited.
+async fn mint_login_link_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<MintLoginLinkResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    // Device-key revocation: `authenticate` rejects expired/unknown tenant
+    // tokens, and `authorize_tenant_access_grant` (when grants are required)
+    // rejects principals lacking an active grant. The bearer-token auth model
+    // does not map a token back to a `device_keys` row, so there is no
+    // additional `device_keys.revoked_at` gate to apply here; revocation is
+    // enforced upstream at token issuance / grant level.
+    let db = account_db(state.as_ref())?;
+    let tenant_id = tenant.tenant_id();
+    let principal_ref = tenant.principal_ref();
+
+    // 1. Per-principal outstanding-link cap (DB-enforced). Broader IP / global
+    //    rate-limiting attaches in Task 11.
+    let outstanding = db
+        .count_outstanding_login_links(tenant_id, principal_ref)
+        .await
+        .map_err(internal_error)?;
+    if outstanding >= ACCOUNT_LOGIN_LINK_OUTSTANDING_CAP {
+        return Err(api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many outstanding login links",
+        ));
+    }
+
+    // 2. Create-or-reuse the durable account for this principal.
+    let account_id = db
+        .create_or_reuse_account(tenant_id, principal_ref)
+        .await
+        .map_err(internal_error)?;
+
+    // 3. Mint the single-use code; store ONLY its hash.
+    let code = generate_login_code();
+    let code_hash = hash_secret(&code);
+    let expires_at = Utc::now() + Duration::minutes(ACCOUNT_LOGIN_LINK_TTL_MINUTES);
+
+    // 4. Persist the link (hash-only).
+    db.insert_login_link(tenant_id, account_id, &code_hash, principal_ref, expires_at)
+        .await
+        .map_err(internal_error)?;
+
+    // 5. Hash-only / label-only audit: actor is the account-actor ref; metadata
+    //    carries no raw code or URL.
+    db.append_account_audit(
+        tenant_id,
+        "account_login_link_mint",
+        &account_actor_ref(&AccountId::from_uuid(account_id)),
+        "success",
+        serde_json::json!({ "outstanding_before": outstanding }),
+    )
+    .await
+    .map_err(internal_error)?;
+
+    // 6. Build the redemption URL. No public base URL is configured server-side,
+    //    so we return a root-relative path; operators MUST front this with the
+    //    deployment's public base URL. The raw code appears ONLY here.
+    let url = format!("/account/login?code={code}");
+    Ok(Json(MintLoginLinkResponse {
+        account_id: account_id.to_string(),
+        url,
+    }))
 }
 
 async fn analytics_handler(

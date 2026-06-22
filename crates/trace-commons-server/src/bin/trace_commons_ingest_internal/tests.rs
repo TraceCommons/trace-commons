@@ -120,6 +120,52 @@ async fn account_migration_applies_and_enforces_rls() {
     }
 }
 
+#[tokio::test]
+async fn mint_login_link_is_idempotent_per_principal_and_returns_login_url() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // First mint for the device token creates-or-reuses an account.
+    let Json(first) = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("first mint succeeds");
+    assert!(
+        first.url.contains("/account/login?code="),
+        "url must carry the redemption code: {}",
+        first.url
+    );
+    // The raw code lives only in the url; it must not be the account id.
+    assert!(!first.url.contains(&first.account_id));
+
+    // Second mint for the SAME device token must reuse the SAME account.
+    let Json(second) = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("second mint succeeds");
+    assert_eq!(
+        first.account_id, second.account_id,
+        "create-or-reuse must return a stable account id for the same principal"
+    );
+    assert!(second.url.contains("/account/login?code="));
+    // Distinct single-use codes per mint.
+    assert_ne!(first.url, second.url);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 #[test]
 fn file_backed_control_plane_appends_reject_cross_tenant_records_before_write() {
     let temp = tempfile::tempdir().expect("temp dir");
