@@ -22,13 +22,20 @@ impl AccountId {
 #[derive(Debug, Clone)]
 pub struct AccountPrincipalSet(BTreeSet<String>);
 impl AccountPrincipalSet {
-    // Crate-private constructor: only this module and the forthcoming
-    // `AccountCtx` (a later slice task) may mint a principal set. Today only
-    // the in-module tests call it, so under `-D warnings` the non-test bins
-    // build sees it as dead code; the allow keeps the not-yet-wired
-    // constructor in place for that task without widening visibility.
-    #[allow(dead_code)]
-    pub(crate) fn from_iter<I: IntoIterator<Item = String>>(it: I) -> Self {
+    /// The ONLY way to mint a principal set. Used by this module's tests and by
+    /// the `AccountCtx` resolver in `trace-commons-ingest`, which feeds it the
+    /// result of the active-membership expansion (`unlinked_at IS NULL`,
+    /// Hardening A) — the single sanctioned source of ownership-bearing
+    /// principals. Kept narrow: it is `pub` to the crate's bins but the type's
+    /// only consumers (`AccountCtx`, the account visibility predicate) cannot be
+    /// coerced into the legacy `&TenantAuth` surface (Hardening C).
+    // Intentionally named `from_iter` (the slice's chosen vocabulary) without
+    // implementing `std::iter::FromIterator`: a `FromIterator` impl would make
+    // the set constructible by anything in scope via `.collect()`, eroding the
+    // "only the resolver mints a set" guarantee. Local allow only; not a CI
+    // allow-list change.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_iter<I: IntoIterator<Item = String>>(it: I) -> Self {
         Self(it.into_iter().collect())
     }
     pub fn contains(&self, principal_ref: &str) -> bool {
@@ -46,6 +53,35 @@ impl AccountPrincipalSet {
 /// so it is structurally incapable of equalling any `principal_<sha>` ref.
 pub fn account_actor_ref(account: &AccountId) -> String {
     format!("account-actor:{}", account.as_uuid())
+}
+
+/// Which credential the `AccountCtx` resolver accepted. The cookie path is a
+/// low-privilege contributor surface and carries NO review/admin capability by
+/// construction (`AccountCtx` exposes only `account_id` + `principal_set`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountAuthMethod {
+    /// Browser session cookie (`tc_account_session`) — contributor-only.
+    SessionCookie,
+    /// Device bearer token resolved to its linked account.
+    DeviceBearer,
+}
+
+/// Resolved account context guarding the `/v1/account/*` read surface.
+///
+/// Producible only by the resolver (`resolve_account_ctx`) — it is the sole
+/// other mint site for an `AccountPrincipalSet` besides this module's own code.
+/// It deliberately exposes ONLY the account id, the active-membership principal
+/// set, the accepted auth method, the tenant, and an actor/audit ref. It carries
+/// no role/privilege field, so neither path can be treated as reviewer/admin:
+/// the cookie path is structurally incapable of escalating.
+#[derive(Debug, Clone)]
+pub struct AccountCtx {
+    pub account_id: AccountId,
+    pub principal_set: AccountPrincipalSet,
+    pub auth_method: AccountAuthMethod,
+    pub tenant_id: String,
+    /// Device `principal_ref` (bearer path) or `account-actor:{id}` (cookie path).
+    pub actor_ref: String,
 }
 
 /// 160-bit CSPRNG login code, URL-safe base64 (unpadded).

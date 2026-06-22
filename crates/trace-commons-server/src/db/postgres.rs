@@ -1792,6 +1792,122 @@ impl Database for PgBackend {
             session_id,
         }))
     }
+
+    async fn validate_session(
+        &self,
+        tenant_id: &str,
+        token_hash: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+
+        // Every-request liveness gate (Hardening I): unexpired AND not revoked AND
+        // seen within the idle cap. The idle cap (3d) is intentionally shorter than
+        // the 7d absolute `expires_at` so an abandoned session dies sooner than its
+        // hard expiry. The `tenant_id = trace_current_tenant_id()` predicate is
+        // belt-and-suspenders on top of forced RLS; `token_hash` is globally
+        // UNIQUE so a client-supplied (forged/mismatched) tenant simply scopes the
+        // lookup to a tenant where this hash does not exist -> no row -> deny.
+        let row = tx
+            .query_opt(
+                "SELECT account_id FROM trace_sessions
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND token_hash = $1
+                    AND expires_at > now()
+                    AND revoked_at IS NULL
+                    AND last_seen_at > now() - INTERVAL '3 days'",
+                &[&token_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let Some(row) = row else {
+            // Miss OR idle-capped. Auto-revoke any matching row that is still live
+            // (unexpired, unrevoked) but fell past the idle cap, so a leaked secret
+            // cannot be reused after the idle window even before hard expiry. The
+            // predicate is the inverse idle-cap on an otherwise-valid row; a true
+            // unknown hash affects zero rows.
+            tx.execute(
+                "UPDATE trace_sessions SET revoked_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND token_hash = $1
+                    AND revoked_at IS NULL
+                    AND expires_at > now()
+                    AND last_seen_at <= now() - INTERVAL '3 days'",
+                &[&token_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            return Ok(None);
+        };
+        let account_id: Uuid = row.get("account_id");
+
+        // Live hit: bump last_seen_at to slide the idle window forward.
+        tx.execute(
+            "UPDATE trace_sessions SET last_seen_at = now()
+              WHERE tenant_id = trace_current_tenant_id()
+                AND token_hash = $1",
+            &[&token_hash],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(Some(account_id))
+    }
+
+    async fn resolve_account_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_ref: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Active-membership only (Hardening A): an unlinked principal must not
+        // resolve to its former account.
+        let row = tx
+            .query_opt(
+                "SELECT account_id FROM trace_account_principals
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND principal_ref = $1
+                    AND unlinked_at IS NULL",
+                &[&principal_ref],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let account_id = row.map(|row| row.get::<_, Uuid>("account_id"));
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(account_id)
+    }
+
+    async fn expand_account_principals(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+    ) -> Result<Vec<String>, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // The ONLY sanctioned ownership-bearing expansion (Hardening A): active
+        // memberships only. An `unlinked_at`-set principal is absent from the set.
+        let rows = tx
+            .query(
+                "SELECT principal_ref FROM trace_account_principals
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND unlinked_at IS NULL",
+                &[&account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let principals = rows
+            .into_iter()
+            .map(|row| row.get::<_, String>("principal_ref"))
+            .collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(principals)
+    }
 }
 
 fn device_key_record_from_row(row: Row) -> crate::db::DeviceKeyRecord {

@@ -318,6 +318,54 @@ pub trait Database: TraceCorpusStore + Send + Sync {
             "redeem_login_link not implemented".to_string(),
         ))
     }
+
+    /// Validate a browser session by its `token_hash` (sha256 of the secret part
+    /// of the cookie, NOT the whole cookie value) under the caller-asserted
+    /// `tenant_id`. Inside an RLS-scoped tx: select the account for a session
+    /// that is unexpired, not revoked, and seen within the idle cap. On a hit,
+    /// bump `last_seen_at` and return the account id. On a miss (including an
+    /// idle-capped row, which is auto-revoked) return `None`. Any store/DB error
+    /// surfaces as `Err`; callers MUST treat both `None` and `Err` as a denial.
+    ///
+    /// Safety of the client-supplied tenant: `token_hash` is globally UNIQUE and
+    /// bound to exactly one real `(tenant, account, session)`. A forged or
+    /// mismatched tenant simply scopes the RLS lookup to a tenant where this
+    /// hash does not exist, so it finds no row and fails closed.
+    async fn validate_session(
+        &self,
+        _tenant_id: &str,
+        _token_hash: &str,
+    ) -> Result<Option<uuid::Uuid>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "validate_session not implemented".to_string(),
+        ))
+    }
+
+    /// Resolve the active account a device `principal_ref` is linked to (bearer
+    /// path). Active-membership only (`unlinked_at IS NULL`, Hardening A). `None`
+    /// when the principal is unlinked or links to no account.
+    async fn resolve_account_for_principal(
+        &self,
+        _tenant_id: &str,
+        _principal_ref: &str,
+    ) -> Result<Option<uuid::Uuid>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "resolve_account_for_principal not implemented".to_string(),
+        ))
+    }
+
+    /// Expand an account's ACTIVE principal memberships — the ONLY sanctioned
+    /// ownership-bearing expansion (Hardening A). MUST filter `unlinked_at IS
+    /// NULL`; an unlinked principal is absent from the returned set.
+    async fn expand_account_principals(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+    ) -> Result<Vec<String>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "expand_account_principals not implemented".to_string(),
+        ))
+    }
 }
 
 /// The session row to create on a winning redeem. `token_hash` is sha256-shaped;

@@ -306,6 +306,280 @@ async fn confirm_login_issues_single_use_session_cookie() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+// --- Task 7: dual-auth AccountCtx resolver -------------------------------
+//
+// PostgreSQL-backed where a real session/link row is needed; they self-skip
+// when neither TRACE_COMMONS_PG_TEST_DATABASE_URL nor DATABASE_URL is set. The
+// both-credentials test short-circuits before any DB access and runs without a
+// database.
+
+/// Mint + redeem via the public handlers and return the raw `tc_account_session`
+/// cookie value the browser would replay (the `{b64url(tenant)}.{secret}` form).
+async fn mint_redeem_session_cookie_value(state: &Arc<AppState>, token: &str) -> String {
+    use axum::response::IntoResponse;
+    let Json(mint) = mint_login_link_handler(State(state.clone()), auth_headers(token))
+        .await
+        .expect("mint succeeds");
+    let code = mint
+        .url
+        .split("code=")
+        .nth(1)
+        .expect("url carries code")
+        .to_string();
+    let mut same_origin = HeaderMap::new();
+    same_origin.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+    let response = confirm_login_handler(
+        State(state.clone()),
+        same_origin,
+        ConfirmLoginForm(ConfirmLoginBody { code }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER, "redeem succeeds");
+    let set_cookie = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .expect("session cookie set")
+        .to_str()
+        .expect("ascii cookie");
+    // `name=value; Attr; Attr` -> take the value of the first pair.
+    let first = set_cookie.split(';').next().expect("cookie pair");
+    let (name, value) = first.split_once('=').expect("cookie name=value");
+    assert_eq!(name, "tc_account_session");
+    value.to_string()
+}
+
+fn cookie_request_headers(name: &str, value: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&format!("{name}={value}")).expect("valid cookie header"),
+    );
+    headers
+}
+
+#[tokio::test]
+async fn account_ctx_bearer_resolves_linked_account_and_principal_set() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // Mint creates-or-reuses the account linked to token-a's device principal.
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint links the principal to an account");
+
+    let ctx = resolve_account_ctx(state.as_ref(), &auth_headers("token-a"))
+        .await
+        .expect("bearer resolves to an account ctx");
+    assert_eq!(ctx.auth_method, AccountAuthMethod::DeviceBearer);
+    assert_eq!(ctx.tenant_id, "tenant-a");
+    let device_principal = principal_storage_ref("token-a");
+    assert_eq!(ctx.actor_ref, device_principal, "actor = device principal");
+    assert!(
+        ctx.principal_set.contains(&device_principal),
+        "principal set must contain the device principal"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_ctx_cookie_resolves_account_with_actor_prefix() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    // The cookie carries `{b64url(tenant)}.{secret}`.
+    assert!(cookie_value.contains('.'), "cookie must be tenant.secret");
+
+    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let ctx = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect("cookie resolves to an account ctx");
+    assert_eq!(ctx.auth_method, AccountAuthMethod::SessionCookie);
+    assert_eq!(ctx.tenant_id, "tenant-a");
+    assert!(
+        ctx.actor_ref.starts_with("account-actor:"),
+        "cookie actor ref must be the reserved-prefix account actor: {}",
+        ctx.actor_ref
+    );
+    // Active membership expansion still carries the device principal.
+    assert!(ctx.principal_set.contains(&principal_storage_ref("token-a")));
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_ctx_cookie_with_forged_tenant_fails_closed() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let secret = cookie_value.split_once('.').expect("tenant.secret").1;
+    // Re-encode the cookie with a DIFFERENT tenant prefix but the valid secret.
+    let forged = format!(
+        "{}.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("tenant-evil".as_bytes()),
+        secret,
+    );
+    let headers = cookie_request_headers("tc_account_session", &forged);
+    let result = resolve_account_ctx(state.as_ref(), &headers).await;
+    let err = result.expect_err("forged tenant must fail closed");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED, "forged tenant -> 401");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_ctx_session_past_idle_cap_is_denied() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let secret = cookie_value.split_once('.').expect("tenant.secret").1;
+    let token_hash = trace_commons_server::account_session::hash_secret(secret);
+
+    // Backdate last_seen_at beyond the 3-day idle cap directly under RLS.
+    {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("conn");
+        let tx = client.transaction().await.expect("tx");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&"tenant-a"],
+        )
+        .await
+        .expect("set tenant ctx");
+        let updated = tx
+            .execute(
+                "UPDATE trace_sessions SET last_seen_at = now() - INTERVAL '4 days'
+                  WHERE tenant_id = trace_current_tenant_id() AND token_hash = $1",
+                &[&token_hash],
+            )
+            .await
+            .expect("backdate");
+        assert_eq!(updated, 1, "exactly one session backdated");
+        tx.commit().await.expect("commit backdate");
+    }
+
+    // validate_session must now miss (idle-capped) -> None.
+    let validated = backend
+        .validate_session("tenant-a", &token_hash)
+        .await
+        .expect("validate query runs");
+    assert!(validated.is_none(), "idle-capped session must not validate");
+
+    // And the resolver surfaces it as 401.
+    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let err = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect_err("idle-capped cookie must be denied");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_ctx_both_credentials_is_ambiguous_400() {
+    // No DB needed: the ambiguity check short-circuits before any DB access.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let mut headers = auth_headers("token-a");
+    headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_static("tc_account_session=dGVuYW50LWE.somesecret"),
+    );
+    let err = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect_err("both credentials must be rejected");
+    assert_eq!(
+        err.0,
+        StatusCode::BAD_REQUEST,
+        "bearer + cookie -> 400 ambiguous credentials"
+    );
+}
+
+#[tokio::test]
+async fn account_ctx_no_credentials_is_401() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let err = resolve_account_ctx(state.as_ref(), &HeaderMap::new())
+        .await
+        .expect_err("no credentials must be rejected");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+}
+
 #[test]
 fn file_backed_control_plane_appends_reject_cross_tenant_records_before_write() {
     let temp = tempfile::tempdir().expect("temp dir");

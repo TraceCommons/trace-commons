@@ -34,7 +34,8 @@ use trace_commons_server::audit_chain::{
     AUDIT_CHAIN_DRIFT_REJECTED_CLASS, audit_event_matches_writeback,
 };
 use trace_commons_server::account_session::{
-    account_actor_ref, generate_login_code, generate_session_secret, hash_secret, AccountId,
+    account_actor_ref, generate_login_code, generate_session_secret, hash_secret, AccountAuthMethod,
+    AccountCtx, AccountId, AccountPrincipalSet,
 };
 use trace_commons_server::config::DatabaseConfig;
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
@@ -11611,6 +11612,146 @@ fn account_db(state: &AppState) -> ApiResult<Arc<dyn Database>> {
     })
 }
 
+/// Extract the value of a named cookie from a request `Cookie` header.
+///
+/// Manual parse of the `name=value; name2=value2` cookie list. Returns the first
+/// match. We do NOT decode percent-encoding: the session cookie value is
+/// `{b64url}.{secret}`, which is already cookie-safe, so a byte-for-byte match is
+/// exactly what we need to recompute the secret's hash.
+// Wired by the `/v1/account/*` read endpoints in Tasks 9-10; until then the
+// non-test bin build sees it as dead code. Exercised now by the Task 7 tests.
+#[allow(dead_code)]
+fn cookie_value_from_headers<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    let raw = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|value| value.to_str().ok())?;
+    raw.split(';').find_map(|pair| {
+        let pair = pair.trim();
+        let (key, value) = pair.split_once('=')?;
+        if key.trim() == name {
+            Some(value)
+        } else {
+            None
+        }
+    })
+}
+
+/// Resolve the dual-auth `AccountCtx` guarding the `/v1/account/*` read surface.
+///
+/// Exactly one credential is accepted:
+/// - Both a `Authorization: Bearer` AND the `tc_account_session` cookie present →
+///   `400` ambiguous credentials. No silent precedence.
+/// - Bearer only → authenticate the device token, resolve its linked account, and
+///   expand active memberships. `auth_method = DeviceBearer`; actor = device ref.
+/// - Cookie only → parse `{b64url(tenant)}.{secret}`, validate the session under
+///   that tenant's RLS, expand active memberships. `auth_method = SessionCookie`;
+///   actor = `account-actor:{id}` (reserved-prefix, never sha-shaped).
+/// - Neither → `401`.
+///
+/// No `account_id` / `principal_ref` is ever taken from client input; everything
+/// is auth-derived. Any miss or DB/store error is a DENY (401/500) — never a
+/// fall-through to an unauthenticated or elevated state. The returned `AccountCtx`
+/// carries no role/privilege field, so the cookie path cannot be treated as
+/// reviewer/admin: it is a low-privilege contributor surface by construction.
+// Wired by the `/v1/account/*` read endpoints in Tasks 9-10; until then the
+// non-test bin build sees it as dead code. Exercised now by the Task 7 tests.
+#[allow(dead_code)]
+async fn resolve_account_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult<AccountCtx> {
+    let has_bearer = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim_start().starts_with("Bearer "))
+        .unwrap_or(false);
+    let cookie = cookie_value_from_headers(headers, ACCOUNT_SESSION_COOKIE);
+
+    match (has_bearer, cookie) {
+        (true, Some(_)) => Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ambiguous credentials: present both a session cookie and a bearer token",
+        )),
+        (true, None) => resolve_account_ctx_bearer(state, headers).await,
+        (false, Some(cookie)) => resolve_account_ctx_cookie(state, cookie).await,
+        (false, None) => Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "account session cookie or device bearer token required",
+        )),
+    }
+}
+
+/// Bearer path: device token → linked account → active-membership set.
+#[allow(dead_code)]
+async fn resolve_account_ctx_bearer(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> ApiResult<AccountCtx> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state, headers).await?;
+    let db = account_db(state)?;
+    let tenant_id = tenant.tenant_id().to_string();
+    let principal_ref = tenant.principal_ref().to_string();
+
+    let account_id = db
+        .resolve_account_for_principal(&tenant_id, &principal_ref)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "no account for this principal"))?;
+    let account = AccountId::from_uuid(account_id);
+    let principals = db
+        .expand_account_principals(&tenant_id, account_id)
+        .await
+        .map_err(internal_error)?;
+
+    Ok(AccountCtx {
+        account_id: account,
+        principal_set: AccountPrincipalSet::from_iter(principals),
+        auth_method: AccountAuthMethod::DeviceBearer,
+        tenant_id,
+        actor_ref: principal_ref,
+    })
+}
+
+/// Cookie path: parse `{b64url(tenant)}.{secret}`, validate the session under the
+/// cookie-carried tenant, expand active memberships. The tenant is client-supplied
+/// but this is SAFE: the stored `token_hash` is the sha256 of the SECRET ONLY and
+/// is globally UNIQUE, so a forged/mismatched tenant scopes the RLS lookup to a
+/// tenant where this hash does not exist → no row → 401. See `validate_session`.
+#[allow(dead_code)]
+async fn resolve_account_ctx_cookie(state: &AppState, cookie: &str) -> ApiResult<AccountCtx> {
+    let invalid =
+        || api_error(StatusCode::UNAUTHORIZED, "invalid or expired account session");
+
+    // Split on the single '.' separator. base64url(no pad) and the CSPRNG secret
+    // both exclude '.', so exactly one split is expected.
+    let (b64_tenant, secret) = cookie.split_once('.').ok_or_else(invalid)?;
+    if secret.is_empty() {
+        return Err(invalid());
+    }
+    let tenant_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(b64_tenant)
+        .map_err(|_| invalid())?;
+    let tenant_id = String::from_utf8(tenant_bytes).map_err(|_| invalid())?;
+
+    let db = account_db(state)?;
+    let token_hash = hash_secret(secret);
+    let account_id = db
+        .validate_session(&tenant_id, &token_hash)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(invalid)?;
+    let account = AccountId::from_uuid(account_id);
+    let principals = db
+        .expand_account_principals(&tenant_id, account_id)
+        .await
+        .map_err(internal_error)?;
+
+    Ok(AccountCtx {
+        actor_ref: account_actor_ref(&account),
+        account_id: account,
+        principal_set: AccountPrincipalSet::from_iter(principals),
+        auth_method: AccountAuthMethod::SessionCookie,
+        tenant_id,
+    })
+}
+
 /// Mint a single-use login link for the authenticated device's principal.
 ///
 /// Creates-or-reuses the durable account for the device principal, then issues
@@ -11722,8 +11863,10 @@ where
 /// Issued session lifetime. Matches the spec's ~7d browser session.
 const ACCOUNT_SESSION_TTL_DAYS: i64 = 7;
 
-/// The session cookie name. Value is the raw CSPRNG secret; only its sha256
-/// hash is persisted server-side.
+/// The session cookie name. Value is `{b64url(tenant_id)}.{secret}`; only the
+/// sha256 hash of the SECRET part is persisted server-side. The tenant prefix
+/// lets the (tenant-less) browser request bootstrap an RLS tenant tx without the
+/// narrow login-resolver pool; see `confirm_login_handler` / `resolve_account_ctx`.
 const ACCOUNT_SESSION_COOKIE: &str = "tc_account_session";
 
 /// Code-free account view path the redeem flow redirects to. The view itself is
@@ -11908,8 +12051,22 @@ async fn confirm_login_handler(
     let _ = redeemed.session_id; // server-assigned; not surfaced to the client.
 
     // Build the session cookie: Secure + HttpOnly + SameSite=Strict + Path=/,
-    // value = raw secret, Max-Age matching the 7d TTL.
-    let cookie = cookie::Cookie::build((ACCOUNT_SESSION_COOKIE, secret))
+    // Max-Age matching the 7d TTL. The VALUE encodes the tenant alongside the
+    // secret as `{b64url(tenant_id)}.{secret}` so that browser session
+    // validation (which arrives with NO tenant context) can bootstrap an RLS
+    // tenant tx WITHOUT routing through the tiny narrow login-resolver pool.
+    // Carrying the tenant client-side is safe: the stored `token_hash` is the
+    // sha256 of the SECRET ONLY (never the whole value), and `token_hash` is
+    // globally UNIQUE — a forged/mismatched tenant just scopes the lookup to a
+    // tenant where the hash does not exist, so it finds no row and fails closed.
+    // '.' is the separator; base64url (no pad) and the CSPRNG secret both exclude
+    // '.', so the split is unambiguous.
+    let cookie_value = format!(
+        "{}.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tenant.as_bytes()),
+        secret,
+    );
+    let cookie = cookie::Cookie::build((ACCOUNT_SESSION_COOKIE, cookie_value))
         .secure(true)
         .http_only(true)
         .same_site(cookie::SameSite::Strict)
