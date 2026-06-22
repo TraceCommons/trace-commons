@@ -19,6 +19,8 @@ async fn postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
         url: SecretString::from(url),
         pool_size: 4,
         ssl_mode: trace_commons_server::config::SslMode::Prefer,
+        login_resolver_url:
+            trace_commons_server::config::DatabaseConfig::login_resolver_url_from_env(),
     };
     let backend = match PgBackend::new(&config).await {
         Ok(backend) => Arc::new(backend),
@@ -57,6 +59,36 @@ async fn cleanup_pg_trace_tenant(backend: &PgBackend, tenant_id: &str) {
         )
         .await;
     tx.commit().await.expect("commit cleanup transaction");
+}
+
+#[tokio::test]
+async fn login_resolver_role_cannot_touch_other_tables() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let row = client
+        .query_one(
+            "SELECT rolbypassrls FROM pg_roles WHERE rolname = 'trace_login_resolver'",
+            &[],
+        )
+        .await
+        .expect("resolver role exists");
+    let bypass: bool = row.get(0);
+    assert!(!bypass, "resolver role must NOT have BYPASSRLS");
+    let can_insert: bool = client
+        .query_one(
+            "SELECT has_table_privilege('trace_login_resolver','trace_login_links','INSERT')",
+            &[],
+        )
+        .await
+        .expect("priv check")
+        .get(0);
+    assert!(!can_insert, "resolver must not write");
 }
 
 #[tokio::test]

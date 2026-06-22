@@ -140,3 +140,15 @@ DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_account_audit;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_account_audit
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());
+
+-- Narrow resolver privilege: redeem runs with NO tenant context, so it needs a
+-- single-table SELECT to map a globally-unique code_hash -> tenant_id. The role
+-- is operator-provisioned (NOLOGIN base, no BYPASSRLS, no writes, no other
+-- table) and runs on a SEPARATE pool, never the runtime pool. This GRANT is the
+-- ONLY GRANT statement in the repo and is deliberate.
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_login_resolver') THEN
+    CREATE ROLE trace_login_resolver NOLOGIN NOBYPASSRLS;
+  END IF;
+END $$;
+GRANT SELECT (tenant_id, account_id, code_hash) ON trace_login_links TO trace_login_resolver;

@@ -14,6 +14,12 @@ use crate::error::DatabaseError;
 
 pub struct PgBackend {
     pool: Pool,
+    /// Narrow, SEPARATE pool for the unauthenticated login-link redeem path.
+    /// Built only when `login_resolver_url` is configured; its DB user is the
+    /// operator-provisioned `trace_login_resolver` role (no BYPASSRLS,
+    /// column-scoped SELECT on `trace_login_links` only). `None` keeps the
+    /// account-redeem path fail-closed. NEVER aliased to `pool`.
+    login_resolver_pool: Option<Pool>,
 }
 
 const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
@@ -126,7 +132,29 @@ impl PgBackend {
             .map_err(|e| DatabaseError::Pool(format!("invalid PostgreSQL URL: {e}")))?;
         let manager = deadpool_postgres::Manager::new(pg_config, tokio_postgres::NoTls);
         let pool = Pool::builder(manager).max_size(config.pool_size).build()?;
-        Ok(Self { pool })
+
+        // Build a SEPARATE, small resolver pool only when a distinct resolver
+        // connection string is configured. This pool runs as the narrow
+        // `trace_login_resolver` role and is never aliased to the runtime pool.
+        let login_resolver_pool = match config.login_resolver_url() {
+            Some(resolver_url) => {
+                let resolver_config = resolver_url
+                    .parse::<tokio_postgres::Config>()
+                    .map_err(|e| {
+                        DatabaseError::Pool(format!("invalid login-resolver PostgreSQL URL: {e}"))
+                    })?;
+                let resolver_manager =
+                    deadpool_postgres::Manager::new(resolver_config, tokio_postgres::NoTls);
+                let resolver_pool = Pool::builder(resolver_manager).max_size(2).build()?;
+                Some(resolver_pool)
+            }
+            None => None,
+        };
+
+        Ok(Self {
+            pool,
+            login_resolver_pool,
+        })
     }
 
     pub(crate) fn trace_pool(&self) -> Pool {
@@ -136,6 +164,30 @@ impl PgBackend {
     #[doc(hidden)]
     pub fn raw_pool_for_tests_and_diagnostics(&self) -> Pool {
         self.pool.clone()
+    }
+
+    /// Resolve the tenant for a login code via the NARROW resolver pool (separate
+    /// role, column-scoped SELECT, no BYPASSRLS). Returns the tenant only; the
+    /// caller MUST re-confirm tenant inside an RLS-scoped transaction before any
+    /// write. Fail-closed: if the resolver pool is not configured, this errors
+    /// with a safe missing-control name rather than falling back to the runtime
+    /// pool.
+    pub async fn resolve_login_link_tenant(
+        &self,
+        code_hash: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let pool = self
+            .login_resolver_pool
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing-control: login-resolver-pool-unconfigured"))?;
+        let client = pool.get().await?;
+        let row = client
+            .query_opt(
+                "SELECT tenant_id FROM trace_login_links WHERE code_hash = $1",
+                &[&code_hash],
+            )
+            .await?;
+        Ok(row.map(|r| r.get::<_, String>(0)))
     }
 }
 

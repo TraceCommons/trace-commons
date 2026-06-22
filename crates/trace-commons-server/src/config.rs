@@ -50,6 +50,12 @@ pub struct DatabaseConfig {
     pub url: SecretString,
     pub pool_size: usize,
     pub ssl_mode: SslMode,
+    /// Separate connection string for the narrow login-resolver pool. Its DB
+    /// user MUST be the operator-provisioned `trace_login_resolver` login role
+    /// (NOLOGIN base, no BYPASSRLS, column-scoped SELECT on `trace_login_links`
+    /// only). Optional at the type level; the account-redeem path is
+    /// fail-closed without it. Never reuse the runtime `url` here.
+    pub login_resolver_url: Option<SecretString>,
 }
 
 impl DatabaseConfig {
@@ -58,10 +64,28 @@ impl DatabaseConfig {
             url: SecretString::from(url.to_string()),
             pool_size,
             ssl_mode: SslMode::from_env(),
+            login_resolver_url: Self::login_resolver_url_from_env(),
         }
+    }
+
+    /// Read the optional separate resolver connection string from
+    /// `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL`. A blank value is treated as
+    /// unset so the feature stays fail-closed rather than building a pool from
+    /// an empty string.
+    pub fn login_resolver_url_from_env() -> Option<SecretString> {
+        std::env::var("TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(SecretString::from)
     }
 
     pub fn url(&self) -> &str {
         self.url.expose_secret()
+    }
+
+    pub fn login_resolver_url(&self) -> Option<&str> {
+        self.login_resolver_url
+            .as_ref()
+            .map(|value| value.expose_secret())
     }
 }
