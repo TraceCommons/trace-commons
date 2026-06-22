@@ -1,3 +1,6 @@
+use base64::Engine;
+use rand::RngCore;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 /// Durable pseudonymous account id (locally-owned UUID).
@@ -45,6 +48,24 @@ pub fn account_actor_ref(account: &AccountId) -> String {
     format!("account-actor:{}", account.as_uuid())
 }
 
+/// 160-bit CSPRNG login code, URL-safe base64 (unpadded).
+pub fn generate_login_code() -> String {
+    let mut bytes = [0u8; 20];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// 160-bit CSPRNG session secret (same entropy source as the login code).
+pub fn generate_session_secret() -> String {
+    generate_login_code()
+}
+
+/// sha256:<lowercase-hex> of the raw secret. Store ONLY this, never the raw secret.
+pub fn hash_secret(raw: &str) -> String {
+    let digest = Sha256::digest(raw.as_bytes());
+    format!("sha256:{}", hex::encode(digest))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,5 +80,19 @@ mod tests {
         let actor = account_actor_ref(&AccountId::from_uuid(uuid::Uuid::nil()));
         assert!(actor.starts_with("account-actor:"));
         assert!(!actor.starts_with("principal_"));
+    }
+    #[test]
+    fn generated_code_is_high_entropy_and_url_safe() {
+        let a = generate_login_code();
+        let b = generate_login_code();
+        assert_ne!(a, b);
+        assert!(a.len() >= 27); // >=160 bits base64url, unpadded
+        assert!(a.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'));
+    }
+    #[test]
+    fn hash_is_sha256_prefixed_shape() {
+        let h = hash_secret("abc");
+        assert!(h.starts_with("sha256:"));
+        assert_eq!(h.len(), "sha256:".len() + 64);
     }
 }
