@@ -181,6 +181,10 @@ impl PgBackend {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("missing-control: login-resolver-pool-unconfigured"))?;
         let client = pool.get().await?;
+        // Safe without a tenant predicate: code_hash is globally UNIQUE (CHECK-shaped sha256) so
+        // this returns at most one row across all tenants; the redeem handler re-confirms tenant
+        // inside an RLS-scoped tx before any write. Do NOT add a non-unique lookup column to this
+        // role's grant.
         let row = client
             .query_opt(
                 "SELECT tenant_id FROM trace_login_links WHERE code_hash = $1",

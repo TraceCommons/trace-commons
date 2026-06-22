@@ -151,4 +151,5 @@ DO $$ BEGIN
     CREATE ROLE trace_login_resolver NOLOGIN NOBYPASSRLS;
   END IF;
 END $$;
-GRANT SELECT (tenant_id, account_id, code_hash) ON trace_login_links TO trace_login_resolver;
+GRANT SELECT (tenant_id, code_hash) ON trace_login_links TO trace_login_resolver;
+ALTER ROLE trace_login_resolver SET statement_timeout = '2s';
