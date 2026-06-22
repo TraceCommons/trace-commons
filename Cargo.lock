@@ -7093,6 +7093,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "cookie",
  "deadpool-postgres",
  "dirs",
  "dotenvy",

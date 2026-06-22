@@ -14,6 +14,7 @@ async-trait = "0.1"
 axum = "0.8"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
+cookie = "0.18"
 clap = { version = "4", features = ["derive", "env"] }
 deadpool-postgres = "0.14"
 dotenvy = "0.15"
