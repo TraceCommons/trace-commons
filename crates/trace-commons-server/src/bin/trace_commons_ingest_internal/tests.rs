@@ -59,6 +59,35 @@ async fn cleanup_pg_trace_tenant(backend: &PgBackend, tenant_id: &str) {
     tx.commit().await.expect("commit cleanup transaction");
 }
 
+#[tokio::test]
+async fn account_migration_applies_and_enforces_rls() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    for table in [
+        "trace_accounts",
+        "trace_account_principals",
+        "trace_login_links",
+        "trace_sessions",
+        "trace_account_audit",
+    ] {
+        let row = client
+            .query_one(
+                "SELECT relforcerowsecurity FROM pg_class WHERE relname = $1",
+                &[&table],
+            )
+            .await
+            .expect("table exists");
+        let forced: bool = row.get(0);
+        assert!(forced, "{table} must FORCE ROW LEVEL SECURITY");
+    }
+}
+
 #[test]
 fn file_backed_control_plane_appends_reject_cross_tenant_records_before_write() {
     let temp = tempfile::tempdir().expect("temp dir");

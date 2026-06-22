@@ -52,6 +52,11 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_contributor_profile_audit",
     "device_keys",
     "onboarding_invites",
+    "trace_accounts",
+    "trace_account_principals",
+    "trace_login_links",
+    "trace_sessions",
+    "trace_account_audit",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -729,6 +734,26 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
                     &[&29_i32, &"onboarding_invites"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&30_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V30__trace_accounts.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&30_i32, &"trace_accounts"],
                 )
                 .await?;
         }
@@ -1650,6 +1675,7 @@ mod tests {
             include_str!("../../../../migrations/V26__trace_contributor_profiles.sql"),
             include_str!("../../../../migrations/V28__device_keys.sql"),
             include_str!("../../../../migrations/V29__onboarding_invites.sql"),
+            include_str!("../../../../migrations/V30__trace_accounts.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
@@ -1661,6 +1687,7 @@ mod tests {
             include_str!("../../../../migrations/V26__trace_contributor_profiles.sql"),
             include_str!("../../../../migrations/V28__device_keys.sql"),
             include_str!("../../../../migrations/V29__onboarding_invites.sql"),
+            include_str!("../../../../migrations/V30__trace_accounts.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {
