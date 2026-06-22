@@ -11577,7 +11577,11 @@ async fn submission_status_handler(
 
 /// Max outstanding (unconsumed, unexpired) login links a single principal may
 /// hold. A coarse, DB-enforced per-principal cap that bounds link-flooding by
-/// an authenticated device. Broader IP/global rate-limiting is Task 11.
+/// an authenticated device. The count check and the link insert run in separate
+/// transactions, so the cap is non-atomic (TOCTOU): concurrent mints for one
+/// principal can transiently overshoot it. This is acceptable as anti-flooding
+/// for an already-authenticated device; the 5-min TTL bounds accumulation, and
+/// stricter IP/global rate-limiting is Task 11.
 const ACCOUNT_LOGIN_LINK_OUTSTANDING_CAP: i64 = 5;
 
 /// Login links expire quickly: they are an ephemeral device->browser hand-off,
