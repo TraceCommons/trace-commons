@@ -313,6 +313,24 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// Resolve a NEAR access public_key to its tenant via the column-scoped,
+    /// restricted-role resolver pool, exactly as `resolve_credential_tenant` does
+    /// for webauthn credentials. Returns the tenant ONLY. The NEAR-login path
+    /// (Task 7) calls this with the public_key parsed from an UNAUTHENTICATED,
+    /// wallet-signed assertion, BEFORE any tenant context exists, then re-confirms
+    /// tenant inside an RLS-scoped tx. Fail-closed: an unconfigured resolver pool
+    /// MUST error with a safe missing-control name, never fall back to the runtime
+    /// pool. NO `ensure_trace_tenant` here: this is a pure read on a
+    /// globally-UNIQUE column and MUST NOT write any tenant row for a forged key.
+    async fn resolve_near_public_key_tenant(
+        &self,
+        _public_key: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "resolve_near_public_key_tenant not implemented".to_string(),
+        ))
+    }
+
     /// Atomically redeem a single-use login link: consume + session insert +
     /// audit insert in ONE RLS-scoped transaction, so redeem is all-or-nothing.
     ///

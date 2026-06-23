@@ -260,6 +260,40 @@ impl PgBackend {
             .await?;
         Ok(row.map(|r| r.get::<_, String>(0)))
     }
+
+    /// Resolve a NEAR access public_key to its tenant via the narrow,
+    /// restricted-role resolver pool (separate role, column-scoped SELECT, no
+    /// BYPASSRLS), exactly like `resolve_credential_tenant`. Returns the tenant
+    /// ONLY. The NEAR login path (Task 7) calls this with the public_key parsed
+    /// from an UNAUTHENTICATED, wallet-signed assertion, BEFORE any tenant context
+    /// exists, then re-confirms tenant inside an RLS-scoped tx before any write.
+    /// Fail-closed: if the resolver pool is not configured, this errors with a
+    /// safe missing-control name rather than falling back to the runtime pool.
+    ///
+    /// Wired into the login handler in Task 7; until then its only non-test caller
+    /// is pending. It is `pub` (part of the crate API, like
+    /// `resolve_credential_tenant`), so it does not trip dead-code under
+    /// `-D warnings` despite having no internal caller yet.
+    pub async fn resolve_near_public_key_tenant(
+        &self,
+        public_key: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let pool = self
+            .login_resolver_pool
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing-control: login-resolver-pool-unconfigured"))?;
+        let client = pool.get().await?;
+        // Safe without a tenant predicate: public_key is globally UNIQUE so this returns at most
+        // one row across all tenants; the login handler re-confirms tenant inside an RLS-scoped tx
+        // before any write. Do NOT add a non-unique lookup column to this role's grant.
+        let row = client
+            .query_opt(
+                "SELECT tenant_id FROM trace_near_identities WHERE public_key = $1",
+                &[&public_key],
+            )
+            .await?;
+        Ok(row.map(|r| r.get::<_, String>(0)))
+    }
 }
 
 #[async_trait]
@@ -1850,6 +1884,19 @@ impl Database for PgBackend {
         // unconfigured-resolver path surfaces here as a Pool error, which the
         // login handler collapses to the uniform deny.
         PgBackend::resolve_credential_tenant(self, credential_id)
+            .await
+            .map_err(|error| DatabaseError::Pool(error.to_string()))
+    }
+
+    async fn resolve_near_public_key_tenant(
+        &self,
+        public_key: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        // Delegate to the inherent implementation (narrow resolver pool); map its
+        // anyhow error onto the trait's DatabaseError. The fail-closed
+        // unconfigured-resolver path surfaces here as a Pool error, which the
+        // login handler collapses to the uniform deny.
+        PgBackend::resolve_near_public_key_tenant(self, public_key)
             .await
             .map_err(|error| DatabaseError::Pool(error.to_string()))
     }
