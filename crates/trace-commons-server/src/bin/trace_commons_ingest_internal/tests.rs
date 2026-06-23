@@ -229,6 +229,68 @@ async fn account_migration_applies_and_enforces_rls() {
 }
 
 #[tokio::test]
+async fn webauthn_migration_applies_credentials_table_and_session_rotation_columns() {
+    // Self-skips without a DB (TRACE_COMMONS_TEST_DATABASE_URL unset).
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+
+    // The credentials table exists and FORCES row-level security.
+    let row = client
+        .query_one(
+            "SELECT relforcerowsecurity FROM pg_class WHERE relname = $1",
+            &[&"trace_webauthn_credentials"],
+        )
+        .await
+        .expect("trace_webauthn_credentials exists");
+    let forced: bool = row.get(0);
+    assert!(forced, "trace_webauthn_credentials must FORCE ROW LEVEL SECURITY");
+
+    // trace_sessions gained the rotation columns.
+    for column in [
+        "prev_token_hash",
+        "prev_token_valid_until",
+        "auth_credential_id",
+        "token_issued_at",
+    ] {
+        let present: bool = client
+            .query_one(
+                "SELECT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'trace_sessions' AND column_name = $1
+                 )",
+                &[&column],
+            )
+            .await
+            .expect("column probe")
+            .get(0);
+        assert!(present, "trace_sessions must have column {column}");
+    }
+
+    // The widened client_kind CHECK now accepts 'passkey'.
+    let check_def: String = client
+        .query_one(
+            "SELECT pg_get_constraintdef(oid)
+             FROM pg_constraint
+             WHERE conrelid = 'trace_sessions'::regclass
+               AND conname = 'trace_sessions_client_kind_check'",
+            &[],
+        )
+        .await
+        .expect("client_kind check exists")
+        .get(0);
+    assert!(
+        check_def.contains("passkey"),
+        "client_kind CHECK must accept 'passkey': {check_def}"
+    );
+}
+
+#[tokio::test]
 async fn mint_login_link_is_idempotent_per_principal_and_returns_login_url() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;

@@ -63,6 +63,7 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_login_links",
     "trace_sessions",
     "trace_account_audit",
+    "trace_webauthn_credentials",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -830,6 +831,26 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
                     &[&31_i32, &"account_traces_index"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&32_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V32__webauthn_credentials.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&32_i32, &"webauthn_credentials"],
                 )
                 .await?;
         }
@@ -2163,6 +2184,7 @@ mod tests {
             include_str!("../../../../migrations/V28__device_keys.sql"),
             include_str!("../../../../migrations/V29__onboarding_invites.sql"),
             include_str!("../../../../migrations/V30__trace_accounts.sql"),
+            include_str!("../../../../migrations/V32__webauthn_credentials.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
@@ -2175,6 +2197,7 @@ mod tests {
             include_str!("../../../../migrations/V28__device_keys.sql"),
             include_str!("../../../../migrations/V29__onboarding_invites.sql"),
             include_str!("../../../../migrations/V30__trace_accounts.sql"),
+            include_str!("../../../../migrations/V32__webauthn_credentials.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {

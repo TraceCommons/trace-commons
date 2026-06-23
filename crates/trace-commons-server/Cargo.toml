@@ -44,6 +44,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tower-http = { version = "0.6", features = ["cors"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
+webauthn-rs = "0.5"
 google-cloud-storage = { version = "0.24", optional = true }
 google-cloud-kms = { version = "0.6", optional = true }
 hf-hub = { version = "0.4.3", default-features = false, features = ["tokio", "rustls-tls"] }
