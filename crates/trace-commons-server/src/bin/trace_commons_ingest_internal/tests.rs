@@ -3081,6 +3081,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         novelty_utility_require_production_gate: false,
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
+        account_near_config: None,
     })
 }
 
@@ -22467,6 +22468,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         novelty_utility_require_production_gate: false,
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
+        account_near_config: None,
     });
 
     let mut envelope = sample_envelope().await;

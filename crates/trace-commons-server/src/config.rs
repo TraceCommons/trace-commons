@@ -158,3 +158,145 @@ impl WebauthnConfig {
             .filter(|value| !value.is_empty())
     }
 }
+
+/// NEAR sign-in configuration for the login-with-NEAR ceremony (Slice 3a).
+///
+/// All three fields are required together. The loader is fail-closed: it returns
+/// `Some` only when every one of `TRACE_COMMONS_NEAR_RPC_URL`,
+/// `TRACE_COMMONS_NEAR_NETWORK`, and `TRACE_COMMONS_NEAR_LOGIN_RECIPIENT` is set
+/// to a non-blank value. A partial configuration (some-but-not-all set) is treated
+/// as a misconfiguration and yields `None`, so the NEAR sign-in surface stays
+/// disabled (its accessor fails closed) rather than building a verifier from
+/// incomplete state. Mirrors [`WebauthnConfig::from_env`]: blank is unset.
+#[derive(Debug, Clone)]
+pub struct NearConfig {
+    /// NEAR JSON-RPC endpoint used to resolve access keys for an account
+    /// (e.g. `https://rpc.mainnet.near.org`). Consumed by the RPC path in Task 5.
+    pub rpc_url: String,
+    /// NEAR network label (e.g. `mainnet` or `testnet`). Attribution/selection
+    /// only; the RPC URL is the authoritative endpoint.
+    pub network: String,
+    /// NEP-413 `recipient` value the signed challenge must bind to
+    /// (e.g. `app.tracecommons.ai`). Verified against the signature in Task 5.
+    pub recipient: String,
+}
+
+impl NearConfig {
+    /// Load the NEAR sign-in config from the environment. Returns `Some` only when
+    /// all three of `TRACE_COMMONS_NEAR_RPC_URL`, `_NEAR_NETWORK`, and
+    /// `_NEAR_LOGIN_RECIPIENT` are present and non-blank. A partial set fails closed
+    /// (`None`) and warns by env-var NAME only (never values).
+    pub fn from_env() -> Option<Self> {
+        let rpc_url = WebauthnConfig::non_blank_env("TRACE_COMMONS_NEAR_RPC_URL");
+        let network = WebauthnConfig::non_blank_env("TRACE_COMMONS_NEAR_NETWORK");
+        let recipient = WebauthnConfig::non_blank_env("TRACE_COMMONS_NEAR_LOGIN_RECIPIENT");
+        match (rpc_url, network, recipient) {
+            (Some(rpc_url), Some(network), Some(recipient)) => Some(Self {
+                rpc_url,
+                network,
+                recipient,
+            }),
+            // Partial config is a misconfiguration: fail closed rather than build a
+            // verifier from incomplete state. A fully-unset config is the normal
+            // "NEAR sign-in disabled" state and is silent; a SOME-but-not-all config
+            // is almost certainly an operator mistake, so warn loudly (by env-var
+            // NAME only — never values; an rpc_url/recipient may be sensitive) so it
+            // is not silently inert.
+            (rpc_url, network, recipient) => {
+                let any_set = rpc_url.is_some() || network.is_some() || recipient.is_some();
+                if any_set {
+                    let name_state = |label: &str, value: &Option<String>| {
+                        format!("{}={}", label, if value.is_some() { "set" } else { "unset" })
+                    };
+                    tracing::warn!(
+                        target: "trace_commons::near_login",
+                        "partial NEAR sign-in config detected ({}, {}, {}); \
+                         NEAR sign-in surface DISABLED (fail-closed) — all three of \
+                         TRACE_COMMONS_NEAR_RPC_URL/NETWORK/LOGIN_RECIPIENT must be set together",
+                        name_state("TRACE_COMMONS_NEAR_RPC_URL", &rpc_url),
+                        name_state("TRACE_COMMONS_NEAR_NETWORK", &network),
+                        name_state("TRACE_COMMONS_NEAR_LOGIN_RECIPIENT", &recipient),
+                    );
+                }
+                None
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod near_config_tests {
+    use super::NearConfig;
+    use std::sync::Mutex;
+
+    // `from_env` reads process-wide env; serialize the mutating tests so they do
+    // not race each other.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const RPC: &str = "TRACE_COMMONS_NEAR_RPC_URL";
+    const NET: &str = "TRACE_COMMONS_NEAR_NETWORK";
+    const RECIP: &str = "TRACE_COMMONS_NEAR_LOGIN_RECIPIENT";
+
+    fn clear_all() {
+        for key in [RPC, NET, RECIP] {
+            // SAFETY: the tests serialize all env mutation through ENV_LOCK, so no
+            // other thread reads or writes the environment concurrently.
+            unsafe { std::env::remove_var(key) };
+        }
+    }
+
+    fn set(key: &str, value: &str) {
+        // SAFETY: serialized through ENV_LOCK (see `clear_all`).
+        unsafe { std::env::set_var(key, value) };
+    }
+
+    #[test]
+    fn from_env_is_some_only_when_all_three_set() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        clear_all();
+        set(RPC, "https://rpc.mainnet.near.org");
+        set(NET, "mainnet");
+        set(RECIP, "app.tracecommons.ai");
+        let cfg = NearConfig::from_env().expect("all three set yields Some");
+        assert_eq!(cfg.rpc_url, "https://rpc.mainnet.near.org");
+        assert_eq!(cfg.network, "mainnet");
+        assert_eq!(cfg.recipient, "app.tracecommons.ai");
+        clear_all();
+    }
+
+    #[test]
+    fn from_env_is_none_when_partial() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Only two of three set -> None (fail closed).
+        clear_all();
+        set(RPC, "https://rpc.mainnet.near.org");
+        set(NET, "mainnet");
+        // RECIP unset.
+        assert!(
+            NearConfig::from_env().is_none(),
+            "partial config must fail closed"
+        );
+        clear_all();
+    }
+
+    #[test]
+    fn from_env_is_none_when_fully_unset() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        clear_all();
+        assert!(NearConfig::from_env().is_none());
+    }
+
+    #[test]
+    fn from_env_treats_blank_as_unset() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        clear_all();
+        set(RPC, "https://rpc.mainnet.near.org");
+        set(NET, "mainnet");
+        set(RECIP, "   ");
+        assert!(
+            NearConfig::from_env().is_none(),
+            "blank recipient counts as unset -> partial -> None"
+        );
+        clear_all();
+    }
+}

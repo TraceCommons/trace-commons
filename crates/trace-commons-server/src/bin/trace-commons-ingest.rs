@@ -47,7 +47,7 @@ use trace_commons_server::account_passkey::{
     build_webauthn, credential_id_from_string, credential_id_to_string, CeremonyState,
     CeremonyStore,
 };
-use trace_commons_server::config::{DatabaseConfig, WebauthnConfig};
+use trace_commons_server::config::{DatabaseConfig, NearConfig, WebauthnConfig};
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
 use trace_commons_server::db::{Database, TraceCorpusRlsDiagnostics};
 use trace_commons_server::error::DatabaseError;
@@ -1062,6 +1062,11 @@ struct AppState {
     /// Single-instance only (see `account_passkey` module docs). Consumed by
     /// the register/login ceremony handlers in later Slice 2 tasks.
     account_ceremony_store: Arc<CeremonyStore>,
+    /// Slice 3a login-with-NEAR: the NEAR sign-in config, present only when
+    /// `NearConfig` is fully configured. `None` makes the NEAR sign-in surface
+    /// fail closed (its accessor 503s). Wired into the begin/finish ceremony
+    /// handlers in later Slice 3a tasks.
+    account_near_config: Option<Arc<NearConfig>>,
 }
 
 #[derive(Clone)]
@@ -3037,6 +3042,11 @@ impl AppState {
             Some(cfg) => Some(Arc::new(build_webauthn(&cfg)?)),
             None => None,
         };
+
+        // Slice 3a login-with-NEAR: capture the NEAR sign-in config only when
+        // fully configured. A partial NearConfig is dropped to None by the loader,
+        // so the NEAR sign-in surface stays fail-closed (its accessor 503s).
+        let account_near_config = NearConfig::from_env().map(Arc::new);
         let account_ceremony_store = Arc::new(CeremonyStore::new());
 
         Ok(Self {
@@ -3155,6 +3165,7 @@ impl AppState {
             ),
             account_webauthn,
             account_ceremony_store,
+            account_near_config,
         })
     }
 }
@@ -11724,6 +11735,22 @@ fn account_webauthn(state: &AppState) -> ApiResult<Arc<webauthn_rs::Webauthn>> {
         api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "passkey relying party is not configured",
+        )
+    })
+}
+
+/// Resolve the configured NEAR sign-in config for the login-with-NEAR ceremonies.
+///
+/// Fails closed exactly like `account_webauthn`: when NEAR sign-in is not
+/// configured (partial or absent `NearConfig`), it returns a 503 with a safe
+/// missing-control label rather than letting a ceremony proceed without a
+/// verifier. Wired into the begin/finish handlers in later Slice 3a tasks.
+#[allow(dead_code)] // wired into the NEAR sign-in handlers in later Slice 3a tasks.
+fn account_near_config(state: &AppState) -> ApiResult<Arc<NearConfig>> {
+    state.account_near_config.as_ref().cloned().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "NEAR sign-in is not configured",
         )
     })
 }

@@ -90,6 +90,17 @@ pub enum CeremonyState {
     /// Pending discoverable authentication (consumed by
     /// `finish_discoverable_authentication`).
     DiscoverableAuthentication(DiscoverableAuthentication),
+    /// Pending NEAR sign-in (Slice 3a): the server-issued NEP-413 challenge
+    /// nonce and the `recipient` the signed message must bind to. Issued by the
+    /// NEAR login-begin handler and consumed by login-finish in later Slice 3a
+    /// tasks. Unlike the WebAuthn variants this carries plain owned data, so it
+    /// is directly constructible (and round-trippable through `CeremonyStore`).
+    NearChallenge {
+        /// 32-byte server nonce the wallet signs over.
+        nonce: [u8; 32],
+        /// NEP-413 `recipient` the signed message must bind to.
+        recipient: String,
+    },
 }
 
 /// Generate a fresh, high-entropy ceremony id.
@@ -239,6 +250,35 @@ mod tests {
         assert_eq!(decoded.as_ref(), raw.as_slice());
         // And the re-encoding is stable (canonical).
         assert_eq!(credential_id_to_string(&decoded), encoded);
+    }
+
+    #[test]
+    fn store_round_trips_near_challenge_variant() {
+        // The generic CeremonyStore must carry the new NearChallenge variant just
+        // like any other CeremonyState value: put -> take returns it, single-use.
+        let store: CeremonyStore<CeremonyState> = CeremonyStore::new();
+        let nonce = [7u8; 32];
+        let recipient = "app.tracecommons.ai".to_string();
+        store.put(
+            "near-1".to_string(),
+            CeremonyState::NearChallenge {
+                nonce,
+                recipient: recipient.clone(),
+            },
+        );
+        match store.take("near-1") {
+            Some(CeremonyState::NearChallenge {
+                nonce: got_nonce,
+                recipient: got_recipient,
+            }) => {
+                assert_eq!(got_nonce, nonce);
+                assert_eq!(got_recipient, recipient);
+            }
+            Some(_) => panic!("expected NearChallenge, got a different CeremonyState"),
+            None => panic!("expected NearChallenge, got None"),
+        }
+        // Single-use.
+        assert!(store.take("near-1").is_none());
     }
 
     #[test]
