@@ -152,4 +152,22 @@ DO $$ BEGIN
   END IF;
 END $$;
 GRANT SELECT (tenant_id, code_hash) ON trace_login_links TO trace_login_resolver;
+
+-- The resolver runs with NO tenant context (unauthenticated redeem), so the
+-- PUBLIC tenant-isolation policy (tenant_id = trace_current_tenant_id()) would
+-- exclude every row and the redeem path would ALWAYS fail closed (no tenant
+-- resolves). `code_hash` being globally UNIQUE is NOT sufficient on its own:
+-- forced RLS still filters the row out for a role with no tenant context. Add a
+-- permissive SELECT policy scoped ONLY to the resolver role so it can map a
+-- globally-UNIQUE code_hash -> tenant_id across tenants. Permissive policies OR
+-- together: for trace_login_resolver the effective USING becomes
+-- (tenant-isolation OR true) = true; the runtime / PUBLIC role is unaffected
+-- (this policy is `TO trace_login_resolver` only) and keeps full tenant
+-- isolation. The column GRANT above still limits the resolver to
+-- (tenant_id, code_hash), so this remains a one-table, two-column read.
+DROP POLICY IF EXISTS trace_login_resolver_cross_tenant_read ON trace_login_links;
+CREATE POLICY trace_login_resolver_cross_tenant_read ON trace_login_links
+    FOR SELECT TO trace_login_resolver
+    USING (true);
+
 ALTER ROLE trace_login_resolver SET statement_timeout = '2s';

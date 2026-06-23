@@ -103,6 +103,102 @@ async fn login_resolver_role_cannot_touch_other_tables() {
     assert!(!can_insert, "resolver must not write");
 }
 
+/// BLOCKER regression (Hardening D correctness): the `trace_login_resolver` role
+/// must be able to map a globally-unique `code_hash` -> `tenant_id` even though it
+/// runs with NO tenant context. `trace_login_links` has FORCE RLS with the PUBLIC
+/// `trace_corpus_tenant_isolation` policy (`tenant_id = trace_current_tenant_id()`),
+/// which alone would exclude EVERY row for a role with no tenant set — so without a
+/// resolver-scoped permissive policy the redeem path always fails closed (no tenant
+/// resolves) and every redeem 400s in production. The column GRANT does not relax
+/// RLS, and `code_hash` uniqueness is irrelevant to row visibility under forced RLS.
+///
+/// This test exercises the REAL policy path: `SET ROLE trace_login_resolver` drops
+/// the superuser RLS bypass, so the resolver role's RLS treatment is what runs even
+/// from a superuser test connection. It asserts the column-scoped read returns the
+/// correct tenant (proving the permissive policy is in effect) and that an
+/// out-of-grant column read is rejected (proving least privilege is retained).
+#[tokio::test]
+async fn login_resolver_reads_tenant_across_rls_under_set_role() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // Mint a real login link via the normal tenant-scoped path so a row exists in
+    // trace_login_links with a known code_hash bound to tenant-a.
+    let Json(mint) = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint succeeds");
+    let code = mint
+        .url
+        .split("code=")
+        .nth(1)
+        .expect("url carries code")
+        .to_string();
+    let code_hash = trace_commons_server::account_session::hash_secret(&code);
+
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    // Deliberately set NO tenant context: the resolver path has none. SET ROLE to a
+    // non-superuser role makes RLS apply (superuser bypass is dropped), so this is
+    // the resolver's real RLS treatment.
+    tx.execute("SET ROLE trace_login_resolver", &[])
+        .await
+        .expect("set resolver role");
+
+    // The column-scoped, cross-tenant SELECT the resolver pool runs must RETURN the
+    // tenant despite forced RLS + no tenant context (permissive resolver policy).
+    let resolved: Option<String> = tx
+        .query_opt(
+            "SELECT tenant_id FROM trace_login_links WHERE code_hash = $1",
+            &[&code_hash],
+        )
+        .await
+        .expect("resolver SELECT runs under RLS")
+        .map(|row| row.get::<_, String>(0));
+    assert_eq!(
+        resolved.as_deref(),
+        Some("tenant-a"),
+        "resolver must resolve the tenant for a known code_hash under forced RLS"
+    );
+
+    // Least privilege: an out-of-grant column read is rejected by the column GRANT
+    // (the resolver may read only tenant_id + code_hash). This keeps the permissive
+    // RLS policy from widening the resolver's effective surface.
+    let out_of_grant = tx
+        .query_opt(
+            "SELECT account_id FROM trace_login_links WHERE code_hash = $1",
+            &[&code_hash],
+        )
+        .await;
+    assert!(
+        out_of_grant.is_err(),
+        "resolver must NOT be able to read columns outside its (tenant_id, code_hash) grant"
+    );
+
+    // The transaction is poisoned by the rejected statement; roll it back and reset.
+    drop(tx);
+    let reset = client.batch_execute("RESET ROLE").await;
+    let _ = reset; // best-effort; connection returns to the pool either way.
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 #[tokio::test]
 async fn account_migration_applies_and_enforces_rls() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
