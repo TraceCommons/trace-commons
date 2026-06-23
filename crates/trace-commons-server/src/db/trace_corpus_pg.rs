@@ -41,7 +41,8 @@ use crate::trace_corpus_storage::{
     TraceRevocationPropagationAction, TraceRevocationPropagationItemRecord,
     TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget,
-    TraceRevocationPropagationTargetKind, TraceSubmissionRecord, TraceSubmissionWrite,
+    TraceRevocationPropagationTargetKind, TraceSubmissionKeysetCursor, TraceSubmissionRecord,
+    TraceSubmissionWrite,
     TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
     TraceTenantAccessGrantWrite, TraceTenantPolicyRecord, TraceTenantPolicyWrite,
     TraceTombstoneRecord, TraceTombstoneWrite, TraceUtilityAttestationRecord,
@@ -1366,6 +1367,77 @@ impl TraceCorpusStore for PgBackend {
             )
             .await
             .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_submission).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn list_account_trace_submissions_keyset(
+        &self,
+        tenant_id: &str,
+        principal_refs: &[String],
+        cursor: Option<TraceSubmissionKeysetCursor>,
+        limit: i64,
+    ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError> {
+        // An empty active principal set can own no submissions; return an empty
+        // page without querying the table (Hardening A/B: ownership is carried
+        // only by the set).
+        if principal_refs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Tenant-leading keyset over `(received_at DESC, submission_id DESC)`
+        // backed by idx_trace_submissions_account_keyset (V31). The
+        // `= ANY($2)` filter is an index-condition over the active principal
+        // set; the cursor totally-orders across any number of principals
+        // (Hardening H). No offset.
+        const SELECT_COLUMNS: &str = "tenant_id, submission_id, trace_id, status, auth_principal_ref,
+                    contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
+                    consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+                    privacy_risk, redaction_pipeline_version, redaction_hash,
+                    redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
+                    credit_points_final, received_at, updated_at, reviewed_at,
+                    review_assigned_to_principal_ref, review_assigned_at,
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at";
+        let rows = match cursor {
+            Some(cursor) => {
+                let sql = format!(
+                    "SELECT {SELECT_COLUMNS}
+                     FROM trace_submissions
+                     WHERE tenant_id = $1
+                       AND auth_principal_ref = ANY($2)
+                       AND (received_at, submission_id) < ($3, $4)
+                     ORDER BY received_at DESC, submission_id DESC
+                     LIMIT $5"
+                );
+                tx.query(
+                    &sql,
+                    &[
+                        &tenant_id,
+                        &principal_refs,
+                        &cursor.received_at,
+                        &cursor.submission_id,
+                        &limit,
+                    ],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?
+            }
+            None => {
+                let sql = format!(
+                    "SELECT {SELECT_COLUMNS}
+                     FROM trace_submissions
+                     WHERE tenant_id = $1
+                       AND auth_principal_ref = ANY($2)
+                     ORDER BY received_at DESC, submission_id DESC
+                     LIMIT $3"
+                );
+                tx.query(&sql, &[&tenant_id, &principal_refs, &limit])
+                    .await
+                    .map_err(DatabaseError::Postgres)?
+            }
+        };
         let records = rows.iter().map(row_to_submission).collect();
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         records

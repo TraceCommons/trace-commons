@@ -790,6 +790,17 @@ pub struct TraceSubmissionWrite {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
+/// Opaque keyset cursor for the account trace read-back list. It carries the
+/// `(received_at, submission_id)` of the last row on the previous page; the
+/// next page continues strictly after it in `(received_at DESC, submission_id
+/// DESC)` order. The wire encoding (base64) lives in the binary; this is the
+/// decoded form the store consumes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceSubmissionKeysetCursor {
+    pub received_at: DateTime<Utc>,
+    pub submission_id: Uuid,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceSubmissionRecord {
     pub tenant_id: String,
@@ -1789,6 +1800,24 @@ pub trait TraceCorpusStore: Send + Sync {
     async fn list_trace_submissions(
         &self,
         tenant_id: &str,
+    ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError>;
+
+    /// Keyset-paginated submission read scoped to an account's active principal
+    /// set, for the dual-auth account read-back surface
+    /// (`GET /v1/account/traces`). Rows are filtered by
+    /// `auth_principal_ref = ANY(principal_refs)` under the caller's tenant RLS
+    /// and ordered `(received_at DESC, submission_id DESC)` so the keyset cursor
+    /// totally-orders across any number of principals (Hardening H). `cursor`,
+    /// when present, continues strictly after the last `(received_at,
+    /// submission_id)` of the previous page. `limit` is applied at the DB; the
+    /// caller is responsible for capping it. An empty `principal_refs` returns
+    /// an empty page without touching the table.
+    async fn list_account_trace_submissions_keyset(
+        &self,
+        tenant_id: &str,
+        principal_refs: &[String],
+        cursor: Option<TraceSubmissionKeysetCursor>,
+        limit: i64,
     ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError>;
 
     async fn upsert_trace_tenant_policy(

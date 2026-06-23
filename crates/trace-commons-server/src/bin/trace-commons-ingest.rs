@@ -139,6 +139,7 @@ use trace_commons_server::trace_corpus_storage::{
     TraceRevocationPropagationItemStatusUpdate as StorageTraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite as StorageTraceRevocationPropagationItemWrite,
     TraceRevocationPropagationTarget as StorageTraceRevocationPropagationTarget,
+    TraceSubmissionKeysetCursor,
     TraceSubmissionRecord as StorageTraceSubmissionRecord,
     TraceSubmissionWrite as StorageTraceSubmissionWrite,
     TraceTenantAccessGrantRecord as StorageTraceTenantAccessGrantRecord,
@@ -5883,6 +5884,11 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/account/login-links",
             post(mint_login_link_handler),
+        )
+        .route("/v1/account/traces", get(account_traces_list_handler))
+        .route(
+            "/v1/account/traces/{submission_id}",
+            get(account_trace_detail_handler),
         )
         // Browser-facing redeem flow. Intentionally NOT under /v1 and
         // un-authenticated: the single-use code IS the credential. The mint URL
@@ -11753,6 +11759,206 @@ async fn resolve_account_ctx_cookie(state: &AppState, cookie: &str) -> ApiResult
         auth_method: AccountAuthMethod::SessionCookie,
         tenant_id,
     })
+}
+
+/// Default page size for the account trace read-back list. Smaller than the
+/// reviewer surface's default: the contributor view is paginated by keyset.
+const ACCOUNT_TRACES_DEFAULT_LIMIT: usize = 50;
+/// Hard cap on the account trace read-back page size.
+const ACCOUNT_TRACES_MAX_LIMIT: usize = 200;
+
+/// Query string for `GET /v1/account/traces`. Keyset pagination only: no offset
+/// is accepted. `account_id` / `principal_ref` are NEVER client input — the
+/// owning set is auth-derived from the `AccountCtx`.
+#[derive(Debug, Default, Deserialize)]
+struct AccountTracesListQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+/// One keyset page of account-owned submission metadata. `next_cursor` is
+/// `Some` only when a further page may exist (a full page was returned).
+#[derive(Debug, Serialize)]
+struct AccountTracesPage {
+    items: Vec<TraceCommonsTraceListItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
+}
+
+/// Build a synthetic, low-privilege `TenantAuth` for the hash-only read audit.
+/// The audit path consumes only `tenant_id`, `principal_ref`, and `role`; this
+/// records the resolved actor (`account-actor:{id}` for the cookie path, the
+/// device principal ref for the bearer path) without granting any capability —
+/// the role is pinned to `Contributor`. It is used ONLY for audit and never
+/// reaches a read/write authorization decision.
+fn account_audit_tenant(ctx: &AccountCtx) -> TenantAuth {
+    TenantAuth {
+        tenant_id: ctx.tenant_id.clone(),
+        role: TokenRole::Contributor,
+        principal_ref: ctx.actor_ref.clone(),
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    }
+}
+
+/// Encode a keyset cursor as opaque URL-safe base64 of `{rfc3339}|{uuid}`. The
+/// payload carries no account identity; it is a position marker only.
+fn encode_account_traces_cursor(received_at: DateTime<Utc>, submission_id: Uuid) -> String {
+    let raw = format!("{}|{}", received_at.to_rfc3339(), submission_id);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw.as_bytes())
+}
+
+/// Decode an opaque keyset cursor. Any malformed cursor is a `400` — never a
+/// silent reset to the first page (which would let a tampered cursor re-walk).
+fn decode_account_traces_cursor(cursor: &str) -> ApiResult<TraceSubmissionKeysetCursor> {
+    let invalid = || api_error(StatusCode::BAD_REQUEST, "invalid pagination cursor");
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| invalid())?;
+    let text = String::from_utf8(bytes).map_err(|_| invalid())?;
+    let (received_at_str, submission_id_str) = text.split_once('|').ok_or_else(invalid)?;
+    let received_at = DateTime::parse_from_rfc3339(received_at_str)
+        .map_err(|_| invalid())?
+        .with_timezone(&Utc);
+    let submission_id = Uuid::parse_str(submission_id_str).map_err(|_| invalid())?;
+    Ok(TraceSubmissionKeysetCursor {
+        received_at,
+        submission_id,
+    })
+}
+
+/// `GET /v1/account/traces` — dual-auth, account-scoped submission metadata list
+/// with keyset pagination. Every returned row belongs to a principal in the
+/// account's active set (DB filter `auth_principal_ref = ANY($set)`, where the
+/// set is the active-membership expansion, `unlinked_at IS NULL`). NO content.
+async fn account_traces_list_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<AccountTracesListQuery>,
+) -> ApiResult<Json<AccountTracesPage>> {
+    let ctx = resolve_account_ctx(state.as_ref(), &headers).await?;
+    let limit = match query.limit {
+        Some(limit) if !(1..=ACCOUNT_TRACES_MAX_LIMIT).contains(&limit) => {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "trace read limit must be between 1 and 200",
+            ));
+        }
+        Some(limit) => limit,
+        None => ACCOUNT_TRACES_DEFAULT_LIMIT,
+    };
+
+    // Empty active set → empty page (no error). Short-circuits the DB.
+    if ctx.principal_set.is_empty() {
+        // A successful read of zero owned rows is still a read: record a
+        // hash-only audit row with item_count 0 so empty reads are not silent.
+        append_control_plane_read_audit(
+            state.as_ref(),
+            &account_audit_tenant(&ctx),
+            "account_traces_list",
+            0,
+        )
+        .await
+        .map_err(internal_error)?;
+        return Ok(Json(AccountTracesPage {
+            items: Vec::new(),
+            next_cursor: None,
+        }));
+    }
+
+    let cursor = match query.cursor.as_deref() {
+        Some(cursor) => Some(decode_account_traces_cursor(cursor)?),
+        None => None,
+    };
+
+    let db = account_db(state.as_ref())?;
+    let principal_refs = ctx.principal_set.as_slice();
+    let records = db
+        .list_account_trace_submissions_keyset(
+            &ctx.tenant_id,
+            &principal_refs,
+            cursor,
+            limit as i64,
+        )
+        .await
+        .map_err(internal_error)?;
+    let records = records
+        .into_iter()
+        .filter_map(trace_commons_record_from_storage_submission)
+        .collect::<anyhow::Result<Vec<_>>>()
+        .map_err(internal_error)?;
+
+    // A full page implies there may be more; emit a continuation cursor from the
+    // last row. The derived map is intentionally empty: this is a metadata-only
+    // surface and the DTO's derived fields are skip-if-empty.
+    let next_cursor = (records.len() == limit)
+        .then(|| records.last())
+        .flatten()
+        .map(|record| encode_account_traces_cursor(record.received_at, record.submission_id));
+    let empty_derived = BTreeMap::new();
+    let items = records
+        .into_iter()
+        .map(|record| TraceCommonsTraceListItem::from_record(record, &empty_derived))
+        .collect::<Vec<_>>();
+
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &account_audit_tenant(&ctx),
+        "account_traces_list",
+        items.len(),
+    )
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(AccountTracesPage { items, next_cursor }))
+}
+
+/// `GET /v1/account/traces/{submission_id}` — dual-auth, account-scoped single
+/// submission metadata. Uniform `404` for both not-found and not-owned (no
+/// existence oracle): the response is byte-identical in either case.
+async fn account_trace_detail_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(submission_id): AxumPath<Uuid>,
+) -> ApiResult<Json<TraceCommonsTraceListItem>> {
+    let ctx = resolve_account_ctx(state.as_ref(), &headers).await?;
+    let not_found = || api_error(StatusCode::NOT_FOUND, "trace not found");
+
+    let db = account_db(state.as_ref())?;
+    let record = db
+        .get_trace_submission(&ctx.tenant_id, submission_id)
+        .await
+        .map_err(internal_error)?;
+    let record = match record {
+        Some(record) if ctx.principal_set.contains(&record.auth_principal_ref) => record,
+        // Not-found AND not-owned collapse to the identical 404 (Hardening:
+        // no enumeration oracle).
+        _ => return Err(not_found()),
+    };
+    let record = trace_commons_record_from_storage_submission(record)
+        .ok_or_else(not_found)?
+        .map_err(internal_error)?;
+
+    let empty_derived = BTreeMap::new();
+    let item = TraceCommonsTraceListItem::from_record(record, &empty_derived);
+
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &account_audit_tenant(&ctx),
+        "account_trace_detail",
+        1,
+    )
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(item))
 }
 
 /// Mint a single-use login link for the authenticated device's principal.

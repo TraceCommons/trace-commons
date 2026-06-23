@@ -580,6 +580,232 @@ async fn account_ctx_no_credentials_is_401() {
     assert_eq!(err.0, StatusCode::UNAUTHORIZED);
 }
 
+/// Insert a submission row directly via the DB mirror so the account read-back
+/// surface (which reads ONLY the DB mirror) can list it. `auth_principal_ref`
+/// is the ownership key the account principal set is matched against.
+async fn insert_account_test_submission(
+    backend: &PgBackend,
+    tenant_id: &str,
+    auth_principal_ref: &str,
+) -> Uuid {
+    use trace_commons_server::trace_corpus_storage::TraceSubmissionWrite;
+    let submission_id = Uuid::new_v4();
+    let mut redaction_counts = BTreeMap::new();
+    redaction_counts.insert("secret".to_string(), 1);
+    backend
+        .upsert_trace_submission(TraceSubmissionWrite {
+            tenant_id: tenant_id.to_string(),
+            submission_id,
+            trace_id: Uuid::new_v4(),
+            auth_principal_ref: auth_principal_ref.to_string(),
+            contributor_pseudonym: None,
+            submitted_tenant_scope_ref: None,
+            schema_version: "ironclaw.trace_contribution.v1".to_string(),
+            consent_policy_version: "2026-04-24".to_string(),
+            consent_scopes: vec!["debugging_evaluation".to_string()],
+            allowed_uses: vec!["debugging".to_string()],
+            retention_policy_id: "private_corpus_revocable".to_string(),
+            status: trace_commons_server::trace_corpus_storage::TraceCorpusStatus::Accepted,
+            privacy_risk: "low".to_string(),
+            redaction_pipeline_version: "deterministic-v1".to_string(),
+            redaction_counts,
+            redaction_hash: "sha256:redaction".to_string(),
+            canonical_summary_hash: None,
+            submission_score: Some(0.5),
+            credit_points_pending: Some(1.0),
+            credit_points_final: None,
+            expires_at: None,
+        })
+        .await
+        .expect("insert submission");
+    submission_id
+}
+
+#[tokio::test]
+async fn account_traces_list_returns_only_owned_submissions() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // Link token-a's device principal to a durable account under tenant-a.
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint links the principal to an account");
+    let device_principal = principal_storage_ref("token-a");
+
+    // One owned submission (device principal) and one foreign principal under the
+    // same tenant that the account does NOT own.
+    let owned = insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let _foreign =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", "principal_someone_else").await;
+    // And a submission under a different tenant entirely.
+    let _other_tenant =
+        insert_account_test_submission(backend.as_ref(), "tenant-b", &device_principal).await;
+
+    let Json(page) = account_traces_list_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Query(AccountTracesListQuery::default()),
+    )
+    .await
+    .expect("list succeeds");
+
+    let ids: Vec<Uuid> = page.items.iter().map(|item| item.submission_id).collect();
+    assert_eq!(ids, vec![owned], "only the device-owned submission is visible");
+    assert!(page.next_cursor.is_none(), "single page has no continuation");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+}
+
+#[tokio::test]
+async fn account_traces_list_cursor_pages_are_disjoint_and_ordered() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = principal_storage_ref("token-a");
+
+    let mut inserted = Vec::new();
+    for _ in 0..3 {
+        inserted.push(insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await);
+    }
+
+    // Page 1: limit 2.
+    let Json(page1) = account_traces_list_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Query(AccountTracesListQuery {
+            limit: Some(2),
+            cursor: None,
+        }),
+    )
+    .await
+    .expect("page 1");
+    assert_eq!(page1.items.len(), 2, "first page is full");
+    let cursor = page1.next_cursor.clone().expect("full page yields a cursor");
+
+    // Page 2: continue from the cursor.
+    let Json(page2) = account_traces_list_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Query(AccountTracesListQuery {
+            limit: Some(2),
+            cursor: Some(cursor),
+        }),
+    )
+    .await
+    .expect("page 2");
+    assert_eq!(page2.items.len(), 1, "remaining page has the last row");
+
+    let page1_ids: Vec<Uuid> = page1.items.iter().map(|item| item.submission_id).collect();
+    let page2_ids: Vec<Uuid> = page2.items.iter().map(|item| item.submission_id).collect();
+    // Disjoint.
+    for id in &page2_ids {
+        assert!(!page1_ids.contains(id), "pages must not overlap");
+    }
+    // Union covers every inserted row exactly once.
+    let mut seen: Vec<Uuid> = page1_ids.iter().chain(page2_ids.iter()).copied().collect();
+    seen.sort();
+    let mut expected = inserted.clone();
+    expected.sort();
+    assert_eq!(seen, expected, "the two pages partition all owned rows");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_trace_detail_owned_returns_metadata_unowned_and_missing_are_uniform_404() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = principal_storage_ref("token-a");
+
+    let owned = insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let unowned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", "principal_not_ours").await;
+    let random = Uuid::new_v4();
+
+    // Owned id -> metadata.
+    let Json(item) = account_trace_detail_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        AxumPath(owned),
+    )
+    .await
+    .expect("owned detail succeeds");
+    assert_eq!(item.submission_id, owned);
+
+    // Unowned id and a random nonexistent id must produce the IDENTICAL 404
+    // (status AND body) -- no existence oracle.
+    let unowned_err = account_trace_detail_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        AxumPath(unowned),
+    )
+    .await
+    .expect_err("unowned -> 404");
+    let missing_err = account_trace_detail_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        AxumPath(random),
+    )
+    .await
+    .expect_err("missing -> 404");
+    assert_eq!(unowned_err.0, StatusCode::NOT_FOUND);
+    assert_eq!(missing_err.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        unowned_err.1 .0.error, missing_err.1 .0.error,
+        "not-owned and not-found must return an identical body"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 #[test]
 fn file_backed_control_plane_appends_reject_cross_tenant_records_before_write() {
     let temp = tempfile::tempdir().expect("temp dir");
