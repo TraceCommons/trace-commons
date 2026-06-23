@@ -63288,3 +63288,627 @@ async fn passkey_enroll_round_trip_persists_credential_and_audit() {
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
+
+// ============================================================================
+// Slice 2 Task 6: discoverable passkey login (unauthenticated surface).
+//
+// All tests are DB-backed against real PostgreSQL and drive a real WebAuthn
+// ceremony end-to-end with the dev-only SoftPasskey software authenticator.
+// Coverage:
+//   * Round-trip: enroll -> login/start -> SoftPasskey assertion -> login/finish
+//     mints a `tc_account_session` cookie (client_kind='passkey',
+//     auth_credential_id set) and 303s.
+//   * Sign-counter / clone defense: a stale (replayed) assertion is rejected
+//     with the uniform deny and mints no session.
+//   * Cross-account binding: a login only ever mints a session for the account
+//     the credential belongs to.
+//   * No-write regression: a forged/unknown credential id (resolver miss) denies
+//     AND creates no bogus trace_tenants row.
+//   * Uniform deny: unknown credential / missing ceremony / malformed body all
+//     return byte-identical status + body.
+// ============================================================================
+
+/// Count `trace_tenants` rows via the raw test pool.
+async fn trace_tenants_count(backend: &PgBackend) -> i64 {
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let row = client
+        .query_one("SELECT COUNT(*) FROM trace_tenants", &[])
+        .await
+        .expect("tenant count query");
+    row.get(0)
+}
+
+/// Load a session row's `(client_kind, auth_credential_id)` by its `token_hash`,
+/// under the tenant's RLS context (raw test pool). `None` when no row matches.
+async fn session_kind_and_credential(
+    backend: &PgBackend,
+    tenant_id: &str,
+    token_hash: &str,
+) -> Option<(String, Option<String>)> {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant ctx");
+    let row = tx
+        .query_opt(
+            "SELECT client_kind, auth_credential_id FROM trace_sessions
+              WHERE tenant_id = trace_current_tenant_id() AND token_hash = $1",
+            &[&token_hash],
+        )
+        .await
+        .expect("session query");
+    tx.commit().await.expect("commit");
+    row.map(|row| (row.get("client_kind"), row.get("auth_credential_id")))
+}
+
+/// Enroll a fresh passkey for the account linked to `token`'s device principal
+/// under tenant-a, driving the Task 5 register ceremony end to end. Returns the
+/// `(authenticator, credential_id)` so the caller can then drive a login ceremony
+/// against the SAME authenticator instance (which holds the enrolled credential).
+async fn enroll_passkey_for_token(
+    state: &Arc<AppState>,
+    session_cookie: &str,
+) -> (
+    webauthn_authenticator_rs::WebauthnAuthenticator<
+        webauthn_authenticator_rs::softpasskey::SoftPasskey,
+    >,
+    String,
+) {
+    let (challenge, ceremony_pair) = passkey_register_start(state, session_cookie).await;
+    let mut authenticator = new_software_authenticator();
+    let attestation = softpasskey_register(&mut authenticator, &challenge);
+
+    let mut finish_headers = HeaderMap::new();
+    finish_headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&format!("tc_account_session={session_cookie}; {ceremony_pair}"))
+            .expect("valid cookie header"),
+    );
+    let finish_json =
+        serde_json::to_value(&attestation).expect("attestation serializes to JSON object");
+    let finish_body: AccountPasskeyRegisterFinishBody =
+        serde_json::from_value(finish_json).expect("finish body builds from attestation");
+    let Json(finish_out) = account_passkey_register_finish_handler(
+        State(state.clone()),
+        finish_headers,
+        Json(finish_body),
+    )
+    .await
+    .expect("register/finish succeeds");
+    let credential_id = finish_out
+        .get("credential_id")
+        .and_then(|v| v.as_str())
+        .expect("credential_id returned")
+        .to_string();
+    (authenticator, credential_id)
+}
+
+/// Drive the dev-only SoftPasskey through a DISCOVERABLE-login assertion.
+///
+/// The SoftPasskey is a non-resident U2F-style software authenticator: it selects
+/// a credential by matching the request's `allowCredentials` (it cannot "discover"
+/// a credential from an empty allow-list) and it never returns a `userHandle`. A
+/// real discoverable/resident authenticator does both. To exercise the server's
+/// discoverable path with this stand-in we faithfully reproduce what a real
+/// authenticator returns: (1) inject the enrolled `credential_id` into the
+/// challenge's `allowCredentials` so the SoftPasskey can find and sign with the
+/// right key, then (2) set the assertion's `response.userHandle` to the account's
+/// uuid bytes (base64url), which is exactly the resident-key user handle a real
+/// authenticator stores at enrollment and replays here. The signature, RP-id hash,
+/// and sign counter in the assertion are produced by the SoftPasskey for real and
+/// are verified for real by the server; only these two transport details (which
+/// the SoftPasskey omits) are supplied by the test. Passing `user_handle = None`
+/// reproduces the broken-client case where the authenticator returns no handle.
+fn softpasskey_authenticate_discoverable(
+    authenticator: &mut webauthn_authenticator_rs::WebauthnAuthenticator<
+        webauthn_authenticator_rs::softpasskey::SoftPasskey,
+    >,
+    challenge: &serde_json::Value,
+    credential_id: &str,
+    user_handle: Option<Uuid>,
+) -> webauthn_rs::prelude::PublicKeyCredential {
+    // (1) Inject the enrolled credential id into allowCredentials so the
+    // non-resident SoftPasskey has a credential to select. The server's
+    // DiscoverableAuthentication state ignores the client allow-list; it verifies
+    // the asserted credential id against the DiscoverableKey we pass to finish.
+    let mut patched = challenge.clone();
+    let public_key = patched
+        .get_mut("publicKey")
+        .and_then(|pk| pk.as_object_mut())
+        .expect("challenge has publicKey object");
+    public_key.insert(
+        "allowCredentials".to_string(),
+        serde_json::json!([{ "type": "public-key", "id": credential_id }]),
+    );
+    let options: webauthn_rs::prelude::RequestChallengeResponse =
+        serde_json::from_value(patched).expect("patched request challenge deserializes");
+    let assertion = authenticator
+        .do_authentication(test_passkey_origin(), options)
+        .expect("software authenticator completes authentication");
+
+    // (2) Replay the resident-key user handle the way a discoverable authenticator
+    // would. Serialize, set response.userHandle (base64url of the uuid bytes), and
+    // re-deserialize into a PublicKeyCredential.
+    let mut assertion_json =
+        serde_json::to_value(&assertion).expect("assertion serializes to JSON");
+    let response = assertion_json
+        .get_mut("response")
+        .and_then(|r| r.as_object_mut())
+        .expect("assertion has response object");
+    match user_handle {
+        Some(handle) => {
+            let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(handle.as_bytes());
+            response.insert("userHandle".to_string(), serde_json::json!(encoded));
+        }
+        None => {
+            response.insert("userHandle".to_string(), serde_json::Value::Null);
+        }
+    }
+    serde_json::from_value(assertion_json).expect("assertion re-deserializes with user handle")
+}
+
+/// Call `login/start` and return `(challenge_json, ceremony_cookie_pair)`.
+async fn passkey_login_start(state: &Arc<AppState>) -> (serde_json::Value, String) {
+    let response =
+        account_passkey_login_start_handler(State(state.clone()), HeaderMap::new()).await;
+    assert_eq!(response.status(), StatusCode::OK, "login/start returns options");
+    let set_cookie = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .expect("ceremony cookie set")
+        .to_str()
+        .expect("ascii cookie")
+        .to_string();
+    assert!(set_cookie.starts_with("tc_passkey_ceremony="));
+    let ceremony_pair = set_cookie
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_string();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body bytes");
+    let challenge: serde_json::Value =
+        serde_json::from_slice(&body).expect("challenge json deserializes");
+    (challenge, ceremony_pair)
+}
+
+/// Full enroll -> discoverable login round trip: a `tc_account_session` cookie is
+/// minted with `client_kind='passkey'` and `auth_credential_id` set, and the
+/// response is a 303 to the account view.
+#[tokio::test]
+async fn passkey_login_round_trip_mints_passkey_session() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let account_id =
+        account_id_for_principal(backend.as_ref(), "tenant-a", &principal_storage_ref("token-a"))
+            .await;
+    let (mut authenticator, credential_id) =
+        enroll_passkey_for_token(&state, &session_cookie).await;
+
+    let (challenge, ceremony_pair) = passkey_login_start(&state).await;
+    let assertion = softpasskey_authenticate_discoverable(
+        &mut authenticator,
+        &challenge,
+        &credential_id,
+        Some(account_id),
+    );
+
+    let mut finish_headers = HeaderMap::new();
+    finish_headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
+    );
+    let response = account_passkey_login_finish_handler(
+        State(state.clone()),
+        finish_headers,
+        PasskeyAssertionBody(assertion),
+    )
+    .await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::SEE_OTHER,
+        "login/finish 303s on success"
+    );
+    let set_cookie = response
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().expect("ascii cookie").to_string())
+        .collect::<Vec<_>>();
+    let session_set = set_cookie
+        .iter()
+        .find(|c| c.starts_with("tc_account_session="))
+        .expect("session cookie set on login");
+    assert!(session_set.contains("HttpOnly"));
+    assert!(session_set.contains("Secure"));
+    assert!(session_set.contains("SameSite=Strict"));
+    let first = session_set.split(';').next().expect("cookie pair");
+    let (_name, value) = first.split_once('=').expect("name=value");
+    let secret = value.split_once('.').expect("tenant.secret").1;
+    let token_hash = hash_secret(secret);
+    let (kind, stored_cred) = session_kind_and_credential(backend.as_ref(), "tenant-a", &token_hash)
+        .await
+        .expect("passkey session row exists");
+    assert_eq!(kind, "passkey", "session client_kind is passkey");
+    assert_eq!(
+        stored_cred.as_deref(),
+        Some(credential_id.as_str()),
+        "auth_credential_id records the asserting credential"
+    );
+
+    let headers = cookie_request_headers("tc_account_session", value);
+    let ctx = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect("passkey session cookie resolves");
+    assert_eq!(ctx.tenant_id, "tenant-a");
+    assert_eq!(ctx.account_id.as_uuid(), account_id);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Sign-counter / clone defense: a STALE assertion (captured, then re-finished
+/// after the credential's counter has advanced via a later login) is rejected
+/// with the uniform deny and mints no session. The SoftPasskey increments its
+/// counter on every assertion, so replaying an earlier assertion regresses the
+/// counter relative to the stored credential, which finish rejects.
+#[tokio::test]
+async fn passkey_login_rejects_stale_counter_assertion() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let account_id =
+        account_id_for_principal(backend.as_ref(), "tenant-a", &principal_storage_ref("token-a"))
+            .await;
+    let (mut authenticator, credential_id) =
+        enroll_passkey_for_token(&state, &session_cookie).await;
+
+    let (challenge1, ceremony_pair1) = passkey_login_start(&state).await;
+    let stale_assertion = softpasskey_authenticate_discoverable(
+        &mut authenticator,
+        &challenge1,
+        &credential_id,
+        Some(account_id),
+    );
+
+    let (challenge2, ceremony_pair2) = passkey_login_start(&state).await;
+    let fresh_assertion = softpasskey_authenticate_discoverable(
+        &mut authenticator,
+        &challenge2,
+        &credential_id,
+        Some(account_id),
+    );
+    let mut finish2 = HeaderMap::new();
+    finish2.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair2).expect("cookie header"),
+    );
+    let ok = account_passkey_login_finish_handler(
+        State(state.clone()),
+        finish2,
+        PasskeyAssertionBody(fresh_assertion),
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::SEE_OTHER, "second login succeeds");
+
+    let mut finish1 = HeaderMap::new();
+    finish1.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair1).expect("cookie header"),
+    );
+    let denied = account_passkey_login_finish_handler(
+        State(state.clone()),
+        finish1,
+        PasskeyAssertionBody(stale_assertion),
+    )
+    .await;
+    assert_eq!(
+        denied.status(),
+        StatusCode::BAD_REQUEST,
+        "stale-counter assertion is denied"
+    );
+    assert!(
+        denied
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .is_none(),
+        "no session cookie is set on a clone-defense denial"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Cross-account binding: a credential enrolled under account A only ever mints a
+/// session for A. The asserted user-handle equals A's account id, and the session
+/// resolves to A. (The step-8 handle/account check would deny any mismatch.)
+#[tokio::test]
+async fn passkey_login_binds_only_to_owning_account() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let account_id =
+        account_id_for_principal(backend.as_ref(), "tenant-a", &principal_storage_ref("token-a"))
+            .await;
+    let (mut authenticator, credential_id) =
+        enroll_passkey_for_token(&state, &session_cookie).await;
+
+    // Positive control: a login asserting the REAL owning account binds to A.
+    let (challenge, ceremony_pair) = passkey_login_start(&state).await;
+    let assertion = softpasskey_authenticate_discoverable(
+        &mut authenticator,
+        &challenge,
+        &credential_id,
+        Some(account_id),
+    );
+    let mut finish_headers = HeaderMap::new();
+    finish_headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("cookie header"),
+    );
+    let response = account_passkey_login_finish_handler(
+        State(state.clone()),
+        finish_headers,
+        PasskeyAssertionBody(assertion),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let value = response
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|c| c.starts_with("tc_account_session="))
+        .and_then(|c| c.split(';').next())
+        .and_then(|p| p.split_once('='))
+        .map(|(_, v)| v.to_string())
+        .expect("session cookie value");
+    let headers = cookie_request_headers("tc_account_session", &value);
+    let ctx = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect("session resolves");
+    assert_eq!(
+        ctx.account_id.as_uuid(),
+        account_id,
+        "session is bound ONLY to the credential's owning account"
+    );
+
+    // Negative: a login asserting a DIFFERENT user handle for the SAME credential
+    // is caught by the step-8 handle/account binding check and denied with no
+    // session minted. This is the defense against rebinding a credential to
+    // another account via a forged user handle.
+    let (challenge_mm, ceremony_mm) = passkey_login_start(&state).await;
+    let foreign_handle = Uuid::new_v4();
+    assert_ne!(foreign_handle, account_id);
+    let mismatched = softpasskey_authenticate_discoverable(
+        &mut authenticator,
+        &challenge_mm,
+        &credential_id,
+        Some(foreign_handle),
+    );
+    let mut mm_headers = HeaderMap::new();
+    mm_headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_mm).expect("cookie header"),
+    );
+    let denied = account_passkey_login_finish_handler(
+        State(state.clone()),
+        mm_headers,
+        PasskeyAssertionBody(mismatched),
+    )
+    .await;
+    assert_eq!(
+        denied.status(),
+        StatusCode::BAD_REQUEST,
+        "a foreign user handle for the credential is denied"
+    );
+    assert!(
+        denied
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .is_none(),
+        "no session cookie on a handle-mismatch deny"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// No-write regression (the Slice 1 Codex bug): a `login/finish` whose assertion
+/// carries a credential id the resolver does not know returns the uniform deny
+/// AND creates no bogus `trace_tenants` row. Driven with an authenticator that
+/// produced a credential we never persisted, so the resolver misses.
+#[tokio::test]
+async fn passkey_login_unknown_credential_denies_and_writes_no_tenant() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Drive register/start to get well-formed options + a SoftPasskey credential,
+    // but never call register/finish -> the DB has never seen this credential.
+    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let (challenge, _ceremony_pair) = passkey_register_start(&state, &session_cookie).await;
+    let mut authenticator = new_software_authenticator();
+    let attestation = softpasskey_register(&mut authenticator, &challenge);
+    let orphan_credential_id = credential_id_to_string(
+        &webauthn_rs::prelude::CredentialID::from(attestation.raw_id.as_ref()),
+    );
+
+    let tenants_before = trace_tenants_count(backend.as_ref()).await;
+
+    let (login_challenge, ceremony_pair) = passkey_login_start(&state).await;
+    let assertion = softpasskey_authenticate_discoverable(
+        &mut authenticator,
+        &login_challenge,
+        &orphan_credential_id,
+        Some(Uuid::new_v4()),
+    );
+    let mut finish_headers = HeaderMap::new();
+    finish_headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("cookie header"),
+    );
+    let denied = account_passkey_login_finish_handler(
+        State(state.clone()),
+        finish_headers,
+        PasskeyAssertionBody(assertion),
+    )
+    .await;
+    assert_eq!(
+        denied.status(),
+        StatusCode::BAD_REQUEST,
+        "unknown credential is denied"
+    );
+    assert!(
+        denied
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .is_none(),
+        "no session cookie on unknown-credential deny"
+    );
+
+    let tenants_after = trace_tenants_count(backend.as_ref()).await;
+    assert_eq!(
+        tenants_before, tenants_after,
+        "an unknown credential must NOT create any trace_tenants row"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Uniform deny: unknown credential, missing ceremony cookie, and a malformed
+/// body all return byte-identical status + body.
+#[tokio::test]
+async fn passkey_login_denials_are_byte_identical() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    async fn as_status_body(response: axum::response::Response) -> (StatusCode, Vec<u8>) {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes")
+            .to_vec();
+        (status, body)
+    }
+
+    // (a) Unknown credential: a never-persisted authenticator + a real ceremony.
+    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let (reg_challenge, _p) = passkey_register_start(&state, &session_cookie).await;
+    let mut orphan = new_software_authenticator();
+    let orphan_attestation = softpasskey_register(&mut orphan, &reg_challenge);
+    let orphan_credential_id = credential_id_to_string(
+        &webauthn_rs::prelude::CredentialID::from(orphan_attestation.raw_id.as_ref()),
+    );
+    let (login_challenge, ceremony_pair) = passkey_login_start(&state).await;
+    let assertion = softpasskey_authenticate_discoverable(
+        &mut orphan,
+        &login_challenge,
+        &orphan_credential_id,
+        Some(Uuid::new_v4()),
+    );
+    let mut h_unknown = HeaderMap::new();
+    h_unknown.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("cookie header"),
+    );
+    let unknown = as_status_body(
+        account_passkey_login_finish_handler(
+            State(state.clone()),
+            h_unknown,
+            PasskeyAssertionBody(assertion),
+        )
+        .await,
+    )
+    .await;
+
+    // (b) Missing ceremony cookie: a well-formed assertion but no ceremony stored.
+    let account_id =
+        account_id_for_principal(backend.as_ref(), "tenant-a", &principal_storage_ref("token-a"))
+            .await;
+    let (mut enrolled, enrolled_cred) = enroll_passkey_for_token(&state, &session_cookie).await;
+    let (login_challenge2, _ceremony2) = passkey_login_start(&state).await;
+    let assertion2 = softpasskey_authenticate_discoverable(
+        &mut enrolled,
+        &login_challenge2,
+        &enrolled_cred,
+        Some(account_id),
+    );
+    let missing_ceremony = as_status_body(
+        account_passkey_login_finish_handler(
+            State(state.clone()),
+            HeaderMap::new(),
+            PasskeyAssertionBody(assertion2),
+        )
+        .await,
+    )
+    .await;
+
+    // (c) Malformed body: route junk JSON through the real extractor, whose
+    // rejection IS the uniform deny.
+    let malformed_rejection = {
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/account/passkey/login/finish")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from("{not valid json"))
+            .expect("request builds");
+        match <PasskeyAssertionBody as axum::extract::FromRequest<()>>::from_request(request, &())
+            .await
+        {
+            Ok(_) => panic!("malformed body must be rejected"),
+            Err(response) => as_status_body(response).await,
+        }
+    };
+
+    assert_eq!(
+        unknown, missing_ceremony,
+        "unknown-credential and missing-ceremony denies are byte-identical"
+    );
+    assert_eq!(
+        unknown, malformed_rejection,
+        "unknown-credential and malformed-body denies are byte-identical"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}

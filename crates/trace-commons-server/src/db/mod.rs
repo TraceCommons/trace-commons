@@ -294,6 +294,25 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// Resolve the tenant for a WebAuthn `credential_id` via the SAME NARROW
+    /// restricted-role resolver pool used by `resolve_login_link_tenant` (separate
+    /// role, column-scoped SELECT, no BYPASSRLS). Returns the tenant ONLY. The
+    /// discoverable-login path (Task 6) calls this with the credential id parsed
+    /// from an UNAUTHENTICATED assertion, BEFORE any tenant context exists, then
+    /// re-confirms tenant inside an RLS-scoped tx via
+    /// `load_webauthn_credential_for_login`. Fail-closed: an unconfigured resolver
+    /// pool MUST error with a safe missing-control name, never fall back to the
+    /// runtime pool. NO `ensure_trace_tenant` here: this is a pure read on a
+    /// globally-UNIQUE column and MUST NOT write any tenant row for a forged id.
+    async fn resolve_credential_tenant(
+        &self,
+        _credential_id: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "resolve_credential_tenant not implemented".to_string(),
+        ))
+    }
+
     /// Atomically redeem a single-use login link: consume + session insert +
     /// audit insert in ONE RLS-scoped transaction, so redeem is all-or-nothing.
     ///
@@ -445,6 +464,30 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<(), DatabaseError> {
         Err(DatabaseError::Pool(
             "update_webauthn_credential_after_login not implemented".to_string(),
+        ))
+    }
+
+    /// Issue a browser session for a passkey login that has ALREADY been verified
+    /// (Task 6). Inserts a `trace_sessions` row (hash-only `token_hash`,
+    /// `client_kind = 'passkey'`, `auth_credential_id` = the base64url credential
+    /// id STRING that authenticated the session, `token_issued_at` defaulted) plus
+    /// a hash-only audit row, in ONE RLS-scoped tx under the already-resolved
+    /// tenant. The caller MUST have verified the assertion (and thereby the
+    /// credential's FK-backed tenant) before calling this; there is therefore NO
+    /// `ensure_trace_tenant` here — the tenant provably exists via the credential
+    /// row, and an UPSERT before verification would let a forged assertion spray
+    /// tenant rows. The raw session secret never reaches the database; only its
+    /// sha256 `token_hash` is stored.
+    async fn issue_passkey_session(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _session: NewSession<'_>,
+        _auth_credential_id: &str,
+        _audit: RedeemAudit,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool(
+            "issue_passkey_session not implemented".to_string(),
         ))
     }
 

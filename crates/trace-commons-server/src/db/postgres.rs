@@ -1787,6 +1787,19 @@ impl Database for PgBackend {
             .map_err(|error| DatabaseError::Pool(error.to_string()))
     }
 
+    async fn resolve_credential_tenant(
+        &self,
+        credential_id: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        // Delegate to the inherent implementation (narrow resolver pool); map its
+        // anyhow error onto the trait's DatabaseError. The fail-closed
+        // unconfigured-resolver path surfaces here as a Pool error, which the
+        // login handler collapses to the uniform deny.
+        PgBackend::resolve_credential_tenant(self, credential_id)
+            .await
+            .map_err(|error| DatabaseError::Pool(error.to_string()))
+    }
+
     async fn redeem_login_link(
         &self,
         tenant_id: &str,
@@ -2114,6 +2127,66 @@ impl Database for PgBackend {
         )
         .await
         .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
+    async fn issue_passkey_session(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        session: crate::db::NewSession<'_>,
+        auth_credential_id: &str,
+        audit: crate::db::RedeemAudit,
+    ) -> Result<(), DatabaseError> {
+        // SECURITY: do NOT ensure_trace_tenant here. The credential (and thus its
+        // tenant) was verified by the login handler before this call: the tenant
+        // provably exists via the credential row's FK, and an UPSERT here would
+        // let a forged assertion spray tenant rows. begin_trace_tenant_transaction
+        // only sets the RLS config var (no row dependency), and the session insert
+        // is FK-bound to (tenant_id, account_id) in trace_accounts, so a bogus
+        // tenant/account simply fails the insert rather than writing anything.
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+
+        // Session row: hash-only token, client_kind='passkey', the base64url
+        // credential id STRING in auth_credential_id (V32 TEXT column), and
+        // token_issued_at left to its DEFAULT now(). session_id is server-assigned.
+        let session_id = Uuid::new_v4();
+        tx.execute(
+            "INSERT INTO trace_sessions (
+                tenant_id, session_id, account_id, token_hash,
+                client_kind, auth_credential_id, created_at, last_seen_at, expires_at
+             ) VALUES (
+                trace_current_tenant_id(), $1, $2, $3, $4, $5, now(), now(), $6
+             )",
+            &[
+                &session_id,
+                &account_id,
+                &session.token_hash,
+                &session.client_kind,
+                &auth_credential_id,
+                &session.expires_at,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        // Hash-only / label-only audit row in the SAME tx so an audit failure rolls
+        // back the session (no un-audited session, no orphaned audit).
+        let actor_ref =
+            crate::account_session::account_actor_ref(&crate::account_session::AccountId::from_uuid(
+                account_id,
+            ));
+        tx.execute(
+            "INSERT INTO trace_account_audit (
+                tenant_id, action, actor_ref, outcome, safe_metadata
+             ) VALUES (trace_current_tenant_id(), $1, $2, $3, $4)",
+            &[&audit.action, &actor_ref, &audit.outcome, &audit.metadata],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(())
     }

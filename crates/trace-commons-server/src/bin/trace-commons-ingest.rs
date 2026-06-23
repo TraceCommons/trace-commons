@@ -5924,6 +5924,16 @@ fn app(state: Arc<AppState>) -> Router {
         // (`/account/login?code=...`) points here.
         .route("/account/login", get(login_interstitial_handler))
         .route("/account/login/confirm", post(confirm_login_handler))
+        // Discoverable passkey login (Slice 2 Task 6). Un-versioned and un-authed,
+        // beside the redeem flow: the assertion IS the credential.
+        .route(
+            "/account/passkey/login/start",
+            post(account_passkey_login_start_handler),
+        )
+        .route(
+            "/account/passkey/login/finish",
+            post(account_passkey_login_finish_handler),
+        )
         .route("/v1/account/logout", post(account_logout_handler))
         .route(
             "/v1/account/sessions/revoke-all",
@@ -12408,6 +12418,18 @@ const CONFIRM_GLOBAL_LIMIT: u32 = 600;
 /// before the single-use consume would. A login link is meant to be redeemed
 /// once; a handful of attempts covers a legitimate retry.
 const CONFIRM_PER_CODE_LIMIT: u32 = 5;
+/// Per-IP cap on `POST /account/passkey/login/start` + `/finish` attempts per
+/// window. A discoverable login is a couple of round-trips; this comfortably
+/// covers a legitimate retry while bounding a guessing/replay flood from one IP.
+const PASSKEY_LOGIN_PER_IP_LIMIT: u32 = 30;
+/// Coarse global cap on passkey-login attempts per window across ALL callers — a
+/// blast-radius ceiling mirroring `CONFIRM_GLOBAL_LIMIT`.
+const PASSKEY_LOGIN_GLOBAL_LIMIT: u32 = 600;
+/// Hard per-`credential_id` ceiling on `login/finish` attempts per window. A
+/// given passkey should assert a handful of times at most in a minute; beyond
+/// that the credential collapses to the uniform deny (replay/brute ceiling). The
+/// credential id is a PUBLIC, globally-unique label (not a secret).
+const PASSKEY_LOGIN_PER_CRED_LIMIT: u32 = 5;
 /// Per-account cap on `GET /v1/account/traces/{id}/content` reads per window.
 const CONTENT_PER_ACCOUNT_LIMIT: u32 = 60;
 /// Concurrency cap on in-flight content reads per account (defense against a
@@ -13099,6 +13121,371 @@ async fn account_passkey_register_finish_handler(
     // The credential id is a PUBLIC identifier (not a secret); returning it lets
     // the client correlate the new credential for management (Task 7+).
     Ok(Json(serde_json::json!({ "credential_id": credential_id })))
+}
+
+// ============================================================================
+// Slice 2 Task 6: discoverable passkey login (UNAUTHENTICATED surface).
+//
+// Two handlers, both un-versioned and un-authed, sitting beside the Slice 1
+// `/account/login/*` redeem flow:
+//
+//   * `/account/passkey/login/start` issues a discoverable-credential WebAuthn
+//     challenge (no allow-list), stashes the server-side
+//     `DiscoverableAuthentication` state in the in-process ceremony store, and
+//     binds it to the browser via the same short-lived `tc_passkey_ceremony`
+//     cookie used by enrollment.
+//   * `/account/passkey/login/finish` verifies the browser's assertion and, on
+//     success, mints the IDENTICAL Slice 1 session cookie. It bootstraps the
+//     tenant from the asserted credential id via the NARROW resolver pool (NO
+//     ensure_trace_tenant before the credential is verified), loads the stored
+//     passkey under that tenant's RLS, runs webauthn-rs `finish_discoverable_
+//     authentication` (which enforces the sign-counter / clone-detection check
+//     INSIDE finish), and issues the session under the resolved tenant tx.
+//
+// SECURITY: EVERY failure mode — unknown credential, missing/expired ceremony,
+// malformed body, sign-counter regression, handle/account mismatch, rate-limit
+// — collapses to ONE byte-identical uniform deny (`passkey_login_generic_deny`)
+// behind a fixed timing floor (`sleep_to_redeem_floor`), so nothing about the
+// attempt is enumerable by status, body, or latency. No credential key or raw
+// session secret is ever logged or audited.
+// ============================================================================
+
+/// The ONE uniform, non-enumerating deny for EVERY passkey-login failure mode.
+/// Byte-identical status + body across unknown-credential / missing-ceremony /
+/// malformed-body / counter-regression / handle-mismatch / rate-limited, with
+/// no-store + no-referrer. Shape mirrors `redeem_generic_deny`; kept distinct so
+/// the login surface has a single, self-contained deny site.
+fn passkey_login_generic_deny() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let mut response = (StatusCode::BAD_REQUEST, "passkey login invalid or expired").into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    headers.insert(
+        axum::http::header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
+}
+
+/// Body extractor for `login/finish`: the browser's `PublicKeyCredential`
+/// assertion. On ANY extraction failure (malformed JSON, wrong shape, missing
+/// body) it rejects with the SAME uniform passkey-login deny so a malformed body
+/// is indistinguishable from a bad/unknown credential. Mirrors `ConfirmLoginForm`.
+struct PasskeyAssertionBody(webauthn_rs::prelude::PublicKeyCredential);
+
+impl<S> axum::extract::FromRequest<S> for PasskeyAssertionBody
+where
+    S: Send + Sync,
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request(
+        req: axum::extract::Request,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        match axum::Json::<webauthn_rs::prelude::PublicKeyCredential>::from_request(req, state).await
+        {
+            Ok(axum::Json(assertion)) => Ok(PasskeyAssertionBody(assertion)),
+            Err(_) => Err(passkey_login_generic_deny()),
+        }
+    }
+}
+
+/// `POST /account/passkey/login/start` — begin a discoverable passkey login
+/// (Slice 2 Task 6). UNAUTHENTICATED. Fails closed (uniform deny) when the
+/// relying party is unconfigured. Rate-limited per-IP + global. Issues a
+/// discoverable-credential challenge (no allow-list — the authenticator
+/// "discovers" the credential and user handle), stashes the server-side
+/// `DiscoverableAuthentication` state under a fresh ceremony id, and binds it to
+/// this browser with the short-lived `tc_passkey_ceremony` cookie. Returns the
+/// `RequestChallengeResponse`. ANY failure collapses to the uniform deny.
+async fn account_passkey_login_start_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    // Per-IP + coarse global rate limit; both collapse to the uniform deny.
+    let client_ip = client_ip_for_rate_limit(&headers);
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("passkey-login-ip:{client_ip}"),
+        PASSKEY_LOGIN_PER_IP_LIMIT,
+    ) {
+        return passkey_login_generic_deny();
+    }
+    if !ACCOUNT_RATE_LIMITER.check("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
+        return passkey_login_generic_deny();
+    }
+
+    // Fail-closed: an unconfigured relying party yields the uniform deny (NOT a
+    // 503), so the login surface does not enumerate configuration state.
+    let webauthn = match account_webauthn(state.as_ref()) {
+        Ok(webauthn) => webauthn,
+        Err(_) => return passkey_login_generic_deny(),
+    };
+
+    let (challenge, auth_state) = match webauthn.start_discoverable_authentication() {
+        Ok(pair) => pair,
+        Err(_) => return passkey_login_generic_deny(),
+    };
+
+    let ceremony_id = trace_commons_server::account_passkey::new_ceremony_id();
+    account_ceremony_store(state.as_ref()).put(
+        ceremony_id.clone(),
+        CeremonyState::DiscoverableAuthentication(auth_state),
+    );
+
+    // Same short-lived ceremony cookie shape as enrollment (Task 5): opaque id
+    // only, Secure + HttpOnly + SameSite=Strict + Path=/, short Max-Age.
+    let cookie = cookie::Cookie::build((ACCOUNT_PASSKEY_CEREMONY_COOKIE, ceremony_id))
+        .secure(true)
+        .http_only(true)
+        .same_site(cookie::SameSite::Strict)
+        .path("/")
+        .max_age(cookie::time::Duration::seconds(
+            ACCOUNT_PASSKEY_CEREMONY_COOKIE_MAX_AGE_SECS,
+        ))
+        .build();
+
+    use axum::response::IntoResponse;
+    let mut response = Json(challenge).into_response();
+    match HeaderValue::from_str(&cookie.to_string()) {
+        Ok(value) => {
+            response
+                .headers_mut()
+                .insert(axum::http::header::SET_COOKIE, value);
+        }
+        // A cookie that cannot be serialized would leave the ceremony unbindable;
+        // collapse to the uniform deny rather than returning an unusable challenge.
+        Err(_) => return passkey_login_generic_deny(),
+    }
+    response
+}
+
+/// `POST /account/passkey/login/finish` — complete a discoverable passkey login
+/// and issue a session (Slice 2 Task 6). UNAUTHENTICATED, with full redeem-style
+/// hardening: a fixed timing floor wraps the WHOLE handler so success and every
+/// uniform deny take at least `REDEEM_MIN_LATENCY`, erasing the
+/// found-vs-not-found (and rate-limited-vs-not) timing oracle.
+async fn account_passkey_login_finish_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: PasskeyAssertionBody,
+) -> axum::response::Response {
+    let start = std::time::Instant::now();
+    let response = account_passkey_login_finish_inner(state, headers, body).await;
+    sleep_to_redeem_floor(start).await;
+    response
+}
+
+/// Inner body of the passkey `login/finish` handler. Returns on every branch with
+/// the final response; the outer wrapper pads each path to `REDEEM_MIN_LATENCY`.
+async fn account_passkey_login_finish_inner(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: PasskeyAssertionBody,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let PasskeyAssertionBody(assertion) = body;
+
+    // 1. Per-IP + coarse global rate limit. Same uniform deny; floor still applies.
+    let client_ip = client_ip_for_rate_limit(&headers);
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("passkey-login-ip:{client_ip}"),
+        PASSKEY_LOGIN_PER_IP_LIMIT,
+    ) {
+        return passkey_login_generic_deny();
+    }
+    if !ACCOUNT_RATE_LIMITER.check("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
+        return passkey_login_generic_deny();
+    }
+
+    let webauthn = match account_webauthn(state.as_ref()) {
+        Ok(webauthn) => webauthn,
+        Err(_) => return passkey_login_generic_deny(),
+    };
+    let db = match account_db(state.as_ref()) {
+        Ok(db) => db,
+        Err(_) => return passkey_login_generic_deny(),
+    };
+
+    // 3. Recover and CONSUME (single-use `take`) the pending discoverable-auth
+    //    state via the ceremony cookie. Missing / expired / already-consumed /
+    //    wrong-variant all collapse to the uniform deny.
+    let auth_state = match cookie_value_from_headers(&headers, ACCOUNT_PASSKEY_CEREMONY_COOKIE) {
+        Some(ceremony_id) => match account_ceremony_store(state.as_ref()).take(ceremony_id) {
+            Some(CeremonyState::DiscoverableAuthentication(auth_state)) => auth_state,
+            Some(_) | None => return passkey_login_generic_deny(),
+        },
+        None => return passkey_login_generic_deny(),
+    };
+
+    // 4. Extract the asserted user handle + credential id from the assertion (no
+    //    tenant context yet). Encode the credential id with the SAME canonical
+    //    base64url encoding enrollment used so the lookup agrees byte-for-byte.
+    let (account_handle_uuid, cred_id_bytes) =
+        match webauthn.identify_discoverable_authentication(&assertion) {
+            Ok(parts) => parts,
+            Err(_) => return passkey_login_generic_deny(),
+        };
+    let credential_id = credential_id_to_string(
+        &webauthn_rs::prelude::CredentialID::from(cred_id_bytes),
+    );
+
+    // Per-credential hard ceiling (replay/brute bound on one specific credential,
+    // IP-independent). Same uniform deny.
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("passkey-login-cred:{credential_id}"),
+        PASSKEY_LOGIN_PER_CRED_LIMIT,
+    ) {
+        return passkey_login_generic_deny();
+    }
+
+    // 5. Tenant bootstrap via the NARROW resolver pool. Returns tenant ONLY; NO
+    //    ensure_trace_tenant. None / Err (incl. fail-closed unconfigured resolver)
+    //    -> uniform deny, and critically NO tenant row is written for a forged id.
+    let tenant = match db.resolve_credential_tenant(&credential_id).await {
+        Ok(Some(tenant)) => tenant,
+        Ok(None) | Err(_) => return passkey_login_generic_deny(),
+    };
+
+    // 6. Under the resolved tenant's RLS, load the active credential. None ->
+    //    uniform deny. Deserialize the stored passkey JSON into a webauthn-rs
+    //    `Passkey`; a corrupt row also collapses to the uniform deny.
+    let credential = match db
+        .load_webauthn_credential_for_login(&tenant, &credential_id)
+        .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) | Err(_) => return passkey_login_generic_deny(),
+    };
+    let mut passkey: webauthn_rs::prelude::Passkey =
+        match serde_json::from_value(credential.passkey.clone()) {
+            Ok(passkey) => passkey,
+            Err(_) => return passkey_login_generic_deny(),
+        };
+
+    // 8. Cross-account / handle binding (checked BEFORE finish so a mismatch never
+    //    reaches verification): the user handle the authenticator asserted MUST
+    //    equal the account the stored credential belongs to. Defense-in-depth on
+    //    top of the credential_id -> account binding.
+    if account_handle_uuid != credential.account_id {
+        return passkey_login_generic_deny();
+    }
+
+    // 7. Verify the assertion. The SIGN-COUNTER regression / clone-detection check
+    //    is enforced INSIDE finish_discoverable_authentication (a regressed counter
+    //    -> Err), as is the allowed-credential / signature check. Any Err ->
+    //    uniform deny.
+    let discoverable_key = webauthn_rs::prelude::DiscoverableKey::from(&passkey);
+    let auth_result = match webauthn.finish_discoverable_authentication(
+        &assertion,
+        auth_state,
+        &[discoverable_key],
+    ) {
+        Ok(auth_result) => auth_result,
+        Err(_) => return passkey_login_generic_deny(),
+    };
+
+    // Persist the advanced sign counter (clone-detection state) when it moved.
+    // `update_credential` mutates `passkey` in place and returns Some(true) iff a
+    // property (counter / backup flags) actually changed. A persistence failure is
+    // NOT fatal to this login (the assertion already verified), but we fail closed
+    // to the uniform deny so a stuck counter can't silently accumulate.
+    if matches!(passkey.update_credential(&auth_result), Some(true)) {
+        let updated = match serde_json::to_value(&passkey) {
+            Ok(value) => value,
+            Err(_) => return passkey_login_generic_deny(),
+        };
+        if db
+            .update_webauthn_credential_after_login(&tenant, &credential_id, &updated)
+            .await
+            .is_err()
+        {
+            return passkey_login_generic_deny();
+        }
+    }
+
+    // 9. Mint the session secret (>=128-bit CSPRNG); store ONLY its hash. Insert
+    //    the session (client_kind='passkey', auth_credential_id=credential_id) +
+    //    hash-only audit in one RLS-scoped tx under the resolved tenant. NO
+    //    ensure_trace_tenant: the credential is verified, so the tenant provably
+    //    exists via its FK.
+    let secret = generate_session_secret();
+    let token_hash = hash_secret(&secret);
+    let expires_at = Utc::now() + Duration::days(ACCOUNT_SESSION_TTL_DAYS);
+    if db
+        .issue_passkey_session(
+            &tenant,
+            credential.account_id,
+            trace_commons_server::db::NewSession {
+                token_hash: &token_hash,
+                client_kind: "passkey",
+                expires_at,
+            },
+            &credential_id,
+            trace_commons_server::db::RedeemAudit {
+                action: "account_passkey_login".to_string(),
+                outcome: "success".to_string(),
+                // Hash-only / label-only: never the credential id or key material.
+                metadata: serde_json::json!({ "client_kind": "passkey" }),
+            },
+        )
+        .await
+        .is_err()
+    {
+        return passkey_login_generic_deny();
+    }
+
+    // 10. Build the IDENTICAL Slice 1 session cookie (`{b64url(tenant)}.{secret}`),
+    //     303 to the account view, no-store + no-referrer, and clear the ceremony
+    //     cookie. See `confirm_login_inner` for the cookie-value rationale.
+    let cookie_value = format!(
+        "{}.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tenant.as_bytes()),
+        secret,
+    );
+    let session_cookie = cookie::Cookie::build((ACCOUNT_SESSION_COOKIE, cookie_value))
+        .secure(true)
+        .http_only(true)
+        .same_site(cookie::SameSite::Strict)
+        .path("/")
+        .max_age(cookie::time::Duration::days(ACCOUNT_SESSION_TTL_DAYS))
+        .build();
+    // Expire the ceremony cookie (Max-Age=0) now that it has been consumed.
+    let clear_ceremony = cookie::Cookie::build((ACCOUNT_PASSKEY_CEREMONY_COOKIE, ""))
+        .secure(true)
+        .http_only(true)
+        .same_site(cookie::SameSite::Strict)
+        .path("/")
+        .max_age(cookie::time::Duration::seconds(0))
+        .build();
+
+    let mut response = StatusCode::SEE_OTHER.into_response();
+    let resp_headers = response.headers_mut();
+    resp_headers.insert(
+        axum::http::header::LOCATION,
+        HeaderValue::from_static(ACCOUNT_VIEW_PATH),
+    );
+    match HeaderValue::from_str(&session_cookie.to_string()) {
+        Ok(value) => {
+            resp_headers.append(axum::http::header::SET_COOKIE, value);
+        }
+        Err(_) => return passkey_login_generic_deny(),
+    }
+    if let Ok(value) = HeaderValue::from_str(&clear_ceremony.to_string()) {
+        resp_headers.append(axum::http::header::SET_COOKIE, value);
+    }
+    resp_headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    resp_headers.insert(
+        axum::http::header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
 }
 
 async fn analytics_handler(
