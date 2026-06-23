@@ -7193,6 +7193,8 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "borsh",
+ "bs58",
  "bytes",
  "chrono",
  "clap",
