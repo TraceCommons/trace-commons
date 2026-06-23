@@ -59,9 +59,11 @@ payout destination 3b settles to. 3a captures and authenticates that binding.
   an existing account, bootstrapping its tenant via the narrow resolver. 3a reuses the
   Slice 2 architecture almost wholesale.
 - **Strong-authenticator gate** with a bootstrapping carve-out (below).
-- **Dependency:** add `bs58` (base58 decode for NEAR keys) — tiny, vetted, MIT. Borsh
-  reconstruction of the fixed NEP-413 payload is hand-rolled (~25 LOC, no `borsh` dep).
-  Reuse in-tree `ring`/`sha2`/`base64`/`reqwest`/`serde_json`.
+- **Dependency:** **prefer hand-rolled base58 decode and the fixed NEP-413 borsh payload
+  (NO new dependency)** — both are small, fixed-shape, and pinned by known-vector tests
+  (see the plan). `bs58` is only a fallback requiring explicit approval if the hand-rolled
+  base58 proves error-prone under review. Reuse in-tree `ring`/`sha2`/`base64`/`reqwest`/
+  `serde_json`. (This supersedes any earlier "add `bs58`" wording.)
 
 ## Components
 
