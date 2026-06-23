@@ -194,6 +194,38 @@ impl PgBackend {
             .await?;
         Ok(row.map(|r| r.get::<_, String>(0)))
     }
+
+    /// Resolve the tenant for a WebAuthn credential via the NARROW resolver pool
+    /// (separate role, column-scoped SELECT, no BYPASSRLS). Returns the tenant
+    /// only; the caller MUST re-confirm tenant inside an RLS-scoped transaction
+    /// before any write. Fail-closed: if the resolver pool is not configured, this
+    /// errors with a safe missing-control name rather than falling back to the
+    /// runtime pool.
+    ///
+    /// Wired into the login handler in Task 6; until then its only non-test caller
+    /// is pending. It is `pub` (part of the crate API, like
+    /// `resolve_login_link_tenant`), so it does not trip dead-code under
+    /// `-D warnings` despite having no internal caller yet.
+    pub async fn resolve_credential_tenant(
+        &self,
+        credential_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let pool = self
+            .login_resolver_pool
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing-control: login-resolver-pool-unconfigured"))?;
+        let client = pool.get().await?;
+        // Safe without a tenant predicate: credential_id is globally UNIQUE so this returns at most
+        // one row across all tenants; the login handler re-confirms tenant inside an RLS-scoped tx
+        // before any write. Do NOT add a non-unique lookup column to this role's grant.
+        let row = client
+            .query_opt(
+                "SELECT tenant_id FROM trace_webauthn_credentials WHERE credential_id = $1",
+                &[&credential_id],
+            )
+            .await?;
+        Ok(row.map(|r| r.get::<_, String>(0)))
+    }
 }
 
 #[async_trait]

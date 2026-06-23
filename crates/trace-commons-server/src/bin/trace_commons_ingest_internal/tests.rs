@@ -199,6 +199,120 @@ async fn login_resolver_reads_tenant_across_rls_under_set_role() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+/// BLOCKER regression (Slice 2 passkeys): the `trace_login_resolver` role must be
+/// able to map a globally-unique WebAuthn `credential_id` -> `tenant_id` even
+/// though an unauthenticated assertion arrives with NO tenant context.
+/// `trace_webauthn_credentials` has FORCE RLS with the PUBLIC
+/// `trace_corpus_tenant_isolation` policy (`tenant_id = trace_current_tenant_id()`),
+/// which alone excludes EVERY row for a role with no tenant set — so without the
+/// resolver-scoped permissive policy (`trace_login_resolver_credential_read`) the
+/// login path always fails closed and every assertion 400s in production. The
+/// column GRANT does not relax RLS, and `credential_id` uniqueness is irrelevant
+/// to row visibility under forced RLS.
+///
+/// This mirrors `login_resolver_reads_tenant_across_rls_under_set_role` for
+/// trace_login_links. `SET ROLE trace_login_resolver` drops the superuser RLS
+/// bypass, so the resolver role's real RLS treatment runs even from a superuser
+/// test connection. It asserts the column-scoped read returns the correct tenant
+/// (permissive policy in effect) and that an out-of-grant column read is rejected
+/// (least privilege retained).
+#[tokio::test]
+async fn credential_resolver_reads_tenant_across_rls_under_set_role() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    // Seed a tenant + account via the normal tenant-scoped path, then raw-insert a
+    // webauthn credential under tenant context (the credential FK needs the account).
+    let account_id = backend
+        .create_or_reuse_account("tenant-a", "principal-a")
+        .await
+        .expect("seed account");
+    let credential_id = "cred-resolver-test-globally-unique";
+
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    {
+        let tx = client.transaction().await.expect("seed tx");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&"tenant-a"],
+        )
+        .await
+        .expect("set seed tenant context");
+        let passkey_json = serde_json::json!({});
+        tx.execute(
+            "INSERT INTO trace_webauthn_credentials
+                 (tenant_id, credential_id, account_id, passkey)
+             VALUES (trace_current_tenant_id(), $1, $2, $3)",
+            &[&credential_id, &account_id, &passkey_json],
+        )
+        .await
+        .expect("seed credential row");
+        tx.commit().await.expect("commit seed");
+    }
+
+    let tx = client.transaction().await.expect("tx");
+    // Deliberately set NO tenant context: the resolver path has none. SET ROLE to a
+    // non-superuser role makes RLS apply (superuser bypass is dropped), so this is
+    // the resolver's real RLS treatment.
+    tx.execute("SET ROLE trace_login_resolver", &[])
+        .await
+        .expect("set resolver role");
+
+    // The column-scoped, cross-tenant SELECT the resolver pool runs must RETURN the
+    // tenant despite forced RLS + no tenant context (permissive resolver policy).
+    let resolved: Option<String> = tx
+        .query_opt(
+            "SELECT tenant_id FROM trace_webauthn_credentials WHERE credential_id = $1",
+            &[&credential_id],
+        )
+        .await
+        .expect("resolver SELECT runs under RLS")
+        .map(|row| row.get::<_, String>(0));
+    assert_eq!(
+        resolved.as_deref(),
+        Some("tenant-a"),
+        "resolver must resolve the tenant for a known credential_id under forced RLS"
+    );
+
+    // Least privilege: an out-of-grant column read is rejected by the column GRANT
+    // (the resolver may read only tenant_id + credential_id). This keeps the
+    // permissive RLS policy from widening the resolver's effective surface.
+    let out_of_grant = tx
+        .query_opt(
+            "SELECT account_id FROM trace_webauthn_credentials WHERE credential_id = $1",
+            &[&credential_id],
+        )
+        .await;
+    assert!(
+        out_of_grant.is_err(),
+        "resolver must NOT be able to read columns outside its (tenant_id, credential_id) grant"
+    );
+
+    // The transaction is poisoned by the rejected statement; roll it back and reset.
+    drop(tx);
+    let reset = client.batch_execute("RESET ROLE").await;
+    let _ = reset; // best-effort; connection returns to the pool either way.
+
+    // Also exercise the inherent resolver method end-to-end (narrow resolver pool).
+    let via_method = backend
+        .resolve_credential_tenant(credential_id)
+        .await
+        .expect("resolver method runs");
+    assert_eq!(
+        via_method.as_deref(),
+        Some("tenant-a"),
+        "resolve_credential_tenant must return the seeded tenant via the narrow pool"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 #[tokio::test]
 async fn account_migration_applies_and_enforces_rls() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
