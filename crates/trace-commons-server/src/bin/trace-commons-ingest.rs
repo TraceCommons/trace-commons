@@ -5890,6 +5890,10 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/account/traces/{submission_id}",
             get(account_trace_detail_handler),
         )
+        .route(
+            "/v1/account/traces/{submission_id}/content",
+            get(account_trace_content_handler),
+        )
         // Browser-facing redeem flow. Intentionally NOT under /v1 and
         // un-authenticated: the single-use code IS the credential. The mint URL
         // (`/account/login?code=...`) points here.
@@ -11767,6 +11771,13 @@ const ACCOUNT_TRACES_DEFAULT_LIMIT: usize = 50;
 /// Hard cap on the account trace read-back page size.
 const ACCOUNT_TRACES_MAX_LIMIT: usize = 200;
 
+/// Hard ceiling on the serialized content body returned by the account content
+/// read-back. The stored envelope is already privacy-scrubbed and bounded at
+/// submission time; this is a defense-in-depth oracle-safe cap so a malformed or
+/// oversized stored object cannot be streamed back unbounded. Exceeding it
+/// collapses to a single generic error that carries no size signal.
+const ACCOUNT_TRACE_CONTENT_MAX_BYTES: usize = 8 * 1024 * 1024;
+
 /// Query string for `GET /v1/account/traces`. Keyset pagination only: no offset
 /// is accepted. `account_id` / `principal_ref` are NEVER client input — the
 /// owning set is auth-derived from the `AccountCtx`.
@@ -11959,6 +11970,164 @@ async fn account_trace_detail_handler(
     .map_err(internal_error)?;
 
     Ok(Json(item))
+}
+
+/// `GET /v1/account/traces/{submission_id}/content` — dual-auth, account-scoped
+/// read-back of the permanently-redacted (`[REDACTED]`) stored trace content for
+/// an owned submission.
+///
+/// The content is decrypted through the EXISTING KMS-bound read path
+/// (`read_envelope_by_record`, which dispatches v1/v2 stores, binds the
+/// `KekContext` to `tenant_storage_ref` + artifact_kind, and verifies
+/// `ciphertext_sha256`). There is NO new decryption path and NO un-scrubbed
+/// read-back: the bytes returned are exactly what was stored, which is already
+/// lossily redacted pre-encryption.
+///
+/// Ownership is enforced BEFORE any read: not-found and not-owned both collapse
+/// to the identical `404` used by the detail handler (no enumeration oracle).
+/// Any KMS/store/decrypt/integrity failure FAILS CLOSED to a generic label-only
+/// `500` that never echoes object_key / KMS ARN / ciphertext / exception detail;
+/// the failed read is still audited (hash-only) so denied reads are not silent.
+async fn account_trace_content_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(submission_id): AxumPath<Uuid>,
+) -> ApiResult<axum::response::Response> {
+    let ctx = resolve_account_ctx(state.as_ref(), &headers).await?;
+    let not_found = || api_error(StatusCode::NOT_FOUND, "trace not found");
+
+    // Same-origin is intentionally NOT enforced for this GET: it carries no
+    // ambient state-changing authority, and a bearer/cookie GET read-back is the
+    // documented contract. (The confirm POST, which issues a cookie, is the only
+    // surface that needs the same-origin gate.)
+
+    let db = account_db(state.as_ref())?;
+    let record = db
+        .get_trace_submission(&ctx.tenant_id, submission_id)
+        .await
+        .map_err(internal_error)?;
+    // Ownership check BEFORE any content read. Not-found AND not-owned collapse
+    // to the byte-identical 404 used by the detail handler.
+    let record = match record {
+        Some(record) if ctx.principal_set.contains(&record.auth_principal_ref) => record,
+        _ => return Err(not_found()),
+    };
+    let record = trace_commons_record_from_storage_submission(record)
+        .ok_or_else(not_found)?
+        .map_err(internal_error)?;
+
+    // Task 11: a per-account rate limit + concurrency cap attaches here, before
+    // the (potentially expensive) decrypt. Not built in this slice.
+
+    let audit_tenant = account_audit_tenant(&ctx);
+
+    // Read the envelope through the EXISTING KMS-bound path. On ANY failure
+    // (KMS unwrap/decrypt, hash mismatch, store error, missing config) fail
+    // closed: audit the FAILED read, then return a generic label-only 500. The
+    // error itself is hashed for logs; never surfaced to the caller.
+    let envelope = match read_envelope_by_record(state.as_ref(), &record) {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            tracing::warn!(
+                error_hash = %safe_display_error_hash(&error),
+                submission_id = %record.submission_id,
+                "Trace Commons account content read-back failed; failing closed"
+            );
+            // Audit the failed read (hash-only, single row, no object ref since
+            // the read never resolved a source object).
+            if let Err(audit_error) = append_trace_content_read_audit_per_source(
+                state.as_ref(),
+                &audit_tenant,
+                record.submission_id,
+                &[],
+                "account_trace_content",
+                Some("read_failed"),
+            )
+            .await
+            {
+                tracing::warn!(
+                    error_hash = %safe_display_error_hash(&audit_error),
+                    submission_id = %record.submission_id,
+                    "Trace Commons account content read-back failure audit append failed"
+                );
+            }
+            return Err(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "trace content unavailable",
+            ));
+        }
+    };
+
+    // Serialize the already-redacted stored envelope. A serialization failure is
+    // also fail-closed and audited (it is still a failed content read).
+    let body = match serde_json::to_vec(&envelope) {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::warn!(
+                error_hash = %safe_display_error_hash(&anyhow::Error::new(error)),
+                submission_id = %record.submission_id,
+                "Trace Commons account content read-back serialization failed; failing closed"
+            );
+            if let Err(audit_error) = append_trace_content_read_audit_per_source(
+                state.as_ref(),
+                &audit_tenant,
+                record.submission_id,
+                &[],
+                "account_trace_content",
+                Some("read_failed"),
+            )
+            .await
+            {
+                tracing::warn!(
+                    error_hash = %safe_display_error_hash(&audit_error),
+                    submission_id = %record.submission_id,
+                    "Trace Commons account content read-back failure audit append failed"
+                );
+            }
+            return Err(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "trace content unavailable",
+            ));
+        }
+    };
+
+    // Oracle-safe max-bytes ceiling. The error carries no size signal.
+    if body.len() > ACCOUNT_TRACE_CONTENT_MAX_BYTES {
+        return Err(api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "trace content unavailable",
+        ));
+    }
+
+    // Audit the SUCCESSFUL read (hash-only, per-source). The file-fallback read
+    // path resolves no DB object ref, so there is no object_ref id to attribute;
+    // an empty ref slice records a single source-less row.
+    append_trace_content_read_audit_per_source(
+        state.as_ref(),
+        &audit_tenant,
+        record.submission_id,
+        &[],
+        "account_trace_content",
+        None,
+    )
+    .await
+    .map_err(internal_error)?;
+
+    let mut response = (StatusCode::OK, body).into_response();
+    let response_headers = response.headers_mut();
+    response_headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    response_headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response_headers.insert(
+        axum::http::header::HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    Ok(response)
 }
 
 /// Mint a single-use login link for the authenticated device's principal.

@@ -806,6 +806,226 @@ async fn account_trace_detail_owned_returns_metadata_unowned_and_missing_are_uni
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+/// Build a privacy-scrubbed envelope whose redacted event content carries a
+/// `[REDACTED:private_email]` marker, then write its serialized JSON to the
+/// on-disk object path the file-fallback read uses. Returns the marker-bearing
+/// serialized bytes so the round-trip test can assert byte-for-byte fidelity.
+async fn write_redacted_envelope_to_disk(
+    state: &AppState,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> Vec<u8> {
+    use trace_commons_protocol::llm::recording::{TraceResponse, TraceStep};
+    use trace_commons_protocol::trace_contribution::RawTraceContribution;
+
+    // A user-input step carrying a private email. Deterministic redaction
+    // replaces the email with `[REDACTED:private_email]` pre-encryption; this is
+    // exactly the lossy, already-scrubbed content the read-back returns.
+    let trace = TraceFile {
+        model_name: "test-model".to_string(),
+        memory_snapshot: Vec::new(),
+        http_exchanges: Vec::new(),
+        steps: vec![TraceStep {
+            request_hint: None,
+            response: TraceResponse::UserInput {
+                content: "please email alice@example.com about the issue".to_string(),
+            },
+            expected_tool_results: Vec::new(),
+        }],
+    };
+    let raw = RawTraceContribution::from_recorded_trace(
+        &trace,
+        RecordedTraceContributionOptions {
+            // Include message text so the email is present to be redacted.
+            include_message_text: true,
+            ..Default::default()
+        },
+    );
+    let envelope = DeterministicTraceRedactor::default()
+        .redact_trace(raw)
+        .await
+        .expect("redaction succeeds");
+
+    let body = serde_json::to_vec(&envelope).expect("serialize envelope");
+    assert!(
+        String::from_utf8(body.clone())
+            .expect("utf8")
+            .contains("[REDACTED"),
+        "fixture envelope must already contain a redaction marker"
+    );
+
+    // Mirror the production object-key layout so `read_envelope_by_record`'s
+    // file fallback resolves the body.
+    let object_key = trace_envelope_object_key(tenant_id, TraceCorpusStatus::Accepted, submission_id);
+    let path = state.root.join(&object_key);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create object dir");
+    }
+    std::fs::write(&path, &body).expect("write envelope object");
+    body
+}
+
+#[tokio::test]
+async fn account_trace_content_owned_returns_redacted_body_unowned_and_missing_are_uniform_404() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = principal_storage_ref("token-a");
+
+    let owned = insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    let unowned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", "principal_not_ours").await;
+    let random = Uuid::new_v4();
+
+    // Stage a readable, already-redacted envelope for the owned submission.
+    let stored_body = write_redacted_envelope_to_disk(state.as_ref(), "tenant-a", owned).await;
+
+    // Owned id with a readable artifact -> 200 + redacted body.
+    let response = account_trace_content_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        AxumPath(owned),
+    )
+    .await
+    .expect("owned content read succeeds");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json; charset=utf-8"),
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store"),
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-content-type-options")
+            .and_then(|v| v.to_str().ok()),
+        Some("nosniff"),
+    );
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    // Redaction invariant: the marker survives the read-back verbatim; there is
+    // no un-scrubbing. The returned body is byte-identical to what was stored.
+    let body_text = String::from_utf8(body_bytes.to_vec()).expect("utf8 body");
+    assert!(
+        body_text.contains("[REDACTED"),
+        "the redaction marker must survive the content read-back"
+    );
+    assert_eq!(
+        body_bytes.as_ref(),
+        stored_body.as_slice(),
+        "the returned content is exactly the stored, already-redacted envelope"
+    );
+
+    // Unowned and nonexistent ids collapse to the IDENTICAL 404 the detail
+    // handler returns -- no existence oracle, and ownership is enforced before
+    // any read.
+    let unowned_err = account_trace_content_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        AxumPath(unowned),
+    )
+    .await
+    .expect_err("unowned -> 404");
+    let missing_err = account_trace_content_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        AxumPath(random),
+    )
+    .await
+    .expect_err("missing -> 404");
+    assert_eq!(unowned_err.0, StatusCode::NOT_FOUND);
+    assert_eq!(missing_err.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        unowned_err.1 .0.error, missing_err.1 .0.error,
+        "not-owned and not-found must return an identical body"
+    );
+
+    // Cross-check the content 404 body is byte-identical to the detail 404 body
+    // (same `not_found()` helper -> no oracle divergence across surfaces).
+    let detail_missing_err = account_trace_detail_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        AxumPath(random),
+    )
+    .await
+    .expect_err("detail missing -> 404");
+    assert_eq!(detail_missing_err.0, missing_err.0);
+    assert_eq!(detail_missing_err.1 .0.error, missing_err.1 .0.error);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_trace_content_read_failure_fails_closed_with_generic_500() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = principal_storage_ref("token-a");
+
+    // Owned submission, but NO envelope is staged on disk and no artifact store
+    // is configured -> the file-fallback read fails. The handler must fail
+    // closed with a generic, label-only 500 (no object_key / path / exception
+    // detail leaked) and still audit the failed read.
+    let owned = insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+
+    let err = account_trace_content_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        AxumPath(owned),
+    )
+    .await
+    .expect_err("missing artifact -> fail closed");
+    assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(err.1 .0.error, "trace content unavailable");
+    // The generic message carries no path, object key, or exception detail.
+    assert!(!err.1 .0.error.contains('/'));
+    assert!(!err.1 .0.error.to_lowercase().contains("tenant"));
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 #[test]
 fn file_backed_control_plane_appends_reject_cross_tenant_records_before_write() {
     let temp = tempfile::tempdir().expect("temp dir");
