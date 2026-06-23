@@ -125,8 +125,29 @@ impl WebauthnConfig {
                 rp_name,
             }),
             // Partial config is a misconfiguration: fail closed rather than build a
-            // relying party from incomplete state.
-            _ => None,
+            // relying party from incomplete state. A fully-unset config is the
+            // normal "passkeys disabled" state and is silent; a SOME-but-not-all
+            // config is almost certainly an operator mistake, so warn loudly (by
+            // env-var NAME only — never values; an origin/rp_id may be sensitive)
+            // so it is not silently inert.
+            (rp_id, rp_origin, rp_name) => {
+                let any_set = rp_id.is_some() || rp_origin.is_some() || rp_name.is_some();
+                if any_set {
+                    let name_state = |label: &str, value: &Option<String>| {
+                        format!("{}={}", label, if value.is_some() { "set" } else { "unset" })
+                    };
+                    tracing::warn!(
+                        target: "trace_commons::passkey",
+                        "partial WebAuthn relying-party config detected ({}, {}, {}); \
+                         passkey surface DISABLED (fail-closed) — all three of \
+                         TRACE_COMMONS_WEBAUTHN_RP_ID/ORIGIN/NAME must be set together",
+                        name_state("TRACE_COMMONS_WEBAUTHN_RP_ID", &rp_id),
+                        name_state("TRACE_COMMONS_WEBAUTHN_RP_ORIGIN", &rp_origin),
+                        name_state("TRACE_COMMONS_WEBAUTHN_RP_NAME", &rp_name),
+                    );
+                }
+                None
+            }
         }
     }
 

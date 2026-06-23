@@ -154,6 +154,10 @@ impl<S> CeremonyStore<S> {
         // Opportunistic GC of unrelated expired entries.
         guard.retain(|_, (_, inserted)| now.duration_since(*inserted) < ttl);
         let (state, inserted) = guard.remove(id)?;
+        // Belt-and-suspenders: the `retain` above already GC'd every expired entry,
+        // so a survivor here is necessarily fresh. This second check guards a future
+        // refactor that drops the opportunistic `retain` — the single-use TTL bound
+        // then still holds.
         if now.duration_since(inserted) >= ttl {
             return None;
         }

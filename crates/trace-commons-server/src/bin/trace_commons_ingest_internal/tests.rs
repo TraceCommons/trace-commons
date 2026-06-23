@@ -33,6 +33,19 @@ async fn postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
         eprintln!("skipping: migrations failed ({error})");
         return None;
     }
+    // Reset the process-global account-surface rate limiter at the START of every
+    // DB-backed test. The account/passkey/session/rotation tests all drive handlers
+    // that share the `ACCOUNT_RATE_LIMITER` singleton (keyed by IP / global /
+    // per-credential buckets); without this, a test inherits hit counts from
+    // whatever ran before it and flakes with spurious rate-limit denials under
+    // default parallelism (e.g. `passkey_login_binds_only_to_owning_account`). The
+    // reset is harmless for tests that don't touch the limiter (it clears empty
+    // maps) and runs before any test logic, so no test can accumulate state across
+    // this boundary. This makes each DB-backed account/passkey test independent of
+    // limiter state. NOTE: it does NOT remove the repo-wide requirement that the
+    // DB-backed ingest suite run `--test-threads=1`; the shared `tenant-a` rows
+    // (cleaned per-test via `cleanup_pg_trace_tenant`) still serialize those tests.
+    reset_account_rate_limiter_for_test();
     Some(backend)
 }
 

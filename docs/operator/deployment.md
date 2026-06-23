@@ -202,6 +202,38 @@ provisioning SQL (recommended: a dedicated LOGIN role with membership in
 permissive policy is what authorizes the cross-tenant `code_hash -> tenant_id`
 read.
 
+The Slice 2 discoverable **passkey login** path reuses this **same** resolver
+role and pool for its `credential_id -> tenant_id` bootstrap (V32 extends the
+role with a `(tenant_id, credential_id)` grant on `trace_webauthn_credentials`
+plus its own permissive policy). No additional login role is needed — the same
+provisioning above covers it. If the resolver pool is unconfigured, passkey login
+fails closed (every assertion collapses to the uniform deny; no session minted),
+while passkey enrollment/management on the authenticated runtime pool are
+unaffected.
+
+### WebAuthn relying party (contributor passkeys, Slice 2)
+
+Passkey enrollment and login require the WebAuthn relying-party identity. All
+**three** of these env vars are **required together**:
+
+```sh
+export TRACE_COMMONS_WEBAUTHN_RP_ID="tracecommons.ai"            # effective domain; cannot change without invalidating every passkey
+export TRACE_COMMONS_WEBAUTHN_RP_ORIGIN="https://app.tracecommons.ai"  # full origin URL
+export TRACE_COMMONS_WEBAUTHN_RP_NAME="TraceCommons"            # shown in authenticator prompts
+```
+
+- **All-or-nothing.** Setting only some of the three is a misconfiguration: the
+  passkey surface stays **disabled** (fail-closed), and the server emits a startup
+  `WARN` naming which of the three are set vs unset (names only, never values).
+  Setting **none** of them is the normal "passkeys disabled" state and is silent.
+- **Origin must match the browser.** `TRACE_COMMONS_WEBAUTHN_RP_ORIGIN` must be the
+  exact origin the browser sees (scheme + host + port). A mismatch makes every
+  ceremony fail verification at the authenticator. `RP_ID` must be a registrable
+  suffix of that origin's host.
+- The `webauthn-authenticator-rs` crate is a **DEV-dependency only** (it backs the
+  in-process soft-authenticator used by the passkey tests). It is **not** compiled
+  into or shipped with the production binaries; no production env var enables it.
+
 ### Privacy filter backend (pilot)
 
 Pilot builds must include the `near-ai-privacy-filter` Cargo feature to enable

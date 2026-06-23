@@ -12653,6 +12653,35 @@ impl AccountRateLimiter {
             }
         }
     }
+
+    /// TEST-ONLY: clear all fixed-window and concurrency state so a test starts
+    /// from a pristine limiter. The DB-backed account/passkey/session/rotation
+    /// tests share the process-global `ACCOUNT_RATE_LIMITER`; without this reset a
+    /// test inherits hit counts from whatever ran before it, causing spurious
+    /// rate-limit denials when the suite runs with default parallelism. Each such
+    /// test calls this at the top (via `reset_account_rate_limiter_for_test`) so it
+    /// is independent of limiter state from prior tests. A poisoned lock is cleared
+    /// into a fresh map so a panic in one test cannot wedge the limiter for the rest.
+    #[cfg(test)]
+    pub fn reset_for_test(&self) {
+        match self.windows.lock() {
+            Ok(mut windows) => windows.clear(),
+            Err(poisoned) => poisoned.into_inner().clear(),
+        }
+        match self.concurrency.lock() {
+            Ok(mut concurrency) => concurrency.clear(),
+            Err(poisoned) => poisoned.into_inner().clear(),
+        }
+    }
+}
+
+/// TEST-ONLY: reset the process-global account-surface rate limiter. The
+/// DB-backed account/passkey/session/rotation tests call this at the start of
+/// each test so they don't inherit hit counts from prior tests sharing the
+/// `ACCOUNT_RATE_LIMITER` singleton. See `AccountRateLimiter::reset_for_test`.
+#[cfg(test)]
+pub fn reset_account_rate_limiter_for_test() {
+    ACCOUNT_RATE_LIMITER.reset_for_test();
 }
 
 /// RAII release of a per-account content concurrency slot.
@@ -13519,6 +13548,11 @@ async fn account_passkey_login_start_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> axum::response::Response {
+    // NOTE: unlike `login/finish`, this start surface is intentionally NOT wrapped
+    // in the `REDEEM_MIN_LATENCY` timing floor. It performs NO credential or tenant
+    // lookup — it only mints a fresh discoverable-auth challenge — so there is no
+    // found-vs-not-found oracle to erase. Do not "fix" this by adding a floor here;
+    // the floor belongs only on paths whose latency could leak credential existence.
     // Per-IP + coarse global rate limit; both collapse to the uniform deny.
     let client_ip = client_ip_for_rate_limit(&headers);
     if !ACCOUNT_RATE_LIMITER.check(
@@ -13673,8 +13707,11 @@ async fn account_passkey_login_finish_inner(
         Ok(Some(row)) => row,
         Ok(None) | Err(_) => return passkey_login_generic_deny(),
     };
+    // Move the owned `passkey` JSON out of the row (no clone) for deserialization;
+    // `account_id` is retained for the handle-binding check below.
+    let credential_account_id = credential.account_id;
     let mut passkey: webauthn_rs::prelude::Passkey =
-        match serde_json::from_value(credential.passkey.clone()) {
+        match serde_json::from_value(credential.passkey) {
             Ok(passkey) => passkey,
             Err(_) => return passkey_login_generic_deny(),
         };
@@ -13683,7 +13720,7 @@ async fn account_passkey_login_finish_inner(
     //    reaches verification): the user handle the authenticator asserted MUST
     //    equal the account the stored credential belongs to. Defense-in-depth on
     //    top of the credential_id -> account binding.
-    if account_handle_uuid != credential.account_id {
+    if account_handle_uuid != credential_account_id {
         return passkey_login_generic_deny();
     }
 
