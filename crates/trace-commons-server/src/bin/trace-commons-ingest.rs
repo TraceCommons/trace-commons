@@ -1067,6 +1067,14 @@ struct AppState {
     /// fail closed (its accessor 503s). Wired into the begin/finish ceremony
     /// handlers in later Slice 3a tasks.
     account_near_config: Option<Arc<NearConfig>>,
+    /// Test-only override for the NEAR access-key binding check (Slice 3a Task 6).
+    /// When `Some`, the enroll-finish handler consults this stub instead of the
+    /// live `view_access_key_list` JSON-RPC call, so the binding check is
+    /// exercisable without a live NEAR RPC. `#[cfg(test)]`-only: the production
+    /// binary never carries this field and always takes the live RPC path.
+    #[cfg(test)]
+    near_access_key_checker_override:
+        Option<Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker>>,
 }
 
 #[derive(Clone)]
@@ -3166,6 +3174,8 @@ impl AppState {
             account_webauthn,
             account_ceremony_store,
             account_near_config,
+            #[cfg(test)]
+            near_access_key_checker_override: None,
         })
     }
 }
@@ -5905,6 +5915,16 @@ fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route(
             "/v1/account/passkeys/{credential_id}",
             patch(account_passkey_rename_handler).delete(account_passkey_remove_handler),
+        )
+        // Login-with-NEAR enroll ceremony (Slice 3a Task 6). Links a NEAR access
+        // key to the caller's account behind the same account-auth middleware.
+        .route(
+            "/v1/account/near/enroll/start",
+            post(account_near_enroll_start_handler),
+        )
+        .route(
+            "/v1/account/near/enroll/finish",
+            post(account_near_enroll_finish_handler),
         )
         .route_layer(axum::middleware::from_fn_with_state(
             state,
@@ -11745,7 +11765,6 @@ fn account_webauthn(state: &AppState) -> ApiResult<Arc<webauthn_rs::Webauthn>> {
 /// configured (partial or absent `NearConfig`), it returns a 503 with a safe
 /// missing-control label rather than letting a ceremony proceed without a
 /// verifier. Wired into the begin/finish handlers in later Slice 3a tasks.
-#[allow(dead_code)] // wired into the NEAR sign-in handlers in later Slice 3a tasks.
 fn account_near_config(state: &AppState) -> ApiResult<Arc<NearConfig>> {
     state.account_near_config.as_ref().cloned().ok_or_else(|| {
         api_error(
@@ -13319,6 +13338,265 @@ async fn account_passkey_register_finish_handler(
     // The credential id is a PUBLIC identifier (not a secret); returning it lets
     // the client correlate the new credential for management (Task 7+).
     Ok(Json(serde_json::json!({ "credential_id": credential_id })))
+}
+
+// ============================================================================
+// Slice 3a Task 6: login-with-NEAR ENROLL ceremony (authenticated).
+//
+// Two dual-auth handlers behind `account_auth_middleware` (`Extension<AccountCtx>`)
+// that link a NEAR access key to the already-authenticated account:
+//
+//   * POST /v1/account/near/enroll/start  — issue a NEP-413 challenge.
+//   * POST /v1/account/near/enroll/finish — verify the wallet signature AND prove
+//     the key is a FullAccess key of the named account, then persist the link.
+//
+// NOTE: this is the ENROLL surface only. The strong-auth GATE (requiring a
+// passkey-backed session before linking a NEAR key) is Task 8; here the
+// middleware-injected `AccountCtx` is the only guard. The unauthenticated NEAR
+// LOGIN flow is Task 7.
+//
+// Fail-closed: `account_near_config` 503s when NEAR sign-in is unconfigured. A
+// bad signature, a missing/expired ceremony, a non-FullAccess key, or an RPC
+// error all reject with 400 and write NO identity row. Audit is hash-only: no
+// public key, NEAR account id, or signature is ever recorded.
+// ============================================================================
+
+/// The fixed human-readable message a wallet signs during NEAR enroll/login. The
+/// per-request `nonce` is the actual challenge; this constant is the displayed
+/// `message` and is pinned so start (which issues it) and finish (which verifies
+/// against it) agree byte-for-byte.
+const NEAR_ENROLL_MESSAGE: &str = "Trace Commons account link";
+
+/// Ceremony cookie binding a NEAR enroll ceremony to this browser. Shares the
+/// shape (Secure + HttpOnly + SameSite=Strict + Path=/ + short Max-Age) of the
+/// passkey ceremony cookie but a distinct name so the two ceremonies never alias.
+const ACCOUNT_NEAR_CEREMONY_COOKIE: &str = "tc_near_ceremony";
+
+/// Encode the 32-byte challenge nonce for the wire as lowercase hex (64 chars).
+///
+/// HEX is the chosen wire encoding for the nonce in BOTH directions: `start`
+/// returns it hex-encoded and `finish` decodes it from the same hex back to the
+/// `[u8; 32]` the ceremony store stashed. (The stashed nonce is the source of
+/// truth for verification; the wire value is informational for the wallet.)
+fn near_nonce_to_wire(nonce: &[u8; 32]) -> String {
+    hex::encode(nonce)
+}
+
+/// `POST /v1/account/near/enroll/start` — begin linking a NEAR access key to the
+/// authenticated account. Fails closed (503) when NEAR sign-in is unconfigured.
+/// Generates a fresh 32-byte CSPRNG nonce, stashes a `NearChallenge` ceremony
+/// keyed by an opaque ceremony id, sets the short-lived `tc_near_ceremony`
+/// cookie, and returns the `{ message, nonce, recipient }` the wallet's
+/// `signMessage` consumes.
+async fn account_near_enroll_start_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+) -> ApiResult<axum::response::Response> {
+    use axum::response::IntoResponse;
+    use rand::RngCore as _;
+
+    let cfg = account_near_config(state.as_ref())?;
+
+    // Fresh 32-byte challenge from the OS CSPRNG (same source as session secrets).
+    let mut nonce = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let recipient = cfg.recipient.clone();
+
+    let ceremony_id = trace_commons_server::account_passkey::new_ceremony_id();
+    account_ceremony_store(state.as_ref()).put(
+        ceremony_id.clone(),
+        CeremonyState::NearChallenge {
+            nonce,
+            recipient: recipient.clone(),
+        },
+    );
+
+    let cookie = cookie::Cookie::build((ACCOUNT_NEAR_CEREMONY_COOKIE, ceremony_id))
+        .secure(true)
+        .http_only(true)
+        .same_site(cookie::SameSite::Strict)
+        .path("/")
+        .max_age(cookie::time::Duration::seconds(
+            ACCOUNT_PASSKEY_CEREMONY_COOKIE_MAX_AGE_SECS,
+        ))
+        .build();
+
+    // Coarse, hash-only audit: a NEAR enroll ceremony was started. No nonce,
+    // recipient, or any account identifier in the metadata.
+    let db = account_db(state.as_ref())?;
+    db.append_account_audit(
+        &ctx.tenant_id,
+        "account_near_enroll_started",
+        &ctx.actor_ref,
+        "success",
+        serde_json::json!({}),
+    )
+    .await
+    .map_err(internal_error)?;
+
+    let payload = serde_json::json!({
+        "message": NEAR_ENROLL_MESSAGE,
+        "nonce": near_nonce_to_wire(&nonce),
+        "recipient": recipient,
+    });
+
+    let mut response = Json(payload).into_response();
+    match HeaderValue::from_str(&cookie.to_string()) {
+        Ok(value) => {
+            response
+                .headers_mut()
+                .insert(axum::http::header::SET_COOKIE, value);
+        }
+        Err(_) => {
+            return Err(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not set ceremony cookie",
+            ));
+        }
+    }
+    Ok(response)
+}
+
+/// Request body for `POST /v1/account/near/enroll/finish`. `accountId` is the
+/// human-readable NEAR account (`alice.near`); `publicKey` is the `ed25519:...`
+/// access key; `signature` is the base64 NEP-413 signature; `label` is an
+/// optional user-supplied display name.
+#[derive(serde::Deserialize)]
+struct AccountNearEnrollFinishBody {
+    #[serde(rename = "accountId")]
+    account_id: String,
+    #[serde(rename = "publicKey")]
+    public_key: String,
+    signature: String,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+/// `POST /v1/account/near/enroll/finish` — complete the NEAR access-key link.
+/// Fails closed (503) when NEAR sign-in is unconfigured. Recovers and CONSUMES
+/// the `NearChallenge` via the single-use `tc_near_ceremony` cookie (missing /
+/// expired / wrong-variant -> 400), verifies the NEP-413 wallet signature over
+/// the stashed challenge, then performs the BINDING CHECK: the signing key must
+/// be a FullAccess key of the named NEAR account (a non-FullAccess key or any RPC
+/// error -> 400, no row). Only then is the identity persisted. Audit is hash-only.
+async fn account_near_enroll_finish_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+    headers: HeaderMap,
+    Json(body): Json<AccountNearEnrollFinishBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let cfg = account_near_config(state.as_ref())?;
+    let db = account_db(state.as_ref())?;
+
+    // Recover and CONSUME (single-use `take`) the pending challenge.
+    let ceremony_id = cookie_value_from_headers(&headers, ACCOUNT_NEAR_CEREMONY_COOKIE)
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "no near ceremony in progress"))?;
+    let (nonce, recipient) = match account_ceremony_store(state.as_ref()).take(ceremony_id) {
+        Some(CeremonyState::NearChallenge { nonce, recipient }) => (nonce, recipient),
+        // Missing / expired / already-consumed, or a non-NEAR ceremony id.
+        Some(_) | None => {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "no near ceremony in progress",
+            ));
+        }
+    };
+
+    // Verify the NEP-413 signature over the stashed challenge. `callback_url` is
+    // `None` for our flow. A generic 400 on any failure: no oracle on which step
+    // failed, and no row written.
+    trace_commons_server::account_near::verify_nep413(
+        &body.public_key,
+        NEAR_ENROLL_MESSAGE,
+        &nonce,
+        &recipient,
+        None,
+        &body.signature,
+    )
+    .map_err(|_| api_error(StatusCode::BAD_REQUEST, "near enrollment failed"))?;
+
+    // BINDING CHECK: prove the signing key controls the named account by
+    // confirming it is a FullAccess key on it. The signature alone only proves
+    // possession of the private key; it does not bind the key to `accountId`.
+    //
+    // Test seam: when the `#[cfg(test)]` override is installed, consult it instead
+    // of the live `view_access_key_list` RPC so the binding check is testable
+    // without a NEAR node. Production never installs an override -> live RPC.
+    let has_full_access = {
+        #[cfg(test)]
+        {
+            match state.near_access_key_checker_override.as_ref() {
+                Some(checker) => {
+                    checker
+                        .has_full_access_key(&cfg, &body.account_id, &body.public_key)
+                        .await
+                }
+                None => {
+                    trace_commons_server::account_near::near_account_has_full_access_key(
+                        &cfg,
+                        &body.account_id,
+                        &body.public_key,
+                    )
+                    .await
+                }
+            }
+        }
+        #[cfg(not(test))]
+        {
+            trace_commons_server::account_near::near_account_has_full_access_key(
+                &cfg,
+                &body.account_id,
+                &body.public_key,
+            )
+            .await
+        }
+    };
+
+    // Fail closed: a non-FullAccess key (Ok(false)) OR an RPC/parse error (Err)
+    // both mean the key has NOT been proven to control the account. Reject with
+    // 400 and write no row.
+    match has_full_access {
+        Ok(true) => {}
+        Ok(false) | Err(_) => {
+            return Err(api_error(StatusCode::BAD_REQUEST, "near enrollment failed"));
+        }
+    }
+
+    // Treat a blank/whitespace label as absent.
+    let label = body
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    db.insert_near_identity(
+        &ctx.tenant_id,
+        ctx.account_id.as_uuid(),
+        &body.public_key,
+        &body.account_id,
+        label,
+    )
+    .await
+    .map_err(internal_error)?;
+
+    // Hash-only / label-only audit. Records ONLY whether a label was supplied —
+    // never the public key, NEAR account id, nonce, or signature.
+    db.append_account_audit(
+        &ctx.tenant_id,
+        "account_near_enrolled",
+        &ctx.actor_ref,
+        "success",
+        serde_json::json!({ "labeled": label.is_some() }),
+    )
+    .await
+    .map_err(internal_error)?;
+
+    // Both fields are PUBLIC identifiers (the access key and the NEAR account id),
+    // returned so the client can correlate the new identity for management.
+    Ok(Json(serde_json::json!({
+        "public_key": body.public_key,
+        "near_account_id": body.account_id,
+    })))
 }
 
 // ============================================================================

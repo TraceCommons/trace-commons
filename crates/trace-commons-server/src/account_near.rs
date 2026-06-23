@@ -181,6 +181,30 @@ pub async fn near_account_has_full_access_key(
     Ok(key_list_has_full_access(&json, public_key))
 }
 
+/// Test seam for the NEAR access-key binding check.
+///
+/// The enroll-finish handler must prove that the signing public key is a
+/// FullAccess key on the named NEAR account, which in production means a live
+/// `view_access_key_list` JSON-RPC call ([`near_account_has_full_access_key`]).
+/// That network call cannot run in a hermetic test, so the handler consults an
+/// optional override of this trait first and only falls back to the live call
+/// when no override is present.
+///
+/// The production path does NOT install an override (the live RPC is used). The
+/// override field is `#[cfg(test)]`-only on `AppState`, so this seam has zero
+/// effect on — and adds zero surface to — the production binary.
+#[async_trait::async_trait]
+pub trait NearAccessKeyChecker: Send + Sync {
+    /// Return `true` iff `public_key` is a FullAccess key on `account_id`.
+    /// Any error is fail-closed by the caller (treated as "not proven").
+    async fn has_full_access_key(
+        &self,
+        cfg: &NearConfig,
+        account_id: &str,
+        public_key: &str,
+    ) -> Result<bool>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
