@@ -72,7 +72,8 @@ existing first, which is exactly what this slice provides.
   the `webauthn-rs` `Webauthn` builder (RP id/origin/name from config), ceremony
   orchestration, the in-process ceremony-state store, and the credential DB ops
   (as `Database`/`PgBackend` methods, each its own tenant-scoped tx).
-- **Migration V32** — `trace_webauthn_credentials` table + the resolver grant and
+- **Migration V32** (next free number — V31 already exists; confirm at plan time) —
+  `trace_webauthn_credentials` table + the resolver grant and
   role-scoped permissive policy on it; new tables registered in
   `TRACE_COMMONS_RLS_TABLES`; `client_kind` enum extended with `'passkey'`; the two
   `trace_sessions` rotation columns.
@@ -100,12 +101,19 @@ Index `(tenant_id, account_id) WHERE revoked_at IS NULL` for the management list
 active-credential expansion. Forced RLS + `trace_corpus_tenant_isolation`. Registered
 in `TRACE_COMMONS_RLS_TABLES`.
 
-### `trace_sessions` additions (rotation)
+### `trace_sessions` additions (rotation + this-device)
 
 ```
 prev_token_hash        TEXT          CHECK (prev_token_hash ~ '^sha256:[0-9a-f]{64}$')  -- nullable
 prev_token_valid_until TIMESTAMPTZ                                                       -- nullable
+auth_credential_id     TEXT                                                              -- nullable
 ```
+
+`auth_credential_id` is set at passkey-login to the `credential_id` that authenticated
+the session (NULL for device-link sessions). It is what the management list's
+`this_device` flag compares against; without it `trace_sessions` carries no credential
+reference. It is carried through rotation unchanged. Hash-only audit still never logs a
+raw credential id.
 
 ### Ceremony state — in-process, not a table
 
@@ -168,8 +176,11 @@ or an existing passkey).
 - **Unauthenticated-surface hardening (same as redeem):** every failure (unknown
   credential, bad assertion, counter regression, expired/replayed ceremony,
   cross-origin, resolver-miss, resolver-unconfigured) → one uniform non-enumerating
-  deny behind the 250 ms timing floor + rate limiter (per-IP + global + per-credential
-  ceiling). **No `ensure_trace_tenant`** before the credential is verified.
+  deny behind the 250 ms timing floor + rate limiter (per-IP + global + a per-credential
+  ceiling, ~5/min). The per-credential ceiling keys on the asserted credential id but,
+  because every failure returns the *same* uniform deny, it never becomes a
+  credential-existence oracle. **No `ensure_trace_tenant`** before the credential is
+  verified.
 
 ### C. Management (authenticated, via `resolve_account_ctx`)
 
