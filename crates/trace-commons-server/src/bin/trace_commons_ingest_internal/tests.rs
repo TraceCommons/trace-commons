@@ -61510,3 +61510,220 @@ fn account_and_tenant_surfaces_take_distinct_types() {
     );
     assert_eq!(tenant_visible.len(), 1);
 }
+
+// --- Task 11: rate limiting, redeem timing floor, session revocation --------
+
+/// The in-process limiter admits up to `limit` hits per window, then denies.
+#[test]
+fn account_rate_limiter_caps_per_key() {
+    let limiter = AccountRateLimiter::new();
+    let key = "unit-key";
+    for _ in 0..CONFIRM_PER_CODE_LIMIT {
+        assert!(limiter.check(key, CONFIRM_PER_CODE_LIMIT), "within ceiling allowed");
+    }
+    assert!(
+        !limiter.check(key, CONFIRM_PER_CODE_LIMIT),
+        "the (limit+1)th hit must be denied"
+    );
+    // A different key is independent.
+    assert!(limiter.check("other-key", CONFIRM_PER_CODE_LIMIT));
+}
+
+/// The concurrency guard caps in-flight slots and releases on drop.
+#[test]
+fn account_rate_limiter_concurrency_cap_and_release() {
+    let limiter = AccountRateLimiter::new();
+    let key = "conc-key";
+    let g1 = limiter.acquire(key, 2).expect("slot 1");
+    let g2 = limiter.acquire(key, 2).expect("slot 2");
+    assert!(limiter.acquire(key, 2).is_none(), "cap reached");
+    drop(g1);
+    let _g3 = limiter.acquire(key, 2).expect("slot freed after drop");
+    drop(g2);
+}
+
+/// Hardening G: a cross-origin confirm (which denies BEFORE any DB access) must
+/// still take at least the redeem timing floor. No database required: the
+/// same-origin gate short-circuits to the uniform deny inside the floored body.
+#[tokio::test]
+async fn confirm_deny_respects_timing_floor() {
+    use axum::response::IntoResponse;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    // Cross-site POST -> uniform deny, short-circuits before any DB.
+    let mut cross_site = HeaderMap::new();
+    cross_site.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+    let start = std::time::Instant::now();
+    let response = confirm_login_handler(
+        State(state.clone()),
+        cross_site,
+        ConfirmLoginForm(ConfirmLoginBody {
+            code: "bogus".to_string(),
+        }),
+    )
+    .await
+    .into_response();
+    let elapsed = start.elapsed();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "uniform deny");
+    assert!(
+        elapsed >= REDEEM_MIN_LATENCY,
+        "every confirm response (incl. early deny) must take >= the floor: {elapsed:?}"
+    );
+}
+
+/// Hardening F: the per-`code_hash` ceiling denies after a few attempts for one
+/// code. No DB needed: it is checked before `resolve_login_link_tenant`. We pass
+/// a same-origin header so the same-origin gate does not short-circuit first.
+#[tokio::test]
+async fn confirm_per_code_ceiling_exhausts_a_code() {
+    use axum::response::IntoResponse;
+    let temp = tempfile::tempdir().expect("temp dir");
+    // No db_mirror: after the per-code check passes, account_db() denies, but the
+    // limiter increment has already happened. A unique code_hash per test run
+    // keeps the process-global limiter isolated from other tests.
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let code = format!("per-code-test-{}", uuid::Uuid::new_v4());
+    let mut same_origin = HeaderMap::new();
+    same_origin.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+    // The first CONFIRM_PER_CODE_LIMIT attempts pass the ceiling (and then fail
+    // downstream at account_db -> uniform deny); the (limit+1)th is denied by the
+    // ceiling itself. All return the SAME uniform deny status (non-enumerating).
+    for _ in 0..CONFIRM_PER_CODE_LIMIT {
+        let resp = confirm_login_handler(
+            State(state.clone()),
+            same_origin.clone(),
+            ConfirmLoginForm(ConfirmLoginBody { code: code.clone() }),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+    let exhausted = confirm_login_handler(
+        State(state.clone()),
+        same_origin,
+        ConfirmLoginForm(ConfirmLoginBody { code: code.clone() }),
+    )
+    .await
+    .into_response();
+    assert_eq!(
+        exhausted.status(),
+        StatusCode::BAD_REQUEST,
+        "exhausted code -> same uniform deny"
+    );
+}
+
+/// Part 1: logout revokes the CURRENT session — the same cookie then 401s on a
+/// guarded endpoint. PostgreSQL-backed; self-skips without a database.
+#[tokio::test]
+async fn logout_revokes_current_session() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+
+    // The cookie resolves before logout.
+    resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect("cookie resolves before logout");
+
+    // Logout the current session.
+    let status = account_logout_handler(State(state.clone()), headers.clone())
+        .await
+        .expect("logout succeeds");
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // The same cookie now fails closed (revoked).
+    let err = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect_err("revoked session must 401");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Part 1: revoke-all invalidates EVERY session for the account and returns the
+/// count. Two sessions for one account both 401 after revoke-all.
+#[tokio::test]
+async fn revoke_all_invalidates_every_session() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // Two redeems for the SAME device principal -> same account, two sessions.
+    let cookie_one = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let cookie_two = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let headers_one = cookie_request_headers("tc_account_session", &cookie_one);
+    let headers_two = cookie_request_headers("tc_account_session", &cookie_two);
+
+    // Both resolve before revoke-all.
+    resolve_account_ctx(state.as_ref(), &headers_one)
+        .await
+        .expect("session one resolves");
+    resolve_account_ctx(state.as_ref(), &headers_two)
+        .await
+        .expect("session two resolves");
+
+    // Revoke-all via either session.
+    let Json(body) = account_revoke_all_handler(State(state.clone()), headers_one.clone())
+        .await
+        .expect("revoke-all succeeds");
+    let revoked = body
+        .get("revoked")
+        .and_then(|v| v.as_u64())
+        .expect("revoked count");
+    assert!(revoked >= 2, "at least the two sessions revoked: {revoked}");
+
+    // BOTH cookies now fail closed.
+    let err_one = resolve_account_ctx(state.as_ref(), &headers_one)
+        .await
+        .expect_err("session one revoked");
+    assert_eq!(err_one.0, StatusCode::UNAUTHORIZED);
+    let err_two = resolve_account_ctx(state.as_ref(), &headers_two)
+        .await
+        .expect_err("session two revoked");
+    assert_eq!(err_two.0, StatusCode::UNAUTHORIZED);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}

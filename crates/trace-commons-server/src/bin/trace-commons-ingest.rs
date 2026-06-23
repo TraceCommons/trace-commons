@@ -5899,6 +5899,11 @@ fn app(state: Arc<AppState>) -> Router {
         // (`/account/login?code=...`) points here.
         .route("/account/login", get(login_interstitial_handler))
         .route("/account/login/confirm", post(confirm_login_handler))
+        .route("/v1/account/logout", post(account_logout_handler))
+        .route(
+            "/v1/account/sessions/revoke-all",
+            post(account_revoke_all_handler),
+        )
         .route("/v1/analytics/summary", get(analytics_handler))
         .route("/v1/review/quarantine", get(review_quarantine_handler))
         .route(
@@ -12016,8 +12021,34 @@ async fn account_trace_content_handler(
         .ok_or_else(not_found)?
         .map_err(internal_error)?;
 
-    // Task 11: a per-account rate limit + concurrency cap attaches here, before
-    // the (potentially expensive) decrypt. Not built in this slice.
+    // Task 11 (Hardening F): per-account rate limit + concurrency cap, keyed on
+    // the auth-derived account id (a uuid, not a secret), BEFORE the potentially
+    // expensive decrypt. Both collapse to a generic 429 (no enumeration, no size
+    // or existence signal). The concurrency guard is RAII: its slot releases when
+    // `_content_slot` drops at function return, on every path including the
+    // fail-closed error returns below.
+    let account_key = ctx.account_id.as_uuid().to_string();
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("content-account:{account_key}"),
+        CONTENT_PER_ACCOUNT_LIMIT,
+    ) {
+        return Err(api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate limited",
+        ));
+    }
+    let _content_slot = match ACCOUNT_RATE_LIMITER.acquire(
+        &format!("content-account:{account_key}"),
+        CONTENT_PER_ACCOUNT_CONCURRENCY,
+    ) {
+        Some(guard) => guard,
+        None => {
+            return Err(api_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate limited",
+            ))
+        }
+    };
 
     let audit_tenant = account_audit_tenant(&ctx);
 
@@ -12266,6 +12297,167 @@ struct ConfirmLoginBody {
     code: String,
 }
 
+// --- Task 11: account-surface hardening (rate limit, timing floor) ----------
+//
+// SINGLE-INSTANCE LIMITATION: this pilot runs on ONE host, so the rate limiter
+// below is in-process (a `Mutex<HashMap>` of fixed-window counters). It is NOT
+// distributed: if the deployment ever fans out to multiple instances behind a
+// load balancer, each instance keeps its own counters and the effective limit
+// multiplies by the instance count. That is acceptable for the single-host pilot
+// and documented here so a future multi-instance rollout knows to swap in a
+// shared limiter. No external dependency is added.
+
+/// Fixed minimum wall-clock time for EVERY redeem-confirm response (success and
+/// every uniform deny alike). Removes the found-vs-not-found timing oracle: a
+/// fast deny is padded up to this floor; a slow DB that already exceeds it does
+/// not sleep. See `confirm_login_handler`.
+const REDEEM_MIN_LATENCY: StdDuration = StdDuration::from_millis(250);
+
+/// Fixed-window length for all account-surface rate limiters.
+const ACCOUNT_RATE_WINDOW: StdDuration = StdDuration::from_secs(60);
+
+/// Per-IP cap on `GET /account/login` interstitial renders per window.
+const INTERSTITIAL_PER_IP_LIMIT: u32 = 120;
+/// Per-IP cap on `POST /account/login/confirm` attempts per window.
+const CONFIRM_PER_IP_LIMIT: u32 = 30;
+/// Coarse global cap on confirm attempts per window across ALL callers — a
+/// blast-radius ceiling against a distributed code-guessing flood.
+const CONFIRM_GLOBAL_LIMIT: u32 = 600;
+/// Hard per-`code_hash` ceiling: after this many confirm attempts in a window a
+/// given code is treated as exhausted and collapses to the uniform deny, even
+/// before the single-use consume would. A login link is meant to be redeemed
+/// once; a handful of attempts covers a legitimate retry.
+const CONFIRM_PER_CODE_LIMIT: u32 = 5;
+/// Per-account cap on `GET /v1/account/traces/{id}/content` reads per window.
+const CONTENT_PER_ACCOUNT_LIMIT: u32 = 60;
+/// Concurrency cap on in-flight content reads per account (defense against a
+/// single account fanning out many simultaneous expensive decrypts).
+const CONTENT_PER_ACCOUNT_CONCURRENCY: u32 = 4;
+
+/// One fixed-window counter: a count and the instant the current window started.
+struct RateWindow {
+    count: u32,
+    window_start: std::time::Instant,
+}
+
+/// In-process fixed-window rate limiter keyed by an opaque string (IP / account
+/// id / code_hash / a fixed global key). Single-instance only (see the module
+/// note above). The map keys hold NO cleartext secrets: IPs, account ids, and
+/// `code_hash` (already a sha256) are all non-secret or pre-hashed.
+struct AccountRateLimiter {
+    windows: std::sync::Mutex<std::collections::HashMap<String, RateWindow>>,
+    concurrency: std::sync::Mutex<std::collections::HashMap<String, u32>>,
+}
+
+impl AccountRateLimiter {
+    fn new() -> Self {
+        Self {
+            windows: std::sync::Mutex::new(std::collections::HashMap::new()),
+            concurrency: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Record one hit against `key` and report whether it is WITHIN `limit` for
+    /// the current `ACCOUNT_RATE_WINDOW`. Returns `true` when allowed, `false`
+    /// when the limit is exceeded. A poisoned lock fails CLOSED (denies).
+    fn check(&self, key: &str, limit: u32) -> bool {
+        let now = std::time::Instant::now();
+        let mut windows = match self.windows.lock() {
+            Ok(guard) => guard,
+            Err(_) => return false,
+        };
+        // Opportunistic GC: drop entries whose window has fully elapsed so the
+        // map cannot grow unbounded across many distinct keys.
+        windows.retain(|_, w| now.duration_since(w.window_start) < ACCOUNT_RATE_WINDOW);
+        let entry = windows.entry(key.to_string()).or_insert_with(|| RateWindow {
+            count: 0,
+            window_start: now,
+        });
+        if now.duration_since(entry.window_start) >= ACCOUNT_RATE_WINDOW {
+            entry.count = 0;
+            entry.window_start = now;
+        }
+        entry.count = entry.count.saturating_add(1);
+        entry.count <= limit
+    }
+
+    /// Try to acquire one concurrency slot for `key` under `limit`. Returns a
+    /// guard that releases the slot on drop, or `None` when the cap is reached.
+    /// A poisoned lock fails CLOSED (returns `None`).
+    fn acquire(&self, key: &str, limit: u32) -> Option<ConcurrencyGuard<'_>> {
+        let mut map = self.concurrency.lock().ok()?;
+        let slot = map.entry(key.to_string()).or_insert(0);
+        if *slot >= limit {
+            return None;
+        }
+        *slot += 1;
+        Some(ConcurrencyGuard {
+            limiter: self,
+            key: key.to_string(),
+        })
+    }
+
+    fn release(&self, key: &str) {
+        if let Ok(mut map) = self.concurrency.lock() {
+            if let Some(slot) = map.get_mut(key) {
+                *slot = slot.saturating_sub(1);
+                if *slot == 0 {
+                    map.remove(key);
+                }
+            }
+        }
+    }
+}
+
+/// RAII release of a per-account content concurrency slot.
+struct ConcurrencyGuard<'a> {
+    limiter: &'a AccountRateLimiter,
+    key: String,
+}
+
+impl Drop for ConcurrencyGuard<'_> {
+    fn drop(&mut self) {
+        self.limiter.release(&self.key);
+    }
+}
+
+/// Process-global account-surface limiter. Single-instance (see module note).
+static ACCOUNT_RATE_LIMITER: std::sync::LazyLock<AccountRateLimiter> =
+    std::sync::LazyLock::new(AccountRateLimiter::new);
+
+/// Extract the client IP for rate-limit keying from the first `X-Forwarded-For`
+/// hop.
+///
+/// TRUST ASSUMPTION: the single-host pilot sits behind a trusted reverse proxy /
+/// load balancer (GCP) that sets `X-Forwarded-For`. The leftmost hop is the
+/// client; we do NOT trust it for any authorization decision — it keys a
+/// best-effort rate-limit bucket ONLY. When the header is absent (no proxy, or a
+/// direct caller) every such request shares the single `"xff-absent"` bucket,
+/// which is conservative (stricter), not permissive. `axum::serve` is not wired
+/// with `ConnectInfo`, so the connection peer addr is intentionally not used
+/// here; wiring it would require a broad make-service change out of Task 11
+/// scope.
+fn client_ip_for_rate_limit(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|raw| raw.split(',').next())
+        .map(|hop| hop.trim().to_string())
+        .filter(|hop| !hop.is_empty())
+        .unwrap_or_else(|| "xff-absent".to_string())
+}
+
+/// Sleep until at least `REDEEM_MIN_LATENCY` has elapsed since `start`. A no-op
+/// when the handler already ran longer than the floor (no negative duration).
+async fn sleep_to_redeem_floor(start: std::time::Instant) {
+    let elapsed = start.elapsed();
+    if let Some(remaining) = REDEEM_MIN_LATENCY.checked_sub(elapsed) {
+        if !remaining.is_zero() {
+            tokio::time::sleep(remaining).await;
+        }
+    }
+}
+
 /// The ONE uniform, non-enumerating deny used for EVERY redeem failure mode:
 /// unknown / expired / consumed / wrong-tenant / cross-origin /
 /// unconfigured-resolver all collapse to this identical status + body. Do NOT
@@ -12328,9 +12520,24 @@ fn confirm_is_same_origin(headers: &HeaderMap) -> bool {
 /// exists so the single-use consume happens on an explicit user action (a POST),
 /// not on a link prefetch / preview that a GET would trigger.
 async fn login_interstitial_handler(
+    headers: HeaderMap,
     Query(query): Query<LoginInterstitialQuery>,
 ) -> axum::response::Response {
-    // Task 11: IP rate-limit attaches here.
+    // Task 11 (Hardening F): per-IP rate limit. On exceed, a GENERIC 429 (no
+    // per-cause detail, no enumeration). This GET does NOT consume the code, so a
+    // 429 here only throttles interstitial renders; the deny is generic.
+    let client_ip = client_ip_for_rate_limit(&headers);
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("interstitial-ip:{client_ip}"),
+        INTERSTITIAL_PER_IP_LIMIT,
+    ) {
+        let mut response = StatusCode::TOO_MANY_REQUESTS.into_response();
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        );
+        return response;
+    }
     // Minimal, self-contained HTML; the code rides in a hidden field. HTML-escape
     // it so a crafted code cannot break out of the attribute context.
     let escaped_code = query
@@ -12373,12 +12580,42 @@ async fn confirm_login_handler(
     headers: HeaderMap,
     body: ConfirmLoginForm,
 ) -> axum::response::Response {
-    // Task 11: fixed-latency floor wrapper + IP/global/per-code rate limits
-    // attach here, wrapping the whole body below.
+    // Task 11 (Hardening G): a fixed-latency floor wraps the WHOLE handler. We
+    // record entry, run the inner body (which returns on every branch — success
+    // and every uniform deny, including the cross-origin / rate-limited early
+    // denies), then sleep up to the floor before returning. Every response path
+    // therefore takes at least `REDEEM_MIN_LATENCY`, erasing the
+    // found-vs-not-found (and rate-limited-vs-not) timing oracle.
+    let start = std::time::Instant::now();
+    let response = confirm_login_inner(state, headers, body).await;
+    sleep_to_redeem_floor(start).await;
+    response
+}
+
+/// Inner body of the redeem-confirm handler. Returns on every branch with the
+/// final response; the timing floor is applied by the outer wrapper so that EACH
+/// of these return paths is padded to `REDEEM_MIN_LATENCY`.
+async fn confirm_login_inner(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: ConfirmLoginForm,
+) -> axum::response::Response {
     let code = body.0.code;
 
     // Same-origin enforcement: a cross-site POST collapses to the SAME deny.
     if !confirm_is_same_origin(&headers) {
+        return redeem_generic_deny();
+    }
+
+    // Task 11 (Hardening F): per-IP + coarse global rate limits. Both collapse to
+    // the SAME uniform deny (no per-cause enumeration); the outer wrapper still
+    // applies the timing floor so a rate-limited deny is indistinguishable from
+    // any other. The per-`code_hash` ceiling is checked below, after hashing.
+    let client_ip = client_ip_for_rate_limit(&headers);
+    if !ACCOUNT_RATE_LIMITER.check(&format!("confirm-ip:{client_ip}"), CONFIRM_PER_IP_LIMIT) {
+        return redeem_generic_deny();
+    }
+    if !ACCOUNT_RATE_LIMITER.check("confirm-global", CONFIRM_GLOBAL_LIMIT) {
         return redeem_generic_deny();
     }
 
@@ -12390,6 +12627,16 @@ async fn confirm_login_handler(
         Err(_) => return redeem_generic_deny(),
     };
     let code_hash = hash_secret(&code);
+
+    // Task 11 (Hardening F): per-`code_hash` hard ceiling. After a few attempts a
+    // given code is treated as exhausted and collapses to the uniform deny — this
+    // is IP-independent (it caps guessing/replay against one specific code even
+    // from rotating IPs). The key is a sha256, so the limiter holds no cleartext
+    // secret. Same uniform deny as every other failure; floor still applies.
+    if !ACCOUNT_RATE_LIMITER.check(&format!("confirm-code:{code_hash}"), CONFIRM_PER_CODE_LIMIT) {
+        return redeem_generic_deny();
+    }
+
     let tenant = match db.resolve_login_link_tenant(&code_hash).await {
         Ok(Some(tenant)) => tenant,
         Ok(None) | Err(_) => return redeem_generic_deny(),
@@ -12475,6 +12722,96 @@ async fn confirm_login_handler(
         HeaderValue::from_static("no-referrer"),
     );
     response
+}
+
+/// `POST /v1/account/logout` — revoke the CURRENT session (Task 11, Part 1).
+///
+/// Guarded by `resolve_account_ctx` (dual-auth). On the COOKIE path we re-parse
+/// the presented `tc_account_session` cookie to recover the secret, recompute its
+/// `token_hash`, and revoke exactly that session row (tenant- + token-scoped under
+/// forced RLS, so only the caller's own session is ever touched). On the BEARER
+/// path there is no browser session to revoke (the device token is the
+/// credential, revoked through the device-key surface, not here): this is a
+/// documented 200 no-op. Audited hash-only as `account_session_logout`.
+async fn account_logout_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<StatusCode> {
+    let ctx = resolve_account_ctx(state.as_ref(), &headers).await?;
+    let db = account_db(state.as_ref())?;
+
+    let revoked = match ctx.auth_method {
+        AccountAuthMethod::SessionCookie => {
+            // Re-derive the token_hash from the presented cookie. We reuse the
+            // exact cookie-parse + secret-hash the resolver used, so the hash we
+            // revoke is byte-identical to the stored one. (The resolver does not
+            // surface the hash, so re-parsing here is the minimal, clean seam.)
+            let cookie = cookie_value_from_headers(&headers, ACCOUNT_SESSION_COOKIE)
+                .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "no session"))?;
+            // `{b64url(tenant)}.{secret}` — the secret is the part after the '.'.
+            let secret = cookie
+                .split_once('.')
+                .map(|(_, secret)| secret)
+                .filter(|secret| !secret.is_empty())
+                .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "no session"))?;
+            let token_hash = hash_secret(secret);
+            db.revoke_current_session(&ctx.tenant_id, &token_hash)
+                .await
+                .map_err(internal_error)?
+        }
+        // Bearer path: no browser session row to revoke. Documented 200 no-op.
+        AccountAuthMethod::DeviceBearer => 0,
+    };
+
+    // Hash-only / label-only audit. The actor is the resolved account/device ref;
+    // no token, cookie, or secret is recorded. `revoked` is a 0/1 count.
+    db.append_account_audit(
+        &ctx.tenant_id,
+        "account_session_logout",
+        &ctx.actor_ref,
+        "success",
+        serde_json::json!({
+            "auth_method": match ctx.auth_method {
+                AccountAuthMethod::SessionCookie => "session_cookie",
+                AccountAuthMethod::DeviceBearer => "device_bearer",
+            },
+            "revoked": revoked,
+        }),
+    )
+    .await
+    .map_err(internal_error)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /v1/account/sessions/revoke-all` — revoke EVERY session for the caller's
+/// own account (Task 11, Part 1). Guarded by `resolve_account_ctx`. The account id
+/// is auth-derived; the UPDATE is tenant- + account-scoped under forced RLS, so a
+/// caller can only ever sign out of their OWN account's sessions. Returns the
+/// revoked count. Audited hash-only as `account_sessions_revoke_all`.
+async fn account_revoke_all_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    let ctx = resolve_account_ctx(state.as_ref(), &headers).await?;
+    let db = account_db(state.as_ref())?;
+
+    let revoked = db
+        .revoke_all_account_sessions(&ctx.tenant_id, ctx.account_id.as_uuid())
+        .await
+        .map_err(internal_error)?;
+
+    db.append_account_audit(
+        &ctx.tenant_id,
+        "account_sessions_revoke_all",
+        &ctx.actor_ref,
+        "success",
+        serde_json::json!({ "revoked": revoked }),
+    )
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(serde_json::json!({ "revoked": revoked })))
 }
 
 async fn analytics_handler(

@@ -1876,6 +1876,56 @@ impl Database for PgBackend {
         Ok(Some(account_id))
     }
 
+    async fn revoke_current_session(
+        &self,
+        tenant_id: &str,
+        token_hash: &str,
+    ) -> Result<u64, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Idempotent single-session revoke. `token_hash` is globally UNIQUE; the
+        // tenant predicate is belt-and-suspenders on top of forced RLS. An
+        // already-revoked or unknown hash affects zero rows.
+        let revoked = tx
+            .execute(
+                "UPDATE trace_sessions SET revoked_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND token_hash = $1
+                    AND revoked_at IS NULL",
+                &[&token_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(revoked)
+    }
+
+    async fn revoke_all_account_sessions(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Sign-out-everywhere: revoke every live session for the auth-derived
+        // account. Tenant- + account-scoped under forced RLS, so only the caller's
+        // own sessions can ever be touched.
+        let revoked = tx
+            .execute(
+                "UPDATE trace_sessions SET revoked_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND revoked_at IS NULL",
+                &[&account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(revoked)
+    }
+
     async fn resolve_account_for_principal(
         &self,
         tenant_id: &str,

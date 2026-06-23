@@ -341,6 +341,35 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// Revoke the CURRENT browser session identified by its `token_hash` (sha256
+    /// of the secret part of the cookie). Idempotent: an already-revoked or
+    /// unknown hash affects zero rows. Returns the number of rows revoked (0 or 1).
+    /// The `tenant_id = trace_current_tenant_id()` predicate is belt-and-suspenders
+    /// on top of forced RLS; `token_hash` is globally UNIQUE.
+    async fn revoke_current_session(
+        &self,
+        _tenant_id: &str,
+        _token_hash: &str,
+    ) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "revoke_current_session not implemented".to_string(),
+        ))
+    }
+
+    /// Revoke ALL live sessions belonging to `account_id` (sign-out-everywhere).
+    /// Only the caller's own account is ever affected: the caller passes an
+    /// auth-derived `account_id` and the UPDATE is tenant- + account-scoped under
+    /// forced RLS. Returns the number of sessions revoked.
+    async fn revoke_all_account_sessions(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+    ) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "revoke_all_account_sessions not implemented".to_string(),
+        ))
+    }
+
     /// Resolve the active account a device `principal_ref` is linked to (bearer
     /// path). Active-membership only (`unlinked_at IS NULL`, Hardening A). `None`
     /// when the principal is unlinked or links to no account.
