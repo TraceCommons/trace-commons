@@ -12,6 +12,39 @@ use crate::config::DatabaseConfig;
 use crate::db::{Database, TraceCorpusRlsDiagnostics};
 use crate::error::DatabaseError;
 
+/// Rotation-on-use cadence for browser sessions. A cookie session whose CURRENT
+/// token was issued more than this many seconds ago is rotated on its next live
+/// request: a fresh secret is minted and the old hash is parked in
+/// `prev_token_hash` for a short grace window. Default ~12h. Overridable via
+/// `TRACE_COMMONS_SESSION_ROTATION_INTERVAL_SECS` so tests can force rotation
+/// without waiting (the env var is read per call; production never sets it).
+const SESSION_ROTATION_INTERVAL_SECS_DEFAULT: i64 = 12 * 60 * 60;
+/// Grace window during which the PREVIOUS token still validates after a rotation,
+/// so an in-flight / multi-tab request holding the old cookie is not logged out
+/// before it observes the new `Set-Cookie`. Default ~2 min. Overridable via
+/// `TRACE_COMMONS_SESSION_ROTATION_GRACE_SECS` for tests.
+const SESSION_ROTATION_GRACE_SECS_DEFAULT: i64 = 2 * 60;
+
+/// Read the rotation interval (seconds), honoring the test-only env override.
+/// A malformed or non-positive override falls back to the default so a bad value
+/// can never disable rotation cadence entirely.
+fn session_rotation_interval_secs() -> i64 {
+    std::env::var("TRACE_COMMONS_SESSION_ROTATION_INTERVAL_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(SESSION_ROTATION_INTERVAL_SECS_DEFAULT)
+}
+
+/// Read the prev-token grace (seconds), honoring the test-only env override.
+fn session_rotation_grace_secs() -> i64 {
+    std::env::var("TRACE_COMMONS_SESSION_ROTATION_GRACE_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(SESSION_ROTATION_GRACE_SECS_DEFAULT)
+}
+
 pub struct PgBackend {
     pool: Pool,
     /// Narrow, SEPARATE pool for the unauthenticated login-link redeem path.
@@ -1902,15 +1935,32 @@ impl Database for PgBackend {
         // belt-and-suspenders on top of forced RLS; `token_hash` is globally
         // UNIQUE so a client-supplied (forged/mismatched) tenant simply scopes the
         // lookup to a tenant where this hash does not exist -> no row -> deny.
+        //
+        // Rotation-on-use: the SELECT also accepts a within-grace PREVIOUS token
+        // (`prev_token_hash = $1 AND prev_token_valid_until > now()`) so a request
+        // still carrying the old cookie during the brief rotation grace continues
+        // to validate (multi-tab / in-flight). `matched_current` records whether
+        // the request matched the CURRENT token: only a current match is eligible
+        // to (re-)rotate, so a prev-token request never re-rotates. `needs_rotate`
+        // pre-computes the age check in SQL against the (possibly env-overridden)
+        // interval. We always read back the row's CURRENT `token_hash` so the
+        // last_seen / rotate UPDATE keys on the canonical hash, not the presented
+        // one (which may be the prev token).
+        let interval_secs = session_rotation_interval_secs();
+        let grace_secs = session_rotation_grace_secs();
         let row = tx
             .query_opt(
-                "SELECT account_id, auth_credential_id FROM trace_sessions
+                "SELECT account_id, auth_credential_id, token_hash,
+                        (token_hash = $1) AS matched_current,
+                        (token_issued_at < now() - make_interval(secs => $2)) AS needs_rotate
+                   FROM trace_sessions
                   WHERE tenant_id = trace_current_tenant_id()
-                    AND token_hash = $1
+                    AND (token_hash = $1
+                         OR (prev_token_hash = $1 AND prev_token_valid_until > now()))
                     AND expires_at > now()
                     AND revoked_at IS NULL
                     AND last_seen_at > now() - INTERVAL '3 days'",
-                &[&token_hash],
+                &[&token_hash, &(interval_secs as f64)],
             )
             .await
             .map_err(DatabaseError::Postgres)?;
@@ -1919,7 +1969,10 @@ impl Database for PgBackend {
             // (unexpired, unrevoked) but fell past the idle cap, so a leaked secret
             // cannot be reused after the idle window even before hard expiry. The
             // predicate is the inverse idle-cap on an otherwise-valid row; a true
-            // unknown hash affects zero rows.
+            // unknown hash affects zero rows. It keys ONLY on the CURRENT
+            // `token_hash`, so a within-grace prev-token presentation (whose own
+            // row, if any, is still live and was simply not matched here) is never
+            // revoked by this branch.
             tx.execute(
                 "UPDATE trace_sessions SET revoked_at = now()
                   WHERE tenant_id = trace_current_tenant_id()
@@ -1936,20 +1989,72 @@ impl Database for PgBackend {
         };
         let account_id: Uuid = row.get("account_id");
         let auth_credential_id: Option<String> = row.get("auth_credential_id");
+        let current_token_hash: String = row.get("token_hash");
+        let matched_current: bool = row.get("matched_current");
+        let needs_rotate: bool = row.get("needs_rotate");
 
-        // Live hit: bump last_seen_at to slide the idle window forward.
-        tx.execute(
-            "UPDATE trace_sessions SET last_seen_at = now()
-              WHERE tenant_id = trace_current_tenant_id()
-                AND token_hash = $1",
-            &[&token_hash],
-        )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        // Rotate only on a CURRENT-token match that has aged past the interval. A
+        // prev-token (within-grace) request slides the idle window forward but must
+        // NOT re-rotate (that would churn the secret every multi-tab request and
+        // could orphan the cookie the other tab still holds).
+        let rotated_secret = if matched_current && needs_rotate {
+            let new_secret = crate::account_session::generate_session_secret();
+            let new_hash = crate::account_session::hash_secret(&new_secret);
+            // Same-tx rotation: park the old hash as the prev token for `grace`,
+            // swap in the new hash, reset the issue clock, slide last_seen. Keyed on
+            // the canonical current hash.
+            tx.execute(
+                "UPDATE trace_sessions
+                    SET prev_token_hash = token_hash,
+                        prev_token_valid_until = now() + make_interval(secs => $2),
+                        token_hash = $3,
+                        token_issued_at = now(),
+                        last_seen_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND token_hash = $1",
+                &[&current_token_hash, &(grace_secs as f64), &new_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+
+            // Hash-only audit. Records only the action and actor (reserved-prefix
+            // account actor); never a token, secret, or hash.
+            let actor_ref = crate::account_session::account_actor_ref(
+                &crate::account_session::AccountId::from_uuid(account_id),
+            );
+            tx.execute(
+                "INSERT INTO trace_account_audit (
+                    tenant_id, action, actor_ref, outcome, safe_metadata
+                 ) VALUES (trace_current_tenant_id(), $1, $2, $3, $4)",
+                &[
+                    &"account_session_rotated",
+                    &actor_ref,
+                    &"success",
+                    &serde_json::json!({}),
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+            Some(new_secret)
+        } else {
+            // Live hit (no rotation): bump last_seen_at to slide the idle window
+            // forward. Keyed on the canonical current hash so a prev-token match
+            // still refreshes the right row.
+            tx.execute(
+                "UPDATE trace_sessions SET last_seen_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND token_hash = $1",
+                &[&current_token_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+            None
+        };
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(Some(crate::db::ValidatedSession {
             account_id,
             auth_credential_id,
+            rotated_secret,
         }))
     }
 

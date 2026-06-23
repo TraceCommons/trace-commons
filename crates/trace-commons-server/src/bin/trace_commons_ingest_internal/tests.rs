@@ -633,6 +633,18 @@ async fn mint_redeem_session_cookie_value(state: &Arc<AppState>, token: &str) ->
     value.to_string()
 }
 
+/// Resolve an `AccountCtx` from request headers and wrap it as the `Extension`
+/// the migrated account handlers now take. Mirrors what `account_auth_middleware`
+/// does in production, so direct handler unit tests can keep asserting handler
+/// behavior without going through the full router. Panics on auth failure (the
+/// callers always pass valid credentials).
+async fn account_ctx_ext(state: &Arc<AppState>, headers: &HeaderMap) -> Extension<AccountCtx> {
+    let ctx = resolve_account_ctx(state.as_ref(), headers)
+        .await
+        .expect("test credentials resolve to an account ctx");
+    Extension(ctx)
+}
+
 fn cookie_request_headers(name: &str, value: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -924,6 +936,411 @@ async fn account_ctx_no_credentials_is_401() {
     assert_eq!(err.0, StatusCode::UNAUTHORIZED);
 }
 
+// ============================================================================
+// Slice 2 Task 8: session rotation-on-use via the account auth middleware.
+//
+// These exercise the FULL middleware stack through `app(state)` so the rotated
+// `Set-Cookie` attach (which lives in `account_auth_middleware`, not the
+// handlers) is covered. Rotation eligibility is forced by backdating
+// `token_issued_at` directly under RLS (default 12h interval, parallel-safe, no
+// process-global env override); grace expiry is forced by backdating
+// `prev_token_valid_until`.
+// ============================================================================
+
+/// Run a raw UPDATE under the tenant's RLS context against the live session row,
+/// keyed by `token_hash`. Returns the number of rows affected.
+async fn rotation_test_update_session(
+    backend: &PgBackend,
+    tenant_id: &str,
+    token_hash: &str,
+    set_clause: &str,
+) -> u64 {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant ctx");
+    let sql = format!(
+        "UPDATE trace_sessions SET {set_clause}
+          WHERE tenant_id = trace_current_tenant_id() AND token_hash = $1"
+    );
+    let n = tx.execute(sql.as_str(), &[&token_hash]).await.expect("update");
+    tx.commit().await.expect("commit");
+    n
+}
+
+/// Read `(token_hash, prev_token_hash, prev_token_valid_until)` for the single
+/// live session under `tenant_id` matching either the current or prev token equal
+/// to `any_hash`. Used to assert rotation moved the hashes as specified.
+async fn rotation_test_read_session(
+    backend: &PgBackend,
+    tenant_id: &str,
+    any_hash: &str,
+) -> (String, Option<String>, Option<chrono::DateTime<chrono::Utc>>) {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant ctx");
+    let row = tx
+        .query_one(
+            "SELECT token_hash, prev_token_hash, prev_token_valid_until
+               FROM trace_sessions
+              WHERE tenant_id = trace_current_tenant_id()
+                AND (token_hash = $1 OR prev_token_hash = $1)",
+            &[&any_hash],
+        )
+        .await
+        .expect("session row exists");
+    tx.commit().await.expect("commit");
+    (
+        row.get("token_hash"),
+        row.get("prev_token_hash"),
+        row.get("prev_token_valid_until"),
+    )
+}
+
+/// Extract the `tc_account_session` cookie VALUE from a response's `Set-Cookie`
+/// header, if present.
+fn rotation_test_set_cookie_value(response: &axum::response::Response) -> Option<String> {
+    let raw = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)?
+        .to_str()
+        .ok()?;
+    let first = raw.split(';').next()?;
+    let (name, value) = first.split_once('=')?;
+    if name.trim() == "tc_account_session" {
+        Some(value.to_string())
+    } else {
+        None
+    }
+}
+
+/// Drive `GET /v1/account/passkeys` through the FULL app (and thus the auth
+/// middleware) with the given cookie value. Returns the response.
+async fn rotation_test_get_passkeys(
+    state: &Arc<AppState>,
+    cookie_value: &str,
+) -> axum::response::Response {
+    use axum::body::Body;
+    use tower::ServiceExt;
+    app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/v1/account/passkeys")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie_value}"),
+                )
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response")
+}
+
+#[tokio::test]
+async fn session_rotation_fires_and_attaches_set_cookie() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let secret = cookie_value.split_once('.').expect("tenant.secret").1;
+    let old_hash = trace_commons_server::account_session::hash_secret(secret);
+
+    // Backdate token_issued_at well past the default 12h rotation interval.
+    let updated = rotation_test_update_session(
+        backend.as_ref(),
+        "tenant-a",
+        &old_hash,
+        "token_issued_at = now() - INTERVAL '13 hours'",
+    )
+    .await;
+    assert_eq!(updated, 1, "exactly one session backdated");
+
+    // Drive an authenticated endpoint through the middleware.
+    let response = rotation_test_get_passkeys(&state, &cookie_value).await;
+    assert_eq!(response.status(), StatusCode::OK, "aged session still valid");
+
+    // A NEW session cookie is attached.
+    let new_cookie =
+        rotation_test_set_cookie_value(&response).expect("rotation attaches a Set-Cookie");
+    assert_ne!(
+        new_cookie, cookie_value,
+        "rotated cookie carries a NEW value"
+    );
+    // Same tenant prefix, different secret.
+    assert_eq!(
+        new_cookie.split_once('.').unwrap().0,
+        cookie_value.split_once('.').unwrap().0,
+        "tenant prefix is unchanged"
+    );
+    let new_secret = new_cookie.split_once('.').expect("tenant.secret").1;
+    let new_hash = trace_commons_server::account_session::hash_secret(new_secret);
+
+    // DB row: token_hash changed to new, prev_token_hash = old, prev grace in future.
+    let (db_token_hash, db_prev_hash, db_prev_valid_until) =
+        rotation_test_read_session(backend.as_ref(), "tenant-a", &new_hash).await;
+    assert_eq!(db_token_hash, new_hash, "token_hash rotated to the new hash");
+    assert_eq!(
+        db_prev_hash.as_deref(),
+        Some(old_hash.as_str()),
+        "prev_token_hash holds the old hash"
+    );
+    let prev_valid = db_prev_valid_until.expect("prev_token_valid_until set");
+    assert!(
+        prev_valid > chrono::Utc::now(),
+        "prev_token_valid_until is in the grace future"
+    );
+
+    // Rotation is audited hash-only as account_session_rotated.
+    let audit_count = {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("conn");
+        let tx = client.transaction().await.expect("tx");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&"tenant-a"],
+        )
+        .await
+        .expect("set tenant ctx");
+        let row = tx
+            .query_one(
+                "SELECT count(*) FROM trace_account_audit
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND action = 'account_session_rotated'",
+                &[],
+            )
+            .await
+            .expect("count query");
+        let n: i64 = row.get(0);
+        tx.commit().await.expect("commit");
+        n
+    };
+    assert_eq!(audit_count, 1, "exactly one rotation audit row");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn session_rotation_grace_lets_old_cookie_validate_then_expires() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let old_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let old_secret = old_cookie.split_once('.').expect("tenant.secret").1;
+    let old_hash = trace_commons_server::account_session::hash_secret(old_secret);
+
+    // Force the first request to rotate.
+    rotation_test_update_session(
+        backend.as_ref(),
+        "tenant-a",
+        &old_hash,
+        "token_issued_at = now() - INTERVAL '13 hours'",
+    )
+    .await;
+    let first = rotation_test_get_passkeys(&state, &old_cookie).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let new_cookie = rotation_test_set_cookie_value(&first).expect("rotation set-cookie");
+    assert_ne!(new_cookie, old_cookie);
+
+    // Multi-tab: the OLD cookie still validates within grace, and does NOT
+    // re-rotate (no second Set-Cookie, since the prev-token path is ineligible).
+    let within_grace = rotation_test_get_passkeys(&state, &old_cookie).await;
+    assert_eq!(
+        within_grace.status(),
+        StatusCode::OK,
+        "old cookie validates within grace"
+    );
+    assert!(
+        rotation_test_set_cookie_value(&within_grace).is_none(),
+        "a within-grace prev-token request must NOT re-rotate"
+    );
+
+    // After grace lapses, the OLD cookie is rejected.
+    rotation_test_update_session(
+        backend.as_ref(),
+        "tenant-a",
+        // The row's CURRENT token is now the new hash; key the backdate on it.
+        &trace_commons_server::account_session::hash_secret(
+            new_cookie.split_once('.').unwrap().1,
+        ),
+        "prev_token_valid_until = now() - INTERVAL '1 minute'",
+    )
+    .await;
+    let after_grace = rotation_test_get_passkeys(&state, &old_cookie).await;
+    assert_eq!(
+        after_grace.status(),
+        StatusCode::UNAUTHORIZED,
+        "old cookie past grace is denied"
+    );
+
+    // The NEW cookie remains valid throughout.
+    let new_still_ok = rotation_test_get_passkeys(&state, &new_cookie).await;
+    assert_eq!(new_still_ok.status(), StatusCode::OK);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn fresh_session_does_not_rotate() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    // A just-minted (un-aged) session must NOT rotate -> no Set-Cookie.
+    let response = rotation_test_get_passkeys(&state, &cookie_value).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        rotation_test_set_cookie_value(&response).is_none(),
+        "a fresh session must not rotate (no Set-Cookie)"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
+async fn account_middleware_preserves_dual_auth_semantics() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    // Link the device principal to an account so the bearer path resolves.
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+
+    // Cookie path -> 200.
+    let cookie_ok = rotation_test_get_passkeys(&state, &cookie_value).await;
+    assert_eq!(cookie_ok.status(), StatusCode::OK, "cookie auth -> 200");
+
+    // Bearer path -> 200.
+    let bearer_ok = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/v1/account/passkeys")
+                .header(AUTHORIZATION, "Bearer token-a")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(bearer_ok.status(), StatusCode::OK, "bearer auth -> 200");
+
+    // Both credentials -> 400 ambiguous.
+    let both = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/v1/account/passkeys")
+                .header(AUTHORIZATION, "Bearer token-a")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie_value}"),
+                )
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        both.status(),
+        StatusCode::BAD_REQUEST,
+        "both creds -> 400 ambiguous"
+    );
+
+    // Neither credential -> 401.
+    let neither = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/v1/account/passkeys")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        neither.status(),
+        StatusCode::UNAUTHORIZED,
+        "no creds -> 401"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 /// Insert a submission row directly via the DB mirror so the account read-back
 /// surface (which reads ONLY the DB mirror) can list it. `auth_principal_ref`
 /// is the ownership key the account principal set is matched against.
@@ -999,9 +1416,10 @@ async fn account_traces_list_returns_only_owned_submissions() {
     let _other_tenant =
         insert_account_test_submission(backend.as_ref(), "tenant-b", &device_principal).await;
 
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
     let Json(page) = account_traces_list_handler(
         State(state.clone()),
-        auth_headers("token-a"),
+        ext,
         Query(AccountTracesListQuery::default()),
     )
     .await
@@ -1044,9 +1462,10 @@ async fn account_traces_list_cursor_pages_are_disjoint_and_ordered() {
     }
 
     // Page 1: limit 2.
+    let ext1 = account_ctx_ext(&state, &auth_headers("token-a")).await;
     let Json(page1) = account_traces_list_handler(
         State(state.clone()),
-        auth_headers("token-a"),
+        ext1,
         Query(AccountTracesListQuery {
             limit: Some(2),
             cursor: None,
@@ -1058,9 +1477,10 @@ async fn account_traces_list_cursor_pages_are_disjoint_and_ordered() {
     let cursor = page1.next_cursor.clone().expect("full page yields a cursor");
 
     // Page 2: continue from the cursor.
+    let ext2 = account_ctx_ext(&state, &auth_headers("token-a")).await;
     let Json(page2) = account_traces_list_handler(
         State(state.clone()),
-        auth_headers("token-a"),
+        ext2,
         Query(AccountTracesListQuery {
             limit: Some(2),
             cursor: Some(cursor),
@@ -1115,9 +1535,10 @@ async fn account_trace_detail_owned_returns_metadata_unowned_and_missing_are_uni
     let random = Uuid::new_v4();
 
     // Owned id -> metadata.
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
     let Json(item) = account_trace_detail_handler(
         State(state.clone()),
-        auth_headers("token-a"),
+        ext,
         AxumPath(owned),
     )
     .await
@@ -1126,16 +1547,18 @@ async fn account_trace_detail_owned_returns_metadata_unowned_and_missing_are_uni
 
     // Unowned id and a random nonexistent id must produce the IDENTICAL 404
     // (status AND body) -- no existence oracle.
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
     let unowned_err = account_trace_detail_handler(
         State(state.clone()),
-        auth_headers("token-a"),
+        ext,
         AxumPath(unowned),
     )
     .await
     .expect_err("unowned -> 404");
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
     let missing_err = account_trace_detail_handler(
         State(state.clone()),
-        auth_headers("token-a"),
+        ext,
         AxumPath(random),
     )
     .await
@@ -1259,9 +1682,10 @@ async fn account_trace_content_owned_returns_redacted_body_unowned_and_missing_a
     let stored_body = write_redacted_envelope_to_disk(state.as_ref(), "tenant-a", owned).await;
 
     // Owned id with a readable artifact -> 200 + redacted body.
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
     let response = account_trace_content_handler(
         State(state.clone()),
-        auth_headers("token-a"),
+        ext,
         AxumPath(owned),
     )
     .await
@@ -1307,16 +1731,18 @@ async fn account_trace_content_owned_returns_redacted_body_unowned_and_missing_a
     // Unowned and nonexistent ids collapse to the IDENTICAL 404 the detail
     // handler returns -- no existence oracle, and ownership is enforced before
     // any read.
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
     let unowned_err = account_trace_content_handler(
         State(state.clone()),
-        auth_headers("token-a"),
+        ext,
         AxumPath(unowned),
     )
     .await
     .expect_err("unowned -> 404");
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
     let missing_err = account_trace_content_handler(
         State(state.clone()),
-        auth_headers("token-a"),
+        ext,
         AxumPath(random),
     )
     .await
@@ -1330,9 +1756,10 @@ async fn account_trace_content_owned_returns_redacted_body_unowned_and_missing_a
 
     // Cross-check the content 404 body is byte-identical to the detail 404 body
     // (same `not_found()` helper -> no oracle divergence across surfaces).
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
     let detail_missing_err = account_trace_detail_handler(
         State(state.clone()),
-        auth_headers("token-a"),
+        ext,
         AxumPath(random),
     )
     .await
@@ -1372,9 +1799,10 @@ async fn account_trace_content_read_failure_fails_closed_with_generic_500() {
     // detail leaked) and still audit the failed read.
     let owned = insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
 
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
     let err = account_trace_content_handler(
         State(state.clone()),
-        auth_headers("token-a"),
+        ext,
         AxumPath(owned),
     )
     .await
@@ -62023,7 +62451,8 @@ async fn logout_revokes_current_session() {
         .expect("cookie resolves before logout");
 
     // Logout the current session.
-    let status = account_logout_handler(State(state.clone()), headers.clone())
+    let logout_ext = account_ctx_ext(&state, &headers).await;
+    let status = account_logout_handler(State(state.clone()), logout_ext, headers.clone())
         .await
         .expect("logout succeeds");
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -62072,7 +62501,8 @@ async fn revoke_all_invalidates_every_session() {
         .expect("session two resolves");
 
     // Revoke-all via either session.
-    let Json(body) = account_revoke_all_handler(State(state.clone()), headers_one.clone())
+    let revoke_ext = account_ctx_ext(&state, &headers_one).await;
+    let Json(body) = account_revoke_all_handler(State(state.clone()), revoke_ext)
         .await
         .expect("revoke-all succeeds");
     let revoked = body
@@ -62166,9 +62596,10 @@ async fn assert_target_invisible_across_all_three_reads(
     own_ids: &[Uuid],
 ) {
     // List: target absent; own ids present.
+    let list_ext = account_ctx_ext(state, &auth_headers(token)).await;
     let Json(page) = account_traces_list_handler(
         State(state.clone()),
-        auth_headers(token),
+        list_ext,
         Query(AccountTracesListQuery::default()),
     )
     .await
@@ -62187,16 +62618,18 @@ async fn assert_target_invisible_across_all_three_reads(
 
     // Detail: uniform 404 (byte-identical to a random nonexistent id).
     let random = Uuid::new_v4();
+    let target_detail_ext = account_ctx_ext(state, &auth_headers(token)).await;
     let target_detail_err = account_trace_detail_handler(
         State(state.clone()),
-        auth_headers(token),
+        target_detail_ext,
         AxumPath(target),
     )
     .await
     .expect_err("foreign detail -> 404");
+    let random_detail_ext = account_ctx_ext(state, &auth_headers(token)).await;
     let random_detail_err = account_trace_detail_handler(
         State(state.clone()),
-        auth_headers(token),
+        random_detail_ext,
         AxumPath(random),
     )
     .await
@@ -62208,9 +62641,10 @@ async fn assert_target_invisible_across_all_three_reads(
     );
 
     // Content: uniform 404, byte-identical to the detail 404 (same not_found()).
+    let target_content_ext = account_ctx_ext(state, &auth_headers(token)).await;
     let target_content_err = account_trace_content_handler(
         State(state.clone()),
-        auth_headers(token),
+        target_content_ext,
         AxumPath(target),
     )
     .await
@@ -62268,9 +62702,10 @@ async fn isolation_a_two_accounts_one_tenant_cannot_cross_read() {
 
     // And A's OWN content read-back succeeds (proves the 404 above is ownership,
     // not a blanket read failure).
+    let own_ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
     let response = account_trace_content_handler(
         State(state.clone()),
-        auth_headers("token-a"),
+        own_ext,
         AxumPath(a_owned),
     )
     .await
@@ -62525,7 +62960,7 @@ async fn isolation_e_account_actor_ref_is_inert_end_to_end() {
     // List under the COOKIE session: actor-keyed row absent, active row present.
     let Json(page) = account_traces_list_handler(
         State(state.clone()),
-        headers.clone(),
+        Extension(ctx.clone()),
         Query(AccountTracesListQuery::default()),
     )
     .await
@@ -62543,7 +62978,7 @@ async fn isolation_e_account_actor_ref_is_inert_end_to_end() {
     // Detail + content 404 for the actor-keyed row under the cookie session.
     let detail_err = account_trace_detail_handler(
         State(state.clone()),
-        headers.clone(),
+        Extension(ctx.clone()),
         AxumPath(actor_keyed),
     )
     .await
@@ -62551,7 +62986,7 @@ async fn isolation_e_account_actor_ref_is_inert_end_to_end() {
     assert_eq!(detail_err.0, StatusCode::NOT_FOUND);
     let content_err = account_trace_content_handler(
         State(state.clone()),
-        headers.clone(),
+        Extension(ctx.clone()),
         AxumPath(actor_keyed),
     )
     .await
@@ -62962,7 +63397,8 @@ async fn passkey_register_start(
 ) -> (serde_json::Value, String) {
     use axum::response::IntoResponse;
     let headers = cookie_request_headers("tc_account_session", session_cookie);
-    let response = account_passkey_register_start_handler(State(state.clone()), headers)
+    let ext = account_ctx_ext(state, &headers).await;
+    let response = account_passkey_register_start_handler(State(state.clone()), ext)
         .await
         .expect("register/start succeeds")
         .into_response();
@@ -63004,7 +63440,8 @@ async fn passkey_register_start_returns_options_and_stashes_ceremony() {
     let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
     let headers = cookie_request_headers("tc_account_session", &cookie_value);
 
-    let response = account_passkey_register_start_handler(State(state.clone()), headers)
+    let start_ext = account_ctx_ext(&state, &headers).await;
+    let response = account_passkey_register_start_handler(State(state.clone()), start_ext)
         .await
         .expect("start succeeds")
         .into_response();
@@ -63068,8 +63505,10 @@ async fn passkey_register_finish_without_ceremony_cookie_is_400() {
     // Only the session cookie; no `tc_passkey_ceremony`.
     let headers = cookie_request_headers("tc_account_session", &cookie_value);
 
+    let finish_ext = account_ctx_ext(&state, &headers).await;
     let err = account_passkey_register_finish_handler(
         State(state.clone()),
+        finish_ext,
         headers,
         Json(dummy_register_finish_body()),
     )
@@ -63105,8 +63544,10 @@ async fn passkey_register_finish_with_unknown_ceremony_is_400() {
         .expect("valid cookie header"),
     );
 
+    let finish_ext = account_ctx_ext(&state, &headers).await;
     let err = account_passkey_register_finish_handler(
         State(state.clone()),
+        finish_ext,
         headers,
         Json(dummy_register_finish_body()),
     )
@@ -63225,8 +63666,10 @@ async fn passkey_enroll_round_trip_persists_credential_and_audit() {
     let finish_body: AccountPasskeyRegisterFinishBody =
         serde_json::from_value(finish_json).expect("finish body builds from attestation");
 
+    let finish_ext = account_ctx_ext(&state, &finish_headers).await;
     let Json(finish_out) = account_passkey_register_finish_handler(
         State(state.clone()),
+        finish_ext,
         finish_headers,
         Json(finish_body),
     )
@@ -63380,8 +63823,10 @@ async fn enroll_passkey_for_token(
         serde_json::to_value(&attestation).expect("attestation serializes to JSON object");
     let finish_body: AccountPasskeyRegisterFinishBody =
         serde_json::from_value(finish_json).expect("finish body builds from attestation");
+    let finish_ext = account_ctx_ext(state, &finish_headers).await;
     let Json(finish_out) = account_passkey_register_finish_handler(
         State(state.clone()),
+        finish_ext,
         finish_headers,
         Json(finish_body),
     )
@@ -63949,7 +64394,8 @@ async fn list_passkeys(
     state: &Arc<AppState>,
     headers: HeaderMap,
 ) -> Vec<(String, Option<String>, bool)> {
-    let Json(body) = account_passkeys_list_handler(State(state.clone()), headers)
+    let ext = account_ctx_ext(state, &headers).await;
+    let Json(body) = account_passkeys_list_handler(State(state.clone()), ext)
         .await
         .expect("passkeys list succeeds");
     decode_passkey_list(&body)
@@ -64049,10 +64495,11 @@ async fn passkey_rename_updates_label_and_404s_unknown() {
     let (_auth, cred) = enroll_passkey_for_token(&state, &session_cookie).await;
 
     // Rename succeeds and is reflected in the list.
+    let rename_ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
     let status = account_passkey_rename_handler(
         State(state.clone()),
+        rename_ext,
         AxumPath(cred.clone()),
-        auth_headers("token-a"),
         Json(
             serde_json::from_value(serde_json::json!({ "label": "  Work laptop  " }))
                 .expect("rename body"),
@@ -64074,10 +64521,11 @@ async fn passkey_rename_updates_label_and_404s_unknown() {
     );
 
     // Rename of an UNKNOWN credential -> 404.
+    let rename_ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
     let err = account_passkey_rename_handler(
         State(state.clone()),
+        rename_ext,
         AxumPath("unknown-credential-id".to_string()),
-        auth_headers("token-a"),
         Json(
             serde_json::from_value(serde_json::json!({ "label": "x" })).expect("rename body"),
         ),
@@ -64106,10 +64554,11 @@ async fn passkey_remove_soft_deletes_and_404s_unknown() {
     let (_a2, cred2) = enroll_passkey_for_token(&state, &session_cookie).await;
 
     // Remove cred1: removed=true, one remaining.
+    let remove_ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
     let Json(body) = account_passkey_remove_handler(
         State(state.clone()),
+        remove_ext,
         AxumPath(cred1.clone()),
-        auth_headers("token-a"),
     )
     .await
     .expect("remove succeeds");
@@ -64128,20 +64577,22 @@ async fn passkey_remove_soft_deletes_and_404s_unknown() {
     assert!(ids.contains(cred2.as_str()), "remaining credential listed");
 
     // Re-removing cred1 (already revoked) -> 404.
+    let remove_ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
     let err = account_passkey_remove_handler(
         State(state.clone()),
+        remove_ext,
         AxumPath(cred1.clone()),
-        auth_headers("token-a"),
     )
     .await
     .expect_err("already-revoked credential 404s");
     assert_eq!(err.0, StatusCode::NOT_FOUND);
 
     // Remove of an UNKNOWN credential -> 404.
+    let remove_ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
     let err = account_passkey_remove_handler(
         State(state.clone()),
+        remove_ext,
         AxumPath("unknown-credential-id".to_string()),
-        auth_headers("token-a"),
     )
     .await
     .expect_err("unknown credential 404s");
@@ -64179,10 +64630,11 @@ async fn passkey_management_is_cross_account_isolated() {
     );
 
     // B's PATCH of A's credential -> 404.
+    let b_rename_ext = account_ctx_ext(&state, &auth_headers("token-a-2")).await;
     let err = account_passkey_rename_handler(
         State(state.clone()),
+        b_rename_ext,
         AxumPath(a_cred.clone()),
-        auth_headers("token-a-2"),
         Json(
             serde_json::from_value(serde_json::json!({ "label": "stolen" }))
                 .expect("rename body"),
@@ -64193,10 +64645,11 @@ async fn passkey_management_is_cross_account_isolated() {
     assert_eq!(err.0, StatusCode::NOT_FOUND);
 
     // B's DELETE of A's credential -> 404.
+    let b_remove_ext = account_ctx_ext(&state, &auth_headers("token-a-2")).await;
     let err = account_passkey_remove_handler(
         State(state.clone()),
+        b_remove_ext,
         AxumPath(a_cred.clone()),
-        auth_headers("token-a-2"),
     )
     .await
     .expect_err("B cannot remove A's credential");

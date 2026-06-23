@@ -12,7 +12,10 @@ use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, patch, post, put};
-use axum::{Json, Router, extract::Path as AxumPath, extract::State};
+use axum::{
+    Extension, Json, Router, extract::Path as AxumPath, extract::Request, extract::State,
+    middleware::Next,
+};
 use base64::Engine as _;
 use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::errors::ErrorKind as JwtErrorKind;
@@ -5850,6 +5853,54 @@ fn community_routes() -> Router<Arc<AppState>> {
         .layer(community_cors_layer())
 }
 
+/// The authenticated `/v1/account/*` surface, grouped on a sub-router so the
+/// account-auth middleware (`account_auth_middleware`) covers ONLY these routes.
+///
+/// `route_layer` applies the middleware to exactly the routes declared here and
+/// nowhere else: a request to a path NOT defined on this sub-router (e.g. one of
+/// the unauthenticated `/account/login*` endpoints, which live on the main
+/// router) never runs the layer. The middleware injects the resolved
+/// [`AccountCtx`] as a request extension (consumed by the handlers via
+/// `Extension<AccountCtx>`) and attaches the rotated session cookie on every
+/// response. `from_fn_with_state` binds the shared `AppState` the middleware needs
+/// to resolve + rotate.
+fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/v1/account/traces", get(account_traces_list_handler))
+        .route(
+            "/v1/account/traces/{submission_id}",
+            get(account_trace_detail_handler),
+        )
+        .route(
+            "/v1/account/traces/{submission_id}/content",
+            get(account_trace_content_handler),
+        )
+        .route("/v1/account/logout", post(account_logout_handler))
+        .route(
+            "/v1/account/sessions/revoke-all",
+            post(account_revoke_all_handler),
+        )
+        .route(
+            "/v1/account/passkeys/register/start",
+            post(account_passkey_register_start_handler),
+        )
+        .route(
+            "/v1/account/passkeys/register/finish",
+            post(account_passkey_register_finish_handler),
+        )
+        // Passkey credential management (Slice 2 Task 7). list / rename / remove the
+        // caller's OWN credentials. `{credential_id}` is the public base64url id.
+        .route("/v1/account/passkeys", get(account_passkeys_list_handler))
+        .route(
+            "/v1/account/passkeys/{credential_id}",
+            patch(account_passkey_rename_handler).delete(account_passkey_remove_handler),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state,
+            account_auth_middleware,
+        ))
+}
+
 fn community_cors_layer() -> CorsLayer {
     CorsLayer::new()
         .allow_origin(AllowOrigin::list(community_cors_origins()))
@@ -5906,18 +5957,15 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/contributors/me/submission-status",
             post(submission_status_handler),
         )
+        // UNAUTHENTICATED account endpoints. These do NOT use `resolve_account_ctx`
+        // and MUST NOT sit behind the account-auth middleware:
+        //  - `login-links` mint authenticates the DEVICE bearer via
+        //    `authenticate_ctx_with_tenant_access_grant` (NOT a cookie/account ctx).
+        //  - The redeem + passkey-login flows are the credential themselves (the
+        //    single-use code / the WebAuthn assertion).
         .route(
             "/v1/account/login-links",
             post(mint_login_link_handler),
-        )
-        .route("/v1/account/traces", get(account_traces_list_handler))
-        .route(
-            "/v1/account/traces/{submission_id}",
-            get(account_trace_detail_handler),
-        )
-        .route(
-            "/v1/account/traces/{submission_id}/content",
-            get(account_trace_content_handler),
         )
         // Browser-facing redeem flow. Intentionally NOT under /v1 and
         // un-authenticated: the single-use code IS the credential. The mint URL
@@ -5934,30 +5982,11 @@ fn app(state: Arc<AppState>) -> Router {
             "/account/passkey/login/finish",
             post(account_passkey_login_finish_handler),
         )
-        .route("/v1/account/logout", post(account_logout_handler))
-        .route(
-            "/v1/account/sessions/revoke-all",
-            post(account_revoke_all_handler),
-        )
-        .route(
-            "/v1/account/passkeys/register/start",
-            post(account_passkey_register_start_handler),
-        )
-        .route(
-            "/v1/account/passkeys/register/finish",
-            post(account_passkey_register_finish_handler),
-        )
-        // Passkey credential management (Slice 2 Task 7). Dual-auth via
-        // `resolve_account_ctx`; list / rename / remove the caller's OWN
-        // credentials. `{credential_id}` is the public base64url WebAuthn id.
-        .route(
-            "/v1/account/passkeys",
-            get(account_passkeys_list_handler),
-        )
-        .route(
-            "/v1/account/passkeys/{credential_id}",
-            patch(account_passkey_rename_handler).delete(account_passkey_remove_handler),
-        )
+        // AUTHENTICATED account surface (read-back, session, passkey enrollment +
+        // management). Grouped behind `account_auth_middleware` so the resolved
+        // `AccountCtx` is injected AND any rotated session cookie is attached on
+        // EVERY response (the single guaranteed rotation attach point).
+        .merge(authenticated_account_routes(state.clone()))
         .route("/v1/analytics/summary", get(analytics_handler))
         .route("/v1/review/quarantine", get(review_quarantine_handler))
         .route(
@@ -11767,7 +11796,80 @@ fn account_session_cookie_parts(cookie: &str) -> Option<(String, String)> {
 /// fall-through to an unauthenticated or elevated state. The returned `AccountCtx`
 /// carries no role/privilege field, so the cookie path cannot be treated as
 /// reviewer/admin: it is a low-privilege contributor surface by construction.
+/// Axum middleware guarding the authenticated `/v1/account/*` surface.
+///
+/// Runs the SAME credential dispatch as [`resolve_account_ctx`] (both creds ->
+/// 400; bearer -> bearer-resolve; cookie -> cookie-resolve + rotate; neither ->
+/// 401). On auth failure it returns the error response WITHOUT calling the inner
+/// handler. On success it inserts the resolved [`AccountCtx`] into the request
+/// extensions (so handlers extract it via `Extension<AccountCtx>`), runs the
+/// handler, and — if rotation-on-use fired — attaches a fresh `Set-Cookie`
+/// (plus `Cache-Control: no-store`) to the response.
+///
+/// This is the SINGLE guaranteed rotated-cookie attach point: by living in the
+/// middleware, the new cookie is emitted on EVERY authenticated account response,
+/// so no handler can rotate the stored token yet forget to hand the browser the
+/// new secret (which would log the user out after the grace window).
+async fn account_auth_middleware(
+    State(state): State<Arc<AppState>>,
+    mut request: Request,
+    next: Next,
+) -> axum::response::Response {
+    let (ctx, rotated_cookie_value) =
+        match resolve_account_ctx_with_rotation(state.as_ref(), request.headers()).await {
+            Ok(resolved) => resolved,
+            // Auth failure: return the error response, do NOT run the handler.
+            Err(err) => return err.into_response(),
+        };
+
+    request.extensions_mut().insert(ctx);
+    let mut response = next.run(request).await;
+
+    if let Some(cookie_value) = rotated_cookie_value {
+        // Build the IDENTICAL Slice 1 session cookie: Secure / HttpOnly /
+        // SameSite=Strict / Path=/, 7d. A malformed header value is impossible in
+        // practice (the value is b64url(tenant) + '.' + b64url(secret)); if it ever
+        // were, we skip the attach rather than corrupt the response — the browser
+        // keeps the old cookie and re-validates within grace on the next request.
+        let cookie = cookie::Cookie::build((ACCOUNT_SESSION_COOKIE, cookie_value))
+            .secure(true)
+            .http_only(true)
+            .same_site(cookie::SameSite::Strict)
+            .path("/")
+            .max_age(cookie::time::Duration::days(ACCOUNT_SESSION_TTL_DAYS))
+            .build();
+        if let Ok(value) = HeaderValue::from_str(&cookie.to_string()) {
+            response
+                .headers_mut()
+                .insert(axum::http::header::SET_COOKIE, value);
+            response.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store"),
+            );
+        }
+    }
+
+    response
+}
+
+#[cfg(test)]
 async fn resolve_account_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult<AccountCtx> {
+    // Thin wrapper that DROPS any rotation outcome. Retained so direct unit-test
+    // call sites (which assert resolver semantics, not cookie attach) keep working.
+    // The PRODUCTION attach point is `account_auth_middleware`, which calls
+    // `resolve_account_ctx_with_rotation` and emits the `Set-Cookie` itself.
+    let (ctx, _rotated) = resolve_account_ctx_with_rotation(state, headers).await?;
+    Ok(ctx)
+}
+
+/// Same dispatch as [`resolve_account_ctx`], but additionally surfaces any
+/// rotated session secret (cookie path only) so the auth middleware can attach a
+/// fresh `Set-Cookie` on EVERY authenticated response. The bearer / both-creds /
+/// neither branches never rotate, so they return `None`.
+async fn resolve_account_ctx_with_rotation(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> ApiResult<(AccountCtx, Option<String>)> {
     let has_bearer = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -11780,7 +11882,9 @@ async fn resolve_account_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult
             StatusCode::BAD_REQUEST,
             "ambiguous credentials: present both a session cookie and a bearer token",
         )),
-        (true, None) => resolve_account_ctx_bearer(state, headers).await,
+        (true, None) => resolve_account_ctx_bearer(state, headers)
+            .await
+            .map(|ctx| (ctx, None)),
         (false, Some(cookie)) => resolve_account_ctx_cookie(state, cookie).await,
         (false, None) => Err(api_error(
             StatusCode::UNAUTHORIZED,
@@ -11827,7 +11931,10 @@ async fn resolve_account_ctx_bearer(
 /// but this is SAFE: the stored `token_hash` is the sha256 of the SECRET ONLY and
 /// is globally UNIQUE, so a forged/mismatched tenant scopes the RLS lookup to a
 /// tenant where this hash does not exist → no row → 401. See `validate_session`.
-async fn resolve_account_ctx_cookie(state: &AppState, cookie: &str) -> ApiResult<AccountCtx> {
+async fn resolve_account_ctx_cookie(
+    state: &AppState,
+    cookie: &str,
+) -> ApiResult<(AccountCtx, Option<String>)> {
     let invalid =
         || api_error(StatusCode::UNAUTHORIZED, "invalid or expired account session");
 
@@ -11846,16 +11953,31 @@ async fn resolve_account_ctx_cookie(state: &AppState, cookie: &str) -> ApiResult
         .await
         .map_err(internal_error)?;
 
-    Ok(AccountCtx {
-        actor_ref: account_actor_ref(&account),
-        account_id: account,
-        principal_set,
-        auth_method: AccountAuthMethod::SessionCookie,
-        tenant_id,
-        // Carried through from the validated session row so the passkey list can
-        // flag the currently-authenticating credential as `this_device`.
-        auth_credential_id: session.auth_credential_id,
-    })
+    // If rotation-on-use fired, build the IDENTICAL Slice 1 session cookie value
+    // (`{b64url(tenant)}.{new_secret}`) so the middleware can attach a fresh
+    // `Set-Cookie`. The browser still holds the old secret until that header lands;
+    // `validate_session` already parked the old hash as the within-grace prev token.
+    let rotated_cookie_value = session.rotated_secret.map(|new_secret| {
+        format!(
+            "{}.{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tenant_id.as_bytes()),
+            new_secret,
+        )
+    });
+
+    Ok((
+        AccountCtx {
+            actor_ref: account_actor_ref(&account),
+            account_id: account,
+            principal_set,
+            auth_method: AccountAuthMethod::SessionCookie,
+            tenant_id,
+            // Carried through from the validated session row so the passkey list can
+            // flag the currently-authenticating credential as `this_device`.
+            auth_credential_id: session.auth_credential_id,
+        },
+        rotated_cookie_value,
+    ))
 }
 
 /// Default page size for the account trace read-back list. Smaller than the
@@ -11945,10 +12067,9 @@ fn decode_account_traces_cursor(cursor: &str) -> ApiResult<TraceSubmissionKeyset
 /// set is the active-membership expansion, `unlinked_at IS NULL`). NO content.
 async fn account_traces_list_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    Extension(ctx): Extension<AccountCtx>,
     Query(query): Query<AccountTracesListQuery>,
 ) -> ApiResult<Json<AccountTracesPage>> {
-    let ctx = resolve_account_ctx(state.as_ref(), &headers).await?;
     let limit = match query.limit {
         Some(limit) if !(1..=ACCOUNT_TRACES_MAX_LIMIT).contains(&limit) => {
             return Err(api_error(
@@ -12030,10 +12151,9 @@ async fn account_traces_list_handler(
 /// existence oracle): the response is byte-identical in either case.
 async fn account_trace_detail_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    Extension(ctx): Extension<AccountCtx>,
     AxumPath(submission_id): AxumPath<Uuid>,
 ) -> ApiResult<Json<TraceCommonsTraceListItem>> {
-    let ctx = resolve_account_ctx(state.as_ref(), &headers).await?;
     let not_found = || api_error(StatusCode::NOT_FOUND, "trace not found");
 
     let db = account_db(state.as_ref())?;
@@ -12119,10 +12239,9 @@ async fn audit_account_content_read_failure(
 
 async fn account_trace_content_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    Extension(ctx): Extension<AccountCtx>,
     AxumPath(submission_id): AxumPath<Uuid>,
 ) -> ApiResult<axum::response::Response> {
-    let ctx = resolve_account_ctx(state.as_ref(), &headers).await?;
     let not_found = || api_error(StatusCode::NOT_FOUND, "trace not found");
 
     // Same-origin is intentionally NOT enforced for this GET: it carries no
@@ -12855,9 +12974,9 @@ async fn confirm_login_inner(
 /// documented 200 no-op. Audited hash-only as `account_session_logout`.
 async fn account_logout_handler(
     State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
     headers: HeaderMap,
 ) -> ApiResult<StatusCode> {
-    let ctx = resolve_account_ctx(state.as_ref(), &headers).await?;
     let db = account_db(state.as_ref())?;
 
     let revoked = match ctx.auth_method {
@@ -12907,9 +13026,8 @@ async fn account_logout_handler(
 /// revoked count. Audited hash-only as `account_sessions_revoke_all`.
 async fn account_revoke_all_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    Extension(ctx): Extension<AccountCtx>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let ctx = resolve_account_ctx(state.as_ref(), &headers).await?;
     let db = account_db(state.as_ref())?;
 
     let revoked = db
@@ -12981,11 +13099,10 @@ struct AccountPasskeyRegisterFinishBody {
 /// binding the ceremony to this browser.
 async fn account_passkey_register_start_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    Extension(ctx): Extension<AccountCtx>,
 ) -> ApiResult<axum::response::Response> {
     use axum::response::IntoResponse;
 
-    let ctx = resolve_account_ctx(state.as_ref(), &headers).await?;
     let webauthn = account_webauthn(state.as_ref())?;
     let db = account_db(state.as_ref())?;
 
@@ -13078,10 +13195,10 @@ async fn account_passkey_register_start_handler(
 /// and NO row is written.
 async fn account_passkey_register_finish_handler(
     State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
     headers: HeaderMap,
     Json(body): Json<AccountPasskeyRegisterFinishBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let ctx = resolve_account_ctx(state.as_ref(), &headers).await?;
     let webauthn = account_webauthn(state.as_ref())?;
     let db = account_db(state.as_ref())?;
 
@@ -13182,9 +13299,8 @@ struct AccountPasskeyListItem {
 /// surfaces that do not audit plain list reads.
 async fn account_passkeys_list_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    Extension(ctx): Extension<AccountCtx>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let ctx = resolve_account_ctx(state.as_ref(), &headers).await?;
     let db = account_db(state.as_ref())?;
 
     let creds = db
@@ -13231,11 +13347,10 @@ struct AccountPasskeyRenameBody {
 /// credential id or label text).
 async fn account_passkey_rename_handler(
     State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
     AxumPath(credential_id): AxumPath<String>,
-    headers: HeaderMap,
     Json(body): Json<AccountPasskeyRenameBody>,
 ) -> ApiResult<StatusCode> {
-    let ctx = resolve_account_ctx(state.as_ref(), &headers).await?;
     let db = account_db(state.as_ref())?;
 
     // Treat a blank/whitespace label as absent (clears the label).
@@ -13283,10 +13398,9 @@ async fn account_passkey_rename_handler(
 /// recording ONLY the remaining count (never the credential id).
 async fn account_passkey_remove_handler(
     State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
     AxumPath(credential_id): AxumPath<String>,
-    headers: HeaderMap,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let ctx = resolve_account_ctx(state.as_ref(), &headers).await?;
     let db = account_db(state.as_ref())?;
 
     let result = db

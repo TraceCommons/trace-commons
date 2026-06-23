@@ -341,9 +341,14 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// Validate a browser session by its `token_hash` (sha256 of the secret part
     /// of the cookie, NOT the whole cookie value) under the caller-asserted
     /// `tenant_id`. Inside an RLS-scoped tx: select the account for a session
-    /// that is unexpired, not revoked, and seen within the idle cap. On a hit,
+    /// that is unexpired, not revoked, and seen within the idle cap, matching
+    /// either the CURRENT `token_hash` or a within-grace previous token. On a hit,
     /// bump `last_seen_at` and return the account id together with the session's
-    /// `auth_credential_id`. On a miss (including an
+    /// `auth_credential_id`. When the matched row aged past the rotation interval
+    /// AND the request matched the current token, mint a new secret in the same tx
+    /// (rotate `token_hash`, set `prev_token_hash`/`prev_token_valid_until`,
+    /// reset `token_issued_at`) and return it as `rotated_secret`. A within-grace
+    /// previous-token match does NOT re-rotate. On a miss (including an
     /// idle-capped row, which is auto-revoked) return `None`. Any store/DB error
     /// surfaces as `Err`; callers MUST treat both `None` and `Err` as a denial.
     ///
@@ -577,6 +582,15 @@ pub struct RedeemedSession {
 pub struct ValidatedSession {
     pub account_id: uuid::Uuid,
     pub auth_credential_id: Option<String>,
+    /// Set to the NEW raw session secret when rotation-on-use fired for this
+    /// request (the matched row's `token_issued_at` aged past the rotation
+    /// interval and the request matched the CURRENT `token_hash`), and `None`
+    /// otherwise. When `Some`, the caller MUST emit a fresh `Set-Cookie` so the
+    /// browser swaps to the new secret before the short prev-token grace lapses;
+    /// the auth middleware is the single guaranteed attach point. A request that
+    /// matched the previous token within grace (multi-tab) does NOT re-rotate and
+    /// leaves this `None`.
+    pub rotated_secret: Option<String>,
 }
 
 /// A registered passkey resolved for the LOGIN (assertion) path. Carries only
