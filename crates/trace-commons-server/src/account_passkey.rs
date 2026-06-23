@@ -1,0 +1,196 @@
+//! Slice 2 passkey scaffolding: the WebAuthn relying-party instance and the
+//! in-process ceremony store.
+//!
+//! This module owns the construction of the `webauthn_rs::Webauthn` relying party
+//! from a validated [`WebauthnConfig`], plus the short-lived store that holds
+//! in-flight ceremony state (registration / discoverable authentication) between
+//! the challenge response and its verification.
+//!
+//! ## Single-instance limitation
+//!
+//! [`CeremonyStore`] keeps ceremony state in process memory ([`Mutex`] +
+//! [`HashMap`]). It is therefore correct ONLY for a single-process deployment: a
+//! challenge issued by one process cannot be completed by another, and state is
+//! lost on restart. The pilot runs a single ingest process, so this is acceptable
+//! for Slice 2. A multi-process or horizontally-scaled deployment MUST replace
+//! this with a shared store (e.g. a short-TTL row keyed by ceremony id). The store
+//! is instantiated and threaded via `AppState` (NOT a global static) so it is
+//! injectable and unit-testable.
+//!
+//! The register/login/manage ceremonies and handlers that consume this scaffolding
+//! land in later Slice 2 tasks; this module deliberately stops at construction.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use webauthn_rs::prelude::{DiscoverableAuthentication, PasskeyRegistration, Url};
+use webauthn_rs::{Webauthn, WebauthnBuilder};
+
+use crate::config::WebauthnConfig;
+
+/// Time-to-live for a stored ceremony. WebAuthn ceremonies are interactive and
+/// short; three minutes is comfortably longer than a user takes to tap an
+/// authenticator while still bounding how long stale challenge state survives.
+pub const CEREMONY_TTL: Duration = Duration::from_secs(3 * 60);
+
+/// Build the relying-party `Webauthn` instance from a validated [`WebauthnConfig`].
+///
+/// The `rp_origin` is parsed into a [`Url`]; an invalid origin (or an rp_id the
+/// builder rejects) surfaces as an `Err`, so a misconfigured relying party fails
+/// at startup rather than producing broken ceremonies. Uses the webauthn-rs 0.5
+/// builder: `WebauthnBuilder::new(rp_id, &rp_origin)?.rp_name(rp_name).build()`.
+pub fn build_webauthn(cfg: &WebauthnConfig) -> anyhow::Result<Webauthn> {
+    let rp_origin = Url::parse(&cfg.rp_origin)?;
+    let webauthn = WebauthnBuilder::new(&cfg.rp_id, &rp_origin)?
+        .rp_name(&cfg.rp_name)
+        .build()?;
+    Ok(webauthn)
+}
+
+/// In-flight WebAuthn ceremony state held between challenge issuance and
+/// verification.
+///
+/// The two variants carry the webauthn-rs 0.5 server-side state types that the
+/// later Slice 2 tasks produce: [`PasskeyRegistration`] from the registration
+/// challenge (Task 5) and [`DiscoverableAuthentication`] from the discoverable
+/// login challenge (Task 6). Neither is constructible outside a real ceremony, so
+/// unit tests exercise [`CeremonyStore`] over a stand-in type via its generic
+/// parameter rather than constructing these variants directly.
+pub enum CeremonyState {
+    /// Pending passkey registration (consumed by `finish_passkey_registration`).
+    Registration(PasskeyRegistration),
+    /// Pending discoverable authentication (consumed by
+    /// `finish_discoverable_authentication`).
+    DiscoverableAuthentication(DiscoverableAuthentication),
+}
+
+/// Generate a fresh, high-entropy ceremony id.
+///
+/// Reuses the Slice 1 CSPRNG (`account_session::generate_login_code`, 160-bit
+/// OsRng, URL-safe base64) so ceremony ids are unguessable and url/cookie-safe.
+pub fn new_ceremony_id() -> String {
+    crate::account_session::generate_login_code()
+}
+
+/// Single-use, TTL-bounded in-process store for in-flight ceremony state.
+///
+/// Generic over the stored value `S` purely for testability: production code uses
+/// `CeremonyStore<CeremonyState>`, while unit tests instantiate it over a simple
+/// stand-in (the real [`CeremonyState`] variants are not constructible without a
+/// live ceremony). See the module-level single-instance limitation.
+pub struct CeremonyStore<S = CeremonyState> {
+    entries: Mutex<HashMap<String, (S, Instant)>>,
+    ttl: Duration,
+}
+
+impl<S> Default for CeremonyStore<S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S> CeremonyStore<S> {
+    /// Create an empty store with the default [`CEREMONY_TTL`].
+    pub fn new() -> Self {
+        Self::with_ttl(CEREMONY_TTL)
+    }
+
+    /// Create an empty store with an explicit TTL (used by tests).
+    pub fn with_ttl(ttl: Duration) -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            ttl,
+        }
+    }
+
+    /// Store `state` under `id`, stamped with the current time. Opportunistically
+    /// drops already-expired entries while the lock is held.
+    pub fn put(&self, id: String, state: S) {
+        let now = Instant::now();
+        let mut guard = self.entries.lock().expect("ceremony store mutex poisoned");
+        let ttl = self.ttl;
+        guard.retain(|_, (_, inserted)| now.duration_since(*inserted) < ttl);
+        guard.insert(id, (state, now));
+    }
+
+    /// Remove and return the state for `id` if present and not expired.
+    ///
+    /// Single-use: the entry is removed on the first successful `take`, so a
+    /// second `take` of the same id returns `None`. An entry older than the TTL is
+    /// dropped and treated as absent. Also opportunistically GCs other expired
+    /// entries while the lock is held.
+    pub fn take(&self, id: &str) -> Option<S> {
+        let now = Instant::now();
+        let mut guard = self.entries.lock().expect("ceremony store mutex poisoned");
+        let ttl = self.ttl;
+        // Opportunistic GC of unrelated expired entries.
+        guard.retain(|_, (_, inserted)| now.duration_since(*inserted) < ttl);
+        let (state, inserted) = guard.remove(id)?;
+        if now.duration_since(inserted) >= ttl {
+            return None;
+        }
+        Some(state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_webauthn_succeeds_for_valid_config() {
+        let cfg = WebauthnConfig {
+            rp_id: "tracecommons.ai".to_string(),
+            rp_origin: "https://app.tracecommons.ai".to_string(),
+            rp_name: "TraceCommons".to_string(),
+        };
+        assert!(build_webauthn(&cfg).is_ok());
+    }
+
+    #[test]
+    fn build_webauthn_errors_for_invalid_origin() {
+        let cfg = WebauthnConfig {
+            rp_id: "tracecommons.ai".to_string(),
+            rp_origin: "not a url".to_string(),
+            rp_name: "TraceCommons".to_string(),
+        };
+        assert!(build_webauthn(&cfg).is_err());
+    }
+
+    #[test]
+    fn new_ceremony_id_is_high_entropy_and_unique() {
+        let a = new_ceremony_id();
+        let b = new_ceremony_id();
+        assert_ne!(a, b);
+        assert!(a.len() >= 20, "ceremony id should be high-entropy");
+    }
+
+    #[test]
+    fn store_put_then_take_returns_value() {
+        let store: CeremonyStore<u32> = CeremonyStore::new();
+        store.put("id-1".to_string(), 42);
+        assert_eq!(store.take("id-1"), Some(42));
+    }
+
+    #[test]
+    fn store_take_is_single_use() {
+        let store: CeremonyStore<u32> = CeremonyStore::new();
+        store.put("id-1".to_string(), 42);
+        assert_eq!(store.take("id-1"), Some(42));
+        assert_eq!(store.take("id-1"), None);
+    }
+
+    #[test]
+    fn store_drops_expired_entries() {
+        let store: CeremonyStore<u32> = CeremonyStore::with_ttl(Duration::ZERO);
+        store.put("id-1".to_string(), 42);
+        assert_eq!(store.take("id-1"), None);
+    }
+
+    #[test]
+    fn store_missing_id_returns_none() {
+        let store: CeremonyStore<u32> = CeremonyStore::new();
+        assert_eq!(store.take("absent"), None);
+    }
+}

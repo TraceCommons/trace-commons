@@ -2196,6 +2196,8 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         revocation_propagation_max_attempts: DEFAULT_REVOCATION_PROPAGATION_MAX_ATTEMPTS,
         novelty_utility_credit_points_delta: DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA,
         novelty_utility_require_production_gate: false,
+        account_webauthn: None,
+        account_ceremony_store: Arc::new(CeremonyStore::new()),
     })
 }
 
@@ -21580,6 +21582,8 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         revocation_propagation_max_attempts: DEFAULT_REVOCATION_PROPAGATION_MAX_ATTEMPTS,
         novelty_utility_credit_points_delta: DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA,
         novelty_utility_require_production_gate: false,
+        account_webauthn: None,
+        account_ceremony_store: Arc::new(CeremonyStore::new()),
     });
 
     let mut envelope = sample_envelope().await;

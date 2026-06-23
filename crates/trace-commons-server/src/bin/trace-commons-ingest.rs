@@ -40,7 +40,8 @@ use trace_commons_server::account_session::{
 // `AccountPrincipalSet` is used by the account visibility predicate below; the
 // binary can no longer mint one (only the lib's `expand_account_principals`
 // does), it only borrows the set carried by an `AccountCtx`.
-use trace_commons_server::config::DatabaseConfig;
+use trace_commons_server::account_passkey::{build_webauthn, CeremonyStore};
+use trace_commons_server::config::{DatabaseConfig, WebauthnConfig};
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
 use trace_commons_server::db::{Database, TraceCorpusRlsDiagnostics};
 use trace_commons_server::error::DatabaseError;
@@ -1046,6 +1047,15 @@ struct AppState {
     /// `credit_withheld_reason = "non_production_gate"`. Toggle via
     /// `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE`.
     novelty_utility_require_production_gate: bool,
+    /// Slice 2 passkeys: the WebAuthn relying party, present only when
+    /// `WebauthnConfig` is fully configured. `None` makes the passkey surface
+    /// fail closed (its accessor 503s). Wired into ceremony handlers in later
+    /// Slice 2 tasks.
+    account_webauthn: Option<Arc<webauthn_rs::Webauthn>>,
+    /// Slice 2 passkeys: in-process, single-use, TTL-bounded ceremony store.
+    /// Single-instance only (see `account_passkey` module docs). Consumed by
+    /// the register/login ceremony handlers in later Slice 2 tasks.
+    account_ceremony_store: Arc<CeremonyStore>,
 }
 
 #[derive(Clone)]
@@ -3013,6 +3023,16 @@ impl AppState {
             require_derived_export_object_refs,
             "TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS requires TRACE_COMMONS_DERIVED_EXPORT_REQUIRE_OBJECT_REFS",
         )?;
+
+        // Slice 2 passkeys: build the relying party only when fully configured.
+        // A partial WebauthnConfig is dropped to None by the loader, so the
+        // passkey surface stays fail-closed. An invalid origin fails startup.
+        let account_webauthn = match WebauthnConfig::from_env() {
+            Some(cfg) => Some(Arc::new(build_webauthn(&cfg)?)),
+            None => None,
+        };
+        let account_ceremony_store = Arc::new(CeremonyStore::new());
+
         Ok(Self {
             root,
             tokens: Arc::new(tokens),
@@ -3127,6 +3147,8 @@ impl AppState {
             novelty_utility_require_production_gate: env_truthy(
                 TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE,
             ),
+            account_webauthn,
+            account_ceremony_store,
         })
     }
 }
@@ -11628,6 +11650,30 @@ fn account_db(state: &AppState) -> ApiResult<Arc<dyn Database>> {
             "account registry DB is not configured",
         )
     })
+}
+
+/// Resolve the configured WebAuthn relying party for the passkey ceremonies.
+///
+/// Fails closed exactly like `account_db`: when the relying party is not
+/// configured (partial or absent `WebauthnConfig`), it returns a 503 with a safe
+/// missing-control label rather than letting a ceremony proceed without a
+/// relying party. Wired into the register/login handlers in later Slice 2 tasks.
+#[allow(dead_code)]
+fn account_webauthn(state: &AppState) -> ApiResult<Arc<webauthn_rs::Webauthn>> {
+    state.account_webauthn.as_ref().cloned().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "passkey relying party is not configured",
+        )
+    })
+}
+
+/// Borrow the in-process ceremony store. Infallible: the store is always present
+/// on `AppState`. Consumed by the register/login ceremony handlers in later
+/// Slice 2 tasks.
+#[allow(dead_code)]
+fn account_ceremony_store(state: &AppState) -> Arc<CeremonyStore> {
+    state.account_ceremony_store.clone()
 }
 
 /// Extract the value of a named cookie from a request `Cookie` header.

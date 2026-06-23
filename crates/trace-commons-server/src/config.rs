@@ -89,3 +89,51 @@ impl DatabaseConfig {
             .map(|value| value.expose_secret())
     }
 }
+
+/// WebAuthn relying-party configuration for the passkey ceremonies (Slice 2).
+///
+/// All three fields are required together. The loader is fail-closed: it returns
+/// `Some` only when every one of `TRACE_COMMONS_WEBAUTHN_RP_ID`,
+/// `TRACE_COMMONS_WEBAUTHN_RP_ORIGIN`, and `TRACE_COMMONS_WEBAUTHN_RP_NAME` is set
+/// to a non-blank value. A partial configuration (some-but-not-all set) is treated
+/// as a misconfiguration and yields `None`, so the passkey surface stays disabled
+/// (its accessor fails closed) rather than building a relying party from incomplete
+/// state. Mirrors `DatabaseConfig::login_resolver_url_from_env`: blank is unset.
+#[derive(Debug, Clone)]
+pub struct WebauthnConfig {
+    /// Relying-party id (an effective domain, e.g. `tracecommons.ai`). Credentials
+    /// bind to this value; it cannot change without invalidating every passkey.
+    pub rp_id: String,
+    /// Relying-party origin (a full URL, e.g. `https://app.tracecommons.ai`).
+    pub rp_origin: String,
+    /// Human-readable relying-party name shown in authenticator prompts.
+    pub rp_name: String,
+}
+
+impl WebauthnConfig {
+    /// Load the relying-party config from the environment. Returns `Some` only when
+    /// all three of `TRACE_COMMONS_WEBAUTHN_RP_ID`, `_RP_ORIGIN`, and `_RP_NAME` are
+    /// present and non-blank. A partial set fails closed (`None`).
+    pub fn from_env() -> Option<Self> {
+        let rp_id = Self::non_blank_env("TRACE_COMMONS_WEBAUTHN_RP_ID");
+        let rp_origin = Self::non_blank_env("TRACE_COMMONS_WEBAUTHN_RP_ORIGIN");
+        let rp_name = Self::non_blank_env("TRACE_COMMONS_WEBAUTHN_RP_NAME");
+        match (rp_id, rp_origin, rp_name) {
+            (Some(rp_id), Some(rp_origin), Some(rp_name)) => Some(Self {
+                rp_id,
+                rp_origin,
+                rp_name,
+            }),
+            // Partial config is a misconfiguration: fail closed rather than build a
+            // relying party from incomplete state.
+            _ => None,
+        }
+    }
+
+    fn non_blank_env(key: &str) -> Option<String> {
+        std::env::var(key)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+}
