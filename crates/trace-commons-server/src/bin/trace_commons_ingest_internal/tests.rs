@@ -62834,22 +62834,22 @@ async fn webauthn_credential_account_scoping_blocks_cross_account_access() {
 // ============================================================================
 // Slice 2 Task 5: passkey enrollment ceremony handlers.
 //
-// What is and isn't driven end-to-end:
-//   * `register/start` is driven fully against real PostgreSQL: it returns
-//     WebAuthn options, sets the `tc_passkey_ceremony` cookie, and stashes a
-//     `CeremonyState::Registration` in the in-process store (asserted via a
-//     same-id `take`).
-//   * `register/finish` is NOT driven through to a credential row, because a
-//     successful `finish_passkey_registration` requires a real attestation from
-//     a WebAuthn authenticator and webauthn-rs 0.5.5 (the version in our lock
-//     file) ships no software/test authenticator (the `webauthn-authenticator-rs`
-//     crate is a separate, un-vendored dependency we did not add). Instead we
-//     assert the ceremony-binding gate that precedes verification: a missing
-//     ceremony cookie and an unknown/expired/already-consumed ceremony id both
-//     yield 400 with no row written. (A wrong-variant ceremony shares the exact
-//     same `Some(_) | None => 400` arm; it cannot be constructed in a test
-//     because `DiscoverableAuthentication` is likewise only producible by a live
-//     ceremony.)
+// Coverage:
+//   * Full happy path is driven end-to-end against real PostgreSQL using the
+//     dev-only `webauthn-authenticator-rs` SoftPasskey software authenticator:
+//     authenticated ctx -> register/start -> SoftPasskey produces a real
+//     attestation -> register/finish -> a `trace_webauthn_credentials` row
+//     exists for the account with the expected credential_id + passkey JSON, and
+//     the `account_passkey_enrolled` audit row is written.
+//   * `register/start` also asserted in isolation: returns WebAuthn options, sets
+//     the `tc_passkey_ceremony` cookie, stashes `CeremonyState::Registration`,
+//     and (after one credential is enrolled) carries that credential in the
+//     options' `exclude_credentials`.
+//   * `register/finish` ceremony-binding gate: a missing ceremony cookie and an
+//     unknown/expired/already-consumed ceremony id both yield 400 with no row
+//     written. (A wrong-variant ceremony shares the exact same
+//     `Some(_) | None => 400` arm; it cannot be constructed in a test because
+//     `DiscoverableAuthentication` is only producible by a live ceremony.)
 // ============================================================================
 
 /// Build a test `AppState` with a real WebAuthn relying party injected. The
@@ -62888,6 +62888,103 @@ fn dummy_register_finish_body() -> AccountPasskeyRegisterFinishBody {
         "type": "public-key"
     }))
     .expect("dummy register body deserializes")
+}
+
+/// Origin the test relying party (`test_state_with_webauthn`) is configured for.
+/// The SoftPasskey driver must present this exact origin; webauthn-rs only allows
+/// an `http://` scheme for `localhost`.
+fn test_passkey_origin() -> webauthn_rs::prelude::Url {
+    webauthn_rs::prelude::Url::parse("http://localhost").expect("test origin parses")
+}
+
+/// Drive the dev-only SoftPasskey software authenticator through a REGISTRATION
+/// ceremony: given the server's `register/start` challenge JSON (the
+/// `CreationChallengeResponse`), produce the `RegisterPublicKeyCredential`
+/// attestation the browser would POST to `register/finish`.
+///
+/// Each call uses a FRESH `SoftPasskey` (its credential state is per-instance),
+/// which is what we want for enrollment: a brand-new authenticator. `falsify_uv`
+/// is true because our relying party requests user-verification-required and the
+/// software authenticator has no real UV gesture to perform.
+///
+/// Reusable by Task 6: pair this with [`softpasskey_authenticate`] (below) to
+/// drive a full register-then-login round trip against the same `SoftPasskey`
+/// instance (hold the authenticator across both calls so the enrolled credential
+/// is available to assert).
+fn softpasskey_register(
+    authenticator: &mut webauthn_authenticator_rs::WebauthnAuthenticator<
+        webauthn_authenticator_rs::softpasskey::SoftPasskey,
+    >,
+    challenge: &serde_json::Value,
+) -> webauthn_rs::prelude::RegisterPublicKeyCredential {
+    let options: webauthn_rs::prelude::CreationChallengeResponse =
+        serde_json::from_value(challenge.clone()).expect("creation challenge deserializes");
+    authenticator
+        .do_registration(test_passkey_origin(), options)
+        .expect("software authenticator completes registration")
+}
+
+/// Drive the SoftPasskey through an AUTHENTICATION (assertion) ceremony. Kept
+/// here (test-only) so Task 6's login test can reuse the same authenticator
+/// instance that enrolled the credential. Currently unused by Task 5 itself; it
+/// is `#[allow(dead_code)]` until Task 6 wires the login handler.
+#[allow(dead_code)]
+fn softpasskey_authenticate(
+    authenticator: &mut webauthn_authenticator_rs::WebauthnAuthenticator<
+        webauthn_authenticator_rs::softpasskey::SoftPasskey,
+    >,
+    challenge: &serde_json::Value,
+) -> webauthn_rs::prelude::PublicKeyCredential {
+    let options: webauthn_rs::prelude::RequestChallengeResponse =
+        serde_json::from_value(challenge.clone()).expect("request challenge deserializes");
+    authenticator
+        .do_authentication(test_passkey_origin(), options)
+        .expect("software authenticator completes authentication")
+}
+
+/// Construct a fresh SoftPasskey-backed authenticator. UV is falsified because
+/// the test relying party requests user-verification-required.
+fn new_software_authenticator() -> webauthn_authenticator_rs::WebauthnAuthenticator<
+    webauthn_authenticator_rs::softpasskey::SoftPasskey,
+> {
+    webauthn_authenticator_rs::WebauthnAuthenticator::new(
+        webauthn_authenticator_rs::softpasskey::SoftPasskey::new(true),
+    )
+}
+
+/// Call `register/start` for an already-authenticated cookie session and return
+/// `(challenge_json, ceremony_cookie_header_value)`. The returned cookie value is
+/// the full `name=value` first pair, ready to feed into a `Cookie:` header for
+/// `register/finish`.
+async fn passkey_register_start(
+    state: &Arc<AppState>,
+    session_cookie: &str,
+) -> (serde_json::Value, String) {
+    use axum::response::IntoResponse;
+    let headers = cookie_request_headers("tc_account_session", session_cookie);
+    let response = account_passkey_register_start_handler(State(state.clone()), headers)
+        .await
+        .expect("register/start succeeds")
+        .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let set_cookie = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .expect("ceremony cookie set")
+        .to_str()
+        .expect("ascii cookie")
+        .to_string();
+    let ceremony_pair = set_cookie
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_string();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body bytes");
+    let challenge: serde_json::Value =
+        serde_json::from_slice(&body).expect("challenge json deserializes");
+    (challenge, ceremony_pair)
 }
 
 /// `register/start` returns WebAuthn options, sets the ceremony cookie, and
@@ -63016,6 +63113,178 @@ async fn passkey_register_finish_with_unknown_ceremony_is_400() {
     .await
     .expect_err("unknown ceremony must 400");
     assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Resolve the account id linked to a device principal under a tenant, via the
+/// raw test pool under that tenant's RLS context.
+async fn account_id_for_principal(backend: &PgBackend, tenant_id: &str, principal_ref: &str) -> Uuid {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant ctx");
+    let row = tx
+        .query_one(
+            "SELECT account_id FROM trace_account_principals
+              WHERE tenant_id = trace_current_tenant_id() AND principal_ref = $1",
+            &[&principal_ref],
+        )
+        .await
+        .expect("principal linked to account");
+    tx.commit().await.expect("commit");
+    row.get("account_id")
+}
+
+/// Count `trace_account_audit` rows for a tenant + action, under that tenant's
+/// RLS context (raw test pool).
+async fn account_audit_count(backend: &PgBackend, tenant_id: &str, action: &str) -> i64 {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant ctx");
+    let row = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_account_audit
+              WHERE tenant_id = trace_current_tenant_id() AND action = $1",
+            &[&action],
+        )
+        .await
+        .expect("audit count query");
+    tx.commit().await.expect("commit");
+    row.get(0)
+}
+
+/// Full enrollment round trip driven by the dev-only SoftPasskey authenticator:
+/// register/start -> software attestation -> register/finish -> a credential row
+/// exists with the expected credential_id + passkey JSON, and the
+/// `account_passkey_enrolled` audit row is written. Also asserts that a SECOND
+/// register/start now carries the enrolled credential in `exclude_credentials`.
+#[tokio::test]
+async fn passkey_enroll_round_trip_persists_credential_and_audit() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let account_id =
+        account_id_for_principal(backend.as_ref(), "tenant-a", &principal_storage_ref("token-a"))
+            .await;
+
+    // No credentials and no enroll audit yet.
+    assert!(backend
+        .list_account_credentials("tenant-a", account_id)
+        .await
+        .expect("list before")
+        .is_empty());
+    assert_eq!(
+        account_audit_count(backend.as_ref(), "tenant-a", "account_passkey_enrolled").await,
+        0
+    );
+
+    // register/start -> drive SoftPasskey -> register/finish.
+    let (challenge, ceremony_pair) = passkey_register_start(&state, &session_cookie).await;
+    let mut authenticator = new_software_authenticator();
+    let attestation = softpasskey_register(&mut authenticator, &challenge);
+
+    // The finish request carries BOTH the session cookie and the ceremony cookie.
+    let mut finish_headers = HeaderMap::new();
+    finish_headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&format!("tc_account_session={session_cookie}; {ceremony_pair}"))
+            .expect("valid cookie header"),
+    );
+    // Serialize the authenticator's attestation exactly as the browser would
+    // (the RegisterPublicKeyCredential shape), then attach a label.
+    let mut finish_json =
+        serde_json::to_value(&attestation).expect("attestation serializes to JSON object");
+    finish_json
+        .as_object_mut()
+        .expect("attestation is a JSON object")
+        .insert("label".to_string(), serde_json::json!("My laptop"));
+    let finish_body: AccountPasskeyRegisterFinishBody =
+        serde_json::from_value(finish_json).expect("finish body builds from attestation");
+
+    let Json(finish_out) = account_passkey_register_finish_handler(
+        State(state.clone()),
+        finish_headers,
+        Json(finish_body),
+    )
+    .await
+    .expect("register/finish succeeds");
+    let returned_credential_id = finish_out
+        .get("credential_id")
+        .and_then(|v| v.as_str())
+        .expect("credential_id returned")
+        .to_string();
+
+    // The returned id matches the canonical encoding of the authenticator's
+    // credential id.
+    let expected_credential_id = credential_id_to_string(
+        &webauthn_rs::prelude::CredentialID::from(attestation.raw_id.as_ref()),
+    );
+    assert_eq!(returned_credential_id, expected_credential_id);
+
+    // A credential row exists for the account, with the expected id and label.
+    let creds = backend
+        .list_account_credentials("tenant-a", account_id)
+        .await
+        .expect("list after");
+    assert_eq!(creds.len(), 1, "exactly one credential enrolled");
+    assert_eq!(creds[0].credential_id, expected_credential_id);
+    assert_eq!(creds[0].label.as_deref(), Some("My laptop"));
+
+    // The stored passkey JSON is present and loadable for the login path (Task 6
+    // consumes this), confirming we persisted real serialized key material.
+    let loaded = backend
+        .load_webauthn_credential_for_login("tenant-a", &expected_credential_id)
+        .await
+        .expect("load query")
+        .expect("credential row loadable");
+    assert_eq!(loaded.account_id, account_id);
+    assert!(loaded.passkey.is_object(), "passkey stored as JSON object");
+
+    // The enroll audit row was written (hash-only; we only count it here).
+    assert_eq!(
+        account_audit_count(backend.as_ref(), "tenant-a", "account_passkey_enrolled").await,
+        1
+    );
+
+    // A SECOND register/start now excludes the enrolled credential.
+    let (challenge2, _ceremony2) = passkey_register_start(&state, &session_cookie).await;
+    let excluded = challenge2
+        .get("publicKey")
+        .and_then(|pk| pk.get("excludeCredentials"))
+        .and_then(|e| e.as_array())
+        .expect("excludeCredentials present after first enroll");
+    let excluded_ids: Vec<String> = excluded
+        .iter()
+        .filter_map(|d| d.get("id").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+    assert!(
+        excluded_ids.contains(&expected_credential_id),
+        "second start excludes the already-enrolled credential: {excluded_ids:?}"
+    );
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }

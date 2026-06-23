@@ -115,3 +115,14 @@ path = "src/bin/trace-commons-smoke-envelope.rs"
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 wiremock = "0.6"
+# Test-only software WebAuthn authenticator (SoftPasskey) used to drive the
+# passkey enrollment/login ceremonies end-to-end. Pinned to =0.5.5 because that
+# release pins webauthn-rs-core/proto =0.5.5, matching our webauthn-rs 0.5.5 so
+# the ceremony types interop. default-features = false keeps the hardware
+# hardware backends (USB/NFC/BLE) out; the "softpasskey" feature pulls in only
+# the software authenticator (and its crypto/ctap2 encode path, no hardware
+# transports). This is a [dev-dependencies] entry and MUST NOT be promoted to a
+# normal dependency — it must never link into the shipped binaries.
+webauthn-authenticator-rs = { version = "=0.5.5", default-features = false, features = [
+    "softpasskey",
+] }
