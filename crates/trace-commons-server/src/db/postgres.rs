@@ -1818,7 +1818,14 @@ impl Database for PgBackend {
         tenant_id: &str,
         token_hash: &str,
     ) -> Result<Option<Uuid>, DatabaseError> {
-        self.ensure_trace_tenant(tenant_id).await?;
+        // SECURITY: do NOT ensure_trace_tenant here. `tenant_id` is the
+        // client-supplied, pre-auth value decoded from the session cookie; an
+        // UPSERT into trace_tenants would let an unauthenticated forged cookie
+        // spray arbitrary tenant rows before the token is validated. The tenant
+        // already exists for any legitimate session (created at mint), and
+        // begin_trace_tenant_transaction only sets the RLS config var (no row
+        // dependency), so a forged/nonexistent tenant scopes the lookup to a
+        // tenant where this hash cannot exist -> zero rows -> deny, no write.
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
 

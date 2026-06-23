@@ -642,6 +642,66 @@ async fn account_ctx_session_past_idle_cap_is_denied() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+/// SECURITY regression: `validate_session` must NOT create a `trace_tenants`
+/// row for the client-supplied, pre-auth tenant decoded from a forged session
+/// cookie. Previously `validate_session` called `ensure_trace_tenant` as its
+/// first line, so any unauthenticated request bearing a forged cookie with an
+/// arbitrary tenant string UPSERTed a `trace_tenants` row before the token was
+/// validated -- letting an attacker spray arbitrary tenant ids. Auth still
+/// fails closed (the session SELECT scopes to that tenant under RLS, finds no
+/// row -> deny), but the write must not happen at all.
+#[tokio::test]
+async fn validate_session_does_not_create_tenant_for_forged_cookie() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    // High-entropy bogus tenant id that no test ever mints.
+    let bogus_tenant = "tenant-bogus-7f3a9c1e-validate-session-no-write";
+
+    async fn trace_tenant_row_count(b: &PgBackend, tenant: &str) -> i64 {
+        let client = b
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("conn");
+        let row = client
+            .query_one(
+                "SELECT count(*) FROM trace_tenants WHERE tenant_id = $1",
+                &[&tenant],
+            )
+            .await
+            .expect("count query");
+        row.get(0)
+    }
+
+    assert_eq!(
+        trace_tenant_row_count(backend.as_ref(), bogus_tenant).await,
+        0,
+        "bogus tenant must not exist before the call"
+    );
+
+    // Directly exercise validate_session with the forged tenant + an arbitrary
+    // token hash. This is the exact pre-auth path: tenant is client-supplied.
+    let validated = backend
+        .validate_session(bogus_tenant, "deadbeef-forged-token-hash")
+        .await
+        .expect("validate query runs");
+    assert!(
+        validated.is_none(),
+        "forged/nonexistent tenant must deny (no session row)"
+    );
+
+    // The crux: NO trace_tenants row was written for the bogus tenant.
+    assert_eq!(
+        trace_tenant_row_count(backend.as_ref(), bogus_tenant).await,
+        0,
+        "validate_session must NOT create a trace_tenants row for a forged tenant"
+    );
+
+    // Defensive cleanup in case a regression reintroduces the write.
+    cleanup_pg_trace_tenant(backend.as_ref(), bogus_tenant).await;
+}
+
 #[tokio::test]
 async fn account_ctx_both_credentials_is_ambiguous_400() {
     // No DB needed: the ambiguity check short-circuits before any DB access.
