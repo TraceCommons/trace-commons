@@ -1341,6 +1341,225 @@ async fn account_middleware_preserves_dual_auth_semantics() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+/// Collect the cookie NAME of every `Set-Cookie` header on the response (one per
+/// header line). Used to assert that `.append` preserved BOTH a handler-set
+/// cookie and the rotated session cookie as distinct headers.
+fn rotation_test_all_set_cookie_names(
+    response: &axum::response::Response,
+) -> std::collections::BTreeSet<String> {
+    response
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| {
+            let raw = value.to_str().ok()?;
+            let first = raw.split(';').next()?;
+            let (name, _value) = first.split_once('=')?;
+            Some(name.trim().to_string())
+        })
+        .collect()
+}
+
+/// Read `revoked_at` for the single live session row under `tenant_id` whose
+/// current or prev token matches `any_hash`. `None` row -> panics (row must
+/// exist); inner `Option` is the nullable `revoked_at`.
+async fn rotation_test_read_revoked_at(
+    backend: &PgBackend,
+    tenant_id: &str,
+    any_hash: &str,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant ctx");
+    let row = tx
+        .query_one(
+            "SELECT revoked_at FROM trace_sessions
+              WHERE tenant_id = trace_current_tenant_id()
+                AND (token_hash = $1 OR prev_token_hash = $1)",
+            &[&any_hash],
+        )
+        .await
+        .expect("session row exists");
+    tx.commit().await.expect("commit");
+    row.get("revoked_at")
+}
+
+/// POST `/v1/account/logout` through the FULL app (and thus the auth middleware)
+/// with the given session cookie value. Returns the response.
+async fn rotation_test_post_logout(
+    state: &Arc<AppState>,
+    cookie_value: &str,
+) -> axum::response::Response {
+    use axum::body::Body;
+    use tower::ServiceExt;
+    app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/account/logout")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie_value}"),
+                )
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response")
+}
+
+/// Regression (logout-vs-rotation): a logout request whose session aged past the
+/// rotation interval rotates in the middleware FIRST, so the logout handler
+/// re-derives the OLD hash (now parked in `prev_token_hash`). `revoke_current_session`
+/// must match either the current or the prev hash so the WHOLE row is revoked,
+/// leaving the rotated cookie the middleware appends dead. Before the fix, the
+/// row stayed live and the rotated cookie kept working.
+#[tokio::test]
+async fn logout_while_rotation_revokes_the_rotated_session() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let old_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let old_secret = old_cookie.split_once('.').expect("tenant.secret").1;
+    let old_hash = trace_commons_server::account_session::hash_secret(old_secret);
+
+    // Backdate so the LOGOUT request itself rotates (middleware runs before the
+    // handler).
+    let updated = rotation_test_update_session(
+        backend.as_ref(),
+        "tenant-a",
+        &old_hash,
+        "token_issued_at = now() - INTERVAL '13 hours'",
+    )
+    .await;
+    assert_eq!(updated, 1, "exactly one session backdated");
+
+    let response = rotation_test_post_logout(&state, &old_cookie).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::NO_CONTENT,
+        "logout succeeds (204)"
+    );
+    // The logout request rotated, so the middleware appends a NEW session cookie.
+    let rotated_cookie =
+        rotation_test_set_cookie_value(&response).expect("logout request rotated -> new cookie");
+    assert_ne!(rotated_cookie, old_cookie, "rotated to a new secret");
+    let new_hash = trace_commons_server::account_session::hash_secret(
+        rotated_cookie.split_once('.').expect("tenant.secret").1,
+    );
+
+    // The row is revoked despite logout seeing only the OLD (prev) hash.
+    let revoked_at = rotation_test_read_revoked_at(backend.as_ref(), "tenant-a", &new_hash).await;
+    assert!(
+        revoked_at.is_some(),
+        "logout must revoke the whole session row (revoked_at set) even after rotation"
+    );
+
+    // The rotated cookie the middleware handed back is dead: a follow-up with the
+    // new cookie -> 401.
+    let after_new = rotation_test_get_passkeys(&state, &rotated_cookie).await;
+    assert_eq!(
+        after_new.status(),
+        StatusCode::UNAUTHORIZED,
+        "the rotated cookie lands on a revoked row -> 401"
+    );
+    // And the old cookie is dead too.
+    let after_old = rotation_test_get_passkeys(&state, &old_cookie).await;
+    assert_eq!(
+        after_old.status(),
+        StatusCode::UNAUTHORIZED,
+        "the old cookie is also dead after logout"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Regression (Set-Cookie clobber): if rotation fires during register/start, the
+/// middleware must APPEND the rotated session cookie alongside the handler's
+/// ceremony cookie, not replace it. Assert the response carries BOTH a
+/// `tc_passkey_ceremony` and a `tc_account_session` Set-Cookie.
+#[tokio::test]
+async fn register_start_while_rotation_keeps_both_set_cookies() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let secret = cookie_value.split_once('.').expect("tenant.secret").1;
+    let old_hash = trace_commons_server::account_session::hash_secret(secret);
+
+    // Backdate so the register/start request rotates.
+    let updated = rotation_test_update_session(
+        backend.as_ref(),
+        "tenant-a",
+        &old_hash,
+        "token_issued_at = now() - INTERVAL '13 hours'",
+    )
+    .await;
+    assert_eq!(updated, 1, "exactly one session backdated");
+
+    let response = {
+        use axum::body::Body;
+        use tower::ServiceExt;
+        app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/account/passkeys/register/start")
+                    .header(
+                        axum::http::header::COOKIE,
+                        format!("tc_account_session={cookie_value}"),
+                    )
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response")
+    };
+    assert_eq!(response.status(), StatusCode::OK, "register/start -> 200");
+
+    // BOTH cookies must be present as distinct Set-Cookie headers (append, not
+    // clobber). Before the fix, the rotated session cookie replaced the ceremony
+    // cookie and register/finish would then fail with no ceremony in progress.
+    let names = rotation_test_all_set_cookie_names(&response);
+    assert!(
+        names.contains("tc_passkey_ceremony"),
+        "ceremony cookie must survive rotation; got {names:?}"
+    );
+    assert!(
+        names.contains("tc_account_session"),
+        "rotated session cookie must be present; got {names:?}"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 /// Insert a submission row directly via the DB mirror so the account read-back
 /// surface (which reads ONLY the DB mirror) can list it. `auth_principal_ref`
 /// is the ownership key the account principal set is matched against.

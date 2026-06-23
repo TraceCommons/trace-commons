@@ -11839,9 +11839,16 @@ async fn account_auth_middleware(
             .max_age(cookie::time::Duration::days(ACCOUNT_SESSION_TTL_DAYS))
             .build();
         if let Ok(value) = HeaderValue::from_str(&cookie.to_string()) {
+            // APPEND, not insert: a handler may have already set its OWN Set-Cookie
+            // (e.g. register/start's ceremony cookie). `insert` REPLACES every
+            // Set-Cookie value, silently dropping that cookie and breaking the
+            // follow-up (register/finish would then find no ceremony cookie).
+            // `append` lets the rotated session cookie and the handler's cookie
+            // coexist as two distinct Set-Cookie headers.
             response
                 .headers_mut()
-                .insert(axum::http::header::SET_COOKIE, value);
+                .append(axum::http::header::SET_COOKIE, value);
+            // Cache-Control is single-valued: insert (overwrite) is correct here.
             response.headers_mut().insert(
                 axum::http::header::CACHE_CONTROL,
                 HeaderValue::from_static("no-store"),

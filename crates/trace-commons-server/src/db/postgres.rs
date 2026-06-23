@@ -2066,14 +2066,23 @@ impl Database for PgBackend {
         self.ensure_trace_tenant(tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
-        // Idempotent single-session revoke. `token_hash` is globally UNIQUE; the
-        // tenant predicate is belt-and-suspenders on top of forced RLS. An
-        // already-revoked or unknown hash affects zero rows.
+        // Idempotent single-session revoke. Match the presented hash as EITHER the
+        // current `token_hash` OR the just-rotated-away `prev_token_hash`: if the
+        // same request rotated the session (rotation runs in the auth middleware
+        // BEFORE the logout handler re-derives the hash from the presented OLD
+        // cookie), the row's current hash is now the freshly minted one and the
+        // presented hash lives in `prev_token_hash`. Keying on the current hash
+        // alone would miss that row and leave the rotated session live. Revoking on
+        // either match kills the WHOLE row (one row per session: both hashes belong
+        // to the same row), so the rotated cookie the middleware appends lands on an
+        // already-revoked row and the next request 401s. `token_hash` is globally
+        // UNIQUE and `prev_token_hash` is its short-lived predecessor, so at most one
+        // row matches; an already-revoked or unknown hash affects zero rows.
         let revoked = tx
             .execute(
                 "UPDATE trace_sessions SET revoked_at = now()
                   WHERE tenant_id = trace_current_tenant_id()
-                    AND token_hash = $1
+                    AND (token_hash = $1 OR prev_token_hash = $1)
                     AND revoked_at IS NULL",
                 &[&token_hash],
             )
