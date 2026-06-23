@@ -24,10 +24,37 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use webauthn_rs::prelude::{DiscoverableAuthentication, PasskeyRegistration, Url};
+use base64::Engine;
+use webauthn_rs::prelude::{CredentialID, DiscoverableAuthentication, PasskeyRegistration, Url};
 use webauthn_rs::{Webauthn, WebauthnBuilder};
 
 use crate::config::WebauthnConfig;
+
+/// Canonical string encoding for a WebAuthn `CredentialID` used as the stable
+/// `credential_id` key in the `account_webauthn_credential` table.
+///
+/// The `CredentialID` is an opaque byte string. We pin ONE encoding — URL-safe
+/// base64, no padding — so that every code path that handles a credential id
+/// agrees byte-for-byte: enrollment stores this form, `exclude_credentials`
+/// decodes back from it (Task 5), and the login/assertion path (Task 6) must
+/// produce the SAME string from the asserted credential id to look up the row.
+/// Centralizing the encoding here keeps those paths from drifting. The credential
+/// id is a PUBLIC identifier (it is sent in the clear in every assertion), not a
+/// secret, so storing/returning this string is safe.
+pub fn credential_id_to_string(cred_id: &CredentialID) -> String {
+    // `CredentialID` (== `HumanBinaryData`) derefs / `AsRef`s to the raw bytes.
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(cred_id.as_ref())
+}
+
+/// Inverse of [`credential_id_to_string`]: decode the canonical URL-safe-base64
+/// (no pad) string back into a `CredentialID`. Used to rebuild
+/// `exclude_credentials` from the account's stored credential ids during
+/// registration. A malformed string surfaces as an `Err` rather than silently
+/// producing a wrong id.
+pub fn credential_id_from_string(s: &str) -> anyhow::Result<CredentialID> {
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s)?;
+    Ok(CredentialID::from(bytes))
+}
 
 /// Time-to-live for a stored ceremony. WebAuthn ceremonies are interactive and
 /// short; three minutes is comfortably longer than a user takes to tap an
@@ -192,5 +219,27 @@ mod tests {
     fn store_missing_id_returns_none() {
         let store: CeremonyStore<u32> = CeremonyStore::new();
         assert_eq!(store.take("absent"), None);
+    }
+
+    #[test]
+    fn credential_id_round_trips_through_canonical_string() {
+        // Arbitrary bytes including a high byte and a zero, to catch any
+        // encoding that mangles non-ASCII or trailing nulls.
+        let raw = vec![0x00u8, 0x01, 0x7f, 0x80, 0xff, 0x10, 0x20, 0x30];
+        let cred_id = CredentialID::from(raw.clone());
+        let encoded = credential_id_to_string(&cred_id);
+        // No padding, URL-safe alphabet only.
+        assert!(!encoded.contains('='));
+        assert!(!encoded.contains('+') && !encoded.contains('/'));
+        let decoded = credential_id_from_string(&encoded).expect("decodes");
+        assert_eq!(decoded.as_ref(), raw.as_slice());
+        // And the re-encoding is stable (canonical).
+        assert_eq!(credential_id_to_string(&decoded), encoded);
+    }
+
+    #[test]
+    fn credential_id_from_string_rejects_malformed() {
+        // '!' is outside the base64url alphabet.
+        assert!(credential_id_from_string("not valid base64!").is_err());
     }
 }

@@ -62830,3 +62830,192 @@ async fn webauthn_credential_account_scoping_blocks_cross_account_access() {
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-scope").await;
 }
+
+// ============================================================================
+// Slice 2 Task 5: passkey enrollment ceremony handlers.
+//
+// What is and isn't driven end-to-end:
+//   * `register/start` is driven fully against real PostgreSQL: it returns
+//     WebAuthn options, sets the `tc_passkey_ceremony` cookie, and stashes a
+//     `CeremonyState::Registration` in the in-process store (asserted via a
+//     same-id `take`).
+//   * `register/finish` is NOT driven through to a credential row, because a
+//     successful `finish_passkey_registration` requires a real attestation from
+//     a WebAuthn authenticator and webauthn-rs 0.5.5 (the version in our lock
+//     file) ships no software/test authenticator (the `webauthn-authenticator-rs`
+//     crate is a separate, un-vendored dependency we did not add). Instead we
+//     assert the ceremony-binding gate that precedes verification: a missing
+//     ceremony cookie and an unknown/expired/already-consumed ceremony id both
+//     yield 400 with no row written. (A wrong-variant ceremony shares the exact
+//     same `Some(_) | None => 400` arm; it cannot be constructed in a test
+//     because `DiscoverableAuthentication` is likewise only producible by a live
+//     ceremony.)
+// ============================================================================
+
+/// Build a test `AppState` with a real WebAuthn relying party injected. The
+/// state is freshly constructed (refcount 1) so `Arc::get_mut` can set the
+/// otherwise-`None` `account_webauthn` field before any clone escapes.
+fn test_state_with_webauthn(
+    root: PathBuf,
+    db_mirror: Option<Arc<dyn Database>>,
+) -> Arc<AppState> {
+    let mut state = test_state_with_options(root, db_mirror, None, false, false, false, false);
+    let webauthn = build_webauthn(&WebauthnConfig {
+        rp_id: "localhost".to_string(),
+        rp_origin: "http://localhost".to_string(),
+        rp_name: "TraceCommons Test".to_string(),
+    })
+    .expect("test relying party builds");
+    Arc::get_mut(&mut state)
+        .expect("fresh state is uniquely owned")
+        .account_webauthn = Some(Arc::new(webauthn));
+    state
+}
+
+/// A syntactically-valid but cryptographically-meaningless
+/// `RegisterPublicKeyCredential` JSON body. Deserializes fine (so the `Json`
+/// extractor and the ceremony-gate path are reachable) but would never pass
+/// attestation verification — which is irrelevant here because the ceremony-gate
+/// rejection happens BEFORE `finish_passkey_registration` is ever called.
+fn dummy_register_finish_body() -> AccountPasskeyRegisterFinishBody {
+    serde_json::from_value(serde_json::json!({
+        "id": "AAAA",
+        "rawId": "AAAA",
+        "response": {
+            "attestationObject": "AAAA",
+            "clientDataJSON": "AAAA"
+        },
+        "type": "public-key"
+    }))
+    .expect("dummy register body deserializes")
+}
+
+/// `register/start` returns WebAuthn options, sets the ceremony cookie, and
+/// stashes the server-side registration state in the ceremony store.
+#[tokio::test]
+async fn passkey_register_start_returns_options_and_stashes_ceremony() {
+    use axum::response::IntoResponse;
+
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+
+    let response = account_passkey_register_start_handler(State(state.clone()), headers)
+        .await
+        .expect("start succeeds")
+        .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The ceremony cookie is set: Secure + HttpOnly + SameSite=Strict, carrying
+    // the opaque ceremony id.
+    let set_cookie = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .expect("ceremony cookie set")
+        .to_str()
+        .expect("ascii cookie");
+    assert!(set_cookie.starts_with("tc_passkey_ceremony="));
+    assert!(set_cookie.contains("HttpOnly"));
+    assert!(set_cookie.contains("Secure"));
+    assert!(set_cookie.contains("SameSite=Strict"));
+
+    // Recover the opaque ceremony id from the cookie before consuming the body.
+    let first = set_cookie.split(';').next().expect("cookie pair");
+    let (_name, ceremony_id) = first.split_once('=').expect("cookie name=value");
+    let ceremony_id = ceremony_id.to_string();
+
+    // The body deserializes as a WebAuthn creation challenge (has a publicKey
+    // member with a challenge).
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body bytes");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("challenge json");
+    assert!(
+        json.get("publicKey")
+            .and_then(|pk| pk.get("challenge"))
+            .is_some(),
+        "challenge response carries publicKey.challenge: {json}"
+    );
+
+    // The server-side ceremony state was stashed under the cookie's ceremony id:
+    // a same-id `take` recovers a Registration variant.
+    let stashed = account_ceremony_store(state.as_ref()).take(&ceremony_id);
+    assert!(
+        matches!(stashed, Some(CeremonyState::Registration(_))),
+        "registration state stashed under ceremony id"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// `register/finish` with NO ceremony cookie is rejected 400 before any
+/// attestation verification, and writes no credential row.
+#[tokio::test]
+async fn passkey_register_finish_without_ceremony_cookie_is_400() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    // Only the session cookie; no `tc_passkey_ceremony`.
+    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+
+    let err = account_passkey_register_finish_handler(
+        State(state.clone()),
+        headers,
+        Json(dummy_register_finish_body()),
+    )
+    .await
+    .expect_err("missing ceremony must 400");
+    assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// `register/finish` with a ceremony cookie that does not resolve to a stored
+/// ceremony (unknown / expired / already-consumed) is rejected 400. This is the
+/// same `Some(_) | None => 400` arm that also rejects a wrong-variant ceremony.
+#[tokio::test]
+async fn passkey_register_finish_with_unknown_ceremony_is_400() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    // Present BOTH the session cookie and a bogus ceremony cookie. The ceremony
+    // id was never `put` into the store, so `take` returns None -> 400.
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&format!(
+            "tc_account_session={session_cookie}; tc_passkey_ceremony=never-issued-ceremony-id"
+        ))
+        .expect("valid cookie header"),
+    );
+
+    let err = account_passkey_register_finish_handler(
+        State(state.clone()),
+        headers,
+        Json(dummy_register_finish_body()),
+    )
+    .await
+    .expect_err("unknown ceremony must 400");
+    assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}

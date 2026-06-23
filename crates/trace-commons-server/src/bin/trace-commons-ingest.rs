@@ -40,7 +40,10 @@ use trace_commons_server::account_session::{
 // `AccountPrincipalSet` is used by the account visibility predicate below; the
 // binary can no longer mint one (only the lib's `expand_account_principals`
 // does), it only borrows the set carried by an `AccountCtx`.
-use trace_commons_server::account_passkey::{build_webauthn, CeremonyStore};
+use trace_commons_server::account_passkey::{
+    build_webauthn, credential_id_from_string, credential_id_to_string, CeremonyState,
+    CeremonyStore,
+};
 use trace_commons_server::config::{DatabaseConfig, WebauthnConfig};
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
 use trace_commons_server::db::{Database, TraceCorpusRlsDiagnostics};
@@ -5926,6 +5929,14 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/account/sessions/revoke-all",
             post(account_revoke_all_handler),
         )
+        .route(
+            "/v1/account/passkeys/register/start",
+            post(account_passkey_register_start_handler),
+        )
+        .route(
+            "/v1/account/passkeys/register/finish",
+            post(account_passkey_register_finish_handler),
+        )
         .route("/v1/analytics/summary", get(analytics_handler))
         .route("/v1/review/quarantine", get(review_quarantine_handler))
         .route(
@@ -11658,7 +11669,6 @@ fn account_db(state: &AppState) -> ApiResult<Arc<dyn Database>> {
 /// configured (partial or absent `WebauthnConfig`), it returns a 503 with a safe
 /// missing-control label rather than letting a ceremony proceed without a
 /// relying party. Wired into the register/login handlers in later Slice 2 tasks.
-#[allow(dead_code)]
 fn account_webauthn(state: &AppState) -> ApiResult<Arc<webauthn_rs::Webauthn>> {
     state.account_webauthn.as_ref().cloned().ok_or_else(|| {
         api_error(
@@ -11671,7 +11681,6 @@ fn account_webauthn(state: &AppState) -> ApiResult<Arc<webauthn_rs::Webauthn>> {
 /// Borrow the in-process ceremony store. Infallible: the store is always present
 /// on `AppState`. Consumed by the register/login ceremony handlers in later
 /// Slice 2 tasks.
-#[allow(dead_code)]
 fn account_ceremony_store(state: &AppState) -> Arc<CeremonyStore> {
     state.account_ceremony_store.clone()
 }
@@ -12879,6 +12888,217 @@ async fn account_revoke_all_handler(
     .map_err(internal_error)?;
 
     Ok(Json(serde_json::json!({ "revoked": revoked })))
+}
+
+// ============================================================================
+// Slice 2 Task 5: passkey enrollment ceremony (authenticated).
+//
+// Two dual-auth handlers guarded by `resolve_account_ctx`. `register/start`
+// issues a WebAuthn registration challenge, stashes the server-side
+// `PasskeyRegistration` state in the in-process ceremony store, and binds the
+// ceremony to the browser via a short-lived `tc_passkey_ceremony` cookie.
+// `register/finish` consumes that cookie (single-use), verifies the attestation,
+// and persists the resulting passkey. Discoverable login (Task 6) and credential
+// management (Task 7+) are intentionally out of scope here.
+// ============================================================================
+
+/// Short-lived cookie that binds a passkey registration ceremony to the browser
+/// that started it. Carries only the opaque ceremony id (an unguessable CSPRNG
+/// token), never any key or challenge material; the server-side challenge state
+/// lives in the ceremony store keyed by this id.
+const ACCOUNT_PASSKEY_CEREMONY_COOKIE: &str = "tc_passkey_ceremony";
+
+/// Ceremony cookie lifetime. Matches the ceremony-store TTL window (a few
+/// minutes): long enough for an interactive authenticator tap, short enough to
+/// bound stale challenge state.
+const ACCOUNT_PASSKEY_CEREMONY_COOKIE_MAX_AGE_SECS: i64 = 3 * 60;
+
+/// Generic, non-PII WebAuthn user name / display name presented to the
+/// authenticator. There is no contributor handle wired into the account model at
+/// this slice, and the spec calls for a generic label when no handle is set, so
+/// we deliberately use a fixed string rather than leak any account identifier
+/// (which would otherwise be stored by the authenticator / surfaced in its UI).
+const ACCOUNT_PASSKEY_USER_LABEL: &str = "TraceCommons contributor";
+
+/// Request body for `POST /v1/account/passkeys/register/finish`. The browser's
+/// `RegisterPublicKeyCredential` (the attestation response) is flattened in;
+/// `label` is an optional, user-supplied display name for the new credential.
+#[derive(serde::Deserialize)]
+struct AccountPasskeyRegisterFinishBody {
+    #[serde(flatten)]
+    credential: webauthn_rs::prelude::RegisterPublicKeyCredential,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+/// `POST /v1/account/passkeys/register/start` — begin enrolling a passkey for the
+/// authenticated account (Slice 2 Task 5). Dual-auth via `resolve_account_ctx`;
+/// fails closed with 503 if the relying party is unconfigured. Builds
+/// `exclude_credentials` from the account's existing active credentials so the
+/// same authenticator cannot enroll twice, stashes the server-side
+/// `PasskeyRegistration` state in the ceremony store, and returns the
+/// `CreationChallengeResponse` plus a short-lived `tc_passkey_ceremony` cookie
+/// binding the ceremony to this browser.
+async fn account_passkey_register_start_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<axum::response::Response> {
+    use axum::response::IntoResponse;
+
+    let ctx = resolve_account_ctx(state.as_ref(), &headers).await?;
+    let webauthn = account_webauthn(state.as_ref())?;
+    let db = account_db(state.as_ref())?;
+
+    // Exclude the account's already-enrolled credentials so an authenticator the
+    // user already registered cannot be double-enrolled. A stored id that fails to
+    // decode is a corrupt row, not a client error: fail closed with a 500 rather
+    // than silently dropping it from the exclusion list.
+    let existing = db
+        .list_account_credentials(&ctx.tenant_id, ctx.account_id.as_uuid())
+        .await
+        .map_err(internal_error)?;
+    let mut exclude = Vec::with_capacity(existing.len());
+    for cred in &existing {
+        exclude.push(credential_id_from_string(&cred.credential_id).map_err(internal_error)?);
+    }
+    let exclude = if exclude.is_empty() {
+        None
+    } else {
+        Some(exclude)
+    };
+
+    // The user id is the account's own UUID (stable, non-PII). user_name /
+    // user_display_name are a fixed generic label (no handle is wired here).
+    let (challenge, reg_state) = webauthn
+        .start_passkey_registration(
+            ctx.account_id.as_uuid(),
+            ACCOUNT_PASSKEY_USER_LABEL,
+            ACCOUNT_PASSKEY_USER_LABEL,
+            exclude,
+        )
+        .map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not start passkey registration",
+            )
+        })?;
+
+    let ceremony_id = trace_commons_server::account_passkey::new_ceremony_id();
+    account_ceremony_store(state.as_ref())
+        .put(ceremony_id.clone(), CeremonyState::Registration(reg_state));
+
+    // Bind the ceremony to this browser. Secure + HttpOnly + SameSite=Strict +
+    // Path=/, short Max-Age. Carries only the opaque ceremony id.
+    let cookie = cookie::Cookie::build((ACCOUNT_PASSKEY_CEREMONY_COOKIE, ceremony_id))
+        .secure(true)
+        .http_only(true)
+        .same_site(cookie::SameSite::Strict)
+        .path("/")
+        .max_age(cookie::time::Duration::seconds(
+            ACCOUNT_PASSKEY_CEREMONY_COOKIE_MAX_AGE_SECS,
+        ))
+        .build();
+
+    // Coarse, hash-only audit. Records only the count of excluded (existing)
+    // credentials — never any credential id, challenge, or key material.
+    db.append_account_audit(
+        &ctx.tenant_id,
+        "account_passkey_register_started",
+        &ctx.actor_ref,
+        "success",
+        serde_json::json!({ "existing_credentials": existing.len() }),
+    )
+    .await
+    .map_err(internal_error)?;
+
+    let mut response = Json(challenge).into_response();
+    match HeaderValue::from_str(&cookie.to_string()) {
+        Ok(value) => {
+            response
+                .headers_mut()
+                .insert(axum::http::header::SET_COOKIE, value);
+        }
+        Err(_) => {
+            return Err(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not set ceremony cookie",
+            ));
+        }
+    }
+    Ok(response)
+}
+
+/// `POST /v1/account/passkeys/register/finish` — complete passkey enrollment
+/// (Slice 2 Task 5). Dual-auth via `resolve_account_ctx`; fails closed with 503
+/// if the relying party is unconfigured. Recovers the pending
+/// `PasskeyRegistration` via the single-use `tc_passkey_ceremony` cookie
+/// (missing / expired / already-consumed / wrong-variant -> 400), verifies the
+/// browser's attestation, and persists the resulting passkey under the canonical
+/// credential-id encoding. A failed/invalid attestation is rejected with a 400
+/// and NO row is written.
+async fn account_passkey_register_finish_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<AccountPasskeyRegisterFinishBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let ctx = resolve_account_ctx(state.as_ref(), &headers).await?;
+    let webauthn = account_webauthn(state.as_ref())?;
+    let db = account_db(state.as_ref())?;
+
+    // Recover and CONSUME (single-use `take`) the pending registration state.
+    let ceremony_id = cookie_value_from_headers(&headers, ACCOUNT_PASSKEY_CEREMONY_COOKIE)
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "no passkey ceremony in progress"))?;
+    let reg_state = match account_ceremony_store(state.as_ref()).take(ceremony_id) {
+        Some(CeremonyState::Registration(reg_state)) => reg_state,
+        // Missing / expired / already-consumed, or a non-registration ceremony id.
+        Some(_) | None => {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "no passkey ceremony in progress",
+            ));
+        }
+    };
+
+    // Verify the attestation. An invalid/forged attestation is a client error:
+    // reject with 400 and write no row.
+    let passkey = webauthn
+        .finish_passkey_registration(&body.credential, &reg_state)
+        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "passkey registration failed"))?;
+
+    let credential_id = credential_id_to_string(passkey.cred_id());
+    let passkey_json = serde_json::to_value(&passkey).map_err(internal_error)?;
+    // Treat a blank/whitespace label as absent.
+    let label = body
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    db.insert_webauthn_credential(
+        &ctx.tenant_id,
+        ctx.account_id.as_uuid(),
+        &credential_id,
+        &passkey_json,
+        label,
+    )
+    .await
+    .map_err(internal_error)?;
+
+    // Hash-only / label-only audit. Records only whether a label was supplied —
+    // never the credential id, public key, or attestation material.
+    db.append_account_audit(
+        &ctx.tenant_id,
+        "account_passkey_enrolled",
+        &ctx.actor_ref,
+        "success",
+        serde_json::json!({ "labeled": label.is_some() }),
+    )
+    .await
+    .map_err(internal_error)?;
+
+    // The credential id is a PUBLIC identifier (not a secret); returning it lets
+    // the client correlate the new credential for management (Task 7+).
+    Ok(Json(serde_json::json!({ "credential_id": credential_id })))
 }
 
 async fn analytics_handler(
