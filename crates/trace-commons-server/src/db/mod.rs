@@ -398,6 +398,101 @@ pub trait Database: TraceCorpusStore + Send + Sync {
             "expand_account_principals not implemented".to_string(),
         ))
     }
+
+    /// Insert a registered passkey for `account_id`. The serialized webauthn-rs
+    /// `Passkey` (public key, sign counter, AAGUID, transports) is stored as
+    /// JSONB; `credential_id` is the globally-UNIQUE base64url WebAuthn id and
+    /// `label` is an optional user-supplied display name. Tenant- + account-
+    /// scoped under forced RLS.
+    async fn insert_webauthn_credential(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _credential_id: &str,
+        _passkey: &serde_json::Value,
+        _label: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool(
+            "insert_webauthn_credential not implemented".to_string(),
+        ))
+    }
+
+    /// Load an ACTIVE credential for the LOGIN (assertion) path by its
+    /// `credential_id`, under the already-resolved `tenant_id`. Returns the
+    /// account id and serialized `Passkey` JSON, or `None` for an unknown /
+    /// revoked / other-tenant credential. Runs inside an RLS-scoped tx; the
+    /// `tenant_id = trace_current_tenant_id()` predicate is belt-and-suspenders
+    /// on top of forced RLS, and `credential_id` is globally UNIQUE.
+    async fn load_webauthn_credential_for_login(
+        &self,
+        _tenant_id: &str,
+        _credential_id: &str,
+    ) -> Result<Option<WebauthnCredentialRow>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "load_webauthn_credential_for_login not implemented".to_string(),
+        ))
+    }
+
+    /// Persist the post-finish `Passkey` after a successful assertion so the
+    /// updated sign counter (clone-detection state) is durable, and stamp
+    /// `last_used_at`. Tenant-scoped under forced RLS; only an active
+    /// (unrevoked) credential is updated.
+    async fn update_webauthn_credential_after_login(
+        &self,
+        _tenant_id: &str,
+        _credential_id: &str,
+        _passkey: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool(
+            "update_webauthn_credential_after_login not implemented".to_string(),
+        ))
+    }
+
+    /// List the ACTIVE (unrevoked) credentials for `account_id`, oldest first.
+    /// Label- and timestamp-only; no key material. Tenant- + account-scoped
+    /// under forced RLS so another account's credentials are never returned.
+    async fn list_account_credentials(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+    ) -> Result<Vec<AccountCredentialSummary>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "list_account_credentials not implemented".to_string(),
+        ))
+    }
+
+    /// Rename one of `account_id`'s ACTIVE credentials. Returns whether a row was
+    /// affected (`false` for an unknown / revoked / other-account credential).
+    /// Tenant- + account-scoped under forced RLS so a caller can never rename a
+    /// credential they do not own.
+    async fn rename_account_credential(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _credential_id: &str,
+        _label: Option<&str>,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "rename_account_credential not implemented".to_string(),
+        ))
+    }
+
+    /// Soft-revoke one of `account_id`'s ACTIVE credentials and report how many of
+    /// the account's credentials remain active afterwards. `removed` is `false`
+    /// for an unknown / already-revoked / other-account credential. Tenant- +
+    /// account-scoped under forced RLS so a caller can never revoke a credential
+    /// they do not own; the remaining-count lets the caller refuse to remove the
+    /// last passkey.
+    async fn revoke_account_credential(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _credential_id: &str,
+    ) -> Result<RevokeCredentialResult, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "revoke_account_credential not implemented".to_string(),
+        ))
+    }
 }
 
 /// The session row to create on a winning redeem. `token_hash` is sha256-shaped;
@@ -427,6 +522,38 @@ pub struct RedeemAudit {
 pub struct RedeemedSession {
     pub account_id: uuid::Uuid,
     pub session_id: uuid::Uuid,
+}
+
+/// A registered passkey resolved for the LOGIN (assertion) path. Carries only
+/// the durable account id and the serialized webauthn-rs `Passkey` JSON (public
+/// key, sign counter, AAGUID, transports); never PII. The loader runs under the
+/// already-resolved tenant's RLS, so the row is tenant-scoped by construction.
+#[derive(Debug, Clone)]
+pub struct WebauthnCredentialRow {
+    pub account_id: uuid::Uuid,
+    pub passkey: serde_json::Value,
+}
+
+/// A single ACTIVE credential as surfaced in the account's credential list.
+/// Label-only and timestamp-only: no public-key material or counter state. The
+/// `credential_id` is the base64url WebAuthn id (a label, not a secret).
+#[derive(Debug, Clone)]
+pub struct AccountCredentialSummary {
+    pub credential_id: String,
+    pub label: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Outcome of revoking one of an account's credentials. `removed` is whether the
+/// soft-delete affected a row (false for an unknown / already-revoked / other
+/// account's credential); `remaining` is the count of the account's credentials
+/// still active after the revoke, so the caller can refuse to remove the last
+/// passkey if policy requires it.
+#[derive(Debug, Clone, Copy)]
+pub struct RevokeCredentialResult {
+    pub removed: bool,
+    pub remaining: i64,
 }
 
 /// Per-contributor row returned by [`Database::compute_leaderboard_inputs`].

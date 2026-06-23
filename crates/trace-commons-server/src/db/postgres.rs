@@ -2038,6 +2038,186 @@ impl Database for PgBackend {
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(principals)
     }
+
+    async fn insert_webauthn_credential(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        credential_id: &str,
+        passkey: &serde_json::Value,
+        label: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "INSERT INTO trace_webauthn_credentials (
+                tenant_id, credential_id, account_id, passkey, label, created_at
+             ) VALUES (
+                trace_current_tenant_id(), $1, $2, $3, $4, now()
+             )",
+            &[&credential_id, &account_id, &passkey, &label],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
+    async fn load_webauthn_credential_for_login(
+        &self,
+        tenant_id: &str,
+        credential_id: &str,
+    ) -> Result<Option<crate::db::WebauthnCredentialRow>, DatabaseError> {
+        // The resolver has already mapped credential_id -> tenant_id; this load
+        // runs under that resolved tenant's RLS. We do NOT ensure_trace_tenant
+        // here: the tenant already exists for any registered credential, and
+        // begin_trace_tenant_transaction only sets the RLS config var (no row
+        // dependency). The `tenant_id = trace_current_tenant_id()` predicate is
+        // belt-and-suspenders on top of forced RLS; `credential_id` is globally
+        // UNIQUE.
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT account_id, passkey FROM trace_webauthn_credentials
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND credential_id = $1
+                    AND revoked_at IS NULL",
+                &[&credential_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(row.map(|row| crate::db::WebauthnCredentialRow {
+            account_id: row.get("account_id"),
+            passkey: row.get("passkey"),
+        }))
+    }
+
+    async fn update_webauthn_credential_after_login(
+        &self,
+        tenant_id: &str,
+        credential_id: &str,
+        passkey: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "UPDATE trace_webauthn_credentials
+                SET passkey = $1, last_used_at = now()
+              WHERE tenant_id = trace_current_tenant_id()
+                AND credential_id = $2
+                AND revoked_at IS NULL",
+            &[&passkey, &credential_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
+    async fn list_account_credentials(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+    ) -> Result<Vec<crate::db::AccountCredentialSummary>, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT credential_id, label, created_at, last_used_at
+                   FROM trace_webauthn_credentials
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND revoked_at IS NULL
+                  ORDER BY created_at",
+                &[&account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::db::AccountCredentialSummary {
+                credential_id: row.get("credential_id"),
+                label: row.get("label"),
+                created_at: row.get("created_at"),
+                last_used_at: row.get("last_used_at"),
+            })
+            .collect())
+    }
+
+    async fn rename_account_credential(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        credential_id: &str,
+        label: Option<&str>,
+    ) -> Result<bool, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // account-scoped so a caller can never rename a credential they do not own.
+        let affected = tx
+            .execute(
+                "UPDATE trace_webauthn_credentials
+                    SET label = $1
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $2
+                    AND credential_id = $3
+                    AND revoked_at IS NULL",
+                &[&label, &account_id, &credential_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(affected > 0)
+    }
+
+    async fn revoke_account_credential(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        credential_id: &str,
+    ) -> Result<crate::db::RevokeCredentialResult, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // account-scoped soft-delete: an unknown / already-revoked / other-account
+        // credential affects zero rows.
+        let removed = tx
+            .execute(
+                "UPDATE trace_webauthn_credentials
+                    SET revoked_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND credential_id = $2
+                    AND revoked_at IS NULL",
+                &[&account_id, &credential_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let remaining_row = tx
+            .query_one(
+                "SELECT count(*) AS remaining
+                   FROM trace_webauthn_credentials
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND revoked_at IS NULL",
+                &[&account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let remaining: i64 = remaining_row.get("remaining");
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(crate::db::RevokeCredentialResult {
+            removed: removed > 0,
+            remaining,
+        })
+    }
 }
 
 fn device_key_record_from_row(row: Row) -> crate::db::DeviceKeyRecord {

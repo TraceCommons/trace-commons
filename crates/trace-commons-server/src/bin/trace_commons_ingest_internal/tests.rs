@@ -62560,3 +62560,273 @@ async fn isolation_e_account_actor_ref_is_inert_end_to_end() {
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
+
+// ---------------------------------------------------------------------------
+// Slice 2 (passkeys) Task 4: webauthn credential DB operations.
+//
+// DB-backed: self-skip when neither TRACE_COMMONS_PG_TEST_DATABASE_URL nor
+// DATABASE_URL is set. Each test cleans tenant-a first so it is self-isolating
+// on a reused database, and seeds accounts via the normal tenant-scoped path so
+// the credential FK (tenant_id, account_id) -> trace_accounts is satisfied.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn webauthn_credential_insert_load_round_trips() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-roundtrip").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-wa-roundtrip", "principal-a")
+        .await
+        .expect("seed account");
+    let credential_id = "cred-roundtrip-globally-unique";
+    let passkey = serde_json::json!({"counter": 7, "aaguid": "abc", "nested": {"k": [1, 2, 3]}});
+
+    backend
+        .insert_webauthn_credential("tenant-wa-roundtrip", account_id, credential_id, &passkey, Some("My Key"))
+        .await
+        .expect("insert credential");
+
+    let loaded = backend
+        .load_webauthn_credential_for_login("tenant-wa-roundtrip", credential_id)
+        .await
+        .expect("load credential")
+        .expect("credential present");
+    assert_eq!(loaded.account_id, account_id);
+    assert_eq!(loaded.passkey, passkey, "passkey JSON preserved exactly");
+
+    // Unknown credential -> None.
+    let missing = backend
+        .load_webauthn_credential_for_login("tenant-wa-roundtrip", "cred-does-not-exist")
+        .await
+        .expect("load missing");
+    assert!(missing.is_none(), "unknown credential resolves to None");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-roundtrip").await;
+}
+
+#[tokio::test]
+async fn webauthn_credential_update_after_login_persists_passkey() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-update").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-wa-update", "principal-a")
+        .await
+        .expect("seed account");
+    let credential_id = "cred-update-globally-unique";
+    let passkey = serde_json::json!({"counter": 1});
+    backend
+        .insert_webauthn_credential("tenant-wa-update", account_id, credential_id, &passkey, None)
+        .await
+        .expect("insert credential");
+
+    let bumped = serde_json::json!({"counter": 42, "post_finish": true});
+    backend
+        .update_webauthn_credential_after_login("tenant-wa-update", credential_id, &bumped)
+        .await
+        .expect("update credential");
+
+    let loaded = backend
+        .load_webauthn_credential_for_login("tenant-wa-update", credential_id)
+        .await
+        .expect("load credential")
+        .expect("credential present");
+    assert_eq!(loaded.passkey, bumped, "post-finish passkey (new sign count) persisted");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-update").await;
+}
+
+#[tokio::test]
+async fn webauthn_credential_list_excludes_revoked_and_orders_by_created_at() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-list").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-wa-list", "principal-a")
+        .await
+        .expect("seed account");
+    let passkey = serde_json::json!({});
+    backend
+        .insert_webauthn_credential("tenant-wa-list", account_id, "cred-1", &passkey, Some("first"))
+        .await
+        .expect("insert cred-1");
+    backend
+        .insert_webauthn_credential("tenant-wa-list", account_id, "cred-2", &passkey, Some("second"))
+        .await
+        .expect("insert cred-2");
+
+    let listed = backend
+        .list_account_credentials("tenant-wa-list", account_id)
+        .await
+        .expect("list credentials");
+    assert_eq!(listed.len(), 2, "both active credentials listed");
+    let ids: Vec<&str> = listed.iter().map(|c| c.credential_id.as_str()).collect();
+    assert_eq!(ids, vec!["cred-1", "cred-2"], "ordered by created_at");
+    assert_eq!(listed[0].label.as_deref(), Some("first"));
+
+    // Revoke one -> excluded from the list.
+    let revoke = backend
+        .revoke_account_credential("tenant-wa-list", account_id, "cred-1")
+        .await
+        .expect("revoke cred-1");
+    assert!(revoke.removed, "revoke affected a row");
+    assert_eq!(revoke.remaining, 1, "one credential remains active");
+
+    let after = backend
+        .list_account_credentials("tenant-wa-list", account_id)
+        .await
+        .expect("list after revoke");
+    assert_eq!(after.len(), 1, "revoked credential excluded");
+    assert_eq!(after[0].credential_id, "cred-2");
+
+    // load_for_login no longer resolves the revoked credential.
+    let revoked_load = backend
+        .load_webauthn_credential_for_login("tenant-wa-list", "cred-1")
+        .await
+        .expect("load revoked");
+    assert!(revoked_load.is_none(), "revoked credential not loadable for login");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-list").await;
+}
+
+#[tokio::test]
+async fn webauthn_credential_rename_updates_label_and_reports_match() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-rename").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-wa-rename", "principal-a")
+        .await
+        .expect("seed account");
+    let passkey = serde_json::json!({});
+    backend
+        .insert_webauthn_credential("tenant-wa-rename", account_id, "cred-rename", &passkey, Some("old"))
+        .await
+        .expect("insert credential");
+
+    let renamed = backend
+        .rename_account_credential("tenant-wa-rename", account_id, "cred-rename", Some("new label"))
+        .await
+        .expect("rename credential");
+    assert!(renamed, "rename of owned active credential returns true");
+
+    let listed = backend
+        .list_account_credentials("tenant-wa-rename", account_id)
+        .await
+        .expect("list credentials");
+    assert_eq!(listed[0].label.as_deref(), Some("new label"), "label updated");
+
+    // Unknown credential id -> false (no row affected).
+    let unknown = backend
+        .rename_account_credential("tenant-wa-rename", account_id, "cred-unknown", Some("x"))
+        .await
+        .expect("rename unknown");
+    assert!(!unknown, "rename of unknown credential returns false");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-rename").await;
+}
+
+#[tokio::test]
+async fn webauthn_credential_revoke_is_idempotent_and_counts_remaining() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-revoke").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-wa-revoke", "principal-a")
+        .await
+        .expect("seed account");
+    let passkey = serde_json::json!({});
+    backend
+        .insert_webauthn_credential("tenant-wa-revoke", account_id, "cred-a", &passkey, None)
+        .await
+        .expect("insert cred-a");
+    backend
+        .insert_webauthn_credential("tenant-wa-revoke", account_id, "cred-b", &passkey, None)
+        .await
+        .expect("insert cred-b");
+
+    let first = backend
+        .revoke_account_credential("tenant-wa-revoke", account_id, "cred-a")
+        .await
+        .expect("revoke cred-a");
+    assert!(first.removed);
+    assert_eq!(first.remaining, 1, "one credential left after first revoke");
+
+    // Idempotent: revoking an already-revoked credential affects no row.
+    let again = backend
+        .revoke_account_credential("tenant-wa-revoke", account_id, "cred-a")
+        .await
+        .expect("revoke cred-a again");
+    assert!(!again.removed, "already-revoked credential is not removed again");
+    assert_eq!(again.remaining, 1, "remaining count unchanged");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-revoke").await;
+}
+
+#[tokio::test]
+async fn webauthn_credential_account_scoping_blocks_cross_account_access() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-scope").await;
+
+    // Two distinct accounts in the SAME tenant.
+    let account_a = backend
+        .create_or_reuse_account("tenant-wa-scope", "principal-a")
+        .await
+        .expect("seed account A");
+    let account_b = backend
+        .create_or_reuse_account("tenant-wa-scope", "principal-b")
+        .await
+        .expect("seed account B");
+    assert_ne!(account_a, account_b, "distinct accounts");
+
+    let passkey = serde_json::json!({"owner": "a"});
+    backend
+        .insert_webauthn_credential("tenant-wa-scope", account_a, "cred-owned-by-a", &passkey, Some("A's key"))
+        .await
+        .expect("insert A's credential");
+
+    // Account B's list must NOT see account A's credential.
+    let b_list = backend
+        .list_account_credentials("tenant-wa-scope", account_b)
+        .await
+        .expect("list B");
+    assert!(b_list.is_empty(), "account B sees none of account A's credentials");
+
+    // Account B cannot rename account A's credential.
+    let b_rename = backend
+        .rename_account_credential("tenant-wa-scope", account_b, "cred-owned-by-a", Some("hijack"))
+        .await
+        .expect("rename attempt by B");
+    assert!(!b_rename, "account B cannot rename account A's credential");
+
+    // Account B cannot revoke account A's credential; remaining counts only B's.
+    let b_revoke = backend
+        .revoke_account_credential("tenant-wa-scope", account_b, "cred-owned-by-a")
+        .await
+        .expect("revoke attempt by B");
+    assert!(!b_revoke.removed, "account B cannot revoke account A's credential");
+    assert_eq!(b_revoke.remaining, 0, "account B has no active credentials of its own");
+
+    // Account A's credential is untouched: still listable, still original label.
+    let a_list = backend
+        .list_account_credentials("tenant-wa-scope", account_a)
+        .await
+        .expect("list A");
+    assert_eq!(a_list.len(), 1, "account A's credential survived B's attempts");
+    assert_eq!(a_list[0].label.as_deref(), Some("A's key"), "label not hijacked");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-scope").await;
+}
