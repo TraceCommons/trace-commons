@@ -52,6 +52,18 @@ async fn cleanup_pg_trace_tenant(backend: &PgBackend, tenant_id: &str) {
     )
     .await
     .expect("set cleanup tenant context");
+    // `trace_audit_events` has no FK to `trace_tenants`, so deleting the tenant
+    // does NOT cascade-clear its mirrored audit chain. Left behind, a stale DB
+    // chain head collides with the next test's fresh (genesis) file chain and
+    // trips the audit-chain drift guard. Clear it explicitly (tenant-scoped under
+    // the cleanup RLS context) so DB-backed account tests are self-isolating on a
+    // reused database.
+    let _ = tx
+        .execute(
+            "DELETE FROM trace_audit_events WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await;
     let _ = tx
         .execute(
             "DELETE FROM trace_tenants WHERE tenant_id = $1",
@@ -806,10 +818,20 @@ async fn account_trace_detail_owned_returns_metadata_unowned_and_missing_are_uni
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+/// True when `body` carries a deterministic-redaction placeholder. The email
+/// redactor emits `<PRIVATE_EMAIL_n>` tokens; the leak-detector fallback emits
+/// `[REDACTED]`/`[REDACTED:label]`. Either proves content was scrubbed; this
+/// predicate accepts both so assertions track the real redactor output rather
+/// than one specific marker shape.
+fn envelope_contains_redaction_marker(body: &str) -> bool {
+    body.contains("<PRIVATE_") || body.contains("[REDACTED")
+}
+
 /// Build a privacy-scrubbed envelope whose redacted event content carries a
-/// `[REDACTED:private_email]` marker, then write its serialized JSON to the
-/// on-disk object path the file-fallback read uses. Returns the marker-bearing
-/// serialized bytes so the round-trip test can assert byte-for-byte fidelity.
+/// deterministic redaction placeholder (`<PRIVATE_EMAIL_n>` for the email path),
+/// then write its serialized JSON to the on-disk object path the file-fallback
+/// read uses. Returns the marker-bearing serialized bytes so the round-trip test
+/// can assert byte-for-byte fidelity.
 async fn write_redacted_envelope_to_disk(
     state: &AppState,
     tenant_id: &str,
@@ -847,11 +869,19 @@ async fn write_redacted_envelope_to_disk(
         .expect("redaction succeeds");
 
     let body = serde_json::to_vec(&envelope).expect("serialize envelope");
+    let body_text = String::from_utf8(body.clone()).expect("utf8");
+    // The deterministic email redactor substitutes a `<PRIVATE_EMAIL_n>` placeholder
+    // (the leak-detector `[REDACTED]` fallback only fires on residual secrets), so
+    // assert the privacy invariant directly: the raw email is GONE and a redaction
+    // placeholder is present. (Earlier this asserted `[REDACTED`, which never
+    // matches the deterministic email path.)
     assert!(
-        String::from_utf8(body.clone())
-            .expect("utf8")
-            .contains("[REDACTED"),
+        envelope_contains_redaction_marker(&body_text),
         "fixture envelope must already contain a redaction marker"
+    );
+    assert!(
+        !body_text.contains("alice@example.com"),
+        "the raw private email must not survive redaction"
     );
 
     // Mirror the production object-key layout so `read_envelope_by_record`'s
@@ -933,7 +963,7 @@ async fn account_trace_content_owned_returns_redacted_body_unowned_and_missing_a
     // no un-scrubbing. The returned body is byte-identical to what was stored.
     let body_text = String::from_utf8(body_bytes.to_vec()).expect("utf8 body");
     assert!(
-        body_text.contains("[REDACTED"),
+        envelope_contains_redaction_marker(&body_text),
         "the redaction marker must survive the content read-back"
     );
     assert_eq!(
@@ -61724,6 +61754,473 @@ async fn revoke_all_invalidates_every_session() {
         .await
         .expect_err("session two revoked");
     assert_eq!(err_two.0, StatusCode::UNAUTHORIZED);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+// ============================================================================
+// Task 12: cross-account isolation regression suite (spec §Testing a-e).
+//
+// These exercise the ACTUAL `/v1/account/*` handlers end-to-end against real
+// PostgreSQL (self-skipping without a database). Each test inserts submissions
+// directly via the DB mirror, links device principals to accounts via the mint
+// handler, then drives the list / detail / content handlers under one account's
+// auth and asserts the other account's (or the legacy / unlinked / account-actor)
+// submissions are NEVER returned. The handlers are reached through the dual-auth
+// `resolve_account_ctx`, so this covers the whole stack, not just the predicate.
+// ============================================================================
+
+/// Stage a readable, serialized envelope on disk for `submission_id` under
+/// `tenant_id` so the content handler's file-fallback read resolves it. Unlike
+/// `write_redacted_envelope_to_disk`, this does NOT assert any redaction marker:
+/// the isolation property under test is ownership-gating (own → 200, foreign →
+/// 404), which is independent of redaction-marker fidelity. Returns the stored
+/// bytes so callers can assert byte-identical read-back.
+async fn stage_account_content_envelope(
+    state: &AppState,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> Vec<u8> {
+    use trace_commons_protocol::trace_contribution::RawTraceContribution;
+
+    let trace = TraceFile {
+        model_name: "test-model".to_string(),
+        memory_snapshot: Vec::new(),
+        http_exchanges: Vec::new(),
+        steps: vec![TraceStep {
+            request_hint: None,
+            response: TraceResponse::UserInput {
+                content: "benign user input with no private data".to_string(),
+            },
+            expected_tool_results: Vec::new(),
+        }],
+    };
+    let raw = RawTraceContribution::from_recorded_trace(
+        &trace,
+        RecordedTraceContributionOptions {
+            include_message_text: true,
+            ..Default::default()
+        },
+    );
+    let envelope = DeterministicTraceRedactor::default()
+        .redact_trace(raw)
+        .await
+        .expect("redaction succeeds");
+    let body = serde_json::to_vec(&envelope).expect("serialize envelope");
+
+    let object_key =
+        trace_envelope_object_key(tenant_id, TraceCorpusStatus::Accepted, submission_id);
+    let path = state.root.join(&object_key);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create object dir");
+    }
+    std::fs::write(&path, &body).expect("write envelope object");
+    body
+}
+
+/// Drive all three account read endpoints under `token`'s bearer auth and assert
+/// `target` (a submission owned by a DIFFERENT account / legacy / unlinked /
+/// account-actor principal) is invisible: absent from the list, and a uniform
+/// `404` on both detail and content. `own_ids` (if any) are asserted present in
+/// the list so we also prove the caller still sees its own rows.
+async fn assert_target_invisible_across_all_three_reads(
+    state: &Arc<AppState>,
+    token: &str,
+    target: Uuid,
+    own_ids: &[Uuid],
+) {
+    // List: target absent; own ids present.
+    let Json(page) = account_traces_list_handler(
+        State(state.clone()),
+        auth_headers(token),
+        Query(AccountTracesListQuery::default()),
+    )
+    .await
+    .expect("list succeeds");
+    let listed: Vec<Uuid> = page.items.iter().map(|item| item.submission_id).collect();
+    assert!(
+        !listed.contains(&target),
+        "target submission must NOT appear in the account list"
+    );
+    for owned in own_ids {
+        assert!(
+            listed.contains(owned),
+            "the account's OWN submission {owned} must appear in its list"
+        );
+    }
+
+    // Detail: uniform 404 (byte-identical to a random nonexistent id).
+    let random = Uuid::new_v4();
+    let target_detail_err = account_trace_detail_handler(
+        State(state.clone()),
+        auth_headers(token),
+        AxumPath(target),
+    )
+    .await
+    .expect_err("foreign detail -> 404");
+    let random_detail_err = account_trace_detail_handler(
+        State(state.clone()),
+        auth_headers(token),
+        AxumPath(random),
+    )
+    .await
+    .expect_err("missing detail -> 404");
+    assert_eq!(target_detail_err.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        target_detail_err.1 .0.error, random_detail_err.1 .0.error,
+        "foreign and nonexistent detail must be byte-identical (no existence oracle)"
+    );
+
+    // Content: uniform 404, byte-identical to the detail 404 (same not_found()).
+    let target_content_err = account_trace_content_handler(
+        State(state.clone()),
+        auth_headers(token),
+        AxumPath(target),
+    )
+    .await
+    .expect_err("foreign content -> 404");
+    assert_eq!(target_content_err.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        target_content_err.1 .0.error, random_detail_err.1 .0.error,
+        "foreign content 404 must be byte-identical to the detail 404"
+    );
+}
+
+/// (a) Two accounts in one tenant. Account A (device principal of `token-a`) and
+/// account B (device principal of `token-a-2`) each own a submission. A's auth on
+/// all three read endpoints returns ONLY A's: B's submission is absent from the
+/// list and 404 on detail AND content (byte-identical to A's own not-found). A's
+/// own content read-back returns 200 with the staged body.
+#[tokio::test]
+async fn isolation_a_two_accounts_one_tenant_cannot_cross_read() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // Link two DISTINCT device principals under the same tenant to two accounts.
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint links account A");
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a-2"))
+        .await
+        .expect("mint links account B");
+    let principal_a = principal_storage_ref("token-a");
+    let principal_b = principal_storage_ref("token-a-2");
+
+    let a_owned = insert_account_test_submission(backend.as_ref(), "tenant-a", &principal_a).await;
+    let b_owned = insert_account_test_submission(backend.as_ref(), "tenant-a", &principal_b).await;
+
+    // Stage readable content for BOTH so a missing-artifact 500 cannot masquerade
+    // as the ownership 404 we are asserting for the foreign row.
+    let a_body = stage_account_content_envelope(state.as_ref(), "tenant-a", a_owned).await;
+    let _ = stage_account_content_envelope(state.as_ref(), "tenant-a", b_owned).await;
+
+    // A cannot see B across list + detail + content; A still sees its own row.
+    assert_target_invisible_across_all_three_reads(&state, "token-a", b_owned, &[a_owned]).await;
+
+    // And A's OWN content read-back succeeds (proves the 404 above is ownership,
+    // not a blanket read failure).
+    let response = account_trace_content_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        AxumPath(a_owned),
+    )
+    .await
+    .expect("A's own content read succeeds");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read A body");
+    assert_eq!(
+        body_bytes.as_ref(),
+        a_body.as_slice(),
+        "A reads back exactly its own stored envelope"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// (b) A submission whose `auth_principal_ref == legacy_principal_ref()` is NEVER
+/// returned on the account surface (list + detail 404 + content 404), proving the
+/// account surface dropped the legacy wildcard that the reviewer/contributor
+/// `/v1/traces` surface still honors.
+#[tokio::test]
+async fn isolation_b_legacy_principal_never_returned_on_account_surface() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint links account A");
+    let principal_a = principal_storage_ref("token-a");
+
+    let a_owned = insert_account_test_submission(backend.as_ref(), "tenant-a", &principal_a).await;
+    // A legacy-wildcard-owned submission under the same tenant.
+    let legacy = insert_account_test_submission(
+        backend.as_ref(),
+        "tenant-a",
+        &legacy_principal_ref(),
+    )
+    .await;
+
+    assert_target_invisible_across_all_three_reads(&state, "token-a", legacy, &[a_owned]).await;
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// (c) A Reviewer-role bearer token, used on `/v1/account/traces`, sees ONLY its
+/// own account's submissions — NOT every submission in the tenant. This proves
+/// the account surface ignores `can_review` (which on `/v1/traces` would expose
+/// the whole tenant). The reviewer's own device principal is linked to its own
+/// account via mint; a foreign-principal submission under the same tenant must
+/// stay invisible to it on the account surface.
+#[tokio::test]
+async fn isolation_c_reviewer_token_confined_to_own_account() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // `review-token-a` is a Reviewer-role token under tenant-a (default token set).
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("review-token-a"))
+        .await
+        .expect("mint links the reviewer's account");
+    let reviewer_principal = principal_storage_ref("review-token-a");
+
+    let reviewer_owned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &reviewer_principal).await;
+    // A submission owned by a DIFFERENT principal in the SAME tenant. On the legacy
+    // reviewer surface a reviewer would see this; on the account surface it must be
+    // invisible (can_review is not consulted).
+    let foreign =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", "principal_other_contributor")
+            .await;
+
+    assert_target_invisible_across_all_three_reads(
+        &state,
+        "review-token-a",
+        foreign,
+        &[reviewer_owned],
+    )
+    .await;
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// (d) An UNLINKED principal (a `trace_account_principals` row with `unlinked_at`
+/// set) is excluded from the active-membership expansion: submissions under the
+/// unlinked principal are absent from the account's list AND 404 on detail/content,
+/// while the SAME account's active principal's submissions remain visible. There
+/// is no unlink endpoint in this slice, so the unlinked row is inserted via raw
+/// SQL under the tenant's RLS context.
+#[tokio::test]
+async fn isolation_d_unlinked_principal_excluded_active_principal_visible() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // Mint links token-a's principal (ACTIVE) to an account; capture that account.
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint links the active principal");
+    let active_principal = principal_storage_ref("token-a");
+
+    // Resolve the account_id for token-a's principal so we can attach an UNLINKED
+    // sibling principal to the SAME account.
+    let account_id: Uuid = {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("conn");
+        let tx = client.transaction().await.expect("tx");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&"tenant-a"],
+        )
+        .await
+        .expect("set tenant ctx");
+        let row = tx
+            .query_one(
+                "SELECT account_id FROM trace_account_principals
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND principal_ref = $1 AND unlinked_at IS NULL",
+                &[&active_principal],
+            )
+            .await
+            .expect("active principal row exists");
+        let account_id: Uuid = row.get(0);
+        // Attach an already-UNLINKED sibling principal to the same account.
+        let unlinked_principal = "principal_unlinked_sibling";
+        let inserted = tx
+            .execute(
+                "INSERT INTO trace_account_principals
+                    (tenant_id, account_id, principal_ref, linked_at, unlinked_at)
+                  VALUES (trace_current_tenant_id(), $1, $2, now() - INTERVAL '1 day', now())",
+                &[&account_id, &unlinked_principal],
+            )
+            .await
+            .expect("insert unlinked sibling principal");
+        assert_eq!(inserted, 1, "exactly one unlinked principal row inserted");
+        tx.commit().await.expect("commit unlinked principal");
+        account_id
+    };
+    let _ = account_id; // captured for clarity; ownership flows through the set.
+
+    let active_owned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &active_principal).await;
+    // A submission owned by the UNLINKED principal must NOT be visible.
+    let unlinked_owned = insert_account_test_submission(
+        backend.as_ref(),
+        "tenant-a",
+        "principal_unlinked_sibling",
+    )
+    .await;
+
+    assert_target_invisible_across_all_three_reads(
+        &state,
+        "token-a",
+        unlinked_owned,
+        &[active_owned],
+    )
+    .await;
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// (e) A submission whose `auth_principal_ref` is literally `account-actor:{uuid}`
+/// is NEVER matched for that account: the account-actor ref is an audit label, not
+/// an ownership key. Even though the cookie path sets the actor ref to exactly this
+/// literal, the principal SET (which carries ownership) holds only the device
+/// principal, so an account-actor-keyed submission is invisible across all three
+/// reads. End-to-end via the cookie session (so the actor ref really is the
+/// account-actor literal at request time).
+#[tokio::test]
+async fn isolation_e_account_actor_ref_is_inert_end_to_end() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // Cookie session for token-a's account; the resolved actor ref will be
+    // `account-actor:{account_id}`.
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let ctx = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect("cookie resolves");
+    assert!(
+        ctx.actor_ref.starts_with("account-actor:"),
+        "cookie path actor ref must be the account-actor literal"
+    );
+    let active_principal = principal_storage_ref("token-a");
+
+    let active_owned =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &active_principal).await;
+    // A submission keyed by the EXACT account-actor literal must be inert: it is an
+    // audit label, never an ownership key, so it is not in the principal set.
+    let actor_keyed =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &ctx.actor_ref).await;
+
+    // Sanity: the actor ref is structurally NOT a sha-shaped principal and is NOT
+    // in the ownership set.
+    assert!(!ctx.actor_ref.starts_with("principal_"));
+    assert!(!ctx.principal_set.contains(&ctx.actor_ref));
+
+    // List under the COOKIE session: actor-keyed row absent, active row present.
+    let Json(page) = account_traces_list_handler(
+        State(state.clone()),
+        headers.clone(),
+        Query(AccountTracesListQuery::default()),
+    )
+    .await
+    .expect("cookie list succeeds");
+    let listed: Vec<Uuid> = page.items.iter().map(|item| item.submission_id).collect();
+    assert!(
+        listed.contains(&active_owned),
+        "the account's active-principal submission is visible"
+    );
+    assert!(
+        !listed.contains(&actor_keyed),
+        "an account-actor-keyed submission must be INERT (never returned)"
+    );
+
+    // Detail + content 404 for the actor-keyed row under the cookie session.
+    let detail_err = account_trace_detail_handler(
+        State(state.clone()),
+        headers.clone(),
+        AxumPath(actor_keyed),
+    )
+    .await
+    .expect_err("actor-keyed detail -> 404");
+    assert_eq!(detail_err.0, StatusCode::NOT_FOUND);
+    let content_err = account_trace_content_handler(
+        State(state.clone()),
+        headers.clone(),
+        AxumPath(actor_keyed),
+    )
+    .await
+    .expect_err("actor-keyed content -> 404");
+    assert_eq!(content_err.0, StatusCode::NOT_FOUND);
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }

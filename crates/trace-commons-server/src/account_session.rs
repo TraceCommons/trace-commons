@@ -61,7 +61,7 @@ impl AccountPrincipalSet {
     pub fn contains(&self, principal_ref: &str) -> bool {
         self.0.contains(principal_ref)
     }
-    pub fn as_slice(&self) -> Vec<String> {
+    pub fn to_vec(&self) -> Vec<String> {
         self.0.iter().cloned().collect()
     }
     pub fn is_empty(&self) -> bool {

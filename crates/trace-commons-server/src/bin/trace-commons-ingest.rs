@@ -11654,6 +11654,29 @@ fn cookie_value_from_headers<'a>(headers: &'a HeaderMap, name: &str) -> Option<&
     })
 }
 
+/// Parse a `tc_account_session` cookie value (`{b64url(tenant_id)}.{secret}`)
+/// into `(tenant_id, token_hash)`. Returns `None` for any malformed value: no '.'
+/// separator, an empty secret, or a tenant prefix that is not valid base64url /
+/// UTF-8. The stored `token_hash` is `sha256(secret)` ONLY — the tenant is carried
+/// in the cookie purely to bootstrap the RLS lookup and is re-confirmed by the
+/// globally-unique `token_hash`, so a forged tenant simply misses (see
+/// `resolve_account_ctx_cookie` / `validate_session`). Shared by the resolver
+/// cookie path and the logout handler so the two cannot derive the hash
+/// differently.
+fn account_session_cookie_parts(cookie: &str) -> Option<(String, String)> {
+    // base64url(no pad) and the CSPRNG secret both exclude '.', so exactly one
+    // split is expected.
+    let (b64_tenant, secret) = cookie.split_once('.')?;
+    if secret.is_empty() {
+        return None;
+    }
+    let tenant_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(b64_tenant)
+        .ok()?;
+    let tenant_id = String::from_utf8(tenant_bytes).ok()?;
+    Some((tenant_id, hash_secret(secret)))
+}
+
 /// Resolve the dual-auth `AccountCtx` guarding the `/v1/account/*` read surface.
 ///
 /// Exactly one credential is accepted:
@@ -11671,9 +11694,6 @@ fn cookie_value_from_headers<'a>(headers: &'a HeaderMap, name: &str) -> Option<&
 /// fall-through to an unauthenticated or elevated state. The returned `AccountCtx`
 /// carries no role/privilege field, so the cookie path cannot be treated as
 /// reviewer/admin: it is a low-privilege contributor surface by construction.
-// Wired by the `/v1/account/*` read endpoints in Tasks 9-10; until then the
-// non-test bin build sees it as dead code. Exercised now by the Task 7 tests.
-#[allow(dead_code)]
 async fn resolve_account_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult<AccountCtx> {
     let has_bearer = headers
         .get(AUTHORIZATION)
@@ -11697,7 +11717,6 @@ async fn resolve_account_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult
 }
 
 /// Bearer path: device token → linked account → active-membership set.
-#[allow(dead_code)]
 async fn resolve_account_ctx_bearer(
     state: &AppState,
     headers: &HeaderMap,
@@ -11732,24 +11751,13 @@ async fn resolve_account_ctx_bearer(
 /// but this is SAFE: the stored `token_hash` is the sha256 of the SECRET ONLY and
 /// is globally UNIQUE, so a forged/mismatched tenant scopes the RLS lookup to a
 /// tenant where this hash does not exist → no row → 401. See `validate_session`.
-#[allow(dead_code)]
 async fn resolve_account_ctx_cookie(state: &AppState, cookie: &str) -> ApiResult<AccountCtx> {
     let invalid =
         || api_error(StatusCode::UNAUTHORIZED, "invalid or expired account session");
 
-    // Split on the single '.' separator. base64url(no pad) and the CSPRNG secret
-    // both exclude '.', so exactly one split is expected.
-    let (b64_tenant, secret) = cookie.split_once('.').ok_or_else(invalid)?;
-    if secret.is_empty() {
-        return Err(invalid());
-    }
-    let tenant_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(b64_tenant)
-        .map_err(|_| invalid())?;
-    let tenant_id = String::from_utf8(tenant_bytes).map_err(|_| invalid())?;
+    let (tenant_id, token_hash) = account_session_cookie_parts(cookie).ok_or_else(invalid)?;
 
     let db = account_db(state)?;
-    let token_hash = hash_secret(secret);
     let account_id = db
         .validate_session(&tenant_id, &token_hash)
         .await
@@ -11778,9 +11786,10 @@ const ACCOUNT_TRACES_MAX_LIMIT: usize = 200;
 
 /// Hard ceiling on the serialized content body returned by the account content
 /// read-back. The stored envelope is already privacy-scrubbed and bounded at
-/// submission time; this is a defense-in-depth oracle-safe cap so a malformed or
-/// oversized stored object cannot be streamed back unbounded. Exceeding it
-/// collapses to a single generic error that carries no size signal.
+/// submission time; this is a defense-in-depth oracle-safe cap. The whole object
+/// is buffered and decrypted in memory before this check, so a body above the
+/// ceiling cannot be returned at all — it collapses to a single generic error
+/// that carries no size signal (no partial/streamed response is ever emitted).
 const ACCOUNT_TRACE_CONTENT_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 /// Query string for `GET /v1/account/traces`. Keyset pagination only: no offset
@@ -11895,7 +11904,7 @@ async fn account_traces_list_handler(
     };
 
     let db = account_db(state.as_ref())?;
-    let principal_refs = ctx.principal_set.as_slice();
+    let principal_refs = ctx.principal_set.to_vec();
     let records = db
         .list_account_trace_submissions_keyset(
             &ctx.tenant_id,
@@ -11993,6 +12002,41 @@ async fn account_trace_detail_handler(
 /// Any KMS/store/decrypt/integrity failure FAILS CLOSED to a generic label-only
 /// `500` that never echoes object_key / KMS ARN / ciphertext / exception detail;
 /// the failed read is still audited (hash-only) so denied reads are not silent.
+///
+/// Shared fail-closed tail for the account content read-back: append the hash-only
+/// failed-read audit row (single row, no object ref — the read never resolved a
+/// source object) and return the generic label-only `500`. Both the decrypt/store
+/// failure and the serialize failure funnel through here so their audit-and-deny
+/// behavior cannot drift. The caller logs the distinct cause (hashed) BEFORE
+/// calling this; an audit-append failure here is itself logged (hash-only) and
+/// swallowed so the original fail-closed `500` is always what the caller sees.
+async fn audit_account_content_read_failure(
+    state: &AppState,
+    audit_tenant: &TenantAuth,
+    submission_id: Uuid,
+) -> (StatusCode, Json<ApiError>) {
+    if let Err(audit_error) = append_trace_content_read_audit_per_source(
+        state,
+        audit_tenant,
+        submission_id,
+        &[],
+        "account_trace_content",
+        Some("read_failed"),
+    )
+    .await
+    {
+        tracing::warn!(
+            error_hash = %safe_display_error_hash(&audit_error),
+            submission_id = %submission_id,
+            "Trace Commons account content read-back failure audit append failed"
+        );
+    }
+    api_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "trace content unavailable",
+    )
+}
+
 async fn account_trace_content_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -12064,28 +12108,10 @@ async fn account_trace_content_handler(
                 submission_id = %record.submission_id,
                 "Trace Commons account content read-back failed; failing closed"
             );
-            // Audit the failed read (hash-only, single row, no object ref since
-            // the read never resolved a source object).
-            if let Err(audit_error) = append_trace_content_read_audit_per_source(
-                state.as_ref(),
-                &audit_tenant,
-                record.submission_id,
-                &[],
-                "account_trace_content",
-                Some("read_failed"),
-            )
-            .await
-            {
-                tracing::warn!(
-                    error_hash = %safe_display_error_hash(&audit_error),
-                    submission_id = %record.submission_id,
-                    "Trace Commons account content read-back failure audit append failed"
-                );
-            }
-            return Err(api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "trace content unavailable",
-            ));
+            return Err(
+                audit_account_content_read_failure(state.as_ref(), &audit_tenant, record.submission_id)
+                    .await,
+            );
         }
     };
 
@@ -12099,26 +12125,10 @@ async fn account_trace_content_handler(
                 submission_id = %record.submission_id,
                 "Trace Commons account content read-back serialization failed; failing closed"
             );
-            if let Err(audit_error) = append_trace_content_read_audit_per_source(
-                state.as_ref(),
-                &audit_tenant,
-                record.submission_id,
-                &[],
-                "account_trace_content",
-                Some("read_failed"),
-            )
-            .await
-            {
-                tracing::warn!(
-                    error_hash = %safe_display_error_hash(&audit_error),
-                    submission_id = %record.submission_id,
-                    "Trace Commons account content read-back failure audit append failed"
-                );
-            }
-            return Err(api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "trace content unavailable",
-            ));
+            return Err(
+                audit_account_content_read_failure(state.as_ref(), &audit_tenant, record.submission_id)
+                    .await,
+            );
         }
     };
 
@@ -12742,19 +12752,15 @@ async fn account_logout_handler(
 
     let revoked = match ctx.auth_method {
         AccountAuthMethod::SessionCookie => {
-            // Re-derive the token_hash from the presented cookie. We reuse the
-            // exact cookie-parse + secret-hash the resolver used, so the hash we
-            // revoke is byte-identical to the stored one. (The resolver does not
-            // surface the hash, so re-parsing here is the minimal, clean seam.)
+            // Re-derive the token_hash from the presented cookie via the SAME
+            // shared parser the resolver uses (`account_session_cookie_parts`), so
+            // the hash we revoke is byte-identical to the stored one. (The resolver
+            // does not surface the hash, so re-parsing here is the minimal, clean
+            // seam; the shared helper keeps the two derivations from drifting.)
             let cookie = cookie_value_from_headers(&headers, ACCOUNT_SESSION_COOKIE)
                 .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "no session"))?;
-            // `{b64url(tenant)}.{secret}` — the secret is the part after the '.'.
-            let secret = cookie
-                .split_once('.')
-                .map(|(_, secret)| secret)
-                .filter(|secret| !secret.is_empty())
+            let (_cookie_tenant, token_hash) = account_session_cookie_parts(cookie)
                 .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "no session"))?;
-            let token_hash = hash_secret(secret);
             db.revoke_current_session(&ctx.tenant_id, &token_hash)
                 .await
                 .map_err(internal_error)?
@@ -44445,8 +44451,16 @@ fn visible_submission_records(
 /// let records: Vec<TraceCommonsSubmissionRecord> = vec![];
 /// let _ = visible_submission_records_for_account(&auth, records); // E0308: expected &AccountPrincipalSet
 /// ```
-// Wired into the `/v1/account/*` read endpoints in a later slice (Tasks 9-10);
-// exercised now by the unit tests below.
+// This is the canonical account-visibility predicate (pure set-membership, no
+// `can_review()` short-circuit, no `legacy_principal_ref()` wildcard). The
+// `/v1/account/*` list endpoint enforces the SAME membership via the SQL route
+// (`auth_principal_ref = ANY($active_principal_set)` in
+// `list_account_trace_submissions_keyset`), so this function is not called on the
+// request path; it is retained as the executable reference for the predicate and
+// — crucially — to anchor the Hardening-C type-level surface separation, asserted
+// by the `compile_fail` doctests above and the runtime witness test. Hence the
+// `#[allow(dead_code)]`: removing the function would drop the compile-fail
+// guarantee, not just an unused helper.
 #[allow(dead_code)]
 fn visible_submission_records_for_account(
     set: &AccountPrincipalSet,
