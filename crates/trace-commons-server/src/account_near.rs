@@ -66,7 +66,7 @@ fn nep413_payload_bytes(
     nonce: &[u8; 32],
     recipient: &str,
     callback_url: Option<&str>,
-) -> Vec<u8> {
+) -> Result<Vec<u8>> {
     let payload = Nep413Payload {
         tag: NEP413_TAG,
         message: message.to_string(),
@@ -74,8 +74,9 @@ fn nep413_payload_bytes(
         recipient: recipient.to_string(),
         callback_url: callback_url.map(|s| s.to_string()),
     };
-    // Borsh serialization of a fixed in-memory struct cannot fail.
-    borsh::to_vec(&payload).expect("borsh serialization of NEP-413 payload is infallible")
+    // Borsh serialization of this fixed struct is infallible in practice; we
+    // propagate rather than panic so the crypto module has zero panic paths.
+    borsh::to_vec(&payload).context("NEP-413 payload serialization failed")
 }
 
 /// Verify a NEP-413 wallet signature.
@@ -98,7 +99,8 @@ pub fn verify_nep413(
     let public_key_bytes = parse_near_ed25519_pubkey(public_key)
         .map_err(|_| anyhow!("NEP-413 verification failed"))?;
 
-    let payload = nep413_payload_bytes(message, nonce, recipient, callback_url);
+    let payload = nep413_payload_bytes(message, nonce, recipient, callback_url)
+        .map_err(|_| anyhow!("NEP-413 verification failed"))?;
 
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(&payload);
@@ -158,13 +160,19 @@ pub async fn near_account_has_full_access_key(
         },
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .context("NEAR RPC client build failed")?;
     let resp = client
         .post(&cfg.rpc_url)
         .json(&body)
         .send()
         .await
         .context("NEAR RPC request failed")?;
+    let resp = resp
+        .error_for_status()
+        .context("NEAR RPC returned error status")?;
     let json: serde_json::Value = resp
         .json()
         .await
@@ -207,7 +215,7 @@ mod tests {
     #[test]
     fn nep413_payload_bytes_layout_pin() {
         let nonce = [1u8; 32];
-        let got = nep413_payload_bytes("hi", &nonce, "app.example", None);
+        let got = nep413_payload_bytes("hi", &nonce, "app.example", None).unwrap();
 
         let mut expected: Vec<u8> = Vec::new();
         // tag = 2_147_484_061 = 2^31 + 413 = 0x8000_019D, little-endian.
@@ -224,7 +232,7 @@ mod tests {
         assert_eq!(got, expected, "NEP-413 None layout drifted");
 
         // callback_url Some("u"): 0x01 (Some) + u32 LE len (1) + 'u'
-        let got_some = nep413_payload_bytes("hi", &nonce, "app.example", Some("u"));
+        let got_some = nep413_payload_bytes("hi", &nonce, "app.example", Some("u")).unwrap();
         let mut expected_some = expected.clone();
         expected_some.pop(); // drop the trailing None byte
         expected_some.extend_from_slice(&[0x01, 0x01, 0x00, 0x00, 0x00, b'u']);
@@ -239,7 +247,7 @@ mod tests {
         callback_url: Option<&str>,
     ) -> String {
         use sha2::{Digest, Sha256};
-        let payload = nep413_payload_bytes(message, nonce, recipient, callback_url);
+        let payload = nep413_payload_bytes(message, nonce, recipient, callback_url).unwrap();
         let digest = Sha256::digest(&payload);
         let sig = kp.sign(digest.as_slice());
         base64::engine::general_purpose::STANDARD.encode(sig.as_ref())
