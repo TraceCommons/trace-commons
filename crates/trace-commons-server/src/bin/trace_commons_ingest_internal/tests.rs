@@ -418,6 +418,47 @@ async fn webauthn_migration_applies_credentials_table_and_session_rotation_colum
 }
 
 #[tokio::test]
+async fn near_identities_migration_applies_table_and_widens_client_kind() {
+    // Self-skips without a DB (TRACE_COMMONS_PG_TEST_DATABASE_URL / DATABASE_URL unset).
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+
+    // The near-identities table exists and FORCES row-level security.
+    let row = client
+        .query_one(
+            "SELECT relforcerowsecurity FROM pg_class WHERE relname = $1",
+            &[&"trace_near_identities"],
+        )
+        .await
+        .expect("trace_near_identities exists");
+    let forced: bool = row.get(0);
+    assert!(forced, "trace_near_identities must FORCE ROW LEVEL SECURITY");
+
+    // The widened client_kind CHECK now accepts 'near'.
+    let check_def: String = client
+        .query_one(
+            "SELECT pg_get_constraintdef(oid)
+             FROM pg_constraint
+             WHERE conrelid = 'trace_sessions'::regclass
+               AND conname = 'trace_sessions_client_kind_check'",
+            &[],
+        )
+        .await
+        .expect("client_kind check exists")
+        .get(0);
+    assert!(
+        check_def.contains("near"),
+        "client_kind CHECK must accept 'near': {check_def}"
+    );
+}
+
+#[tokio::test]
 async fn mint_login_link_is_idempotent_per_principal_and_returns_login_url() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;

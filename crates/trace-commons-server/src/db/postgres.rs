@@ -97,6 +97,7 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_sessions",
     "trace_account_audit",
     "trace_webauthn_credentials",
+    "trace_near_identities",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -916,6 +917,26 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
                     &[&32_i32, &"webauthn_credentials"],
+                )
+                .await?;
+        }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&33_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V33__near_identities.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&33_i32, &"near_identities"],
                 )
                 .await?;
         }
@@ -2588,6 +2609,7 @@ mod tests {
             include_str!("../../../../migrations/V29__onboarding_invites.sql"),
             include_str!("../../../../migrations/V30__trace_accounts.sql"),
             include_str!("../../../../migrations/V32__webauthn_credentials.sql"),
+            include_str!("../../../../migrations/V33__near_identities.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
@@ -2601,6 +2623,7 @@ mod tests {
             include_str!("../../../../migrations/V29__onboarding_invites.sql"),
             include_str!("../../../../migrations/V30__trace_accounts.sql"),
             include_str!("../../../../migrations/V32__webauthn_credentials.sql"),
+            include_str!("../../../../migrations/V33__near_identities.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {
