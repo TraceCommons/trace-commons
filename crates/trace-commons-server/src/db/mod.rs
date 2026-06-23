@@ -342,7 +342,8 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// of the cookie, NOT the whole cookie value) under the caller-asserted
     /// `tenant_id`. Inside an RLS-scoped tx: select the account for a session
     /// that is unexpired, not revoked, and seen within the idle cap. On a hit,
-    /// bump `last_seen_at` and return the account id. On a miss (including an
+    /// bump `last_seen_at` and return the account id together with the session's
+    /// `auth_credential_id`. On a miss (including an
     /// idle-capped row, which is auto-revoked) return `None`. Any store/DB error
     /// surfaces as `Err`; callers MUST treat both `None` and `Err` as a denial.
     ///
@@ -354,7 +355,7 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         &self,
         _tenant_id: &str,
         _token_hash: &str,
-    ) -> Result<Option<uuid::Uuid>, DatabaseError> {
+    ) -> Result<Option<ValidatedSession>, DatabaseError> {
         Err(DatabaseError::Pool(
             "validate_session not implemented".to_string(),
         ))
@@ -565,6 +566,17 @@ pub struct RedeemAudit {
 pub struct RedeemedSession {
     pub account_id: uuid::Uuid,
     pub session_id: uuid::Uuid,
+}
+
+/// Outcome of a successful [`Database::validate_session`] lookup. Carries the
+/// durable account id and the `auth_credential_id` recorded on the session row
+/// (the base64url WebAuthn credential id that authenticated a passkey session, or
+/// `None` for a device-link session). The credential id is a public identifier,
+/// never key material.
+#[derive(Debug, Clone)]
+pub struct ValidatedSession {
+    pub account_id: uuid::Uuid,
+    pub auth_credential_id: Option<String>,
 }
 
 /// A registered passkey resolved for the LOGIN (assertion) path. Carries only

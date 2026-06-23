@@ -102,6 +102,12 @@ pub struct AccountCtx {
     pub tenant_id: String,
     /// Device `principal_ref` (bearer path) or `account-actor:{id}` (cookie path).
     pub actor_ref: String,
+    /// The `credential_id` that authenticated THIS session, when the session was
+    /// minted by a passkey assertion (cookie path only). `None` for device-link
+    /// cookie sessions and for the bearer path. Used solely to flag the
+    /// currently-authenticating credential (`this_device`) in the passkey list;
+    /// it is a public id, never a secret.
+    pub auth_credential_id: Option<String>,
 }
 
 /// 160-bit CSPRNG login code, URL-safe base64 (unpadded).

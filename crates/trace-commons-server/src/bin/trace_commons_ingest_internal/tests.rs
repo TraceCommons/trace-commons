@@ -63912,3 +63912,303 @@ async fn passkey_login_denials_are_byte_identical() {
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
+
+// ============================================================================
+// Slice 2 Task 7: passkey credential management endpoints.
+// ============================================================================
+
+/// Decode the `passkeys` array from a `GET /v1/account/passkeys` response value
+/// into `(credential_id, label, this_device)` tuples for assertion.
+fn decode_passkey_list(body: &serde_json::Value) -> Vec<(String, Option<String>, bool)> {
+    body.get("passkeys")
+        .and_then(|v| v.as_array())
+        .expect("passkeys array present")
+        .iter()
+        .map(|item| {
+            let credential_id = item
+                .get("credential_id")
+                .and_then(|v| v.as_str())
+                .expect("credential_id present")
+                .to_string();
+            let label = item
+                .get("label")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let this_device = item
+                .get("this_device")
+                .and_then(|v| v.as_bool())
+                .expect("this_device present");
+            (credential_id, label, this_device)
+        })
+        .collect()
+}
+
+/// List the caller's passkeys via the GET handler under a given header set,
+/// returning the decoded tuples.
+async fn list_passkeys(
+    state: &Arc<AppState>,
+    headers: HeaderMap,
+) -> Vec<(String, Option<String>, bool)> {
+    let Json(body) = account_passkeys_list_handler(State(state.clone()), headers)
+        .await
+        .expect("passkeys list succeeds");
+    decode_passkey_list(&body)
+}
+
+/// Enroll two passkeys for account A (via the Task 5 register path), list them
+/// under a bearer session (this_device always false), then log in via passkey
+/// (Task 6) with ONE credential and assert that exact credential shows
+/// this_device=true on a cookie-session list while the other stays false.
+#[tokio::test]
+async fn passkey_list_flags_this_device_only_for_authenticating_credential() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let account_id =
+        account_id_for_principal(backend.as_ref(), "tenant-a", &principal_storage_ref("token-a"))
+            .await;
+    let (mut auth1, cred1) = enroll_passkey_for_token(&state, &session_cookie).await;
+    let (_auth2, cred2) = enroll_passkey_for_token(&state, &session_cookie).await;
+    assert_ne!(cred1, cred2, "the two enrollments produce distinct credentials");
+
+    // (1) Bearer session lists BOTH with this_device=false (no passkey authed it).
+    let bearer = list_passkeys(&state, auth_headers("token-a")).await;
+    assert_eq!(bearer.len(), 2, "both credentials listed");
+    assert!(
+        bearer.iter().all(|(_, _, this_device)| !*this_device),
+        "bearer session never flags this_device"
+    );
+    let listed: std::collections::BTreeSet<&str> =
+        bearer.iter().map(|(id, _, _)| id.as_str()).collect();
+    assert!(listed.contains(cred1.as_str()) && listed.contains(cred2.as_str()));
+
+    // (2) Log in via passkey with cred1 -> cookie session carries auth_credential_id.
+    let (challenge, ceremony_pair) = passkey_login_start(&state).await;
+    let assertion =
+        softpasskey_authenticate_discoverable(&mut auth1, &challenge, &cred1, Some(account_id));
+    let mut finish_headers = HeaderMap::new();
+    finish_headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("cookie header"),
+    );
+    let response = account_passkey_login_finish_handler(
+        State(state.clone()),
+        finish_headers,
+        PasskeyAssertionBody(assertion),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let passkey_cookie = response
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|c| c.starts_with("tc_account_session="))
+        .and_then(|c| c.split(';').next())
+        .and_then(|p| p.split_once('='))
+        .map(|(_, v)| v.to_string())
+        .expect("passkey session cookie value");
+
+    // (3) Cookie-session list flags cred1 as this_device, cred2 false.
+    let cookie_list = list_passkeys(
+        &state,
+        cookie_request_headers("tc_account_session", &passkey_cookie),
+    )
+    .await;
+    assert_eq!(cookie_list.len(), 2);
+    for (id, _label, this_device) in &cookie_list {
+        if *id == cred1 {
+            assert!(*this_device, "authenticating credential flagged this_device");
+        } else {
+            assert!(!*this_device, "non-authenticating credential not flagged");
+        }
+    }
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Rename updates the label (reflected in the list); rename of an unknown (or
+/// already-revoked) credential is a uniform 404.
+#[tokio::test]
+async fn passkey_rename_updates_label_and_404s_unknown() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let (_auth, cred) = enroll_passkey_for_token(&state, &session_cookie).await;
+
+    // Rename succeeds and is reflected in the list.
+    let status = account_passkey_rename_handler(
+        State(state.clone()),
+        AxumPath(cred.clone()),
+        auth_headers("token-a"),
+        Json(
+            serde_json::from_value(serde_json::json!({ "label": "  Work laptop  " }))
+                .expect("rename body"),
+        ),
+    )
+    .await
+    .expect("rename succeeds");
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let listed = list_passkeys(&state, auth_headers("token-a")).await;
+    let entry = listed
+        .iter()
+        .find(|(id, _, _)| *id == cred)
+        .expect("renamed credential listed");
+    assert_eq!(
+        entry.1.as_deref(),
+        Some("Work laptop"),
+        "label is trimmed and stored"
+    );
+
+    // Rename of an UNKNOWN credential -> 404.
+    let err = account_passkey_rename_handler(
+        State(state.clone()),
+        AxumPath("unknown-credential-id".to_string()),
+        auth_headers("token-a"),
+        Json(
+            serde_json::from_value(serde_json::json!({ "label": "x" })).expect("rename body"),
+        ),
+    )
+    .await
+    .expect_err("unknown credential rename 404s");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Remove soft-deletes (excluded from the list afterward) and reports the correct
+/// remaining count; remove of an unknown / already-revoked credential -> 404.
+#[tokio::test]
+async fn passkey_remove_soft_deletes_and_404s_unknown() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let (_a1, cred1) = enroll_passkey_for_token(&state, &session_cookie).await;
+    let (_a2, cred2) = enroll_passkey_for_token(&state, &session_cookie).await;
+
+    // Remove cred1: removed=true, one remaining.
+    let Json(body) = account_passkey_remove_handler(
+        State(state.clone()),
+        AxumPath(cred1.clone()),
+        auth_headers("token-a"),
+    )
+    .await
+    .expect("remove succeeds");
+    assert_eq!(body.get("removed").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        body.get("remaining_credentials").and_then(|v| v.as_i64()),
+        Some(1),
+        "one credential remains after removing one of two"
+    );
+
+    // cred1 excluded from the list; cred2 still present.
+    let listed = list_passkeys(&state, auth_headers("token-a")).await;
+    let ids: std::collections::BTreeSet<&str> =
+        listed.iter().map(|(id, _, _)| id.as_str()).collect();
+    assert!(!ids.contains(cred1.as_str()), "removed credential excluded");
+    assert!(ids.contains(cred2.as_str()), "remaining credential listed");
+
+    // Re-removing cred1 (already revoked) -> 404.
+    let err = account_passkey_remove_handler(
+        State(state.clone()),
+        AxumPath(cred1.clone()),
+        auth_headers("token-a"),
+    )
+    .await
+    .expect_err("already-revoked credential 404s");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+    // Remove of an UNKNOWN credential -> 404.
+    let err = account_passkey_remove_handler(
+        State(state.clone()),
+        AxumPath("unknown-credential-id".to_string()),
+        auth_headers("token-a"),
+    )
+    .await
+    .expect_err("unknown credential 404s");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Cross-account isolation: account B never lists A's credentials; PATCH/DELETE of
+/// A's credential by B is a uniform 404; A's credential is unaffected. Account B
+/// is `token-a-2` — a SECOND contributor in the SAME tenant, so this exercises the
+/// account_id predicate (not merely tenant RLS).
+#[tokio::test]
+async fn passkey_management_is_cross_account_isolated() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Account A enrolls a passkey.
+    let a_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let (_a_auth, a_cred) = enroll_passkey_for_token(&state, &a_cookie).await;
+
+    // Account B (token-a-2, same tenant) gets an account but no passkeys.
+    let _b_cookie = mint_redeem_session_cookie_value(&state, "token-a-2").await;
+
+    // B lists NONE of A's credentials.
+    let b_listed = list_passkeys(&state, auth_headers("token-a-2")).await;
+    assert!(
+        b_listed.iter().all(|(id, _, _)| *id != a_cred),
+        "account B never sees account A's credential"
+    );
+
+    // B's PATCH of A's credential -> 404.
+    let err = account_passkey_rename_handler(
+        State(state.clone()),
+        AxumPath(a_cred.clone()),
+        auth_headers("token-a-2"),
+        Json(
+            serde_json::from_value(serde_json::json!({ "label": "stolen" }))
+                .expect("rename body"),
+        ),
+    )
+    .await
+    .expect_err("B cannot rename A's credential");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+    // B's DELETE of A's credential -> 404.
+    let err = account_passkey_remove_handler(
+        State(state.clone()),
+        AxumPath(a_cred.clone()),
+        auth_headers("token-a-2"),
+    )
+    .await
+    .expect_err("B cannot remove A's credential");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+    // A's credential is unaffected: still listed, with no label set by B.
+    let a_listed = list_passkeys(&state, auth_headers("token-a")).await;
+    let entry = a_listed
+        .iter()
+        .find(|(id, _, _)| *id == a_cred)
+        .expect("A's credential still active");
+    assert_eq!(entry.1, None, "B's forged rename never touched A's label");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}

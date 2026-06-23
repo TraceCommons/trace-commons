@@ -11,7 +11,7 @@ use axum::extract::{DefaultBodyLimit, Query};
 use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router, extract::Path as AxumPath, extract::State};
 use base64::Engine as _;
 use chrono::{DateTime, Duration, Utc};
@@ -5947,6 +5947,17 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/account/passkeys/register/finish",
             post(account_passkey_register_finish_handler),
         )
+        // Passkey credential management (Slice 2 Task 7). Dual-auth via
+        // `resolve_account_ctx`; list / rename / remove the caller's OWN
+        // credentials. `{credential_id}` is the public base64url WebAuthn id.
+        .route(
+            "/v1/account/passkeys",
+            get(account_passkeys_list_handler),
+        )
+        .route(
+            "/v1/account/passkeys/{credential_id}",
+            patch(account_passkey_rename_handler).delete(account_passkey_remove_handler),
+        )
         .route("/v1/analytics/summary", get(analytics_handler))
         .route("/v1/review/quarantine", get(review_quarantine_handler))
         .route(
@@ -11805,6 +11816,9 @@ async fn resolve_account_ctx_bearer(
         auth_method: AccountAuthMethod::DeviceBearer,
         tenant_id,
         actor_ref: principal_ref,
+        // The bearer path is a device token, not a passkey assertion: there is no
+        // authenticating credential to flag as `this_device`.
+        auth_credential_id: None,
     })
 }
 
@@ -11820,11 +11834,12 @@ async fn resolve_account_ctx_cookie(state: &AppState, cookie: &str) -> ApiResult
     let (tenant_id, token_hash) = account_session_cookie_parts(cookie).ok_or_else(invalid)?;
 
     let db = account_db(state)?;
-    let account_id = db
+    let session = db
         .validate_session(&tenant_id, &token_hash)
         .await
         .map_err(internal_error)?
         .ok_or_else(invalid)?;
+    let account_id = session.account_id;
     let account = AccountId::from_uuid(account_id);
     let principal_set = db
         .expand_account_principals(&tenant_id, account_id)
@@ -11837,6 +11852,9 @@ async fn resolve_account_ctx_cookie(state: &AppState, cookie: &str) -> ApiResult
         principal_set,
         auth_method: AccountAuthMethod::SessionCookie,
         tenant_id,
+        // Carried through from the validated session row so the passkey list can
+        // flag the currently-authenticating credential as `this_device`.
+        auth_credential_id: session.auth_credential_id,
     })
 }
 
@@ -13121,6 +13139,180 @@ async fn account_passkey_register_finish_handler(
     // The credential id is a PUBLIC identifier (not a secret); returning it lets
     // the client correlate the new credential for management (Task 7+).
     Ok(Json(serde_json::json!({ "credential_id": credential_id })))
+}
+
+// ============================================================================
+// Slice 2 Task 7: passkey credential management (authenticated).
+//
+// Three dual-auth handlers guarded by `resolve_account_ctx`, scoped to the
+// caller's OWN account by the DB ops (forced RLS + account_id predicate):
+//
+//   * GET    /v1/account/passkeys                 — list active credentials.
+//   * PATCH  /v1/account/passkeys/{credential_id} — rename one credential.
+//   * DELETE /v1/account/passkeys/{credential_id} — soft-revoke one credential.
+//
+// A credential not owned by the caller (or unknown / already-revoked) is a
+// UNIFORM 404 on rename/remove — no oracle distinguishing not-found from
+// not-owned. `credential_id` is the PUBLIC base64url WebAuthn id; it is safe to
+// return in list responses but is NEVER recorded in hash-only audit metadata.
+// ============================================================================
+
+/// One credential as surfaced by `GET /v1/account/passkeys`. `this_device` is
+/// `true` only when THIS exact credential authenticated the current (passkey)
+/// session — always `false` for bearer and device-link cookie sessions.
+#[derive(Debug, Serialize)]
+struct AccountPasskeyListItem {
+    credential_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_used_at: Option<DateTime<Utc>>,
+    this_device: bool,
+}
+
+/// `GET /v1/account/passkeys` — list the caller's ACTIVE credentials.
+///
+/// Dual-auth via `resolve_account_ctx`. The owning account is auth-derived; the
+/// DB op is tenant- + account-scoped under forced RLS, so another account's
+/// credentials are never listed. `this_device` flags the credential that
+/// authenticated the current session (passkey-cookie path only). No audit row is
+/// written: this is a read of the caller's own label/timestamp metadata (no key
+/// material, no other account's data), consistent with the other account read
+/// surfaces that do not audit plain list reads.
+async fn account_passkeys_list_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    let ctx = resolve_account_ctx(state.as_ref(), &headers).await?;
+    let db = account_db(state.as_ref())?;
+
+    let creds = db
+        .list_account_credentials(&ctx.tenant_id, ctx.account_id.as_uuid())
+        .await
+        .map_err(internal_error)?;
+
+    let passkeys: Vec<AccountPasskeyListItem> = creds
+        .into_iter()
+        .map(|c| {
+            let this_device = ctx
+                .auth_credential_id
+                .as_deref()
+                .is_some_and(|active| active == c.credential_id);
+            AccountPasskeyListItem {
+                credential_id: c.credential_id,
+                label: c.label,
+                created_at: c.created_at,
+                last_used_at: c.last_used_at,
+                this_device,
+            }
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({ "passkeys": passkeys })))
+}
+
+/// Request body for `PATCH /v1/account/passkeys/{credential_id}`. A blank /
+/// whitespace-only `label` clears the credential's label (stored as NULL).
+#[derive(Debug, Deserialize)]
+struct AccountPasskeyRenameBody {
+    #[serde(default)]
+    label: Option<String>,
+}
+
+/// `PATCH /v1/account/passkeys/{credential_id}` — rename one of the caller's
+/// credentials.
+///
+/// Dual-auth via `resolve_account_ctx`. The DB op is tenant- + account-scoped, so
+/// a credential the caller does not own (or one that is unknown / already
+/// revoked) affects zero rows and yields a UNIFORM 404 — no existence oracle
+/// distinguishing not-found from not-owned. Audited hash-only as
+/// `account_passkey_renamed`, recording ONLY whether a label was set (never the
+/// credential id or label text).
+async fn account_passkey_rename_handler(
+    State(state): State<Arc<AppState>>,
+    AxumPath(credential_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(body): Json<AccountPasskeyRenameBody>,
+) -> ApiResult<StatusCode> {
+    let ctx = resolve_account_ctx(state.as_ref(), &headers).await?;
+    let db = account_db(state.as_ref())?;
+
+    // Treat a blank/whitespace label as absent (clears the label).
+    let label = body
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let renamed = db
+        .rename_account_credential(
+            &ctx.tenant_id,
+            ctx.account_id.as_uuid(),
+            &credential_id,
+            label,
+        )
+        .await
+        .map_err(internal_error)?;
+
+    if !renamed {
+        // Uniform 404: unknown / revoked / not-owned are indistinguishable.
+        return Err(api_error(StatusCode::NOT_FOUND, "passkey not found"));
+    }
+
+    db.append_account_audit(
+        &ctx.tenant_id,
+        "account_passkey_renamed",
+        &ctx.actor_ref,
+        "success",
+        serde_json::json!({ "labeled": label.is_some() }),
+    )
+    .await
+    .map_err(internal_error)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /v1/account/passkeys/{credential_id}` — soft-revoke one of the
+/// caller's credentials.
+///
+/// Dual-auth via `resolve_account_ctx`. The DB op is tenant- + account-scoped, so
+/// a credential the caller does not own (or one that is unknown / already
+/// revoked) yields a UNIFORM 404. On success returns the count of the account's
+/// remaining active credentials. Audited hash-only as `account_passkey_removed`,
+/// recording ONLY the remaining count (never the credential id).
+async fn account_passkey_remove_handler(
+    State(state): State<Arc<AppState>>,
+    AxumPath(credential_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    let ctx = resolve_account_ctx(state.as_ref(), &headers).await?;
+    let db = account_db(state.as_ref())?;
+
+    let result = db
+        .revoke_account_credential(&ctx.tenant_id, ctx.account_id.as_uuid(), &credential_id)
+        .await
+        .map_err(internal_error)?;
+
+    if !result.removed {
+        // Uniform 404: unknown / revoked / not-owned are indistinguishable.
+        return Err(api_error(StatusCode::NOT_FOUND, "passkey not found"));
+    }
+
+    db.append_account_audit(
+        &ctx.tenant_id,
+        "account_passkey_removed",
+        &ctx.actor_ref,
+        "success",
+        serde_json::json!({ "remaining": result.remaining }),
+    )
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(serde_json::json!({
+        "removed": true,
+        "remaining_credentials": result.remaining,
+    })))
 }
 
 // ============================================================================

@@ -1883,7 +1883,7 @@ impl Database for PgBackend {
         &self,
         tenant_id: &str,
         token_hash: &str,
-    ) -> Result<Option<Uuid>, DatabaseError> {
+    ) -> Result<Option<crate::db::ValidatedSession>, DatabaseError> {
         // SECURITY: do NOT ensure_trace_tenant here. `tenant_id` is the
         // client-supplied, pre-auth value decoded from the session cookie; an
         // UPSERT into trace_tenants would let an unauthenticated forged cookie
@@ -1904,7 +1904,7 @@ impl Database for PgBackend {
         // lookup to a tenant where this hash does not exist -> no row -> deny.
         let row = tx
             .query_opt(
-                "SELECT account_id FROM trace_sessions
+                "SELECT account_id, auth_credential_id FROM trace_sessions
                   WHERE tenant_id = trace_current_tenant_id()
                     AND token_hash = $1
                     AND expires_at > now()
@@ -1935,6 +1935,7 @@ impl Database for PgBackend {
             return Ok(None);
         };
         let account_id: Uuid = row.get("account_id");
+        let auth_credential_id: Option<String> = row.get("auth_credential_id");
 
         // Live hit: bump last_seen_at to slide the idle window forward.
         tx.execute(
@@ -1946,7 +1947,10 @@ impl Database for PgBackend {
         .await
         .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
-        Ok(Some(account_id))
+        Ok(Some(crate::db::ValidatedSession {
+            account_id,
+            auth_credential_id,
+        }))
     }
 
     async fn revoke_current_session(
