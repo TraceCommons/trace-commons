@@ -560,6 +560,117 @@ pub trait Database: TraceCorpusStore + Send + Sync {
             "revoke_account_credential not implemented".to_string(),
         ))
     }
+
+    /// Insert a registered NEAR access key for `account_id`. `public_key` is the
+    /// globally-UNIQUE NEAR access key (`ed25519:...`) used by the unauthenticated
+    /// login resolver to map key -> tenant; `near_account_id` is the human-readable
+    /// NEAR account label (attribution only); `label` is an optional user-supplied
+    /// display name. Tenant- + account-scoped under forced RLS.
+    async fn insert_near_identity(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _public_key: &str,
+        _near_account_id: &str,
+        _label: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool(
+            "insert_near_identity not implemented".to_string(),
+        ))
+    }
+
+    /// Load an ACTIVE NEAR identity for the LOGIN (wallet-assertion) path by its
+    /// `public_key`, under the already-resolved `tenant_id`. Returns the account id
+    /// and the human-readable NEAR account id, or `None` for an unknown / revoked /
+    /// other-tenant key. Runs inside an RLS-scoped tx; the `tenant_id =
+    /// trace_current_tenant_id()` predicate is belt-and-suspenders on top of forced
+    /// RLS, and `public_key` is globally UNIQUE. NO `ensure_trace_tenant` here: this
+    /// mirrors `load_webauthn_credential_for_login` — the tenant already exists for
+    /// any registered identity, and the resolver mapped public_key -> tenant first.
+    async fn load_near_identity_for_login(
+        &self,
+        _tenant_id: &str,
+        _public_key: &str,
+    ) -> Result<Option<NearIdentityRow>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "load_near_identity_for_login not implemented".to_string(),
+        ))
+    }
+
+    /// Stamp `last_used_at` on an ACTIVE NEAR identity after a successful
+    /// wallet-assertion login. Tenant-scoped under forced RLS; only an active
+    /// (unrevoked) identity is updated. `public_key` is globally UNIQUE.
+    async fn touch_near_identity_last_used(
+        &self,
+        _tenant_id: &str,
+        _public_key: &str,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool(
+            "touch_near_identity_last_used not implemented".to_string(),
+        ))
+    }
+
+    /// List the ACTIVE (unrevoked) NEAR identities for `account_id`, oldest first.
+    /// Label- and timestamp-only plus the public attribution fields (`public_key`,
+    /// `near_account_id`); no secret material. Tenant- + account-scoped under forced
+    /// RLS so another account's identities are never returned.
+    async fn list_account_near_identities(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+    ) -> Result<Vec<NearIdentitySummary>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "list_account_near_identities not implemented".to_string(),
+        ))
+    }
+
+    /// Rename one of `account_id`'s ACTIVE NEAR identities. Returns whether a row was
+    /// affected (`false` for an unknown / revoked / other-account key). Tenant- +
+    /// account-scoped under forced RLS so a caller can never rename an identity they
+    /// do not own.
+    async fn rename_account_near_identity(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _public_key: &str,
+        _label: Option<&str>,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "rename_account_near_identity not implemented".to_string(),
+        ))
+    }
+
+    /// Soft-revoke one of `account_id`'s ACTIVE NEAR identities and report how many
+    /// strong authenticators (webauthn credentials + NEAR identities) remain active
+    /// for the account afterwards, computed in the SAME tx as the revoke. `removed`
+    /// is `false` for an unknown / already-revoked / other-account key. Tenant- +
+    /// account-scoped under forced RLS so a caller can never revoke an identity they
+    /// do not own; the remaining-strong count lets the caller refuse to remove the
+    /// last strong authenticator.
+    async fn revoke_account_near_identity(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _public_key: &str,
+    ) -> Result<RevokeNearResult, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "revoke_account_near_identity not implemented".to_string(),
+        ))
+    }
+
+    /// Count `account_id`'s ACTIVE strong authenticators: webauthn credentials plus
+    /// NEAR identities, summed in ONE RLS-scoped tx. Lets a caller enforce
+    /// "keep at least one strong authenticator" before revoking the last passkey or
+    /// NEAR key. Tenant- + account-scoped under forced RLS.
+    async fn count_active_strong_authenticators(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+    ) -> Result<i64, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "count_active_strong_authenticators not implemented".to_string(),
+        ))
+    }
 }
 
 /// The session row to create on a winning redeem. `token_hash` is sha256-shaped;
@@ -641,6 +752,40 @@ pub struct AccountCredentialSummary {
 pub struct RevokeCredentialResult {
     pub removed: bool,
     pub remaining: i64,
+}
+
+/// A registered NEAR identity resolved for the LOGIN (wallet-assertion) path.
+/// Carries only the durable account id and the human-readable `near_account_id`
+/// (attribution only); never key material or PII. The loader runs under the
+/// already-resolved tenant's RLS, so the row is tenant-scoped by construction.
+#[derive(Debug, Clone)]
+pub struct NearIdentityRow {
+    pub account_id: uuid::Uuid,
+    pub near_account_id: String,
+}
+
+/// A single ACTIVE NEAR identity as surfaced in the account's identity list.
+/// Label-, timestamp-, and public-attribution-only: `public_key` is the NEAR
+/// access key (a public identifier, not a secret) and `near_account_id` is the
+/// human-readable NEAR account label.
+#[derive(Debug, Clone)]
+pub struct NearIdentitySummary {
+    pub public_key: String,
+    pub near_account_id: String,
+    pub label: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Outcome of revoking one of an account's NEAR identities. `removed` is whether
+/// the soft-delete affected a row (false for an unknown / already-revoked / other
+/// account's key); `remaining_strong` is the count of the account's strong
+/// authenticators (webauthn credentials + NEAR identities) still active after the
+/// revoke, so the caller can refuse to remove the last strong authenticator.
+#[derive(Debug, Clone, Copy)]
+pub struct RevokeNearResult {
+    pub removed: bool,
+    pub remaining_strong: i64,
 }
 
 /// Per-contributor row returned by [`Database::compute_leaderboard_inputs`].

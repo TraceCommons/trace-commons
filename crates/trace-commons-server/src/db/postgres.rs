@@ -2477,6 +2477,222 @@ impl Database for PgBackend {
             remaining,
         })
     }
+
+    async fn insert_near_identity(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        public_key: &str,
+        near_account_id: &str,
+        label: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "INSERT INTO trace_near_identities (
+                tenant_id, public_key, near_account_id, account_id, label, created_at
+             ) VALUES (
+                trace_current_tenant_id(), $1, $2, $3, $4, now()
+             )",
+            &[&public_key, &near_account_id, &account_id, &label],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
+    async fn load_near_identity_for_login(
+        &self,
+        tenant_id: &str,
+        public_key: &str,
+    ) -> Result<Option<crate::db::NearIdentityRow>, DatabaseError> {
+        // The resolver has already mapped public_key -> tenant_id; this load runs
+        // under that resolved tenant's RLS. We do NOT ensure_trace_tenant here: the
+        // tenant already exists for any registered identity, and
+        // begin_trace_tenant_transaction only sets the RLS config var (no row
+        // dependency). The `tenant_id = trace_current_tenant_id()` predicate is
+        // belt-and-suspenders on top of forced RLS; `public_key` is globally UNIQUE.
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT account_id, near_account_id FROM trace_near_identities
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND public_key = $1
+                    AND revoked_at IS NULL",
+                &[&public_key],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(row.map(|row| crate::db::NearIdentityRow {
+            account_id: row.get("account_id"),
+            near_account_id: row.get("near_account_id"),
+        }))
+    }
+
+    async fn touch_near_identity_last_used(
+        &self,
+        tenant_id: &str,
+        public_key: &str,
+    ) -> Result<(), DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "UPDATE trace_near_identities
+                SET last_used_at = now()
+              WHERE tenant_id = trace_current_tenant_id()
+                AND public_key = $1
+                AND revoked_at IS NULL",
+            &[&public_key],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
+    async fn list_account_near_identities(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+    ) -> Result<Vec<crate::db::NearIdentitySummary>, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT public_key, near_account_id, label, created_at, last_used_at
+                   FROM trace_near_identities
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND revoked_at IS NULL
+                  ORDER BY created_at",
+                &[&account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::db::NearIdentitySummary {
+                public_key: row.get("public_key"),
+                near_account_id: row.get("near_account_id"),
+                label: row.get("label"),
+                created_at: row.get("created_at"),
+                last_used_at: row.get("last_used_at"),
+            })
+            .collect())
+    }
+
+    async fn rename_account_near_identity(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        public_key: &str,
+        label: Option<&str>,
+    ) -> Result<bool, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // account-scoped so a caller can never rename an identity they do not own.
+        let affected = tx
+            .execute(
+                "UPDATE trace_near_identities
+                    SET label = $1
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $2
+                    AND public_key = $3
+                    AND revoked_at IS NULL",
+                &[&label, &account_id, &public_key],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(affected > 0)
+    }
+
+    async fn revoke_account_near_identity(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        public_key: &str,
+    ) -> Result<crate::db::RevokeNearResult, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // account-scoped soft-delete: an unknown / already-revoked / other-account
+        // key affects zero rows.
+        let removed = tx
+            .execute(
+                "UPDATE trace_near_identities
+                    SET revoked_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND public_key = $2
+                    AND revoked_at IS NULL",
+                &[&account_id, &public_key],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        // remaining strong authenticators = webauthn credentials + NEAR identities,
+        // computed in the SAME tx after the revoke.
+        let remaining_row = tx
+            .query_one(
+                "SELECT (
+                    SELECT count(*) FROM trace_webauthn_credentials
+                      WHERE tenant_id = trace_current_tenant_id()
+                        AND account_id = $1
+                        AND revoked_at IS NULL
+                  ) + (
+                    SELECT count(*) FROM trace_near_identities
+                      WHERE tenant_id = trace_current_tenant_id()
+                        AND account_id = $1
+                        AND revoked_at IS NULL
+                  ) AS remaining_strong",
+                &[&account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let remaining_strong: i64 = remaining_row.get("remaining_strong");
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(crate::db::RevokeNearResult {
+            removed: removed > 0,
+            remaining_strong,
+        })
+    }
+
+    async fn count_active_strong_authenticators(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+    ) -> Result<i64, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_one(
+                "SELECT (
+                    SELECT count(*) FROM trace_webauthn_credentials
+                      WHERE tenant_id = trace_current_tenant_id()
+                        AND account_id = $1
+                        AND revoked_at IS NULL
+                  ) + (
+                    SELECT count(*) FROM trace_near_identities
+                      WHERE tenant_id = trace_current_tenant_id()
+                        AND account_id = $1
+                        AND revoked_at IS NULL
+                  ) AS strong_count",
+                &[&account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(row.get("strong_count"))
+    }
 }
 
 fn device_key_record_from_row(row: Row) -> crate::db::DeviceKeyRecord {

@@ -63723,6 +63723,307 @@ async fn webauthn_credential_account_scoping_blocks_cross_account_access() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-scope").await;
 }
 
+// ---------------------------------------------------------------------------
+// Slice 3a (login-with-NEAR) Task 5: NEAR identity DB operations and the
+// strong-authenticator count.
+//
+// DB-backed: self-skip when neither TRACE_COMMONS_PG_TEST_DATABASE_URL nor
+// DATABASE_URL is set. Each test uses a distinct tenant and cleans it first so it
+// is self-isolating on a reused database; accounts are seeded via the normal
+// tenant-scoped path so the FK (tenant_id, account_id) -> trace_accounts holds.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn near_identity_insert_load_round_trips() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-near-roundtrip").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-near-roundtrip", "principal-a")
+        .await
+        .expect("seed account");
+    let public_key = "ed25519:roundtrip-globally-unique";
+
+    backend
+        .insert_near_identity(
+            "tenant-near-roundtrip",
+            account_id,
+            public_key,
+            "alice.near",
+            Some("My Wallet"),
+        )
+        .await
+        .expect("insert identity");
+
+    let loaded = backend
+        .load_near_identity_for_login("tenant-near-roundtrip", public_key)
+        .await
+        .expect("load identity")
+        .expect("identity present");
+    assert_eq!(loaded.account_id, account_id);
+    assert_eq!(loaded.near_account_id, "alice.near", "near_account_id preserved");
+
+    // Unknown key -> None.
+    let missing = backend
+        .load_near_identity_for_login("tenant-near-roundtrip", "ed25519:does-not-exist")
+        .await
+        .expect("load missing");
+    assert!(missing.is_none(), "unknown public_key resolves to None");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-near-roundtrip").await;
+}
+
+#[tokio::test]
+async fn near_identity_touch_last_used_updates_timestamp() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-near-touch").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-near-touch", "principal-a")
+        .await
+        .expect("seed account");
+    let public_key = "ed25519:touch-key";
+    backend
+        .insert_near_identity("tenant-near-touch", account_id, public_key, "alice.near", None)
+        .await
+        .expect("insert identity");
+
+    let before = backend
+        .list_account_near_identities("tenant-near-touch", account_id)
+        .await
+        .expect("list before");
+    assert_eq!(before.len(), 1);
+    assert!(before[0].last_used_at.is_none(), "last_used_at starts NULL");
+
+    backend
+        .touch_near_identity_last_used("tenant-near-touch", public_key)
+        .await
+        .expect("touch identity");
+
+    let after = backend
+        .list_account_near_identities("tenant-near-touch", account_id)
+        .await
+        .expect("list after");
+    assert!(after[0].last_used_at.is_some(), "last_used_at stamped after touch");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-near-touch").await;
+}
+
+#[tokio::test]
+async fn near_identity_list_excludes_revoked_and_orders_by_created_at() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-near-list").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-near-list", "principal-a")
+        .await
+        .expect("seed account");
+    backend
+        .insert_near_identity("tenant-near-list", account_id, "ed25519:key-1", "alice.near", Some("first"))
+        .await
+        .expect("insert key-1");
+    backend
+        .insert_near_identity("tenant-near-list", account_id, "ed25519:key-2", "bob.near", Some("second"))
+        .await
+        .expect("insert key-2");
+
+    let listed = backend
+        .list_account_near_identities("tenant-near-list", account_id)
+        .await
+        .expect("list identities");
+    assert_eq!(listed.len(), 2, "both active identities listed");
+    let keys: Vec<&str> = listed.iter().map(|i| i.public_key.as_str()).collect();
+    assert_eq!(keys, vec!["ed25519:key-1", "ed25519:key-2"], "ordered by created_at");
+    assert_eq!(listed[0].label.as_deref(), Some("first"));
+    assert_eq!(listed[0].near_account_id, "alice.near");
+
+    // Revoke one -> excluded from list and from load_for_login.
+    let revoke = backend
+        .revoke_account_near_identity("tenant-near-list", account_id, "ed25519:key-1")
+        .await
+        .expect("revoke key-1");
+    assert!(revoke.removed, "revoke affected a row");
+    assert_eq!(revoke.remaining_strong, 1, "one identity remains active");
+
+    let after = backend
+        .list_account_near_identities("tenant-near-list", account_id)
+        .await
+        .expect("list after revoke");
+    assert_eq!(after.len(), 1, "revoked identity excluded");
+    assert_eq!(after[0].public_key, "ed25519:key-2");
+
+    let revoked_load = backend
+        .load_near_identity_for_login("tenant-near-list", "ed25519:key-1")
+        .await
+        .expect("load revoked");
+    assert!(revoked_load.is_none(), "revoked identity not loadable for login");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-near-list").await;
+}
+
+#[tokio::test]
+async fn near_identity_rename_updates_label_and_reports_match() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-near-rename").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-near-rename", "principal-a")
+        .await
+        .expect("seed account");
+    backend
+        .insert_near_identity("tenant-near-rename", account_id, "ed25519:rename-key", "alice.near", Some("old"))
+        .await
+        .expect("insert identity");
+
+    let renamed = backend
+        .rename_account_near_identity("tenant-near-rename", account_id, "ed25519:rename-key", Some("new label"))
+        .await
+        .expect("rename identity");
+    assert!(renamed, "rename of owned active identity returns true");
+
+    let listed = backend
+        .list_account_near_identities("tenant-near-rename", account_id)
+        .await
+        .expect("list identities");
+    assert_eq!(listed[0].label.as_deref(), Some("new label"), "label updated");
+
+    let unknown = backend
+        .rename_account_near_identity("tenant-near-rename", account_id, "ed25519:unknown", Some("x"))
+        .await
+        .expect("rename unknown");
+    assert!(!unknown, "rename of unknown key returns false");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-near-rename").await;
+}
+
+#[tokio::test]
+async fn near_identity_account_scoping_blocks_cross_account_access() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-near-scope").await;
+
+    // Two distinct accounts in the SAME tenant.
+    let account_a = backend
+        .create_or_reuse_account("tenant-near-scope", "principal-a")
+        .await
+        .expect("seed account A");
+    let account_b = backend
+        .create_or_reuse_account("tenant-near-scope", "principal-b")
+        .await
+        .expect("seed account B");
+    assert_ne!(account_a, account_b, "distinct accounts");
+
+    backend
+        .insert_near_identity("tenant-near-scope", account_a, "ed25519:owned-by-a", "alice.near", Some("A's wallet"))
+        .await
+        .expect("insert A's identity");
+
+    // Account B's list must NOT see account A's identity.
+    let b_list = backend
+        .list_account_near_identities("tenant-near-scope", account_b)
+        .await
+        .expect("list B");
+    assert!(b_list.is_empty(), "account B sees none of account A's identities");
+
+    // Account B cannot rename account A's identity.
+    let b_rename = backend
+        .rename_account_near_identity("tenant-near-scope", account_b, "ed25519:owned-by-a", Some("hijack"))
+        .await
+        .expect("rename attempt by B");
+    assert!(!b_rename, "account B cannot rename account A's identity");
+
+    // Account B cannot revoke account A's identity; remaining counts only B's.
+    let b_revoke = backend
+        .revoke_account_near_identity("tenant-near-scope", account_b, "ed25519:owned-by-a")
+        .await
+        .expect("revoke attempt by B");
+    assert!(!b_revoke.removed, "account B cannot revoke account A's identity");
+    assert_eq!(b_revoke.remaining_strong, 0, "account B has no strong authenticators of its own");
+
+    // Account A's identity is untouched: still listable, still original label.
+    let a_list = backend
+        .list_account_near_identities("tenant-near-scope", account_a)
+        .await
+        .expect("list A");
+    assert_eq!(a_list.len(), 1, "account A's identity survived B's attempts");
+    assert_eq!(a_list[0].label.as_deref(), Some("A's wallet"), "label not hijacked");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-near-scope").await;
+}
+
+#[tokio::test]
+async fn strong_authenticator_count_sums_webauthn_and_near() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-strong-count").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-strong-count", "principal-a")
+        .await
+        .expect("seed account");
+
+    // Start with no strong authenticators.
+    let zero = backend
+        .count_active_strong_authenticators("tenant-strong-count", account_id)
+        .await
+        .expect("count empty");
+    assert_eq!(zero, 0, "no strong authenticators initially");
+
+    // Enroll one webauthn credential AND one NEAR identity -> 2.
+    let passkey = serde_json::json!({"counter": 1});
+    backend
+        .insert_webauthn_credential("tenant-strong-count", account_id, "cred-x", &passkey, None)
+        .await
+        .expect("insert webauthn credential");
+    backend
+        .insert_near_identity("tenant-strong-count", account_id, "ed25519:strong-key", "alice.near", None)
+        .await
+        .expect("insert near identity");
+
+    let two = backend
+        .count_active_strong_authenticators("tenant-strong-count", account_id)
+        .await
+        .expect("count two");
+    assert_eq!(two, 2, "webauthn + near summed");
+
+    // Revoke the NEAR identity -> 1, and remaining_strong reported in the SAME tx.
+    let revoke_near = backend
+        .revoke_account_near_identity("tenant-strong-count", account_id, "ed25519:strong-key")
+        .await
+        .expect("revoke near");
+    assert!(revoke_near.removed);
+    assert_eq!(revoke_near.remaining_strong, 1, "webauthn credential still counts as strong");
+    let one = backend
+        .count_active_strong_authenticators("tenant-strong-count", account_id)
+        .await
+        .expect("count one");
+    assert_eq!(one, 1, "one strong authenticator after near revoke");
+
+    // Revoke the webauthn credential -> 0.
+    let revoke_cred = backend
+        .revoke_account_credential("tenant-strong-count", account_id, "cred-x")
+        .await
+        .expect("revoke webauthn");
+    assert!(revoke_cred.removed);
+    let zero_again = backend
+        .count_active_strong_authenticators("tenant-strong-count", account_id)
+        .await
+        .expect("count zero again");
+    assert_eq!(zero_again, 0, "no strong authenticators after both revoked");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-strong-count").await;
+}
+
 // ============================================================================
 // Slice 2 Task 5: passkey enrollment ceremony handlers.
 //
