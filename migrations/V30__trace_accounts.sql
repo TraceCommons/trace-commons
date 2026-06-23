@@ -146,6 +146,12 @@ CREATE POLICY trace_corpus_tenant_isolation ON trace_account_audit
 -- is operator-provisioned (NOLOGIN base, no BYPASSRLS, no writes, no other
 -- table) and runs on a SEPARATE pool, never the runtime pool. This GRANT is the
 -- ONLY GRANT statement in the repo and is deliberate.
+-- NOTE: this NOLOGIN base role cannot be connected to directly. The resolver
+-- pool (TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL) must connect as a LOGIN role
+-- that inherits this membership (recommended) or the base role must be granted
+-- LOGIN. Either way it MUST stay NOBYPASSRLS so the role-scoped permissive
+-- policy below is what authorizes the cross-tenant read. See the provisioning
+-- runbook: docs/operator/login-resolver-role.md
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_login_resolver') THEN
     CREATE ROLE trace_login_resolver NOLOGIN NOBYPASSRLS;

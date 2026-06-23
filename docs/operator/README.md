@@ -32,6 +32,7 @@ the link.
 | Calibrating the perplexity floor after A2.6 Outcome 1 | [`./a27-perplexity-floor-calibration.md`](./a27-perplexity-floor-calibration.md) |
 | Running the pilot bootstrap harness | [`./pilot-bootstrap.md`](./pilot-bootstrap.md) (see also [`./pilot-bootstrap-dryrun-notes.md`](./pilot-bootstrap-dryrun-notes.md) — known real-data defects) |
 | Running the pilot-bootstrap first-100-traces dry run | [`./pilot-bootstrap-first-100-traces.md`](./pilot-bootstrap-first-100-traces.md) |
+| Provisioning the contributor-account login-resolver DB role | [`./login-resolver-role.md`](./login-resolver-role.md) |
 | Gating the pilot to invited contributors only | [`./pilot-allowlist.md`](./pilot-allowlist.md) |
 | Onboarding an internal pilot contributor | [`./pilot-contributor-onboarding.md`](./pilot-contributor-onboarding.md) |
 | Managing the HuggingFace dataset / model cache | [`./hf-dataset-cache-hygiene.md`](./hf-dataset-cache-hygiene.md) |

@@ -183,6 +183,25 @@ export TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL=true
 export TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY=true
 ```
 
+### Login-resolver role (contributor accounts)
+
+The contributor-account redeem path uses a dedicated, least-privilege
+PostgreSQL role (`trace_login_resolver`) on a **separate pool** configured by
+`TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL`. The `V30` migration creates that
+role as `NOLOGIN NOBYPASSRLS`, so it is **not directly connectable as shipped**
+— you must provision a connectable, NOBYPASSRLS role before first traffic or
+redeem fails closed (every redeem 400s).
+
+```sh
+export TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL="postgres://<login-role>@/trace-commons?host=/cloudsql/.../trace-commons"
+```
+
+Follow [`login-resolver-role.md`](login-resolver-role.md) for the exact
+provisioning SQL (recommended: a dedicated LOGIN role with membership in
+`trace_login_resolver`). The role MUST remain NOBYPASSRLS — the role-scoped
+permissive policy is what authorizes the cross-tenant `code_hash -> tenant_id`
+read.
+
 ### Privacy filter backend (pilot)
 
 Pilot builds must include the `near-ai-privacy-filter` Cargo feature to enable
