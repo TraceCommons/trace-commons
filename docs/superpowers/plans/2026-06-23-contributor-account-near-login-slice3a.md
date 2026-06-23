@@ -6,7 +6,7 @@
 
 **Architecture:** A NEAR identity is structurally a passkey — a stored credential (`trace_near_identities`) authenticating to an existing account, bootstrapping tenant via the same narrow `trace_login_resolver` role. Enroll does the one NEAR RPC call (full-access-key binding check); login verifies the NEP-413 signature offline. A strong-authenticator gate (with a bootstrapping carve-out) protects adding/removing any authenticator.
 
-**Tech Stack:** Rust, axum 0.8, PostgreSQL (forced RLS), in-tree `ring` (Ed25519) / `sha2` / `base64` / `reqwest` / `serde_json`. **Base58 decode and the fixed NEP-413 borsh payload are HAND-ROLLED (no `bs58`/`borsh` dependency)** — both are small, fixed-shape, and pinned by known-vector tests. If hand-rolled base58 proves error-prone under review, escalate for `bs58` approval (do NOT add it without explicit approval). Spec: `docs/superpowers/specs/2026-06-23-contributor-account-near-login-slice3a-design.md`.
+**Tech Stack:** Rust, axum 0.8, PostgreSQL (forced RLS), in-tree `ring` (Ed25519) / `sha2` / `base64` / `reqwest` / `serde_json`. **`borsh` 1.x and `bs58` 0.5 are APPROVED** for NEP-413 encoding: use `borsh` to serialize the NEP-413 payload byte-exactly (NEAR's canonical format — guarantees our bytes match what the wallet signed) and `bs58` to decode `ed25519:<base58>` keys. The actual Ed25519 verify stays on in-tree `ring`; do NOT add a full near-sdk/near-crypto crate. Spec: `docs/superpowers/specs/2026-06-23-contributor-account-near-login-slice3a-design.md`.
 
 **Branch/worktree:** Execute on `contributor-account-slice3a` (stacked on `contributor-account-slice2`). Relative paths only; after each commit verify the main checkout (`/Users/zakimanian/code/trace-commons-server`) shows ONLY the pre-existing `community/*` + `AGENTS.md` (no leakage). Stand up a throwaway PostgreSQL to actually RUN the DB tests (prior slices did). DB ingest suite runs `--test-threads=1`.
 
@@ -87,19 +87,18 @@ Mirror V32 exactly (read `migrations/V32__webauthn_credentials.sql` for the tabl
 - [ ] **Step 4 — run → PASS.**
 - [ ] **Step 5 — gates + commit** `Add NEAR config and account_near scaffolding`.
 
-### Task 4: NEP-413 verification (hand-rolled base58 + borsh + ring) + RPC client
+### Task 4: NEP-413 verification (borsh + bs58 + ring) + RPC client
 
-**Files:** `account_near.rs`, tests inline + in tests.rs. **This is the crypto-critical task — pin the byte layout with hardcoded vectors, not just round-trips.**
+**Files:** `account_near.rs`, `Cargo.toml` (add `borsh = { version = "1", features = ["derive"] }` and `bs58 = "0.5"`), tests inline + in tests.rs. **This is the crypto-critical task — still pin the byte layout with a hardcoded vector to catch any version/feature surprise.** Use `borsh` for the payload serialization (NEAR's canonical format) and `bs58` for key decode; `ring` for the Ed25519 verify.
 
 - [ ] **Step 1 — failing tests** (unit, no DB):
-  - `base58_decode`: known vectors (e.g. decode a real `ed25519:<base58>` NEAR key → the 32 expected bytes; an all-zeros/leading-1s vector; malformed (non-alphabet char, wrong length) → Err).
-  - `nep413_payload_bytes`: for a FIXED input `{message:"hi", nonce:[1u8;32], recipient:"app.example", callbackUrl:None}`, assert the borsh bytes equal a hardcoded expected `Vec<u8>` (compute it by hand from the layout: u32 LE tag `2_147_484_061` = `[0x1d,0x00,0x00,0x80]`; String = u32 LE len + UTF-8; `[u8;32]` raw; Option None = `[0x00]`). ALSO a `callbackUrl:Some("u")` case (Option Some = `[0x01]` + String). This pins the format.
+  - `parse_near_ed25519_pubkey`: decode a real `ed25519:<base58>` NEAR key → the 32 expected bytes (via `bs58`); a malformed key (non-base58 char, wrong decoded length) → Err.
+  - `nep413_payload_bytes`: for a FIXED input `{message:"hi", nonce:[1u8;32], recipient:"app.example", callbackUrl:None}`, assert the `borsh::to_vec` bytes equal a hardcoded expected `Vec<u8>` (u32 LE tag `2_147_484_061` = `[0x1d,0x00,0x00,0x80]`; String = u32 LE len + UTF-8; `[u8;32]` raw; Option None = `[0x00]`). ALSO a `callbackUrl:Some("u")` case (Option Some = `[0x01]` + String). This pins the format even though borsh produces it.
   - `verify_nep413`: build a payload, sha256 it, sign the digest with a `ring::signature::Ed25519KeyPair` test key, and assert `verify_nep413(public_key, {message,nonce,recipient,callbackUrl}, signature)` returns Ok; a tampered message/nonce/recipient → Err; a tag-mismatch (verify the function reconstructs with the exact tag) → Err.
 - [ ] **Step 2 — run → FAIL.**
 - [ ] **Step 3 — implement** in `account_near.rs`:
-  - `fn base58_decode(s: &str) -> Result<Vec<u8>>` — hand-rolled Bitcoin-alphabet base58 (big-endian base conversion + leading-`1`→leading-zero handling). ~35 LOC. Keep it small + total; reject non-alphabet input.
-  - `fn parse_near_ed25519_pubkey(s: &str) -> Result<[u8;32]>` — strip `ed25519:` prefix, base58_decode, require 32 bytes.
-  - `fn nep413_payload_bytes(message, nonce: &[u8;32], recipient, callback_url: Option<&str>) -> Vec<u8>` — the hand-rolled borsh (u32 LE tag `2_147_484_061`, then borsh String/[u8;32]/Option<String>). Document each field.
+  - `fn parse_near_ed25519_pubkey(s: &str) -> Result<[u8;32]>` — strip `ed25519:` prefix, `bs58::decode(...).into_vec()`, require exactly 32 bytes; reject malformed.
+  - `fn nep413_payload_bytes(message, nonce: &[u8;32], recipient, callback_url: Option<&str>) -> Vec<u8>` — a `#[derive(BorshSerialize)]` struct `Nep413Payload { tag: u32, message: String, nonce: [u8;32], recipient: String, callback_url: Option<String> }` with `tag = 2_147_484_061`, serialized via `borsh::to_vec(&payload)`. (Borsh emits u32 LE tag, then u32 LE length-prefixed UTF-8 strings, raw [u8;32], and the 1-byte Option tag — matching NEAR wallets.) Still assert the bytes for a fixed input equal a hardcoded expected `Vec<u8>` so a borsh major/feature change can't silently shift the layout.
   - `fn verify_nep413(public_key_b58: &str, message, nonce, recipient, callback_url, signature: &[u8]) -> Result<()>` — parse key, build payload, `sha2::Sha256` digest, `ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &key).verify(&digest, signature)` (mirror the lib module `crates/trace-commons-server/src/trace_upload_claim_issuer.rs:1974` — the underscore lib file, NOT the hyphenated binary). Decode the wallet signature (base64 — confirm the wallet returns base64; NEP-413/wallet-selector returns base64 signature) before verify.
   - The NEAR RPC client: `async fn near_account_has_full_access_key(cfg: &NearConfig, account_id, public_key_b58) -> Result<bool>` — POST to `cfg.rpc_url` a JSON-RPC `{method:"query", params:{request_type:"view_access_key_list", finality:"final", account_id}}` via the in-tree `reqwest`; parse `keys[]`, return true iff `public_key` is present with `access_key.permission == "FullAccess"`. Make it TESTABLE: take the RPC response JSON as an injectable input in a pure helper `fn key_list_has_full_access(json, public_key) -> bool` (unit-tested without network), and the network call thin around it. Any RPC/parse error → the caller fails closed.
 - [ ] **Step 4 — run → PASS** (incl. the hardcoded-byte-layout assertions).
@@ -197,7 +196,7 @@ Mirror V32 exactly (read `migrations/V32__webauthn_credentials.sql` for the tabl
 
 ## Done criteria
 
-All 10 tasks committed; full sweep green; the resolver `SET ROLE` test passes under the real role (fail-without/pass-with); NEP-413 byte layout pinned by hardcoded vectors incl. `callbackUrl=None`; cross-account, forged-key-no-write, uniform-deny, gate, and enroll-RPC-fail-closed regressions pass; NEAR login does no pre-verify `ensure_trace_tenant` and no RPC; only public on-chain identifiers (`public_key`/`near_account_id`) stored, never in audit/logs; the new table forced-RLS + registered + coverage-tested; **no `bs58`/`borsh` dependency added** (hand-rolled, vector-pinned) unless explicitly approved.
+All 10 tasks committed; full sweep green; the resolver `SET ROLE` test passes under the real role (fail-without/pass-with); NEP-413 byte layout pinned by hardcoded vectors incl. `callbackUrl=None`; cross-account, forged-key-no-write, uniform-deny, gate, and enroll-RPC-fail-closed regressions pass; NEAR login does no pre-verify `ensure_trace_tenant` and no RPC; only public on-chain identifiers (`public_key`/`near_account_id`) stored, never in audit/logs; the new table forced-RLS + registered + coverage-tested; `borsh` + `bs58` used for NEP-413 encoding (approved), Ed25519 verify on in-tree `ring`, no near-sdk/near-crypto crate; the NEP-413 byte layout still pinned by a hardcoded vector.
 
 ## Residual risks (carried, documented)
 
