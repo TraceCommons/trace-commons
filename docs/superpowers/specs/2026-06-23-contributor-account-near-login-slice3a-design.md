@@ -133,6 +133,14 @@ payload whose tag mismatches is rejected.
 
 ## Flows / ceremonies
 
+**Route naming:** the NEAR routes intentionally parallel the Slice 2 passkey routes
+(`/v1/account/passkeys/register/{start,finish}`, `/account/passkey/login/{start,finish}`).
+Use `/v1/account/near/enroll/{start,finish}` (authenticated, behind the middleware) and
+`/account/near/login/{start,finish}` (unauthenticated, on the main router). The planner
+should keep the enroll-vs-register / singular-vs-plural choice deliberate and consistent;
+the authenticated NEAR routes go behind the existing `resolve_account_ctx` middleware, the
+login routes stay outside it (like passkey login).
+
 ### Enroll — `POST /v1/account/near/enroll/{start,finish}` (authenticated; gated)
 
 - *start*: `resolve_account_ctx` + the strong-auth gate (Section: gate). Generate a
@@ -227,9 +235,11 @@ nonce, or session secret in metadata; `near_account_id`/`public_key` live only i
 ## Testing strategy
 
 - **NEP-413 unit tests**: a known good vector (`{message, nonce, recipient}` + key +
-  signature → verifies); the borsh-payload reconstruction round-trip; base58 decode incl.
-  malformed → reject; tag-mismatch → reject. A `ring` Ed25519 test signer drives
-  enroll→login end-to-end without a real wallet.
+  signature → verifies); the borsh-payload reconstruction round-trip — explicitly
+  covering `callbackUrl = None` (the live NEP-413 sign-in path, encoded as the 1-byte
+  `0` Option tag) AND a `Some` case; base58 decode incl. malformed → reject;
+  tag-mismatch → reject. A `ring` Ed25519 test signer drives enroll→login end-to-end
+  without a real wallet.
 - **NEAR RPC**: mock `view_access_key_list` — full-access present → enroll ok; absent or
   function-call-only → reject; RPC error → fail-closed.
 - **Security regressions (DB-backed, real PG)**: resolver `SET ROLE` least-privilege on
