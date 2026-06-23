@@ -11636,9 +11636,6 @@ fn account_db(state: &AppState) -> ApiResult<Arc<dyn Database>> {
 /// match. We do NOT decode percent-encoding: the session cookie value is
 /// `{b64url}.{secret}`, which is already cookie-safe, so a byte-for-byte match is
 /// exactly what we need to recompute the secret's hash.
-// Wired by the `/v1/account/*` read endpoints in Tasks 9-10; until then the
-// non-test bin build sees it as dead code. Exercised now by the Task 7 tests.
-#[allow(dead_code)]
 fn cookie_value_from_headers<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     let raw = headers
         .get(axum::http::header::COOKIE)
@@ -12132,8 +12129,26 @@ async fn account_trace_content_handler(
         }
     };
 
-    // Oracle-safe max-bytes ceiling. The error carries no size signal.
+    // Oracle-safe max-bytes ceiling. The error carries no size signal. An
+    // over-ceiling owned read is still a denied content read, so it is audited
+    // (hash-only) before returning — no read terminal is silent.
     if body.len() > ACCOUNT_TRACE_CONTENT_MAX_BYTES {
+        if let Err(audit_error) = append_trace_content_read_audit_per_source(
+            state.as_ref(),
+            &audit_tenant,
+            record.submission_id,
+            &[],
+            "account_trace_content",
+            Some("read_too_large"),
+        )
+        .await
+        {
+            tracing::warn!(
+                error_hash = %safe_display_error_hash(&audit_error),
+                submission_id = %record.submission_id,
+                "Trace Commons account content read-back over-ceiling audit append failed"
+            );
+        }
         return Err(api_error(
             StatusCode::PAYLOAD_TOO_LARGE,
             "trace content unavailable",
