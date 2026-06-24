@@ -491,6 +491,12 @@ const TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_DRY_RUN: &str =
     "TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_DRY_RUN";
 const TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_PURPOSE: &str =
     "TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_PURPOSE";
+const TRACE_COMMONS_NEAR_SETTLEMENT_MODE: &str = "TRACE_COMMONS_NEAR_SETTLEMENT_MODE";
+/// Settlement-group key prefix for credit groups re-keyed onto a durable account
+/// (`account:{uuid}`). Shared by the account-group build site, the payout parse
+/// site, and the hold-recovery repair path; drift between literals would misroute
+/// on-chain payout, so they all reference this one const.
+const ACCOUNT_SETTLEMENT_KEY_PREFIX: &str = "account:";
 const TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL: &str =
     "TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL";
 const TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN: &str =
@@ -988,6 +994,7 @@ struct AppState {
     near_credit_confirmer_timeout_ms: Option<u64>,
     near_credit_confirmer_auth_configured: bool,
     near_credit_require_adapter_auth: bool,
+    near_settlement_mode: NearSettlementMode,
     near_credit_outbox_scheduler: Option<TraceNearCreditOutboxSchedulerConfig>,
     benchmark_registry_submitter: Option<Arc<dyn TraceBenchmarkRegistrySubmitter>>,
     benchmark_registry_submitter_timeout_ms: Option<u64>,
@@ -2794,6 +2801,32 @@ impl AppState {
             },
         )?;
         let near_credit_confirmer = near_credit_confirmer_config.map(|config| config.confirmer);
+
+        // The settlement mode is the deployment control that selects the effective
+        // submitter/confirmer the outbox worker drives. It is applied AFTER the env
+        // adapter validation above so that the real HTTP adapter remains gated by
+        // its auth requirements, while `DryRun` substitutes in-process impls and
+        // `Disabled` withholds any submitter (worker no-ops, rows stay pending).
+        // Default is `Disabled` (fail-safe): an unset mode never advances credit.
+        let near_settlement_mode = NearSettlementMode::from_env();
+        let (near_credit_submitter, near_credit_confirmer) = match near_settlement_mode {
+            NearSettlementMode::Disabled => (None, None),
+            NearSettlementMode::DryRun => {
+                let submitter: Arc<dyn TraceNearCreditSubmitter> =
+                    Arc::new(DryRunTraceNearCreditSubmitter);
+                let confirmer: Arc<dyn TraceNearCreditConfirmer> =
+                    Arc::new(DryRunTraceNearCreditConfirmer);
+                (Some(submitter), Some(confirmer))
+            }
+            NearSettlementMode::Http => (near_credit_submitter, near_credit_confirmer),
+        };
+        tracing::info!(
+            near_settlement_mode = near_settlement_mode.as_label(),
+            near_submitter_active = near_credit_submitter.is_some(),
+            near_confirmer_active = near_credit_confirmer.is_some(),
+            "Trace Commons NEAR settlement mode resolved"
+        );
+
         let benchmark_registry_submitter_config = trace_benchmark_registry_submitter_from_env()?;
         let benchmark_registry_submitter_timeout_ms = benchmark_registry_submitter_config
             .as_ref()
@@ -3120,6 +3153,7 @@ impl AppState {
             near_credit_confirmer_timeout_ms,
             near_credit_confirmer_auth_configured,
             near_credit_require_adapter_auth,
+            near_settlement_mode,
             near_credit_outbox_scheduler,
             benchmark_registry_submitter,
             benchmark_registry_submitter_timeout_ms,
@@ -9552,6 +9586,7 @@ struct TraceCommonsConfigStatusResponse {
     near_credit_confirmer_timeout_ms: Option<u64>,
     near_credit_confirmer_auth_configured: bool,
     near_credit_require_adapter_auth: bool,
+    near_settlement_mode: &'static str,
     near_credit_outbox_confirm_default_limit: u32,
     near_credit_outbox_confirm_max_limit: u32,
     near_credit_outbox_scheduler_configured: bool,
@@ -9903,6 +9938,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         near_credit_confirmer_timeout_ms: state.near_credit_confirmer_timeout_ms,
         near_credit_confirmer_auth_configured: state.near_credit_confirmer_auth_configured,
         near_credit_require_adapter_auth: state.near_credit_require_adapter_auth,
+        near_settlement_mode: state.near_settlement_mode.as_label(),
         near_credit_outbox_confirm_default_limit: TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_DEFAULT_LIMIT,
         near_credit_outbox_confirm_max_limit: TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_MAX_LIMIT,
         near_credit_outbox_scheduler_configured: state.near_credit_outbox_scheduler.is_some(),
@@ -16890,6 +16926,112 @@ impl TraceNearCreditConfirmer for HttpTraceNearCreditConfirmer {
     }
 }
 
+/// Server-wide NEAR settlement execution mode. This is the *deployment* control
+/// that decides whether the outbox state machine advances at all and against
+/// what backend. It is deliberately DISTINCT from the per-request `dry_run`
+/// preview flag on the submit/confirm worker bodies: that flag only ever reports
+/// what would happen and never mutates outbox state, whereas this mode selects
+/// which (if any) submitter/confirmer the worker drives when it does mutate.
+///
+/// Default is `Disabled` (fail-safe): a production deploy that never sets
+/// `TRACE_COMMONS_NEAR_SETTLEMENT_MODE` must NOT advance any outbox row, so
+/// credit can never be marked settled by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NearSettlementMode {
+    /// No submitter/confirmer: the worker no-ops, leaving rows `pending`.
+    Disabled,
+    /// Deterministic in-process submitter/confirmer: the FULL outbox state
+    /// machine runs with no network and no funds (synthetic tx hashes).
+    DryRun,
+    /// The existing env-configured HTTP adapter seam.
+    Http,
+}
+
+impl NearSettlementMode {
+    /// Parse from `TRACE_COMMONS_NEAR_SETTLEMENT_MODE`. Unset, blank, or any
+    /// unrecognized value resolves to `Disabled` (fail-safe).
+    fn from_env() -> Self {
+        match std::env::var(TRACE_COMMONS_NEAR_SETTLEMENT_MODE) {
+            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "dry_run" => NearSettlementMode::DryRun,
+                "http" => NearSettlementMode::Http,
+                _ => NearSettlementMode::Disabled,
+            },
+            Err(_) => NearSettlementMode::Disabled,
+        }
+    }
+
+    fn as_label(self) -> &'static str {
+        match self {
+            NearSettlementMode::Disabled => "disabled",
+            NearSettlementMode::DryRun => "dry_run",
+            NearSettlementMode::Http => "http",
+        }
+    }
+}
+
+/// Deterministic in-process NEAR credit submitter for `NearSettlementMode::DryRun`.
+///
+/// `submit` returns a synthetic `near_transaction_hash` derived solely from the
+/// call's idempotency key, so a given outbox row always maps to the same hash and
+/// re-submission is stable. The hash is base58 over `sha256(idempotency_key)`,
+/// shaped to the 43-44 char NEAR-base58 form that `normalize_near_transaction_hash`
+/// accepts. No network, no funds.
+#[derive(Clone, Default)]
+struct DryRunTraceNearCreditSubmitter;
+
+fn dry_run_near_transaction_hash(idempotency_key: &str) -> String {
+    // sha256 -> 32 bytes -> base58. 32 bytes encodes to 43-44 base58 chars over
+    // the NEAR alphabet, exactly the range the tx-hash normalizer accepts.
+    let digest = Sha256::digest(idempotency_key.as_bytes());
+    bs58::encode(digest).into_string()
+}
+
+#[async_trait::async_trait]
+impl TraceNearCreditSubmitter for DryRunTraceNearCreditSubmitter {
+    async fn submit(
+        &self,
+        request: TraceNearCreditSubmitterRequest,
+    ) -> anyhow::Result<TraceNearCreditSubmitterResponse> {
+        request.near_call.validate().with_context(|| {
+            format!(
+                "dry-run NEAR credit submit rejected invalid method-call payload for outbox item {}",
+                request.near_outbox_id
+            )
+        })?;
+        let near_transaction_hash = normalize_near_transaction_hash(
+            &dry_run_near_transaction_hash(&request.near_call.idempotency_key),
+        )?;
+        Ok(TraceNearCreditSubmitterResponse {
+            near_transaction_hash,
+        })
+    }
+}
+
+/// Deterministic in-process NEAR credit confirmer for `NearSettlementMode::DryRun`.
+///
+/// Echoes the submitted transaction hash back as `Confirmed`, so the confirm
+/// worker advances `submitted -> confirmed` with no network. The echo matches the
+/// submitted hash, satisfying the worker's submitted-vs-confirmed hash check.
+#[derive(Clone, Default)]
+struct DryRunTraceNearCreditConfirmer;
+
+#[async_trait::async_trait]
+impl TraceNearCreditConfirmer for DryRunTraceNearCreditConfirmer {
+    async fn confirm(
+        &self,
+        request: TraceNearCreditConfirmationRequest,
+    ) -> anyhow::Result<TraceNearCreditConfirmationResponse> {
+        let near_transaction_hash =
+            normalize_near_transaction_hash(&request.near_transaction_hash)?;
+        Ok(TraceNearCreditConfirmationResponse {
+            status: TraceNearCreditConfirmationStatus::Confirmed,
+            near_transaction_hash: Some(near_transaction_hash),
+            error_detail: None,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TraceBenchmarkRegistrySubmitterRequest {
     tenant_storage_ref: String,
@@ -20241,7 +20383,7 @@ async fn run_credit_settlement(
     // A single shared prefix for both the account-group build site and the parse
     // site below: drift between the two literals would silently route every
     // account group down the unlinked path and misroute the on-chain payout.
-    const ACCOUNT_KEY_PREFIX: &str = "account:";
+    const ACCOUNT_KEY_PREFIX: &str = ACCOUNT_SETTLEMENT_KEY_PREFIX;
     let principal_to_account: HashMap<String, Uuid> = if let Some(db) = state.db_mirror.as_ref() {
         let distinct_refs = selected_events
             .iter()
@@ -20557,21 +20699,33 @@ async fn repair_missing_near_credit_outbox_items_for_finalized_batches(
     tenant: &TenantAuth,
     settlement_batches: &[TraceCreditSettlementBatchRecord],
 ) -> anyhow::Result<usize> {
-    if !settlement_batches.iter().any(|batch| {
+    // Run when there is either a missing-but-expected outbox row (a line item that
+    // already carries a `near_outbox_id`) OR a HELD line item that may now resolve
+    // a payout (no `near_outbox_id`, `near_payout_hold_reason` set). Both are
+    // gated on the batch being finalized with a NEAR contract configured.
+    let has_repairable = settlement_batches.iter().any(|batch| {
         batch.status == StorageTraceCreditSettlementBatchStatus::Finalized
             && batch.near_contract_id.is_some()
-            && batch
-                .line_items
-                .iter()
-                .any(|item| item.near_outbox_id.is_some())
-    }) {
+            && batch.line_items.iter().any(|item| {
+                item.near_outbox_id.is_some() || item.near_payout_hold_reason.is_some()
+            })
+    });
+    if !has_repairable {
         return Ok(0);
     }
 
-    let mut existing_outbox_ids = read_near_credit_outbox_items_for_admin(state, tenant)
-        .await?
-        .into_iter()
+    let existing_items = read_near_credit_outbox_items_for_admin(state, tenant).await?;
+    let mut existing_outbox_ids = existing_items
+        .iter()
         .map(|item| item.near_outbox_id)
+        .collect::<BTreeSet<_>>();
+    // Held re-emission keys on (settlement_batch_id, credit_account_hash), which is
+    // the table's UNIQUE constraint. The mirror upsert only conflicts on
+    // near_outbox_id, so a fresh id for an already-emitted (batch, account) pair
+    // would otherwise hit the unique violation; dedup here keeps re-runs idempotent.
+    let mut existing_batch_account_keys = existing_items
+        .iter()
+        .map(|item| (item.settlement_batch_id, item.credit_account_hash.clone()))
         .collect::<BTreeSet<_>>();
     let mut repaired = 0usize;
     for batch in settlement_batches
@@ -20582,22 +20736,74 @@ async fn repair_missing_near_credit_outbox_items_for_finalized_batches(
             continue;
         };
         for item in &batch.line_items {
-            let Some(near_outbox_id) = item.near_outbox_id else {
-                continue;
-            };
-            if existing_outbox_ids.contains(&near_outbox_id) {
-                continue;
+            match item.near_outbox_id {
+                Some(near_outbox_id) => {
+                    if existing_outbox_ids.contains(&near_outbox_id) {
+                        continue;
+                    }
+                    let outbox_item = near_credit_outbox_item_from_settlement_line_item(
+                        tenant,
+                        batch,
+                        item,
+                        contract_id,
+                        near_outbox_id,
+                    )?;
+                    append_near_credit_outbox_item_with_db_mirror(state, tenant, &outbox_item)
+                        .await?;
+                    existing_outbox_ids.insert(near_outbox_id);
+                    existing_batch_account_keys
+                        .insert((batch.settlement_batch_id, item.credit_account_hash.clone()));
+                    repaired += 1;
+                }
+                None => {
+                    // Hold recovery: a finalized account line item whose on-chain
+                    // payout was previously withheld. Re-resolve the account's payout
+                    // target fail-closed; once it resolves (`Designated`/`SoleActive`)
+                    // enqueue a fresh `pending` outbox row carrying the payout target.
+                    if item.near_payout_hold_reason.is_none() {
+                        continue;
+                    }
+                    let key = (batch.settlement_batch_id, item.credit_account_hash.clone());
+                    if existing_batch_account_keys.contains(&key) {
+                        continue;
+                    }
+                    let Some(account_id) = item
+                        .credit_account_ref
+                        .strip_prefix(ACCOUNT_SETTLEMENT_KEY_PREFIX)
+                        .and_then(|raw| Uuid::parse_str(raw).ok())
+                    else {
+                        continue;
+                    };
+                    let Some(db) = state.db_mirror.as_ref() else {
+                        continue;
+                    };
+                    let resolution = db
+                        .resolve_payout_near_account_id(&tenant.tenant_id, account_id)
+                        .await
+                        .context("failed to re-resolve held account payout target")?;
+                    let payout_near_account_id = match resolution {
+                        PayoutResolution::Designated(near) | PayoutResolution::SoleActive(near) => {
+                            near
+                        }
+                        // Still held: leave the line item held, no outbox row.
+                        PayoutResolution::Hold(_) => continue,
+                    };
+                    let near_outbox_id = Uuid::new_v4();
+                    let mut outbox_item = near_credit_outbox_item_from_settlement_line_item(
+                        tenant,
+                        batch,
+                        item,
+                        contract_id,
+                        near_outbox_id,
+                    )?;
+                    outbox_item.payout_near_account_id = Some(payout_near_account_id);
+                    append_near_credit_outbox_item_with_db_mirror(state, tenant, &outbox_item)
+                        .await?;
+                    existing_outbox_ids.insert(near_outbox_id);
+                    existing_batch_account_keys.insert(key);
+                    repaired += 1;
+                }
             }
-            let outbox_item = near_credit_outbox_item_from_settlement_line_item(
-                tenant,
-                batch,
-                item,
-                contract_id,
-                near_outbox_id,
-            )?;
-            append_near_credit_outbox_item_with_db_mirror(state, tenant, &outbox_item).await?;
-            existing_outbox_ids.insert(near_outbox_id);
-            repaired += 1;
         }
     }
     Ok(repaired)

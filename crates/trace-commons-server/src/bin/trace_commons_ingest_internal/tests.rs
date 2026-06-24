@@ -3834,6 +3834,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         near_credit_confirmer_timeout_ms: None,
         near_credit_confirmer_auth_configured: false,
         near_credit_require_adapter_auth: false,
+        near_settlement_mode: NearSettlementMode::Http,
         near_credit_outbox_scheduler: None,
         benchmark_registry_submitter: None,
         benchmark_registry_submitter_timeout_ms: None,
@@ -23224,6 +23225,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         near_credit_confirmer_timeout_ms: None,
         near_credit_confirmer_auth_configured: false,
         near_credit_require_adapter_auth: false,
+        near_settlement_mode: NearSettlementMode::Http,
         near_credit_outbox_scheduler: None,
         benchmark_registry_submitter: None,
         benchmark_registry_submitter_timeout_ms: None,
@@ -68860,3 +68862,431 @@ async fn near_payout_endpoint_unknown_and_cross_account_404() {
     cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
 }
 
+
+// --- Slice 3b Task 10: mockable NEAR settlement modes + dry-run submitter + hold recovery ---
+
+#[test]
+fn near_settlement_mode_from_env_parses_known_values_and_defaults_disabled() {
+    // Serialize env mutation: these tests run with --test-threads=1, but keep the
+    // set/remove paired so a value never leaks across cases.
+    unsafe {
+        std::env::set_var(TRACE_COMMONS_NEAR_SETTLEMENT_MODE, "disabled");
+    }
+    assert_eq!(NearSettlementMode::from_env(), NearSettlementMode::Disabled);
+    unsafe {
+        std::env::set_var(TRACE_COMMONS_NEAR_SETTLEMENT_MODE, "dry_run");
+    }
+    assert_eq!(NearSettlementMode::from_env(), NearSettlementMode::DryRun);
+    unsafe {
+        std::env::set_var(TRACE_COMMONS_NEAR_SETTLEMENT_MODE, "  HTTP  ");
+    }
+    assert_eq!(NearSettlementMode::from_env(), NearSettlementMode::Http);
+    // Blank, garbage, and unset all fail safe to Disabled.
+    unsafe {
+        std::env::set_var(TRACE_COMMONS_NEAR_SETTLEMENT_MODE, "");
+    }
+    assert_eq!(NearSettlementMode::from_env(), NearSettlementMode::Disabled);
+    unsafe {
+        std::env::set_var(TRACE_COMMONS_NEAR_SETTLEMENT_MODE, "garbage");
+    }
+    assert_eq!(NearSettlementMode::from_env(), NearSettlementMode::Disabled);
+    unsafe {
+        std::env::remove_var(TRACE_COMMONS_NEAR_SETTLEMENT_MODE);
+    }
+    assert_eq!(NearSettlementMode::from_env(), NearSettlementMode::Disabled);
+}
+
+#[test]
+fn dry_run_near_transaction_hash_is_deterministic_and_normalizer_accepts_it() {
+    let a = dry_run_near_transaction_hash("sha256:idem-key-a");
+    let a_again = dry_run_near_transaction_hash("sha256:idem-key-a");
+    let b = dry_run_near_transaction_hash("sha256:idem-key-b");
+    assert_eq!(a, a_again, "same idempotency key yields the same synthetic hash");
+    assert_ne!(a, b, "different keys yield different hashes");
+    // The synthetic hash must pass the production tx-hash normalizer unchanged.
+    assert_eq!(
+        normalize_near_transaction_hash(&a).expect("dry-run hash normalizes"),
+        a
+    );
+}
+
+/// Seed one finalized settlement with a single pending NEAR outbox row for
+/// `tenant-a`/`token-a`, returning the temp dir and state. Mirrors the canonical
+/// submit-worker fixture but leaves the submitter unset so the caller wires the
+/// mode-specific submitter/confirmer.
+async fn seed_pending_near_outbox_for_token_a(state: &Arc<AppState>) {
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+    envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+    envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+    let submission_id = envelope.submission_id;
+    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(envelope))
+        .await
+        .expect("submission succeeds");
+    let _ = append_credit_event_handler(
+        State(state.clone()),
+        auth_headers("review-token-a"),
+        AxumPath(submission_id),
+        Json(TraceCreditLedgerAppendRequest {
+            event_type: TraceCreditLedgerEventType::TrainingUtility,
+            credit_points_delta: 1.0,
+            reason: Some("utility for settlement mode test".to_string()),
+            external_ref: Some("settlement-mode:near-outbox".to_string()),
+        }),
+    )
+    .await
+    .expect("credit event succeeds");
+    let Json(settlement) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "settlement for mode test".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("settlement creates outbox");
+    assert_eq!(settlement.near_outbox_item_count, 1);
+}
+
+#[tokio::test]
+async fn settlement_mode_disabled_leaves_outbox_rows_pending() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    // Disabled mode == no submitter configured. The worker refuses (cannot advance)
+    // and the pending row stays pending; credit is never marked submitted.
+    let state = test_state(temp.path().to_path_buf());
+    assert!(
+        state.near_credit_submitter.is_none(),
+        "disabled-equivalent state has no submitter"
+    );
+    seed_pending_near_outbox_for_token_a(&state).await;
+
+    let result = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("disabled-mode submit attempt".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "submit worker must refuse when no submitter is configured (disabled mode no-op)"
+    );
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(
+        outbox[0].status,
+        StorageTraceCreditSettlementNearStatus::Pending,
+        "disabled mode leaves the row pending"
+    );
+    assert!(outbox[0].near_transaction_hash.is_none());
+}
+
+#[tokio::test]
+async fn settlement_mode_dry_run_advances_full_state_machine_idempotently() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state(temp.path().to_path_buf());
+    // DryRun mode wires the in-process deterministic submitter + confirmer.
+    Arc::make_mut(&mut state).near_credit_submitter =
+        Some(Arc::new(DryRunTraceNearCreditSubmitter));
+    Arc::make_mut(&mut state).near_credit_confirmer =
+        Some(Arc::new(DryRunTraceNearCreditConfirmer));
+    seed_pending_near_outbox_for_token_a(&state).await;
+
+    let outbox_before =
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    let expected_hash = normalize_near_transaction_hash(&dry_run_near_transaction_hash(
+        &outbox_before[0].near_call.idempotency_key,
+    ))
+    .expect("expected dry-run hash normalizes");
+
+    // Submit: pending -> submitted with the deterministic synthetic hash.
+    let Json(submit) = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("dry-run submit".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("dry-run submit succeeds");
+    assert_eq!(submit.submitted, 1);
+    assert_eq!(submit.failed, 0);
+    let after_submit =
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(
+        after_submit[0].status,
+        StorageTraceCreditSettlementNearStatus::Submitted
+    );
+    assert_eq!(
+        after_submit[0].near_transaction_hash.as_deref(),
+        Some(expected_hash.as_str()),
+        "submitted row carries the deterministic synthetic hash"
+    );
+
+    // Idempotency: a re-run does not re-submit the already-submitted row.
+    let Json(resubmit) = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("dry-run re-submit".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("dry-run re-submit succeeds");
+    assert_eq!(resubmit.checked, 0, "no submit candidates remain");
+    assert_eq!(resubmit.submitted, 0, "submitted row is not re-submitted");
+    let after_resubmit =
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(
+        after_resubmit[0].near_transaction_hash.as_deref(),
+        Some(expected_hash.as_str()),
+        "re-run leaves the same hash"
+    );
+
+    // Confirm: submitted -> confirmed.
+    let Json(confirm) = near_credit_outbox_confirm_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxConfirmWorkerRequest {
+            purpose: Some("dry-run confirm".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("dry-run confirm succeeds");
+    assert_eq!(confirm.confirmed, 1);
+    let after_confirm =
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(
+        after_confirm[0].status,
+        StorageTraceCreditSettlementNearStatus::Confirmed
+    );
+}
+
+#[tokio::test]
+async fn settlement_request_dry_run_flag_is_preview_only_under_dry_run_mode() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).near_credit_submitter =
+        Some(Arc::new(DryRunTraceNearCreditSubmitter));
+    seed_pending_near_outbox_for_token_a(&state).await;
+
+    // Per-request dry_run=true is a PREVIEW: it must never mutate outbox state,
+    // even though the deployment mode would otherwise advance it.
+    let Json(preview) = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("preview only".to_string()),
+            dry_run: true,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("preview submit succeeds");
+    assert!(preview.dry_run, "response echoes the preview flag");
+    assert_eq!(preview.submitted, 0, "preview submits nothing");
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(
+        outbox[0].status,
+        StorageTraceCreditSettlementNearStatus::Pending,
+        "request dry_run preview leaves the row pending"
+    );
+    assert!(outbox[0].near_transaction_hash.is_none());
+}
+
+#[tokio::test]
+async fn settlement_mode_submitter_error_marks_row_failed_with_error_hash() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).near_credit_submitter = Some(Arc::new(FakeNearCreditSubmitter {
+        calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        failure: Some("relayer down".to_string()),
+    }));
+    seed_pending_near_outbox_for_token_a(&state).await;
+
+    let Json(response) = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("failing submit".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("submit worker returns summary even on per-item failure");
+    assert_eq!(response.failed, 1);
+    assert_eq!(response.submitted, 0);
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(
+        outbox[0].status,
+        StorageTraceCreditSettlementNearStatus::Failed,
+        "submitter error marks the row failed"
+    );
+    let error_hash = outbox[0]
+        .last_error_hash
+        .as_deref()
+        .expect("failed row carries a last_error_hash");
+    assert!(error_hash.starts_with("sha256:"), "error is hash-only");
+    assert!(
+        !error_hash.contains("relayer down"),
+        "raw error string is not stored"
+    );
+}
+
+#[tokio::test]
+async fn hold_recovery_emits_outbox_row_once_payout_resolves() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+    // Finalize a settlement for an account with NO enrolled payout -> HELD line item,
+    // no outbox row.
+    let _ = seed_settlement_credit(&state, "token-a", 1.0).await;
+    let p1_principal = principal_storage_ref("token-a");
+    let account_a = backend
+        .create_or_reuse_account("tenant-a", &p1_principal)
+        .await
+        .expect("mint account A");
+
+    let _ = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "finalize none-enrolled for hold recovery".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("admin finalizes settlement");
+
+    let account_hash = sha256_prefixed(&format!("account:{account_a}"));
+    let outbox_before =
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert!(
+        outbox_before
+            .iter()
+            .all(|i| i.credit_account_hash != account_hash),
+        "held account has no outbox row before recovery"
+    );
+
+    // Now designate a payout for the account.
+    backend
+        .insert_near_identity(
+            "tenant-a",
+            account_a,
+            "ed25519:a-payout",
+            "alice.near",
+            None,
+        )
+        .await
+        .expect("insert payout identity");
+    assert!(
+        backend
+            .designate_payout_near_identity("tenant-a", account_a, "ed25519:a-payout")
+            .await
+            .expect("designate payout"),
+        "designation takes effect"
+    );
+
+    let admin_auth = TenantAuth {
+        tenant_id: "tenant-a".to_string(),
+        role: TokenRole::Admin,
+        principal_ref: principal_storage_ref("admin-token-a"),
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    };
+
+    let batches =
+        read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+    let repaired = repair_missing_near_credit_outbox_items_for_finalized_batches(
+        &state, &admin_auth, &batches,
+    )
+    .await
+    .expect("hold recovery runs");
+    assert_eq!(repaired, 1, "exactly one held line item is re-emitted");
+
+    let outbox_after =
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    let recovered = outbox_after
+        .iter()
+        .find(|i| i.credit_account_hash == account_hash)
+        .expect("held account now has an outbox row");
+    assert_eq!(
+        recovered.status,
+        StorageTraceCreditSettlementNearStatus::Pending,
+        "recovered row is pending"
+    );
+    assert_eq!(
+        recovered.payout_near_account_id,
+        Some("alice.near".to_string()),
+        "recovered row carries the designated payout target"
+    );
+
+    // Idempotent: re-running recovery does not create a duplicate row.
+    let batches_again =
+        read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+    let repaired_again = repair_missing_near_credit_outbox_items_for_finalized_batches(
+        &state,
+        &admin_auth,
+        &batches_again,
+    )
+    .await
+    .expect("hold recovery re-run");
+    assert_eq!(repaired_again, 0, "no new rows on re-run");
+    let outbox_final =
+        read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert_eq!(
+        outbox_final
+            .iter()
+            .filter(|i| i.credit_account_hash == account_hash)
+            .count(),
+        1,
+        "exactly one outbox row for the account after re-run"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
