@@ -641,6 +641,77 @@ async fn near_identities_migration_applies_table_and_widens_client_kind() {
 }
 
 #[tokio::test]
+async fn account_consolidation_migration_applies_proposals_payout_and_outbox_destination() {
+    // Self-skips without a DB (TRACE_COMMONS_PG_TEST_DATABASE_URL / DATABASE_URL unset).
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+
+    // The merge-proposals table exists and FORCES row-level security.
+    let row = client
+        .query_one(
+            "SELECT relforcerowsecurity FROM pg_class WHERE relname = $1",
+            &[&"trace_account_merge_proposals"],
+        )
+        .await
+        .expect("trace_account_merge_proposals exists");
+    let forced: bool = row.get(0);
+    assert!(
+        forced,
+        "trace_account_merge_proposals must FORCE ROW LEVEL SECURITY"
+    );
+
+    // payout_designated_at is added to trace_near_identities.
+    let payout_col = client
+        .query_opt(
+            "SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'trace_near_identities'
+               AND column_name = 'payout_designated_at'",
+            &[],
+        )
+        .await
+        .expect("columns query succeeds");
+    assert!(
+        payout_col.is_some(),
+        "trace_near_identities must have a payout_designated_at column"
+    );
+
+    // payout_near_account_id is added to the settlement outbox.
+    let outbox_col = client
+        .query_opt(
+            "SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'trace_near_credit_outbox'
+               AND column_name = 'payout_near_account_id'",
+            &[],
+        )
+        .await
+        .expect("columns query succeeds");
+    assert!(
+        outbox_col.is_some(),
+        "trace_near_credit_outbox must have a payout_near_account_id column"
+    );
+
+    // The partial-unique payout index exists.
+    let payout_index = client
+        .query_opt(
+            "SELECT 1 FROM pg_indexes
+             WHERE indexname = 'idx_trace_near_identities_one_payout'",
+            &[],
+        )
+        .await
+        .expect("pg_indexes query succeeds");
+    assert!(
+        payout_index.is_some(),
+        "idx_trace_near_identities_one_payout partial-unique index must exist"
+    );
+}
+
+#[tokio::test]
 async fn mint_login_link_is_idempotent_per_principal_and_returns_login_url() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
