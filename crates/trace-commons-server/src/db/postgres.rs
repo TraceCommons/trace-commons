@@ -2598,7 +2598,9 @@ impl Database for PgBackend {
         tenant_id: &str,
         public_key: &str,
     ) -> Result<(), DatabaseError> {
-        self.ensure_trace_tenant(tenant_id).await?;
+        // SECURITY: do NOT ensure_trace_tenant here — login path. The identity row
+        // (loaded above) already guarantees the tenant via its FK;
+        // begin_trace_tenant_transaction only sets the RLS var (no write).
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         tx.execute(
