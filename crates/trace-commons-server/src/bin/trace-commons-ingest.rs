@@ -20036,6 +20036,11 @@ async fn run_credit_settlement(
     // their own key and settle exactly as before. The resolve only runs when a DB
     // mirror is present; without one there is no account linkage to fold up and we
     // preserve the legacy per-principal behavior.
+    //
+    // A single shared prefix for both the account-group build site and the parse
+    // site below: drift between the two literals would silently route every
+    // account group down the unlinked path and misroute the on-chain payout.
+    const ACCOUNT_KEY_PREFIX: &str = "account:";
     let principal_to_account: HashMap<String, Uuid> = if let Some(db) = state.db_mirror.as_ref() {
         let distinct_refs = selected_events
             .iter()
@@ -20055,7 +20060,7 @@ async fn run_credit_settlement(
     for event in selected_events {
         let resolved_key = principal_to_account
             .get(&event.auth_principal_ref)
-            .map(|account_id| format!("account:{account_id}"))
+            .map(|account_id| format!("{ACCOUNT_KEY_PREFIX}{account_id}"))
             .unwrap_or_else(|| event.auth_principal_ref.clone());
         grouped.entry(resolved_key).or_default().push(event);
     }
@@ -20089,20 +20094,28 @@ async fn run_credit_settlement(
         // internally) and records a coarse hold label on the line item. Unlinked
         // principal groups settle as before with no payout lookup.
         let account_id = credit_account_ref
-            .strip_prefix("account:")
+            .strip_prefix(ACCOUNT_KEY_PREFIX)
             .and_then(|raw| Uuid::parse_str(raw).ok());
         let (payout_near_account_id, near_payout_hold_reason) = if let Some(account_id) = account_id
         {
-            let db = state
-                .db_mirror
-                .as_ref()
-                .expect("account-keyed group implies a resolved DB mirror");
-            match db
-                .resolve_payout_near_account_id(&tenant.tenant_id, account_id)
-                .await
-                .context("failed to resolve account payout target for settlement")
-                .map_err(internal_error)?
-            {
+            // Resolve fail-closed. An account-keyed group can only exist when the
+            // mirror was present above, but guard the impossible mirror-less branch
+            // by HOLDING (never pay, never panic) rather than `.expect`-ing on the
+            // money path: a future edit must not be able to arm a settlement-run
+            // 500 or a silent pay here.
+            debug_assert!(
+                state.db_mirror.is_some(),
+                "account-keyed group implies a resolved DB mirror"
+            );
+            let resolution = match state.db_mirror.as_ref() {
+                Some(db) => db
+                    .resolve_payout_near_account_id(&tenant.tenant_id, account_id)
+                    .await
+                    .context("failed to resolve account payout target for settlement")
+                    .map_err(internal_error)?,
+                None => PayoutResolution::Hold(PayoutHoldReason::NoneEnrolled),
+            };
+            match resolution {
                 PayoutResolution::Designated(near) | PayoutResolution::SoleActive(near) => {
                     (Some(near), None)
                 }
