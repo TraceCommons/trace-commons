@@ -67914,6 +67914,348 @@ async fn near_login_cookie_value(
         .expect("near session cookie value")
 }
 
+// ============================================================================
+// Slice 3b Task 8: merge start + strong-auth-gated confirm HTTP handlers.
+//
+// These drive the two handlers directly (via `account_ctx_ext`) over real PG,
+// the same shape as the gate tests above. Device B presents its RAW login-link
+// code as `merge_code`; the handler hashes it with `hash_secret` (the SAME
+// helper the login redeem path uses), so the seeded link is found and consumed.
+// ============================================================================
+
+/// Mint device B's login-link via the real `mint_login_link_handler` and return
+/// `(raw_code, account_b_id)` WITHOUT redeeming it. The raw code is device B's
+/// `merge_code`; leaving the link unconsumed is exactly what `stage_merge_proposal`
+/// expects to find. `mint_login_link_handler` create-or-reuses B's durable account
+/// for the bearer principal, so the returned id is the account the link binds to.
+async fn mint_device_login_code(
+    state: &Arc<AppState>,
+    backend: &PgBackend,
+    tenant_id: &str,
+    token: &str,
+) -> (String, Uuid) {
+    let Json(mint) = mint_login_link_handler(State(state.clone()), auth_headers(token))
+        .await
+        .expect("mint succeeds");
+    let code = mint
+        .url
+        .split("code=")
+        .nth(1)
+        .expect("url carries code")
+        .to_string();
+    let account_id =
+        account_id_for_principal(backend, tenant_id, &principal_storage_ref(token)).await;
+    (code, account_id)
+}
+
+/// Account id currently linking `principal_ref` (active link only), or None.
+async fn merge_principal_account(
+    backend: &PgBackend,
+    tenant_id: &str,
+    principal_ref: &str,
+) -> Option<Uuid> {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant ctx");
+    let row = tx
+        .query_opt(
+            "SELECT account_id FROM trace_account_principals
+              WHERE tenant_id = trace_current_tenant_id()
+                AND principal_ref = $1
+                AND unlinked_at IS NULL",
+            &[&principal_ref],
+        )
+        .await
+        .expect("principal lookup");
+    tx.commit().await.expect("commit");
+    row.map(|r| r.get("account_id"))
+}
+
+/// True iff `account_id` is closed (`closed_at IS NOT NULL`).
+async fn merge_account_closed(backend: &PgBackend, tenant_id: &str, account_id: Uuid) -> bool {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant ctx");
+    let row = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_accounts
+              WHERE tenant_id = trace_current_tenant_id()
+                AND account_id = $1
+                AND closed_at IS NOT NULL",
+            &[&account_id],
+        )
+        .await
+        .expect("closed count");
+    tx.commit().await.expect("commit");
+    let n: i64 = row.get(0);
+    n > 0
+}
+
+/// ROUND TRIP: account A with a STRONG passkey session stages a merge by
+/// consuming device B's raw login-link, then confirms it. B's principal moves
+/// under A, B's webauthn credential moves under A, and B is closed.
+#[tokio::test]
+async fn merge_start_then_confirm_folds_device_b_into_a() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Account A: weak redeem cookie, then enroll a passkey and log in -> STRONG.
+    let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let account_a =
+        account_id_for_principal(backend.as_ref(), tenant, &principal_storage_ref("token-a")).await;
+    let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
+    let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_a).await;
+    let strong_headers = cookie_request_headers("tc_account_session", &strong_cookie);
+
+    // Device B: its own account + a webauthn credential + an UNREDEEMED login-link.
+    let (merge_code, account_b) =
+        mint_device_login_code(&state, backend.as_ref(), tenant, "token-a-2").await;
+    assert_ne!(account_a, account_b, "A and B are distinct accounts");
+    backend
+        .insert_webauthn_credential(
+            tenant,
+            account_b,
+            "cred-device-b",
+            &serde_json::json!({ "fake": "passkey" }),
+            Some("b-key"),
+        )
+        .await
+        .expect("seed webauthn for B");
+
+    // start (strong session OK) -> 200 with proposal_id + absorbed_principal_count.
+    let ext = account_ctx_ext(&state, &strong_headers).await;
+    let Json(started) = account_merge_start_handler(
+        State(state.clone()),
+        ext,
+        Json(AccountMergeStartBody { merge_code }),
+    )
+    .await
+    .expect("start stages a proposal");
+    let proposal_id = started
+        .get("proposal_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .expect("proposal_id returned");
+    assert_eq!(
+        started.get("absorbed_principal_count").and_then(|v| v.as_i64()),
+        Some(1),
+        "B contributes one principal"
+    );
+    assert_eq!(
+        account_audit_count(backend.as_ref(), tenant, "account_merge_started").await,
+        1,
+        "start writes one hash-only merge_started audit"
+    );
+
+    // confirm (strong session) -> 200 merged:true with counts.
+    let ext = account_ctx_ext(&state, &strong_headers).await;
+    let Json(confirmed) = account_merge_confirm_handler(
+        State(state.clone()),
+        ext,
+        Json(AccountMergeConfirmBody { proposal_id }),
+    )
+    .await
+    .expect("confirm executes the merge");
+    assert_eq!(confirmed.get("merged").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        confirmed.get("principals_moved").and_then(|v| v.as_i64()),
+        Some(1)
+    );
+    assert_eq!(
+        confirmed.get("authenticators_moved").and_then(|v| v.as_i64()),
+        Some(1),
+        "B's single webauthn credential moved"
+    );
+
+    // B's principal now sits under A; B is closed.
+    assert_eq!(
+        merge_principal_account(backend.as_ref(), tenant, &principal_storage_ref("token-a-2")).await,
+        Some(account_a),
+        "B's principal re-keyed onto A"
+    );
+    assert!(
+        merge_account_closed(backend.as_ref(), tenant, account_b).await,
+        "absorbed account B is closed"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// GATE: `/merge/confirm` from a WEAK session (a device-link / web cookie) is
+/// refused with 403 while the account holds a strong authenticator. Staging from
+/// the weak session is allowed (only confirm is gated), so the proposal exists;
+/// it is the confirm that the gate blocks.
+#[tokio::test]
+async fn merge_confirm_is_blocked_from_weak_session() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Account A: weak redeem cookie, plus a passkey enrolled so a strong
+    // authenticator EXISTS (so the gate is armed for the weak session).
+    let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    // Enroll a passkey so a strong authenticator EXISTS (arming the gate); the
+    // account id is not needed since enrollment binds to the session cookie.
+    let (_auth, _cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
+    let weak_headers = cookie_request_headers("tc_account_session", &weak_cookie);
+
+    // Device B with an unredeemed login-link.
+    let (merge_code, account_b) =
+        mint_device_login_code(&state, backend.as_ref(), tenant, "token-a-2").await;
+
+    // Start from the WEAK session is allowed (only confirm is gated).
+    let ext = account_ctx_ext(&state, &weak_headers).await;
+    assert!(!ext.0.is_strong_session(), "redeem cookie is a weak session");
+    let Json(started) = account_merge_start_handler(
+        State(state.clone()),
+        ext,
+        Json(AccountMergeStartBody { merge_code }),
+    )
+    .await
+    .expect("weak session may stage a proposal");
+    let proposal_id = started
+        .get("proposal_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .expect("proposal_id returned");
+
+    // Confirm from the WEAK session is refused: a strong authenticator exists.
+    let ext = account_ctx_ext(&state, &weak_headers).await;
+    let err = account_merge_confirm_handler(
+        State(state.clone()),
+        ext,
+        Json(AccountMergeConfirmBody { proposal_id }),
+    )
+    .await
+    .expect_err("weak-session confirm is gated");
+    assert_eq!(err.0, StatusCode::FORBIDDEN);
+
+    // The merge did NOT execute: B is still open with its own principal.
+    assert!(
+        !merge_account_closed(backend.as_ref(), tenant, account_b).await,
+        "blocked confirm left B open"
+    );
+    assert_eq!(
+        merge_principal_account(backend.as_ref(), tenant, &principal_storage_ref("token-a-2")).await,
+        Some(account_b),
+        "B's principal stayed under B"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// UNIFORM REJECT: a bogus/unknown merge_code on start -> 400; an unknown
+/// proposal_id on confirm -> 400; and a proposal_id NOT owned by the caller's
+/// account on confirm -> 400. All collapse to the same uniform body.
+#[tokio::test]
+async fn merge_rejects_bogus_code_and_foreign_or_unknown_proposal() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Caller account A, strong session (so confirm reaches execute_merge, not the gate).
+    let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let account_a =
+        account_id_for_principal(backend.as_ref(), tenant, &principal_storage_ref("token-a")).await;
+    let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
+    let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_a).await;
+    let strong_headers = cookie_request_headers("tc_account_session", &strong_cookie);
+
+    // (1) start with a bogus code -> 400 (no matching login-link).
+    let ext = account_ctx_ext(&state, &strong_headers).await;
+    let err = account_merge_start_handler(
+        State(state.clone()),
+        ext,
+        Json(AccountMergeStartBody { merge_code: "this-code-does-not-exist".to_string() }),
+    )
+    .await
+    .expect_err("bogus merge code is rejected");
+    assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+    // (2) confirm with an unknown proposal_id -> 400.
+    let ext = account_ctx_ext(&state, &strong_headers).await;
+    let err = account_merge_confirm_handler(
+        State(state.clone()),
+        ext,
+        Json(AccountMergeConfirmBody { proposal_id: Uuid::new_v4() }),
+    )
+    .await
+    .expect_err("unknown proposal is rejected");
+    assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+    // (3) A FOREIGN proposal: account C stages a real proposal absorbing device B,
+    // then account A tries to confirm it -> 400 (not owned by A).
+    let c_weak = mint_redeem_session_cookie_value(&state, "token-a-3").await;
+    let account_c =
+        account_id_for_principal(backend.as_ref(), tenant, &principal_storage_ref("token-a-3")).await;
+    let (mut c_auth, c_cred) = enroll_passkey_for_token(&state, &c_weak).await;
+    let c_strong = passkey_login_cookie_value(&state, &mut c_auth, &c_cred, account_c).await;
+    let c_headers = cookie_request_headers("tc_account_session", &c_strong);
+
+    let (merge_code, _account_b) =
+        mint_device_login_code(&state, backend.as_ref(), tenant, "token-a-2").await;
+    let ext = account_ctx_ext(&state, &c_headers).await;
+    let Json(started) = account_merge_start_handler(
+        State(state.clone()),
+        ext,
+        Json(AccountMergeStartBody { merge_code }),
+    )
+    .await
+    .expect("C stages a real proposal");
+    let foreign_proposal = started
+        .get("proposal_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .expect("proposal_id returned");
+
+    // A tries to confirm C's proposal -> 400 (tenant- + account-scoped: not A's).
+    let ext = account_ctx_ext(&state, &strong_headers).await;
+    let err = account_merge_confirm_handler(
+        State(state.clone()),
+        ext,
+        Json(AccountMergeConfirmBody { proposal_id: foreign_proposal }),
+    )
+    .await
+    .expect_err("a proposal not owned by the caller is rejected");
+    assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
 /// List flags `this_session` ONLY for the NEAR identity that authenticated the
 /// current session: bearer/device sessions see all false; a NEAR-login cookie
 /// session flags exactly the asserting identity; a passkey session sees all

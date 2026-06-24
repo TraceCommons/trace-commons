@@ -5947,6 +5947,14 @@ fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/v1/account/near-identities/{public_key}/payout",
             patch(account_near_identity_payout_handler),
         )
+        // Device-principal merge (Slice 3b Task 8). `start` stages a proposal by
+        // consuming device B's login-link as proof-of-control (a weak session may
+        // stage); `confirm` performs the irreversible fold and is strong-auth-gated.
+        .route("/v1/account/merge/start", post(account_merge_start_handler))
+        .route(
+            "/v1/account/merge/confirm",
+            post(account_merge_confirm_handler),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             account_auth_middleware,
@@ -14179,6 +14187,124 @@ async fn account_near_identity_payout_handler(
     Ok(Json(serde_json::json!({
         "public_key": public_key,
         "is_payout": body.payout,
+    })))
+}
+
+/// Request body for `POST /v1/account/merge/start`. The `merge_code` is device
+/// B's RAW login-link code (the same single-use code Slice 1 redeems at
+/// `/account/login/confirm`); it is proof-of-control of account B. We hash it the
+/// SAME way the login redeem path does (`hash_secret`, sha256-prefixed) and never
+/// store, log, or audit the raw value. Required field: a malformed / absent body
+/// is a 4xx, not a silent no-op.
+#[derive(Debug, Deserialize)]
+struct AccountMergeStartBody {
+    merge_code: String,
+}
+
+/// Request body for `POST /v1/account/merge/confirm`. Carries only the durable
+/// proposal id staged by `/merge/start`; never any code or secret.
+#[derive(Debug, Deserialize)]
+struct AccountMergeConfirmBody {
+    proposal_id: Uuid,
+}
+
+/// `POST /v1/account/merge/start` — stage a device-principal merge (Slice 3b
+/// Task 8). The caller (surviving account A) presents device B's raw login-link
+/// code as proof-of-control of account B. We hash the code EXACTLY as the login
+/// redeem path does and call `stage_merge_proposal`, which consumes B's link and
+/// stages a single-use, time-bounded proposal naming B as absorbed.
+///
+/// This stage is NOT strong-auth-gated: it only consumes a link and stages a
+/// proposal (a weak session may stage). The irreversible fold is gated on
+/// `/merge/confirm`. Every reject — invalid / expired / consumed link, a self-
+/// merge code, or a closed account — collapses to ONE uniform 400 so nothing
+/// about account B is enumerable. Hash-only: no merge_code, no principal refs.
+async fn account_merge_start_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+    Json(body): Json<AccountMergeStartBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let db = account_db(state.as_ref())?;
+
+    // Hash device B's raw login code the SAME way the login redeem path
+    // (`confirm_login_handler`) hashes its code, or `stage_merge_proposal` would
+    // never find the link.
+    let code_hash = hash_secret(&body.merge_code);
+
+    let staged = db
+        .stage_merge_proposal(&ctx.tenant_id, ctx.account_id.as_uuid(), &code_hash)
+        .await
+        .map_err(internal_error)?;
+
+    let Some(proposal) = staged else {
+        // Uniform reject: invalid / expired / consumed link, self-merge, and
+        // closed account are indistinguishable. No existence oracle.
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "merge code invalid or expired",
+        ));
+    };
+
+    // Hash-only / actor-only audit that a merge was staged. No code, no proposal
+    // detail beyond that one was created, no principal refs.
+    db.append_account_audit(
+        &ctx.tenant_id,
+        "account_merge_started",
+        &ctx.actor_ref,
+        "success",
+        serde_json::json!({}),
+    )
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(serde_json::json!({
+        "proposal_id": proposal.proposal_id,
+        "absorbed_principal_count": proposal.absorbed_principal_count,
+    })))
+}
+
+/// `POST /v1/account/merge/confirm` — execute a staged device-principal merge
+/// (Slice 3b Task 8). This is the IRREVERSIBLE step: it atomically re-keys
+/// account B's principals + strong authenticators onto the caller's account and
+/// closes B. Because it moves authenticators and cannot be undone, it runs behind
+/// the SAME strong-authenticator gate as an authenticator change: a weak session
+/// may confirm only while the account holds zero strong authenticators
+/// (bootstrapping); otherwise refused with 403.
+///
+/// `execute_merge` is tenant- + account-scoped and re-validates the proposal, so
+/// an unknown / expired / already-consumed proposal, one not owned by the caller,
+/// or a closed survivor/absorbed account all affect zero rows and yield a UNIFORM
+/// 400 — no existence oracle. `execute_merge` writes the `account_merged` audit on
+/// success; this handler adds none. Hash-only: returns counts only.
+async fn account_merge_confirm_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+    Json(body): Json<AccountMergeConfirmBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    // Strong-authenticator gate FIRST: the merge is irreversible and moves
+    // authenticators, so it is at least as sensitive as an authenticator change.
+    require_authenticator_change_allowed(state.as_ref(), &ctx).await?;
+
+    let db = account_db(state.as_ref())?;
+
+    let executed = db
+        .execute_merge(&ctx.tenant_id, ctx.account_id.as_uuid(), body.proposal_id)
+        .await
+        .map_err(internal_error)?;
+
+    let Some(merge) = executed else {
+        // Uniform reject: expired / not-owned / already-consumed / closed account
+        // are indistinguishable.
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "merge proposal invalid or expired",
+        ));
+    };
+
+    Ok(Json(serde_json::json!({
+        "merged": true,
+        "principals_moved": merge.principals_moved,
+        "authenticators_moved": merge.authenticators_moved,
     })))
 }
 
