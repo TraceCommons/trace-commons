@@ -2686,7 +2686,8 @@ impl Database for PgBackend {
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
-                "SELECT public_key, near_account_id, label, created_at, last_used_at
+                "SELECT public_key, near_account_id, label, created_at, last_used_at,
+                        payout_designated_at
                    FROM trace_near_identities
                   WHERE tenant_id = trace_current_tenant_id()
                     AND account_id = $1
@@ -2699,12 +2700,17 @@ impl Database for PgBackend {
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(rows
             .into_iter()
-            .map(|row| crate::db::NearIdentitySummary {
-                public_key: row.get("public_key"),
-                near_account_id: row.get("near_account_id"),
-                label: row.get("label"),
-                created_at: row.get("created_at"),
-                last_used_at: row.get("last_used_at"),
+            .map(|row| {
+                let payout_designated_at: Option<chrono::DateTime<chrono::Utc>> =
+                    row.get("payout_designated_at");
+                crate::db::NearIdentitySummary {
+                    public_key: row.get("public_key"),
+                    near_account_id: row.get("near_account_id"),
+                    label: row.get("label"),
+                    created_at: row.get("created_at"),
+                    last_used_at: row.get("last_used_at"),
+                    is_payout: payout_designated_at.is_some(),
+                }
             })
             .collect())
     }
@@ -2813,6 +2819,115 @@ impl Database for PgBackend {
             .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(row.get("strong_count"))
+    }
+
+    async fn designate_payout_near_identity(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        public_key: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Clear any existing active designation first so at most one active row ever
+        // carries payout_designated_at -> the partial-unique index can never trip.
+        tx.execute(
+            "UPDATE trace_near_identities
+                SET payout_designated_at = NULL
+              WHERE tenant_id = trace_current_tenant_id()
+                AND account_id = $1
+                AND payout_designated_at IS NOT NULL",
+            &[&account_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        // Stamp the named active key. account-scoped + revoked_at IS NULL so an
+        // unknown / revoked / other-account key affects zero rows.
+        let affected = tx
+            .execute(
+                "UPDATE trace_near_identities
+                    SET payout_designated_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND public_key = $2
+                    AND revoked_at IS NULL",
+                &[&account_id, &public_key],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(affected > 0)
+    }
+
+    async fn clear_payout_near_identity(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        public_key: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let affected = tx
+            .execute(
+                "UPDATE trace_near_identities
+                    SET payout_designated_at = NULL
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND public_key = $2
+                    AND revoked_at IS NULL
+                    AND payout_designated_at IS NOT NULL",
+                &[&account_id, &public_key],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(affected > 0)
+    }
+
+    async fn resolve_payout_near_account_id(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+    ) -> Result<crate::db::PayoutResolution, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT near_account_id, payout_designated_at
+                   FROM trace_near_identities
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND revoked_at IS NULL",
+                &[&account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+
+        // A designated active identity wins outright.
+        if let Some(row) = rows.iter().find(|row| {
+            row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("payout_designated_at")
+                .is_some()
+        }) {
+            return Ok(crate::db::PayoutResolution::Designated(
+                row.get("near_account_id"),
+            ));
+        }
+        // No designation: a single active identity is unambiguous; otherwise hold.
+        match rows.len() {
+            0 => Ok(crate::db::PayoutResolution::Hold(
+                crate::db::PayoutHoldReason::NoneEnrolled,
+            )),
+            1 => Ok(crate::db::PayoutResolution::SoleActive(
+                rows[0].get("near_account_id"),
+            )),
+            _ => Ok(crate::db::PayoutResolution::Hold(
+                crate::db::PayoutHoldReason::AmbiguousNoDesignation,
+            )),
+        }
     }
 }
 

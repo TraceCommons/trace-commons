@@ -712,6 +712,54 @@ pub trait Database: TraceCorpusStore + Send + Sync {
             "count_active_strong_authenticators not implemented".to_string(),
         ))
     }
+
+    /// Designate one of `account_id`'s ACTIVE NEAR identities as its payout target.
+    /// In ONE tx: clear any existing active designation for the account (so at most
+    /// one holds, never violating the partial-unique index), then stamp
+    /// `payout_designated_at = now()` on the named active key. Returns whether the
+    /// stamp affected a row (`false` for an unknown / revoked / other-account key,
+    /// which the caller surfaces as a 404). Tenant- + account-scoped under forced RLS.
+    async fn designate_payout_near_identity(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _public_key: &str,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "designate_payout_near_identity not implemented".to_string(),
+        ))
+    }
+
+    /// Clear the payout designation from one of `account_id`'s ACTIVE NEAR
+    /// identities. Returns whether a row changed (`false` when the key was not an
+    /// active, currently-designated identity). Tenant- + account-scoped under forced
+    /// RLS so a caller can never clear an identity they do not own.
+    async fn clear_payout_near_identity(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _public_key: &str,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "clear_payout_near_identity not implemented".to_string(),
+        ))
+    }
+
+    /// Resolve the NEAR account id to pay for `account_id`, fail-closed. Reading the
+    /// account's ACTIVE identities in one RLS-scoped tx: a designated one wins
+    /// (`Designated`); else a single active identity is the unambiguous target
+    /// (`SoleActive`); else zero active holds `NoneEnrolled` and two-or-more active
+    /// with none designated holds `AmbiguousNoDesignation`. Settlement must withhold
+    /// on any `Hold` rather than guess. Tenant- + account-scoped under forced RLS.
+    async fn resolve_payout_near_account_id(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+    ) -> Result<PayoutResolution, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "resolve_payout_near_account_id not implemented".to_string(),
+        ))
+    }
 }
 
 /// The session row to create on a winning redeem. `token_hash` is sha256-shaped;
@@ -822,6 +870,36 @@ pub struct NearIdentitySummary {
     pub label: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// True when this identity is the account's designated payout target
+    /// (`payout_designated_at IS NOT NULL` on an ACTIVE row). At most one active
+    /// identity per account carries this flag (enforced by a partial-unique index).
+    pub is_payout: bool,
+}
+
+/// Why [`Database::resolve_payout_near_account_id`] withheld a payout target. A
+/// fail-closed signal: settlement must hold (not guess) when no unambiguous
+/// designation exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PayoutHoldReason {
+    /// The account has no ACTIVE NEAR identities at all.
+    NoneEnrolled,
+    /// The account has two or more ACTIVE NEAR identities and none is designated
+    /// as the payout target, so there is no unambiguous choice.
+    AmbiguousNoDesignation,
+}
+
+/// Outcome of resolving an account's payout NEAR account id. The carried `String`
+/// is the human-readable `near_account_id` to pay; a [`PayoutResolution::Hold`]
+/// means settlement must withhold until the account designates a target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PayoutResolution {
+    /// The account explicitly designated this `near_account_id` as its payout target.
+    Designated(String),
+    /// The account has exactly one ACTIVE NEAR identity and none is explicitly
+    /// designated; pay it as the sole unambiguous choice.
+    SoleActive(String),
+    /// No unambiguous payout target; hold with the given reason.
+    Hold(PayoutHoldReason),
 }
 
 /// Outcome of revoking one of an account's NEAR identities. `removed` is whether

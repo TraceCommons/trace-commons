@@ -64387,6 +64387,225 @@ async fn strong_authenticator_count_sums_webauthn_and_near() {
 }
 
 // ============================================================================
+// Slice 3b Task 4: NEAR payout designation DB ops + fail-closed resolution.
+// ============================================================================
+
+#[tokio::test]
+async fn near_payout_designate_sets_flag_and_clears_prior() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-payout-designate").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-payout-designate", "principal-a")
+        .await
+        .expect("seed account");
+    backend
+        .insert_near_identity("tenant-payout-designate", account_id, "ed25519:pay-1", "alice.near", Some("first"))
+        .await
+        .expect("insert key-1");
+    backend
+        .insert_near_identity("tenant-payout-designate", account_id, "ed25519:pay-2", "bob.near", Some("second"))
+        .await
+        .expect("insert key-2");
+
+    // No designation yet -> is_payout false on both.
+    let listed = backend
+        .list_account_near_identities("tenant-payout-designate", account_id)
+        .await
+        .expect("list identities");
+    assert!(listed.iter().all(|i| !i.is_payout), "no payout designated initially");
+
+    // Designate key-1.
+    let ok = backend
+        .designate_payout_near_identity("tenant-payout-designate", account_id, "ed25519:pay-1")
+        .await
+        .expect("designate key-1");
+    assert!(ok, "designating an owned active key returns true");
+    let listed = backend
+        .list_account_near_identities("tenant-payout-designate", account_id)
+        .await
+        .expect("list after designate");
+    let designated: Vec<&str> = listed
+        .iter()
+        .filter(|i| i.is_payout)
+        .map(|i| i.public_key.as_str())
+        .collect();
+    assert_eq!(designated, vec!["ed25519:pay-1"], "exactly key-1 designated");
+
+    // Designate key-2 -> clears key-1 (partial-unique index never violated).
+    let ok2 = backend
+        .designate_payout_near_identity("tenant-payout-designate", account_id, "ed25519:pay-2")
+        .await
+        .expect("designate key-2");
+    assert!(ok2, "designating second key returns true");
+    let listed = backend
+        .list_account_near_identities("tenant-payout-designate", account_id)
+        .await
+        .expect("list after re-designate");
+    let designated: Vec<&str> = listed
+        .iter()
+        .filter(|i| i.is_payout)
+        .map(|i| i.public_key.as_str())
+        .collect();
+    assert_eq!(designated, vec!["ed25519:pay-2"], "prior designation cleared; only key-2 active");
+
+    // Clear key-2 -> none designated.
+    let cleared = backend
+        .clear_payout_near_identity("tenant-payout-designate", account_id, "ed25519:pay-2")
+        .await
+        .expect("clear key-2");
+    assert!(cleared, "clearing an active designated key returns true");
+    let listed = backend
+        .list_account_near_identities("tenant-payout-designate", account_id)
+        .await
+        .expect("list after clear");
+    assert!(listed.iter().all(|i| !i.is_payout), "no payout designated after clear");
+
+    // Clearing again -> no row changed.
+    let cleared_again = backend
+        .clear_payout_near_identity("tenant-payout-designate", account_id, "ed25519:pay-2")
+        .await
+        .expect("clear again");
+    assert!(!cleared_again, "clearing a non-designated key returns false");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-payout-designate").await;
+}
+
+#[tokio::test]
+async fn near_payout_designate_rejects_unknown_revoked_and_cross_account() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-payout-reject").await;
+
+    let account_a = backend
+        .create_or_reuse_account("tenant-payout-reject", "principal-a")
+        .await
+        .expect("seed account A");
+    let account_b = backend
+        .create_or_reuse_account("tenant-payout-reject", "principal-b")
+        .await
+        .expect("seed account B");
+    assert_ne!(account_a, account_b, "distinct accounts");
+
+    backend
+        .insert_near_identity("tenant-payout-reject", account_a, "ed25519:a-key", "alice.near", None)
+        .await
+        .expect("insert A's identity");
+    backend
+        .insert_near_identity("tenant-payout-reject", account_a, "ed25519:a-revoked", "alice2.near", None)
+        .await
+        .expect("insert A's revoked identity");
+    backend
+        .revoke_account_near_identity("tenant-payout-reject", account_a, "ed25519:a-revoked")
+        .await
+        .expect("revoke A's identity");
+
+    // Unknown key -> false.
+    let unknown = backend
+        .designate_payout_near_identity("tenant-payout-reject", account_a, "ed25519:unknown")
+        .await
+        .expect("designate unknown");
+    assert!(!unknown, "designating an unknown key returns false");
+
+    // Revoked key -> false.
+    let revoked = backend
+        .designate_payout_near_identity("tenant-payout-reject", account_a, "ed25519:a-revoked")
+        .await
+        .expect("designate revoked");
+    assert!(!revoked, "designating a revoked key returns false");
+
+    // Cross-account: B designating A's key under B's id -> false.
+    let cross = backend
+        .designate_payout_near_identity("tenant-payout-reject", account_b, "ed25519:a-key")
+        .await
+        .expect("designate cross-account");
+    assert!(!cross, "designating another account's key returns false");
+
+    // A's key remains undesignated.
+    let listed = backend
+        .list_account_near_identities("tenant-payout-reject", account_a)
+        .await
+        .expect("list A");
+    assert!(listed.iter().all(|i| !i.is_payout), "no spurious designation occurred");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-payout-reject").await;
+}
+
+#[tokio::test]
+async fn near_payout_resolution_is_fail_closed() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-payout-resolve").await;
+
+    let account_id = backend
+        .create_or_reuse_account("tenant-payout-resolve", "principal-a")
+        .await
+        .expect("seed account");
+
+    // Zero active -> Hold(NoneEnrolled).
+    let resolution = backend
+        .resolve_payout_near_account_id("tenant-payout-resolve", account_id)
+        .await
+        .expect("resolve empty");
+    assert_eq!(
+        resolution,
+        trace_commons_server::db::PayoutResolution::Hold(trace_commons_server::db::PayoutHoldReason::NoneEnrolled),
+        "zero active identities holds with NoneEnrolled"
+    );
+
+    // Exactly one active, none designated -> SoleActive.
+    backend
+        .insert_near_identity("tenant-payout-resolve", account_id, "ed25519:sole", "alice.near", None)
+        .await
+        .expect("insert sole");
+    let resolution = backend
+        .resolve_payout_near_account_id("tenant-payout-resolve", account_id)
+        .await
+        .expect("resolve sole");
+    assert_eq!(
+        resolution,
+        trace_commons_server::db::PayoutResolution::SoleActive("alice.near".to_string()),
+        "single active identity resolves SoleActive"
+    );
+
+    // Two active, none designated -> Hold(AmbiguousNoDesignation).
+    backend
+        .insert_near_identity("tenant-payout-resolve", account_id, "ed25519:second", "bob.near", None)
+        .await
+        .expect("insert second");
+    let resolution = backend
+        .resolve_payout_near_account_id("tenant-payout-resolve", account_id)
+        .await
+        .expect("resolve ambiguous");
+    assert_eq!(
+        resolution,
+        trace_commons_server::db::PayoutResolution::Hold(trace_commons_server::db::PayoutHoldReason::AmbiguousNoDesignation),
+        "two active none designated holds with AmbiguousNoDesignation"
+    );
+
+    // Designate one -> Designated(that near_account_id).
+    backend
+        .designate_payout_near_identity("tenant-payout-resolve", account_id, "ed25519:second")
+        .await
+        .expect("designate second");
+    let resolution = backend
+        .resolve_payout_near_account_id("tenant-payout-resolve", account_id)
+        .await
+        .expect("resolve designated");
+    assert_eq!(
+        resolution,
+        trace_commons_server::db::PayoutResolution::Designated("bob.near".to_string()),
+        "designated identity resolves Designated"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-payout-resolve").await;
+}
+
+// ============================================================================
 // Slice 2 Task 5: passkey enrollment ceremony handlers.
 //
 // Coverage:
