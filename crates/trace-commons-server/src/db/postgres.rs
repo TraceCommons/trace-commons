@@ -2075,16 +2075,20 @@ impl Database for PgBackend {
         let grace_secs = session_rotation_grace_secs();
         let row = tx
             .query_opt(
-                "SELECT account_id, auth_credential_id, token_hash, client_kind,
-                        (token_hash = $1) AS matched_current,
-                        (token_issued_at < now() - make_interval(secs => $2)) AS needs_rotate
-                   FROM trace_sessions
-                  WHERE tenant_id = trace_current_tenant_id()
-                    AND (token_hash = $1
-                         OR (prev_token_hash = $1 AND prev_token_valid_until > now()))
-                    AND expires_at > now()
-                    AND revoked_at IS NULL
-                    AND last_seen_at > now() - INTERVAL '3 days'",
+                "SELECT s.account_id, s.auth_credential_id, s.token_hash, s.client_kind,
+                        (s.token_hash = $1) AS matched_current,
+                        (s.token_issued_at < now() - make_interval(secs => $2)) AS needs_rotate
+                   FROM trace_sessions s
+                   JOIN trace_accounts a
+                     ON a.tenant_id = s.tenant_id
+                    AND a.account_id = s.account_id
+                  WHERE s.tenant_id = trace_current_tenant_id()
+                    AND a.closed_at IS NULL
+                    AND (s.token_hash = $1
+                         OR (s.prev_token_hash = $1 AND s.prev_token_valid_until > now()))
+                    AND s.expires_at > now()
+                    AND s.revoked_at IS NULL
+                    AND s.last_seen_at > now() - INTERVAL '3 days'",
                 &[&token_hash, &(interval_secs as f64)],
             )
             .await

@@ -1784,6 +1784,95 @@ async fn account_ctx_session_past_idle_cap_is_denied() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+/// Slice 3b Task 9: a session whose account has been closed (the absorbed side
+/// of a device-principal merge sets `trace_accounts.closed_at = now()`) must no
+/// longer validate. Normally the merge revokes B's sessions, but `validate_session`
+/// gains a belt-and-suspenders `closed_at IS NULL` gate so a closed account can
+/// never resolve to a valid session context (fail-closed).
+#[tokio::test]
+async fn validate_session_rejects_closed_account() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let secret = cookie_value.split_once('.').expect("tenant.secret").1;
+    let token_hash = trace_commons_server::account_session::hash_secret(secret);
+
+    // While the account is OPEN, the session validates.
+    let validated = backend
+        .validate_session("tenant-a", &token_hash)
+        .await
+        .expect("validate query runs");
+    assert!(
+        validated.is_some(),
+        "open account session must validate before closure"
+    );
+
+    // Close the session's account directly under RLS (mirrors the merge's
+    // closed_at = now() on the absorbed account).
+    {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("conn");
+        let tx = client.transaction().await.expect("tx");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&"tenant-a"],
+        )
+        .await
+        .expect("set tenant ctx");
+        let updated = tx
+            .execute(
+                "UPDATE trace_accounts SET closed_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = (
+                        SELECT account_id FROM trace_sessions
+                          WHERE tenant_id = trace_current_tenant_id()
+                            AND token_hash = $1
+                    )",
+                &[&token_hash],
+            )
+            .await
+            .expect("close account");
+        assert_eq!(updated, 1, "exactly one account closed");
+        tx.commit().await.expect("commit closure");
+    }
+
+    // validate_session must now miss (closed account) -> None.
+    let validated = backend
+        .validate_session("tenant-a", &token_hash)
+        .await
+        .expect("validate query runs");
+    assert!(
+        validated.is_none(),
+        "closed-account session must not validate"
+    );
+
+    // And the resolver surfaces it as 401.
+    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let err = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect_err("closed-account cookie must be denied");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 /// SECURITY regression: `validate_session` must NOT create a `trace_tenants`
 /// row for the client-supplied, pre-auth tenant decoded from a forged session
 /// cookie. Previously `validate_session` called `ensure_trace_tenant` as its
