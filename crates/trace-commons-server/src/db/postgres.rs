@@ -3016,7 +3016,7 @@ impl Database for PgBackend {
                 &proposal_id,
                 &surviving_account_id,
                 &absorbed_account_id,
-                &(absorbed_principal_count as i32),
+                &absorbed_principal_count,
             ],
         )
         .await
@@ -3043,10 +3043,15 @@ impl Database for PgBackend {
         // Load + consume the proposal atomically. The conditional UPDATE
         // re-validates OWNERSHIP (surviving_account_id = A, the auth-derived
         // caller), single-use (consumed_at IS NULL), and freshness (expires_at >
-        // now()) in one shot: an expired / not-owned / already-consumed / unknown
-        // proposal affects zero rows -> deny. Returning Ok(None) before any
-        // mutation drops the tx (no commit), so the consume itself rolls back and
-        // the proposal stays usable on the benign-not-found paths.
+        // now()) AND that the surviving account A is still OPEN in one shot: an
+        // expired / not-owned / already-consumed / unknown proposal, or a
+        // soft-closed A, affects zero rows -> deny. The A-open EXISTS guard is
+        // load-bearing: the proposal FK only guarantees A exists, not that it is
+        // open, and a soft-close (closed_at) does not trigger ON DELETE CASCADE,
+        // so without it B's principals + authenticators could be folded onto a
+        // tombstoned account (irreversible identity corruption). Returning Ok(None)
+        // before any mutation drops the tx (no commit), so the consume itself rolls
+        // back and the proposal stays usable on the benign-not-found paths.
         let consumed = tx
             .query_opt(
                 "UPDATE trace_account_merge_proposals SET consumed_at = now()
@@ -3055,6 +3060,12 @@ impl Database for PgBackend {
                     AND surviving_account_id = $2
                     AND consumed_at IS NULL
                     AND expires_at > now()
+                    AND EXISTS (
+                        SELECT 1 FROM trace_accounts a
+                         WHERE a.tenant_id = trace_current_tenant_id()
+                           AND a.account_id = $2
+                           AND a.closed_at IS NULL
+                    )
                   RETURNING absorbed_account_id",
                 &[&proposal_id, &surviving_account_id],
             )

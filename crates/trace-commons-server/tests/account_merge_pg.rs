@@ -550,6 +550,57 @@ async fn execute_rejects_expired_proposal_without_mutating() {
 }
 
 #[tokio::test]
+async fn execute_rejects_when_surviving_closed() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    let tenant = unique_tenant("closed-a");
+    let account_a = backend
+        .create_or_reuse_account(&tenant, "principal:closeda-a")
+        .await
+        .expect("mint A");
+    let account_b = backend
+        .create_or_reuse_account(&tenant, "principal:closeda-b")
+        .await
+        .expect("mint B");
+
+    // Stage a valid, fresh proposal (A surviving, B absorbed).
+    let code_hash = unique_code_hash();
+    seed_login_link(&backend, &tenant, account_b, &code_hash, false, false).await;
+    let staged = backend
+        .stage_merge_proposal(&tenant, account_a, &code_hash)
+        .await
+        .expect("stage ok")
+        .expect("staged some");
+
+    // The surviving account A is soft-closed AFTER staging but BEFORE execute.
+    // Folding B onto a tombstoned A would be irreversible identity corruption, so
+    // execute must deny and mutate nothing.
+    raw_execute(
+        &backend,
+        &tenant,
+        "UPDATE trace_accounts SET closed_at = now()
+          WHERE tenant_id = trace_current_tenant_id() AND account_id = $1",
+        &[&account_a],
+    )
+    .await;
+
+    assert!(
+        backend
+            .execute_merge(&tenant, account_a, staged.proposal_id)
+            .await
+            .expect("execute ok")
+            .is_none(),
+        "a closed surviving account must deny execute"
+    );
+    // No mutation: B still open with its own principal; nothing folded onto A.
+    assert!(!account_closed(&backend, &tenant, account_b).await);
+    assert_eq!(active_principal_count(&backend, &tenant, account_b).await, 1);
+    assert_eq!(active_principal_count(&backend, &tenant, account_a).await, 1);
+    assert_eq!(merge_audit_count(&backend, &tenant).await, 0);
+}
+
+#[tokio::test]
 async fn execute_rejects_proposal_owned_by_different_surviving_account() {
     let Some(backend) = postgres_backend().await else {
         return;

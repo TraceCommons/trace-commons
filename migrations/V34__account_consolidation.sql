@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS trace_account_merge_proposals (
     proposal_id              UUID NOT NULL,
     surviving_account_id     UUID NOT NULL,
     absorbed_account_id      UUID NOT NULL,
-    absorbed_principal_count INT NOT NULL DEFAULT 0,
+    absorbed_principal_count BIGINT NOT NULL DEFAULT 0,
     created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at               TIMESTAMPTZ NOT NULL,
     consumed_at              TIMESTAMPTZ,
