@@ -66494,6 +66494,72 @@ async fn near_login_binds_session_to_owning_tenant() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
 }
 
+/// Hardening: an over-long / wrong-prefix `publicKey` is refused with the uniform
+/// deny BEFORE it is interpolated into the per-key rate-limit map key (so garbage
+/// keys cannot bloat the limiter). The shape/length gate fires ahead of the
+/// ceremony lookup, so a valid ceremony cookie is still refused, and no session
+/// is minted.
+#[tokio::test]
+async fn near_login_rejects_malformed_public_key_shape() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let checker: Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker> =
+        Arc::new(StubNearAccessKeyChecker { result: Ok(true) });
+    let state = test_state_with_near(temp.path().to_path_buf(), Some(db_mirror), Some(checker));
+
+    // A real, enrolled wallet exists; we just present a malformed public key.
+    let (_account_id, kp, _public_key) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet").await;
+
+    // Each case carries a fresh, VALID ceremony so the only thing that can deny is
+    // the shape/length gate (which fires before the ceremony lookup).
+    let cases = [
+        // Wrong prefix (no `ed25519:`).
+        "secp256k1:abcdefabcdefabcdefabcdefabcdefabcdefabcdef".to_string(),
+        // Over-long: `ed25519:` + 200 base58-ish chars, well past the 120 cap.
+        format!("ed25519:{}", "1".repeat(200)),
+    ];
+    for bogus_pk in cases {
+        let (message, nonce, recipient, ceremony_pair) = near_login_start(&state).await;
+        // Sign with the real key over the challenge; the signature is well-formed,
+        // proving the gate is what denies (not a bad signature).
+        let signature = near_test_sign(&kp, &message, &nonce, &recipient);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
+        );
+        let response = account_near_login_finish_handler(
+            State(state.clone()),
+            headers,
+            NearAssertionBody(NearLoginFinishBody {
+                account_id: "alice.testnet".to_string(),
+                public_key: bogus_pk.clone(),
+                signature,
+            }),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "a malformed public key ({bogus_pk}) is refused with the uniform deny"
+        );
+        assert!(
+            !all_set_cookies(&response)
+                .iter()
+                .any(|c| c.starts_with("tc_account_session=")),
+            "the refused malformed-key attempt mints no session cookie"
+        );
+    }
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
 
 // ============================================================================
 // Slice 3a Task 8: the strong-authenticator change gate.

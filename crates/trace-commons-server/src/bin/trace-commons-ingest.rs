@@ -12663,6 +12663,12 @@ const NEAR_LOGIN_GLOBAL_LIMIT: u32 = 600;
 /// that the key collapses to the uniform deny (replay/brute ceiling). The public
 /// key is a PUBLIC, globally-unique label (not a secret).
 const NEAR_LOGIN_PER_KEY_LIMIT: u32 = 5;
+/// Upper bound on the asserted NEAR `publicKey` STRING length accepted at
+/// `login/finish`, enforced before the key is interpolated into the per-key
+/// rate-limit map key. A real `ed25519:` access key is the 8-char prefix plus
+/// ~44 base58 chars (~52 total); 120 leaves generous slack while preventing an
+/// over-long/garbage key from bloating the limiter map.
+const NEAR_LOGIN_PUBKEY_MAX_LEN: usize = 120;
 /// Per-account cap on `GET /v1/account/traces/{id}/content` reads per window.
 const CONTENT_PER_ACCOUNT_LIMIT: u32 = 60;
 /// Concurrency cap on in-flight content reads per account (defense against a
@@ -14672,9 +14678,23 @@ async fn account_near_login_finish_inner(
         Err(_) => return near_login_generic_deny(),
     };
 
+    // 3a. Shape/length-bound the asserted public key BEFORE it is interpolated
+    //     into the per-key rate-limit map key. A real NEAR ed25519 key is
+    //     `ed25519:` + ~44 base58 chars; anything not starting with `ed25519:` or
+    //     longer than NEAR_LOGIN_PUBKEY_MAX_LEN cannot be a valid credential, so we
+    //     reject it with the uniform deny here. This stops an attacker from
+    //     spraying over-long/garbage `publicKey` values to bloat the limiter map
+    //     keys, and short-circuits malformed keys before any further work. (The
+    //     passkey path needs no analogue: webauthn-rs parses the assertion first.)
+    if !body.public_key.starts_with("ed25519:")
+        || body.public_key.len() > NEAR_LOGIN_PUBKEY_MAX_LEN
+    {
+        return near_login_generic_deny();
+    }
+
     // 3. Per-publicKey hard ceiling (replay/brute bound on one specific key,
-    //    IP-independent). The public key is a PUBLIC, globally-unique label. Same
-    //    uniform deny.
+    //    IP-independent). The public key is a PUBLIC, globally-unique label, now
+    //    shape- and length-bounded above. Same uniform deny.
     if !ACCOUNT_RATE_LIMITER.check(
         &format!("near-login-key:{}", body.public_key),
         NEAR_LOGIN_PER_KEY_LIMIT,

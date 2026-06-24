@@ -256,6 +256,10 @@ export TRACE_COMMONS_NEAR_LOGIN_RECIPIENT="app.tracecommons.ai"    # NEP-413 rec
   confirm that binding, so **pin a trusted endpoint**. **Login is fully offline**:
   it verifies the NEP-413 signature and resolves the stored `public_key -> tenant`
   binding without any network call.
+- **The login `accountId` field is informational only.** The `accountId` in the
+  `login/finish` assertion body is NOT verified at login — authentication is by the
+  NEP-413 signature over the challenge plus the `public_key -> tenant` resolution;
+  the account binding was established and RPC-verified at enroll time.
 - **NEAR login depends on the login-resolver pool.** The unauthenticated
   `public_key -> tenant` bootstrap runs on the `trace_login_resolver` pool
   (`TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL`, above). If that pool is
