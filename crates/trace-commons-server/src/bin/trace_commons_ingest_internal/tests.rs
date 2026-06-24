@@ -760,6 +760,128 @@ async fn settlement_groups_account_principals_and_routes_designated_payout() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+/// Slice 3b read-side regression: after an ACCOUNT-KEYED settlement, a linked
+/// contributor's `credit_handler` must report the account's settled credit, NOT
+/// zero. Task 5 re-keys a linked account's settlement line item to
+/// `account:{uuid}`; a principal-ref set never contains that, so the
+/// credit-handler settlement filter must consult the caller's resolved
+/// `account_id` (the fix). Without it, `credit_points_settled` and
+/// `last_settlement_batch_id` zero out for exactly the accounts this slice serves.
+/// Also asserts an UNLINKED contributor's principal-keyed settled credit is
+/// unchanged.
+#[tokio::test]
+async fn linked_contributor_sees_account_keyed_settled_credit() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+    // P1 (token-a) + P2 (token-a-2) -> account A; P3 (token-a-3) unlinked.
+    let (_, _p1_event) = seed_settlement_credit(&state, "token-a", 1.0).await;
+    let (_, _p2_event) = seed_settlement_credit(&state, "token-a-2", 0.5).await;
+    let (_, _p3_event) = seed_settlement_credit(&state, "token-a-3", 2.0).await;
+    let p1_principal = principal_storage_ref("token-a");
+    let p2_principal = principal_storage_ref("token-a-2");
+
+    let account_a = backend
+        .create_or_reuse_account("tenant-a", &p1_principal)
+        .await
+        .expect("mint account A for P1");
+    link_principal_to_account(backend.as_ref(), "tenant-a", account_a, &p2_principal).await;
+    // Designate a payout so the account line item is not held (mirrors Task 5 test).
+    backend
+        .insert_near_identity("tenant-a", account_a, "ed25519:a-payout", "alice.near", None)
+        .await
+        .expect("insert A payout identity");
+    assert!(
+        backend
+            .designate_payout_near_identity("tenant-a", account_a, "ed25519:a-payout")
+            .await
+            .expect("designate A payout"),
+        "designation must take effect"
+    );
+
+    let Json(finalized) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "finalize account-keyed settlement".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("admin can finalize settlement");
+    assert_eq!(finalized.settled_source_event_count, 3);
+
+    // --- Linked caller P1 (token-a) sees the ACCOUNT-KEYED settled credit. ---
+    // A's line item is `account:{A}` summing P1 (1.0) + P2 (0.5) = 1.5. Pre-fix
+    // this was 0.0 because the principal-ref set never contained `account:{A}`.
+    let Json(p1_credit) = credit_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("P1 credit summary succeeds");
+    assert!(
+        (p1_credit.credit_points_settled - 1.5).abs() < 1e-6,
+        "linked P1 must see account A's settled credit (1.5); got {}",
+        p1_credit.credit_points_settled
+    );
+    assert_eq!(
+        p1_credit.last_settlement_batch_id,
+        Some(finalized.settlement_batch_id),
+        "linked P1's last settlement batch must be the finalized account-keyed batch"
+    );
+    assert!(
+        p1_credit.credit_points_ledger >= 1.5,
+        "settled credit rolls into the ledger total"
+    );
+
+    // P2 (the OTHER linked principal) resolves to the SAME account A and sees the
+    // SAME account-keyed settled credit.
+    let Json(p2_credit) = credit_handler(State(state.clone()), auth_headers("token-a-2"))
+        .await
+        .expect("P2 credit summary succeeds");
+    assert!(
+        (p2_credit.credit_points_settled - 1.5).abs() < 1e-6,
+        "linked P2 sees the same account A settled credit (1.5); got {}",
+        p2_credit.credit_points_settled
+    );
+
+    // --- Unlinked caller P3 (token-a-3): its own principal-keyed line item, 2.0,
+    // unchanged behavior; A's account-keyed credit is NOT visible. ---
+    let Json(p3_credit) = credit_handler(State(state.clone()), auth_headers("token-a-3"))
+        .await
+        .expect("P3 credit summary succeeds");
+    assert!(
+        (p3_credit.credit_points_settled - 2.0).abs() < 1e-6,
+        "unlinked P3 still sees its own principal-keyed settled credit (2.0); got {}",
+        p3_credit.credit_points_settled
+    );
+    assert_eq!(
+        p3_credit.last_settlement_batch_id,
+        Some(finalized.settlement_batch_id),
+        "unlinked P3's own line item is in the same finalized batch"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 /// An account with ZERO active NEAR identities settles internally (line item
 /// present) but its on-chain payout is HELD with `none_enrolled` and NO outbox row
 /// is enqueued.

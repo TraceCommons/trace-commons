@@ -11712,7 +11712,9 @@ async fn credit_handler(
     let account_scope = caller_credit_account_scope(state.as_ref(), tenant.auth())
         .await
         .map_err(internal_error)?;
-    let credit_view = read_contributor_credit_view(state.as_ref(), tenant.auth(), account_scope.as_ref())
+    let account_principals = account_scope.as_ref().map(CreditAccountScope::principals);
+    let account_id = account_scope.as_ref().map(CreditAccountScope::account_id);
+    let credit_view = read_contributor_credit_view(state.as_ref(), tenant.auth(), account_principals)
         .await
         .map_err(internal_error)?;
     let item_count = credit_view.records.len();
@@ -11732,7 +11734,8 @@ async fn credit_handler(
         TraceCommonsTenantCreditResponse::from_records_events_and_settlements(
             tenant.tenant_id().to_string(),
             tenant.auth(),
-            account_scope.as_ref(),
+            account_principals,
+            account_id,
             credit_view.records,
             &credit_view.credit_events,
             &settlement_batches,
@@ -11749,7 +11752,8 @@ async fn credit_events_handler(
     let account_scope = caller_credit_account_scope(state.as_ref(), tenant.auth())
         .await
         .map_err(internal_error)?;
-    let credit_view = read_contributor_credit_view(state.as_ref(), tenant.auth(), account_scope.as_ref())
+    let account_principals = account_scope.as_ref().map(CreditAccountScope::principals);
+    let credit_view = read_contributor_credit_view(state.as_ref(), tenant.auth(), account_principals)
         .await
         .map_err(internal_error)?;
     append_control_plane_read_audit(
@@ -11779,8 +11783,9 @@ async fn submission_status_handler(
     let account_scope = caller_credit_account_scope(state.as_ref(), tenant.auth())
         .await
         .map_err(internal_error)?;
+    let account_principals = account_scope.as_ref().map(CreditAccountScope::principals);
     let credit_view =
-        read_contributor_credit_view(state.as_ref(), tenant.auth(), account_scope.as_ref())
+        read_contributor_credit_view(state.as_ref(), tenant.auth(), account_principals)
             .await
             .map_err(internal_error)?;
     let visible_by_submission = credit_view
@@ -11791,7 +11796,7 @@ async fn submission_status_handler(
     let status_credit_events = read_contributor_status_credit_events(
         state.as_ref(),
         tenant.auth(),
-        account_scope.as_ref(),
+        account_principals,
         &credit_view.records,
     )
     .await
@@ -47362,13 +47367,38 @@ async fn read_reviewer_metadata_view_from_db(
     Ok(TraceCommonsMetadataView { records, derived })
 }
 
+/// The CALLER's resolved contributor-credit visibility scope (Slice 3b): the
+/// durable `account_id` the caller's device principal is linked to, plus that
+/// account's ACTIVE principal set. Two keying schemes coexist on the credit
+/// surface, so both fields are load-bearing:
+/// - credit EVENTS and submission records are keyed by raw `auth_principal_ref`,
+///   matched against `principals`;
+/// - SETTLEMENT line items and credit HOLDS for a linked account are re-keyed by
+///   Task 5 to `{ACCOUNT_SETTLEMENT_KEY_PREFIX}{account_id}` (`account:{uuid}`),
+///   matched against `account_id`. A principal-ref set never contains that
+///   account-keyed ref, so the settlement/hold filter MUST consult `account_id`
+///   or a linked contributor's settled/held roll-ups zero out.
+struct CreditAccountScope {
+    account_id: Uuid,
+    principals: AccountPrincipalSet,
+}
+
+impl CreditAccountScope {
+    fn principals(&self) -> &AccountPrincipalSet {
+        &self.principals
+    }
+    fn account_id(&self) -> Uuid {
+        self.account_id
+    }
+}
+
 /// Resolve the CALLER's contributor-credit visibility scope (Slice 3b). If the
 /// caller's own `principal_ref` has an ACTIVE link to a durable account, returns
-/// that account's active principal set (`Some`), broadening the credit surface to
-/// EVERY principal on the account. If the caller is unlinked (no account), returns
-/// `None`, leaving the EXACT pre-3b own-principal scope. Computed ONCE per request
-/// and shared by the per-event filter and the credit-handler sum-filter, so the
-/// record list and the scalar sums never disagree.
+/// that account's id + active principal set (`Some`), broadening the credit
+/// surface to EVERY principal on the account. If the caller is unlinked (no
+/// account), returns `None`, leaving the EXACT pre-3b own-principal scope. Computed
+/// ONCE per request and shared by the per-event filter and the credit-handler
+/// sum-filter, so the record list and the scalar sums never disagree.
 ///
 /// Fail-closed: a DB/resolution error PROPAGATES (the handler maps it to a 5xx and
 /// denies the request) rather than widening; account linkage requires a DB mirror,
@@ -47377,7 +47407,7 @@ async fn read_reviewer_metadata_view_from_db(
 async fn caller_credit_account_scope(
     state: &AppState,
     tenant: &TenantAuth,
-) -> anyhow::Result<Option<AccountPrincipalSet>> {
+) -> anyhow::Result<Option<CreditAccountScope>> {
     let Some(db) = state.db_mirror.as_ref() else {
         // No DB mirror => no account linkage to broaden from. Own-principal only.
         return Ok(None);
@@ -47394,11 +47424,14 @@ async fn caller_credit_account_scope(
         // Caller has no active account link: unchanged own-principal scope.
         return Ok(None);
     };
-    let scope = db
+    let principals = db
         .expand_account_principals(&tenant.tenant_id, account_id)
         .await
         .context("failed to expand account principals for credit visibility")?;
-    Ok(Some(scope))
+    Ok(Some(CreditAccountScope {
+        account_id,
+        principals,
+    }))
 }
 
 async fn read_contributor_credit_view(
@@ -63387,10 +63420,18 @@ impl TraceCreditRiskSummaryResponse {
 }
 
 impl TraceCommonsTenantCreditResponse {
+    // `account_scope` (principal-keyed events/records) and `account_id`
+    // (account-keyed settlements/holds) are the two visibility keys this builder
+    // needs; passing them alongside the existing record/event/settlement/hold
+    // inputs crosses clippy's arg threshold. Matches the repo's existing
+    // `#[allow(clippy::too_many_arguments)]` convention rather than widening the
+    // CI allow-list.
+    #[allow(clippy::too_many_arguments)]
     fn from_records_events_and_settlements(
         tenant_id: String,
         auth: &TenantAuth,
         account_scope: Option<&AccountPrincipalSet>,
+        account_id: Option<Uuid>,
         records: Vec<TraceCommonsSubmissionRecord>,
         credit_events: &[TraceCommonsCreditLedgerRecord],
         settlement_batches: &[TraceCreditSettlementBatchRecord],
@@ -63442,16 +63483,31 @@ impl TraceCommonsTenantCreditResponse {
         let legacy_principal_ref = legacy_principal_ref();
         let legacy_principal_ref = legacy_principal_ref.as_str();
         // Slice 3b: a credit `account_ref` is visible to this caller iff it is the
-        // caller's own principal, the legacy wildcard, OR a principal on the
-        // caller's account (active links only). `account_scope == None` (unlinked
-        // caller / file-only path) reproduces the pre-3b own-principal predicate.
-        // The SAME `account_scope` drives the per-event credit filter, so the
-        // visible record list and these scalar sums stay consistent.
+        // caller's own principal, the legacy wildcard, a principal on the caller's
+        // account (active links only), OR the caller's own account-settlement key.
+        // Two keying schemes flow through this closure:
+        // - credit EVENTS carry a raw `auth_principal_ref` matched by the
+        //   principal-set arm;
+        // - SETTLEMENT line items / credit HOLDS for a linked account are re-keyed
+        //   by Task 5 to `{ACCOUNT_SETTLEMENT_KEY_PREFIX}{account_id}`
+        //   (`account:{uuid}`), which a principal-ref set NEVER contains — so
+        //   without the account-keyed arm a linked contributor's settled/held
+        //   roll-ups would zero out. The account-keyed arm is inert for the event
+        //   path (an `auth_principal_ref` never has the `account:` shape).
+        // `account_scope`/`account_id == None` (unlinked caller / file-only path)
+        // reproduces the pre-3b own-principal predicate exactly. The SAME scope
+        // drives the per-event credit filter, so the visible record list and these
+        // scalar sums stay consistent.
+        let account_settlement_key =
+            account_id.map(|id| format!("{ACCOUNT_SETTLEMENT_KEY_PREFIX}{id}"));
         let account_ref_visible = |account_ref: &str| -> bool {
             tenant_wide_credit_view
                 || account_ref == principal_ref
                 || account_ref == legacy_principal_ref
                 || account_scope.is_some_and(|scope| scope.contains(account_ref))
+                || account_settlement_key
+                    .as_deref()
+                    .is_some_and(|key| account_ref == key)
         };
         let visible_settlements = settlement_batches
             .iter()
