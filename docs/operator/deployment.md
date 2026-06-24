@@ -234,6 +234,37 @@ export TRACE_COMMONS_WEBAUTHN_RP_NAME="TraceCommons"            # shown in authe
   in-process soft-authenticator used by the passkey tests). It is **not** compiled
   into or shipped with the production binaries; no production env var enables it.
 
+### Login-with-NEAR (contributor NEAR sign-in, Slice 3a)
+
+NEAR enrollment and login require the NEAR configuration. All **three** of these
+env vars are **required together**:
+
+```sh
+export TRACE_COMMONS_NEAR_RPC_URL="https://rpc.mainnet.near.org"   # pin a TRUSTED endpoint; used ONLY at enroll
+export TRACE_COMMONS_NEAR_NETWORK="mainnet"                        # network label (mainnet|testnet)
+export TRACE_COMMONS_NEAR_LOGIN_RECIPIENT="app.tracecommons.ai"    # NEP-413 recipient the signed challenge binds to
+```
+
+- **All-or-nothing.** Setting only some of the three is a misconfiguration: the
+  NEAR surface stays **disabled** (fail-closed), and the server emits a startup
+  `WARN` naming which of the three are set vs unset (names only, never values —
+  an rpc_url/recipient may be sensitive). Setting **none** of them is the normal
+  "NEAR disabled" state and is silent.
+- **RPC is used ONLY at enroll.** The `view_access_key_list` JSON-RPC call that
+  proves the signing key is a FullAccess key on the named NEAR account runs
+  exclusively during enroll-finish. A malicious/compromised RPC could falsely
+  confirm that binding, so **pin a trusted endpoint**. **Login is fully offline**:
+  it verifies the NEP-413 signature and resolves the stored `public_key -> tenant`
+  binding without any network call.
+- **NEAR login depends on the login-resolver pool.** The unauthenticated
+  `public_key -> tenant` bootstrap runs on the `trace_login_resolver` pool
+  (`TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL`, above). If that pool is
+  unconfigured, NEAR login fails closed (uniform deny, no session) — same as
+  redeem and passkey login. See `docs/operator/login-resolver-role.md`.
+- **Encoding deps.** NEP-413 message encoding uses `borsh` (canonical struct
+  serialization) and `bs58` (the `ed25519:<base58>` public-key form); both are
+  compiled into the production binary and need no env vars.
+
 ### Privacy filter backend (pilot)
 
 Pilot builds must include the `near-ai-privacy-filter` Cargo feature to enable

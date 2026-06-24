@@ -88,6 +88,14 @@ fn nep413_payload_bytes(
 /// Returns a generic `Err` on every failure path (bad key, bad signature
 /// encoding, signature mismatch) so the verification boundary never leaks which
 /// step failed.
+///
+/// NOTE (residual risk): the byte layout is canonically correct (borsh of the
+/// documented NEP-413 struct + the `2^31+413` tag), validated by the
+/// `nep413_payload_bytes_layout_pin` byte-pin and a ring sign/verify round-trip.
+/// Those exercise only our own encoder. A captured real-wallet vector (a real
+/// `{message, nonce, recipient, publicKey, signature}` produced by a NEAR wallet
+/// / near-api-js) should be added as the gold-standard cross-check before first
+/// contributor traffic. See the slice-3a spec residual-risks section.
 pub fn verify_nep413(
     public_key: &str,
     message: &str,

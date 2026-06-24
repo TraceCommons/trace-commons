@@ -281,3 +281,16 @@ One cohesive slice, ~3 phases:
    contributor-secret sense, but it links a pseudonymous account to a named NEAR account;
    kept out of audit/logs, in the RLS-forced row only. Acceptable given the contributor
    opted in by enrolling NEAR for payout.
+6. **No captured real-wallet NEP-413 cross-check vector yet** — our NEP-413 byte layout is
+   canonically correct (borsh of the documented NEP-413 struct: `u32` `2^31+413` tag,
+   `message`, 32-byte `nonce`, `recipient`, `Option<callbackUrl>`), validated by the
+   `nep413_payload_bytes_layout_pin` byte-pin test plus a ring sign/verify round-trip and a
+   wrong-tag negative test. Those exercise only OUR own encoder, not an independent wallet.
+   A single captured `{message, nonce(base64), recipient, publicKey(ed25519:base58),
+   signature(base64)}` vector produced by a real NEAR wallet / `near-api-js` should be added
+   as a `#[test]` gold-standard cross-check **before first contributor traffic**. We did not
+   fabricate one, since a hand-made vector would only re-test our own reconstruction and give
+   false confidence. Risk: a subtle divergence between our reconstruction and real wallet
+   output (e.g. unicode normalization, a recipient/callbackUrl edge case) would not be caught
+   until a live wallet failed to log in. Low likelihood given the layout pin, but unverified
+   against ground truth.
