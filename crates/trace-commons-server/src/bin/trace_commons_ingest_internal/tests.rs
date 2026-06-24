@@ -64473,8 +64473,14 @@ async fn passkey_enroll_round_trip_persists_credential_and_audit() {
         1
     );
 
-    // A SECOND register/start now excludes the enrolled credential.
-    let (challenge2, _ceremony2) = passkey_register_start(&state, &session_cookie).await;
+    // A SECOND register/start now excludes the enrolled credential. The first
+    // passkey makes the account strong, so this second start must come from a
+    // STRONG session (Slice 3a Task 8 authenticator-change gate): log in with the
+    // just-enrolled credential and drive register/start from the passkey session.
+    let strong_cookie =
+        passkey_login_cookie_value(&state, &mut authenticator, &returned_credential_id, account_id)
+            .await;
+    let (challenge2, _ceremony2) = passkey_register_start(&state, &strong_cookie).await;
     let excluded = challenge2
         .get("publicKey")
         .and_then(|pk| pk.get("excludeCredentials"))
@@ -64689,6 +64695,49 @@ async fn passkey_login_start(state: &Arc<AppState>) -> (serde_json::Value, Strin
     let challenge: serde_json::Value =
         serde_json::from_slice(&body).expect("challenge json deserializes");
     (challenge, ceremony_pair)
+}
+
+/// Drive a discoverable passkey login with `authenticator`/`credential_id` for
+/// `account_id` and return the minted STRONG (`client_kind='passkey'`) session
+/// cookie value. Used by the Task 8 gate tests (and the tightened management
+/// tests) to obtain a strong session that may freely change authenticators.
+async fn passkey_login_cookie_value(
+    state: &Arc<AppState>,
+    authenticator: &mut webauthn_authenticator_rs::WebauthnAuthenticator<
+        webauthn_authenticator_rs::softpasskey::SoftPasskey,
+    >,
+    credential_id: &str,
+    account_id: Uuid,
+) -> String {
+    let (challenge, ceremony_pair) = passkey_login_start(state).await;
+    let assertion = softpasskey_authenticate_discoverable(
+        authenticator,
+        &challenge,
+        credential_id,
+        Some(account_id),
+    );
+    let mut finish_headers = HeaderMap::new();
+    finish_headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
+    );
+    let response = account_passkey_login_finish_handler(
+        State(state.clone()),
+        finish_headers,
+        PasskeyAssertionBody(assertion),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER, "passkey login 303s");
+    response
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|c| c.starts_with("tc_account_session="))
+        .and_then(|c| c.split(';').next())
+        .and_then(|p| p.split_once('='))
+        .map(|(_, v)| v.to_string())
+        .expect("passkey session cookie value")
 }
 
 /// Full enroll -> discoverable login round trip: a `tc_account_session` cookie is
@@ -65180,7 +65229,12 @@ async fn passkey_list_flags_this_device_only_for_authenticating_credential() {
         account_id_for_principal(backend.as_ref(), "tenant-a", &principal_storage_ref("token-a"))
             .await;
     let (mut auth1, cred1) = enroll_passkey_for_token(&state, &session_cookie).await;
-    let (_auth2, cred2) = enroll_passkey_for_token(&state, &session_cookie).await;
+    // Task 8 gate: the first passkey makes the account strong, so the SECOND
+    // enrollment must come from a strong session. Log in with cred1, then enroll
+    // cred2 from the resulting `client_kind='passkey'` cookie.
+    let strong_cookie =
+        passkey_login_cookie_value(&state, &mut auth1, &cred1, account_id).await;
+    let (_auth2, cred2) = enroll_passkey_for_token(&state, &strong_cookie).await;
     assert_ne!(cred1, cred2, "the two enrollments produce distinct credentials");
 
     // (1) Bearer session lists BOTH with this_device=false (no passkey authed it).
@@ -65310,11 +65364,18 @@ async fn passkey_remove_soft_deletes_and_404s_unknown() {
     let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
 
     let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let (_a1, cred1) = enroll_passkey_for_token(&state, &session_cookie).await;
-    let (_a2, cred2) = enroll_passkey_for_token(&state, &session_cookie).await;
+    let account_id =
+        account_id_for_principal(backend.as_ref(), "tenant-a", &principal_storage_ref("token-a"))
+            .await;
+    let (mut a1, cred1) = enroll_passkey_for_token(&state, &session_cookie).await;
+    // Task 8 gate: the account is now strong, so the second enroll AND the removes
+    // must run from a strong (passkey-login) session. Log in with cred1.
+    let strong_cookie = passkey_login_cookie_value(&state, &mut a1, &cred1, account_id).await;
+    let (_a2, cred2) = enroll_passkey_for_token(&state, &strong_cookie).await;
+    let strong_headers = cookie_request_headers("tc_account_session", &strong_cookie);
 
-    // Remove cred1: removed=true, one remaining.
-    let remove_ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    // Remove cred1 from the STRONG session: removed=true, one remaining.
+    let remove_ext = account_ctx_ext(&state, &strong_headers).await;
     let Json(body) = account_passkey_remove_handler(
         State(state.clone()),
         remove_ext,
@@ -65336,8 +65397,9 @@ async fn passkey_remove_soft_deletes_and_404s_unknown() {
     assert!(!ids.contains(cred1.as_str()), "removed credential excluded");
     assert!(ids.contains(cred2.as_str()), "remaining credential listed");
 
-    // Re-removing cred1 (already revoked) -> 404.
-    let remove_ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    // Re-removing cred1 (already revoked) -> 404. Still one strong credential
+    // (cred2) remains, so this MUST run from the strong session to pass the gate.
+    let remove_ext = account_ctx_ext(&state, &strong_headers).await;
     let err = account_passkey_remove_handler(
         State(state.clone()),
         remove_ext,
@@ -65347,8 +65409,8 @@ async fn passkey_remove_soft_deletes_and_404s_unknown() {
     .expect_err("already-revoked credential 404s");
     assert_eq!(err.0, StatusCode::NOT_FOUND);
 
-    // Remove of an UNKNOWN credential -> 404.
-    let remove_ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    // Remove of an UNKNOWN credential -> 404 (strong session, gate satisfied).
+    let remove_ext = account_ctx_ext(&state, &strong_headers).await;
     let err = account_passkey_remove_handler(
         State(state.clone()),
         remove_ext,
@@ -66431,3 +66493,313 @@ async fn near_login_binds_session_to_owning_tenant() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
 }
+
+
+// ============================================================================
+// Slice 3a Task 8: the strong-authenticator change gate.
+//
+// DB-backed (real PG): self-skip when no PG URL is set; each test uses a DISTINCT
+// tenant and cleans it first. The gate (`require_authenticator_change_allowed`)
+// is applied at the top of passkey register start/finish, NEAR enroll
+// start/finish, and passkey remove. A STRONG session (`client_kind='passkey'` or
+// `'near'`) may always change authenticators; a WEAK session (a device-link
+// `'web'` cookie or a `'device'` bearer) may add/remove only while the account
+// holds ZERO strong authenticators (the bootstrapping carve-out). Rename/list are
+// NOT gated (label-only) and are not exercised here.
+// ============================================================================
+
+/// Count `account_authenticator_gate_denied` audit rows for a tenant.
+async fn gate_denied_audit_count(backend: &PgBackend, tenant_id: &str) -> i64 {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant ctx");
+    let row = tx
+        .query_one(
+            "SELECT count(*) FROM trace_account_audit
+              WHERE tenant_id = trace_current_tenant_id()
+                AND action = 'account_authenticator_gate_denied'",
+            &[],
+        )
+        .await
+        .expect("count audit");
+    tx.commit().await.expect("commit");
+    row.get::<_, i64>(0)
+}
+
+/// Build an `AppState` wired with BOTH a WebAuthn relying party and a NEAR config
+/// (mock RPC = FullAccess), so a single test can drive passkey and NEAR ceremonies
+/// against the same backend.
+fn test_state_with_webauthn_and_near(
+    root: std::path::PathBuf,
+    db_mirror: Option<Arc<dyn Database>>,
+) -> Arc<AppState> {
+    let checker: Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker> =
+        Arc::new(StubNearAccessKeyChecker { result: Ok(true) });
+    let mut state = test_state_with_near(root, db_mirror, Some(checker));
+    let webauthn = build_webauthn(&WebauthnConfig {
+        rp_id: "localhost".to_string(),
+        rp_origin: "http://localhost".to_string(),
+        rp_name: "TraceCommons Test".to_string(),
+    })
+    .expect("test relying party builds");
+    Arc::get_mut(&mut state)
+        .expect("fresh state is uniquely owned")
+        .account_webauthn = Some(Arc::new(webauthn));
+    state
+}
+
+/// CARVE-OUT: an account with ZERO strong authenticators, on a WEAK device-link
+/// (`client_kind='web'`) session, CAN start adding its FIRST authenticator —
+/// passkey register/start AND NEAR enroll/start both return 200, not 403.
+#[tokio::test]
+async fn gate_allows_first_authenticator_from_weak_session() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+
+    let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let headers = cookie_request_headers("tc_account_session", &weak_cookie);
+
+    // passkey register/start from the weak session -> 200 (carve-out).
+    let ext = account_ctx_ext(&state, &headers).await;
+    let pk = account_passkey_register_start_handler(State(state.clone()), ext)
+        .await
+        .expect("first passkey enrollment is allowed from a weak session");
+    use axum::response::IntoResponse;
+    assert_eq!(pk.into_response().status(), StatusCode::OK);
+
+    // NEAR enroll/start from the weak session -> 200 (still zero strong).
+    let ext = account_ctx_ext(&state, &headers).await;
+    let near = account_near_enroll_start_handler(State(state.clone()), ext)
+        .await
+        .expect("first NEAR enrollment is allowed from a weak session");
+    assert_eq!(near.into_response().status(), StatusCode::OK);
+
+    assert_eq!(
+        gate_denied_audit_count(backend.as_ref(), tenant).await,
+        0,
+        "no gate-denied audit when carve-out applies"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// GATE BLOCKS 2nd FROM WEAK: an account that already holds one strong
+/// authenticator (an enrolled passkey) is, on a WEAK session, BLOCKED (403) from
+/// BOTH passkey register/start and NEAR enroll/start, and a hash-only
+/// `account_authenticator_gate_denied` audit row is written for each refusal.
+#[tokio::test]
+async fn gate_blocks_second_authenticator_from_weak_session() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+
+    let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    // Enroll the first passkey (carve-out) -> account now holds 1 strong.
+    let (_auth, _cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
+
+    let headers = cookie_request_headers("tc_account_session", &weak_cookie);
+
+    // passkey register/start from the weak session -> 403.
+    let ext = account_ctx_ext(&state, &headers).await;
+    let err = account_passkey_register_start_handler(State(state.clone()), ext)
+        .await
+        .expect_err("second passkey enrollment is blocked from a weak session");
+    assert_eq!(err.0, StatusCode::FORBIDDEN);
+
+    // NEAR enroll/start from the weak session -> 403.
+    let ext = account_ctx_ext(&state, &headers).await;
+    let err = account_near_enroll_start_handler(State(state.clone()), ext)
+        .await
+        .expect_err("NEAR enrollment is blocked from a weak session");
+    assert_eq!(err.0, StatusCode::FORBIDDEN);
+
+    assert_eq!(
+        gate_denied_audit_count(backend.as_ref(), tenant).await,
+        2,
+        "each weak-session refusal writes one gate-denied audit row"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// STRONG SESSION ALWAYS ALLOWED: from a `client_kind='passkey'` session the
+/// account may add ANOTHER authenticator (passkey register/start AND NEAR
+/// enroll/start both 200), even though it already holds a strong authenticator.
+#[tokio::test]
+async fn gate_allows_any_authenticator_from_strong_session() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+
+    let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let account_id = account_id_for_principal(
+        backend.as_ref(),
+        tenant,
+        &principal_storage_ref("token-a"),
+    )
+    .await;
+    let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
+    // Log in with the passkey -> STRONG (`client_kind='passkey'`) session cookie.
+    let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_id).await;
+    let headers = cookie_request_headers("tc_account_session", &strong_cookie);
+
+    use axum::response::IntoResponse;
+    // passkey register/start from the strong session -> 200.
+    let ext = account_ctx_ext(&state, &headers).await;
+    assert!(ext.0.is_strong_session(), "the login cookie is a strong session");
+    let pk = account_passkey_register_start_handler(State(state.clone()), ext)
+        .await
+        .expect("strong session may add another passkey");
+    assert_eq!(pk.into_response().status(), StatusCode::OK);
+
+    // NEAR enroll/start from the strong session -> 200.
+    let ext = account_ctx_ext(&state, &headers).await;
+    let near = account_near_enroll_start_handler(State(state.clone()), ext)
+        .await
+        .expect("strong session may add a NEAR key");
+    assert_eq!(near.into_response().status(), StatusCode::OK);
+
+    assert_eq!(
+        gate_denied_audit_count(backend.as_ref(), tenant).await,
+        0,
+        "a strong session never trips the gate"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// REMOVE GATED: removing an authenticator from a WEAK session is blocked (403)
+/// while >=1 strong authenticator exists, and ALLOWED once the account is back at
+/// zero strong (bootstrapping). Drives the gate through passkey remove.
+#[tokio::test]
+async fn gate_blocks_weak_remove_until_back_to_bootstrap() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let account_id = account_id_for_principal(
+        backend.as_ref(),
+        tenant,
+        &principal_storage_ref("token-a"),
+    )
+    .await;
+    // Enroll the only passkey (carve-out) -> 1 strong.
+    let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
+    let weak_headers = cookie_request_headers("tc_account_session", &weak_cookie);
+
+    // Removing it from the WEAK session is blocked: 1 strong still present.
+    let remove_ext = account_ctx_ext(&state, &weak_headers).await;
+    let err =
+        account_passkey_remove_handler(State(state.clone()), remove_ext, AxumPath(cred.clone()))
+            .await
+            .expect_err("weak-session remove is blocked while a strong authenticator exists");
+    assert_eq!(err.0, StatusCode::FORBIDDEN);
+    assert_eq!(
+        gate_denied_audit_count(backend.as_ref(), tenant).await,
+        1,
+        "the blocked remove wrote one gate-denied audit"
+    );
+
+    // From a STRONG (passkey-login) session the remove is allowed; this returns the
+    // account to zero strong authenticators.
+    let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_id).await;
+    let strong_headers = cookie_request_headers("tc_account_session", &strong_cookie);
+    let remove_ext = account_ctx_ext(&state, &strong_headers).await;
+    let Json(out) =
+        account_passkey_remove_handler(State(state.clone()), remove_ext, AxumPath(cred.clone()))
+            .await
+            .expect("strong-session remove succeeds");
+    assert_eq!(out.get("removed").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        backend
+            .count_active_strong_authenticators(tenant, account_id)
+            .await
+            .expect("count"),
+        0,
+        "account is back at zero strong authenticators"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// BEARER = WEAK: a device-bearer-authenticated request is treated as a WEAK
+/// session (`client_kind='device'`), so it is gated exactly like a device-link
+/// cookie when the account already holds a strong authenticator (403), and the
+/// carve-out lets it add the FIRST authenticator (200).
+#[tokio::test]
+async fn gate_treats_device_bearer_as_weak() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Mint links token-gate-bearer's device principal to a fresh account.
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint links the principal to an account");
+
+    use axum::response::IntoResponse;
+    // The bearer session resolves to a WEAK ctx.
+    let bearer_ctx = resolve_account_ctx(state.as_ref(), &auth_headers("token-a"))
+        .await
+        .expect("bearer resolves");
+    assert_eq!(bearer_ctx.client_kind, "device");
+    assert!(!bearer_ctx.is_strong_session(), "a device bearer is a weak session");
+
+    // Carve-out: with zero strong authenticators the bearer may add the first
+    // passkey -> register/start 200.
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let pk = account_passkey_register_start_handler(State(state.clone()), ext)
+        .await
+        .expect("bearer may add the first authenticator (carve-out)");
+    assert_eq!(pk.into_response().status(), StatusCode::OK);
+
+    // Now enroll a passkey end-to-end so the account holds 1 strong, then the
+    // bearer's next register/start is gated -> 403.
+    let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let (_auth, _cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
+
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let err = account_passkey_register_start_handler(State(state.clone()), ext)
+        .await
+        .expect_err("a device bearer is gated once a strong authenticator exists");
+    assert_eq!(err.0, StatusCode::FORBIDDEN);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+

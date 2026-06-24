@@ -736,6 +736,12 @@ pub struct RedeemedSession {
 pub struct ValidatedSession {
     pub account_id: uuid::Uuid,
     pub auth_credential_id: Option<String>,
+    /// The `client_kind` recorded on the session row (`'web'` for a device-link
+    /// session, `'passkey'` for a passkey login, `'near'` for a NEAR login). Used
+    /// by the strong-authenticator gate to classify session strength: a `'web'`
+    /// session is WEAK, a `'passkey'`/`'near'` session is STRONG. A public label,
+    /// never key material.
+    pub client_kind: String,
     /// Set to the NEW raw session secret when rotation-on-use fired for this
     /// request (the matched row's `token_issued_at` aged past the rotation
     /// interval and the request matched the CURRENT `token_hash`), and `None`

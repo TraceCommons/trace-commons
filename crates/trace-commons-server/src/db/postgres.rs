@@ -2018,7 +2018,7 @@ impl Database for PgBackend {
         let grace_secs = session_rotation_grace_secs();
         let row = tx
             .query_opt(
-                "SELECT account_id, auth_credential_id, token_hash,
+                "SELECT account_id, auth_credential_id, token_hash, client_kind,
                         (token_hash = $1) AS matched_current,
                         (token_issued_at < now() - make_interval(secs => $2)) AS needs_rotate
                    FROM trace_sessions
@@ -2057,6 +2057,7 @@ impl Database for PgBackend {
         };
         let account_id: Uuid = row.get("account_id");
         let auth_credential_id: Option<String> = row.get("auth_credential_id");
+        let client_kind: String = row.get("client_kind");
         let current_token_hash: String = row.get("token_hash");
         let matched_current: bool = row.get("matched_current");
         let needs_rotate: bool = row.get("needs_rotate");
@@ -2122,6 +2123,7 @@ impl Database for PgBackend {
         Ok(Some(crate::db::ValidatedSession {
             account_id,
             auth_credential_id,
+            client_kind,
             rotated_secret,
         }))
     }

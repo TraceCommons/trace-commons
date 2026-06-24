@@ -108,6 +108,22 @@ pub struct AccountCtx {
     /// currently-authenticating credential (`this_device`) in the passkey list;
     /// it is a public id, never a secret.
     pub auth_credential_id: Option<String>,
+    /// Strength label for this session, used by the strong-authenticator gate.
+    /// Cookie path: the validated session row's `client_kind` (`'web'` weak,
+    /// `'passkey'`/`'near'` strong). Bearer path: always `'device'` (a device
+    /// bearer is NOT a strong authenticator for the gate). A public label, never
+    /// key material.
+    pub client_kind: String,
+}
+
+impl AccountCtx {
+    /// True iff THIS session was minted by a passkey or NEAR assertion. Only a
+    /// strong session may freely change authenticators; a weak (`'web'` /
+    /// `'device'`) session is gated unless the account has zero strong
+    /// authenticators (the bootstrapping carve-out, enforced by the caller).
+    pub fn is_strong_session(&self) -> bool {
+        matches!(self.client_kind.as_str(), "passkey" | "near")
+    }
 }
 
 /// 160-bit CSPRNG login code, URL-safe base64 (unpadded).

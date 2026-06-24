@@ -11987,6 +11987,9 @@ async fn resolve_account_ctx_bearer(
         // The bearer path is a device token, not a passkey assertion: there is no
         // authenticating credential to flag as `this_device`.
         auth_credential_id: None,
+        // A device bearer is NOT a strong authenticator for the authenticator-change
+        // gate: mark it weak so it is gated like a device-link cookie session.
+        client_kind: "device".to_string(),
     })
 }
 
@@ -12039,6 +12042,9 @@ async fn resolve_account_ctx_cookie(
             // Carried through from the validated session row so the passkey list can
             // flag the currently-authenticating credential as `this_device`.
             auth_credential_id: session.auth_credential_id,
+            // Session strength for the authenticator-change gate: `'web'` is weak,
+            // `'passkey'`/`'near'` are strong.
+            client_kind: session.client_kind,
         },
         rotated_cookie_value,
     ))
@@ -13184,6 +13190,59 @@ const ACCOUNT_PASSKEY_CEREMONY_COOKIE_MAX_AGE_SECS: i64 = 3 * 60;
 /// (which would otherwise be stored by the authenticator / surfaced in its UI).
 const ACCOUNT_PASSKEY_USER_LABEL: &str = "TraceCommons contributor";
 
+/// Slice 3a Task 8: the strong-authenticator-change gate.
+///
+/// Adding or removing an authenticator (passkey or NEAR key) is only freely
+/// allowed from a STRONG session — one minted by a passkey or NEAR assertion.
+/// From a WEAK session (a device-link `'web'` cookie or a `'device'` bearer) the
+/// change is REFUSED *once the account already holds at least one strong
+/// authenticator*, so a leaked device bearer or a phished device-link link cannot
+/// silently swap the account's real second factor.
+///
+/// The single exception is the BOOTSTRAPPING carve-out: when the account has zero
+/// strong authenticators a weak session MAY add the FIRST one (otherwise a
+/// contributor who only ever held a device link could never enroll a passkey).
+/// The carve-out is symmetric for removal — when zero strong authenticators
+/// remain the account is already back at bootstrap, so a weak-session remove is
+/// permitted.
+///
+/// Fail-closed: a strong session short-circuits to `Ok`; otherwise the count is
+/// read under RLS and a non-zero count denies with a 403 plus a hash-only
+/// `account_authenticator_gate_denied` audit row (actor-only, no identifiers).
+async fn require_authenticator_change_allowed(
+    state: &AppState,
+    ctx: &AccountCtx,
+) -> ApiResult<()> {
+    if ctx.is_strong_session() {
+        return Ok(());
+    }
+    let db = account_db(state)?;
+    let strong = db
+        .count_active_strong_authenticators(&ctx.tenant_id, ctx.account_id.as_uuid())
+        .await
+        .map_err(internal_error)?;
+    if strong == 0 {
+        // Bootstrapping carve-out: a weak/device-link session may add the FIRST
+        // strong authenticator (or remove down to zero, returning to bootstrap).
+        return Ok(());
+    }
+    // Hash-only / actor-only audit of the refusal. No credential id, no count, no
+    // identifier — just that a weak session attempted an authenticator change.
+    db.append_account_audit(
+        &ctx.tenant_id,
+        "account_authenticator_gate_denied",
+        &ctx.actor_ref,
+        "denied",
+        serde_json::json!({}),
+    )
+    .await
+    .map_err(internal_error)?;
+    Err(api_error(
+        StatusCode::FORBIDDEN,
+        "a passkey or NEAR sign-in is required to change authenticators",
+    ))
+}
+
 /// Request body for `POST /v1/account/passkeys/register/finish`. The browser's
 /// `RegisterPublicKeyCredential` (the attestation response) is flattened in;
 /// `label` is an optional, user-supplied display name for the new credential.
@@ -13208,6 +13267,10 @@ async fn account_passkey_register_start_handler(
     Extension(ctx): Extension<AccountCtx>,
 ) -> ApiResult<axum::response::Response> {
     use axum::response::IntoResponse;
+
+    // Strong-authenticator gate (Slice 3a Task 8): a weak session may add the
+    // FIRST authenticator (bootstrapping) but not a second.
+    require_authenticator_change_allowed(state.as_ref(), &ctx).await?;
 
     let webauthn = account_webauthn(state.as_ref())?;
     let db = account_db(state.as_ref())?;
@@ -13305,6 +13368,10 @@ async fn account_passkey_register_finish_handler(
     headers: HeaderMap,
     Json(body): Json<AccountPasskeyRegisterFinishBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // Strong-authenticator gate (Slice 3a Task 8). Enforced again on finish so a
+    // weak session cannot complete a registration it could not start.
+    require_authenticator_change_allowed(state.as_ref(), &ctx).await?;
+
     let webauthn = account_webauthn(state.as_ref())?;
     let db = account_db(state.as_ref())?;
 
@@ -13427,6 +13494,10 @@ async fn account_near_enroll_start_handler(
     use axum::response::IntoResponse;
     use rand::RngCore as _;
 
+    // Strong-authenticator gate (Slice 3a Task 8): bootstrapping carve-out allows
+    // the FIRST authenticator from a weak session; a second is refused.
+    require_authenticator_change_allowed(state.as_ref(), &ctx).await?;
+
     let cfg = account_near_config(state.as_ref())?;
 
     // Fresh 32-byte challenge from the OS CSPRNG (same source as session secrets).
@@ -13517,6 +13588,10 @@ async fn account_near_enroll_finish_handler(
     headers: HeaderMap,
     Json(body): Json<AccountNearEnrollFinishBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // Strong-authenticator gate (Slice 3a Task 8). Enforced again on finish so a
+    // weak session cannot complete an enrollment it could not start.
+    require_authenticator_change_allowed(state.as_ref(), &ctx).await?;
+
     let cfg = account_near_config(state.as_ref())?;
     let db = account_db(state.as_ref())?;
 
@@ -13774,6 +13849,11 @@ async fn account_passkey_remove_handler(
     Extension(ctx): Extension<AccountCtx>,
     AxumPath(credential_id): AxumPath<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // Strong-authenticator gate (Slice 3a Task 8): a weak session may remove only
+    // while zero strong authenticators remain (bootstrapping); otherwise refused.
+    // NOTE: NEAR-identity removal (Task 9) will call this SAME gate.
+    require_authenticator_change_allowed(state.as_ref(), &ctx).await?;
+
     let db = account_db(state.as_ref())?;
 
     let result = db
