@@ -1803,6 +1803,42 @@ impl Database for PgBackend {
         Ok(account_id)
     }
 
+    /// Batched principal->account resolution. One query under the tenant tx maps
+    /// every active-linked principal in `principal_refs` to its account; principals
+    /// with no active link are simply absent from the result. Mirrors the
+    /// tenant-tx shape of `create_or_reuse_account`.
+    async fn resolve_principals_to_accounts(
+        &self,
+        tenant_id: &str,
+        principal_refs: &[String],
+    ) -> Result<std::collections::HashMap<String, Uuid>, DatabaseError> {
+        // Empty input short-circuits without a query.
+        if principal_refs.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT principal_ref, account_id FROM trace_account_principals
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND unlinked_at IS NULL
+                    AND principal_ref = ANY($1)",
+                &[&principal_refs],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        let mut map = std::collections::HashMap::with_capacity(rows.len());
+        for row in rows {
+            let principal_ref: String = row.get("principal_ref");
+            let account_id: Uuid = row.get("account_id");
+            map.insert(principal_ref, account_id);
+        }
+        Ok(map)
+    }
+
     async fn count_outstanding_login_links(
         &self,
         tenant_id: &str,

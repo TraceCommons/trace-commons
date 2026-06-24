@@ -326,6 +326,110 @@ async fn credential_resolver_reads_tenant_across_rls_under_set_role() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+/// `resolve_principals_to_accounts` returns the active principal->account map for a
+/// batch of principal refs. It must: (a) map principals with an ACTIVE link
+/// (`unlinked_at IS NULL`) to their account, including multiple principals that
+/// share one account; (b) EXCLUDE principals whose link was unlinked
+/// (`unlinked_at IS NOT NULL`); (c) EXCLUDE principals that were never linked; and
+/// (d) EXCLUDE principal refs not present in the table at all. This is the batched
+/// resolver that the credit-view and settlement re-key paths consume.
+#[tokio::test]
+async fn resolve_principals_to_accounts_maps_active_links_only() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-resolve-batch").await;
+
+    // Mint account A and link principal-a1 (the mint links exactly this principal).
+    let account_a = backend
+        .create_or_reuse_account("tenant-resolve-batch", "principal-a1")
+        .await
+        .expect("mint account A");
+
+    // Link a SECOND principal (principal-a2) to the SAME account A, plus an
+    // already-UNLINKED principal that must be excluded. create_or_reuse_account does
+    // NOT link additional principals to an existing account, so insert directly under
+    // the tenant's RLS context.
+    {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("conn");
+        let tx = client.transaction().await.expect("seed tx");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&"tenant-resolve-batch"],
+        )
+        .await
+        .expect("set seed tenant context");
+        // Active second principal on account A.
+        tx.execute(
+            "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+             VALUES (trace_current_tenant_id(), $1, $2)",
+            &[&account_a, &"principal-a2"],
+        )
+        .await
+        .expect("link active second principal to account A");
+        // Unlinked principal on account A: must be excluded from the map.
+        tx.execute(
+            "INSERT INTO trace_account_principals
+                 (tenant_id, account_id, principal_ref, linked_at, unlinked_at)
+             VALUES (trace_current_tenant_id(), $1, $2, now() - INTERVAL '1 day', now())",
+            &[&account_a, &"principal-unlinked"],
+        )
+        .await
+        .expect("insert unlinked principal on account A");
+        tx.commit().await.expect("commit seed");
+    }
+
+    let map = backend
+        .resolve_principals_to_accounts(
+            "tenant-resolve-batch",
+            &[
+                "principal-a1".to_string(),
+                "principal-a2".to_string(),
+                "principal-unlinked".to_string(),
+                "principal-unknown".to_string(),
+            ],
+        )
+        .await
+        .expect("resolve batch");
+
+    assert_eq!(
+        map.len(),
+        2,
+        "only the two ACTIVE principals resolve; unlinked + unknown excluded"
+    );
+    assert_eq!(
+        map.get("principal-a1").copied(),
+        Some(account_a),
+        "principal-a1 maps to account A"
+    );
+    assert_eq!(
+        map.get("principal-a2").copied(),
+        Some(account_a),
+        "principal-a2 (second active link) maps to the same account A"
+    );
+    assert!(
+        !map.contains_key("principal-unlinked"),
+        "an unlinked_at IS NOT NULL row must be excluded from the map"
+    );
+    assert!(
+        !map.contains_key("principal-unknown"),
+        "a principal absent from the table must be excluded from the map"
+    );
+
+    // Empty input slice returns an empty map.
+    let empty = backend
+        .resolve_principals_to_accounts("tenant-resolve-batch", &[])
+        .await
+        .expect("resolve empty batch");
+    assert!(empty.is_empty(), "empty input slice yields an empty map");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-resolve-batch").await;
+}
+
 /// The NEAR public_key -> tenant_id resolver must read across forced RLS under the
 /// restricted `trace_login_resolver` role with NO tenant context, exactly as the
 /// credential resolver does. This is the load-bearing security test for Slice 3a's

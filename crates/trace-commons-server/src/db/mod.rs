@@ -237,6 +237,22 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// Batched principal->account resolution. Returns a map from each
+    /// `principal_ref` that has an ACTIVE link (`unlinked_at IS NULL`) within
+    /// `tenant_id` to its `account_id`. Principals with no active link (never
+    /// linked, unlinked, or absent) are omitted from the map. An empty input
+    /// slice yields an empty map. Used by the credit-view and settlement re-key
+    /// paths to fold per-principal rows up to their durable account.
+    async fn resolve_principals_to_accounts(
+        &self,
+        _tenant_id: &str,
+        _principal_refs: &[String],
+    ) -> Result<std::collections::HashMap<String, uuid::Uuid>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "resolve_principals_to_accounts not implemented".to_string(),
+        ))
+    }
+
     /// Count this principal's outstanding (unconsumed, unexpired) login links.
     /// Used by the mint endpoint to cap per-principal outstanding links.
     async fn count_outstanding_login_links(
