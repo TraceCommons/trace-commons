@@ -472,6 +472,7 @@ async fn write_sample_credit_control_plane_rows(
                 source_list_hash: source_list_hash.clone(),
                 near_status: TraceCreditSettlementNearStatus::Pending,
                 near_outbox_id: Some(ids.near_outbox_id),
+                near_payout_hold_reason: None,
             }],
             near_contract_id: Some("trace-credits.testnet".to_string()),
             ranking_model_version: None,
@@ -501,6 +502,7 @@ async fn write_sample_credit_control_plane_rows(
                 "idempotency_key": format!("sha256:{label}:settle")
             }),
             status: TraceCreditSettlementNearStatus::Pending,
+            payout_near_account_id: None,
         })
         .await
         .expect("write tenant NEAR receipt outbox");
@@ -520,6 +522,7 @@ async fn write_sample_credit_control_plane_rows(
                 "idempotency_key": format!("sha256:{label}:freeze")
             }),
             status: TraceCreditSettlementNearStatus::Pending,
+            payout_near_account_id: None,
         })
         .await
         .expect("write tenant NEAR account outbox");

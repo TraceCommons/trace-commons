@@ -260,6 +260,7 @@ fn credit_settlement_contract_uses_typed_states_and_hash_only_near_metadata() {
         source_list_hash: "sha256:sources".to_string(),
         near_status: TraceCreditSettlementNearStatus::Pending,
         near_outbox_id: Some(Uuid::from_u128(0x13)),
+        near_payout_hold_reason: None,
     };
     let json = serde_json::to_value(line_item).unwrap();
 

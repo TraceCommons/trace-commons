@@ -602,6 +602,13 @@ pub struct TraceCreditAccountSettlementLineItem {
     pub source_list_hash: String,
     pub near_status: TraceCreditSettlementNearStatus,
     pub near_outbox_id: Option<Uuid>,
+    /// Coarse label set when this account group's on-chain payout was withheld
+    /// (`"none_enrolled"` / `"ambiguous_no_designation"`). When present, NO NEAR
+    /// outbox row was enqueued for the group even though the credit is finalized
+    /// internally. `None` for groups that resolved a payout target and for
+    /// unlinked-principal groups. A label only; carries no account identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near_payout_hold_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -715,6 +722,13 @@ pub struct TraceNearCreditOutboxItemWrite {
     pub credit_account_hash: String,
     pub near_call_json: serde_json::Value,
     pub status: TraceCreditSettlementNearStatus,
+    /// Designated NEAR account id to pay for this settlement group, when the
+    /// group resolved to a single durable account with an unambiguous payout
+    /// target. A public on-chain identifier (operational routing state), never
+    /// key material. `None` for unlinked-principal groups and the account-hold /
+    /// reversal flows that do not resolve a payout target.
+    #[serde(default)]
+    pub payout_near_account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -725,6 +739,10 @@ pub struct TraceNearCreditOutboxItemRecord {
     pub credit_account_hash: String,
     pub near_call_json: serde_json::Value,
     pub status: TraceCreditSettlementNearStatus,
+    /// See [`TraceNearCreditOutboxItemWrite::payout_near_account_id`]. A public
+    /// on-chain identifier persisted as operational routing state.
+    #[serde(default)]
+    pub payout_near_account_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub submitted_at: Option<DateTime<Utc>>,
     pub near_transaction_hash: Option<String>,

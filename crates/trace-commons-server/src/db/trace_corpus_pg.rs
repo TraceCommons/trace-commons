@@ -112,12 +112,15 @@ const TRACE_CREDIT_HOLD_COLUMNS: &str = "\
 
 const TRACE_NEAR_CREDIT_OUTBOX_COLUMNS: &str = "\
     tenant_id, near_outbox_id, settlement_batch_id, credit_account_hash, near_call_json, \
-    status, created_at, submitted_at, near_transaction_hash, last_error_hash, confirmed_at";
+    status, payout_near_account_id, created_at, submitted_at, near_transaction_hash, \
+    last_error_hash, confirmed_at";
 
+// The account-hold outbox table has no payout designation; project a typed NULL
+// so the shared `row_to_near_credit_outbox_item` mapper can read the column.
 const TRACE_NEAR_CREDIT_ACCOUNT_OUTBOX_COLUMNS: &str = "\
     tenant_id, near_outbox_id, credit_hold_id AS settlement_batch_id, credit_account_hash, \
-    near_call_json, status, created_at, submitted_at, near_transaction_hash, last_error_hash, \
-    confirmed_at";
+    near_call_json, status, NULL::text AS payout_near_account_id, created_at, submitted_at, \
+    near_transaction_hash, last_error_hash, confirmed_at";
 
 const TRACE_BENCHMARK_REGISTRY_OUTBOX_COLUMNS: &str = "\
     tenant_id, benchmark_outbox_id, conversion_id, operation, registry_ref, \
@@ -530,6 +533,7 @@ fn row_to_near_credit_outbox_item(
             &status,
             "TraceCreditSettlementNearStatus",
         )?,
+        payout_near_account_id: row.get("payout_near_account_id"),
         created_at: row.get("created_at"),
         submitted_at: row.get("submitted_at"),
         near_transaction_hash: row.get("near_transaction_hash"),
@@ -3987,13 +3991,14 @@ impl TraceCorpusStore for PgBackend {
                     &format!(
                         "INSERT INTO trace_near_credit_outbox (
                             tenant_id, near_outbox_id, settlement_batch_id, credit_account_hash,
-                            near_call_json, status
-                         ) VALUES ($1, $2, $3, $4, $5, $6)
+                            near_call_json, status, payout_near_account_id
+                         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
                          ON CONFLICT (tenant_id, near_outbox_id) DO UPDATE SET
                             settlement_batch_id = excluded.settlement_batch_id,
                             credit_account_hash = excluded.credit_account_hash,
                             near_call_json = excluded.near_call_json,
-                            status = excluded.status
+                            status = excluded.status,
+                            payout_near_account_id = excluded.payout_near_account_id
                          RETURNING {TRACE_NEAR_CREDIT_OUTBOX_COLUMNS}"
                     ),
                     &[
@@ -4003,6 +4008,7 @@ impl TraceCorpusStore for PgBackend {
                         &item.credit_account_hash,
                         &item.near_call_json,
                         &status,
+                        &item.payout_near_account_id,
                     ],
                 )
                 .await

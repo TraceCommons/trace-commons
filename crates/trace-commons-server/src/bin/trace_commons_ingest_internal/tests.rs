@@ -614,6 +614,365 @@ async fn contributor_credit_visibility_broadens_to_account_scope() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+/// Slice 3b Task 5: settlement re-keys credit groups by durable account. Two
+/// principals (token-a, token-a-2) linked to account A each carry a credit event;
+/// A designates a payout NEAR identity. An unlinked principal (token-a-3) carries
+/// its own credit. A single finalize must (1) collapse A's two principals into ONE
+/// account-keyed line item summing both micros, hashed over `account:{A}`, with an
+/// outbox row whose `payout_near_account_id` is A's designated near account, and
+/// (2) settle the unlinked principal under its own principal hash with no payout.
+#[tokio::test]
+async fn settlement_groups_account_principals_and_routes_designated_payout() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+    let (_, p1_event) = seed_settlement_credit(&state, "token-a", 1.0).await;
+    let (_, p2_event) = seed_settlement_credit(&state, "token-a-2", 0.5).await;
+    let (_, p3_event) = seed_settlement_credit(&state, "token-a-3", 2.0).await;
+
+    let p1_principal = principal_storage_ref("token-a");
+    let p2_principal = principal_storage_ref("token-a-2");
+    let p3_principal = principal_storage_ref("token-a-3");
+
+    // Account A links P1 + P2; P3 stays unlinked.
+    let account_a = backend
+        .create_or_reuse_account("tenant-a", &p1_principal)
+        .await
+        .expect("mint account A for P1");
+    link_principal_to_account(backend.as_ref(), "tenant-a", account_a, &p2_principal).await;
+
+    // A designates a payout NEAR identity.
+    backend
+        .insert_near_identity(
+            "tenant-a",
+            account_a,
+            "ed25519:a-payout",
+            "alice.near",
+            None,
+        )
+        .await
+        .expect("insert A payout identity");
+    assert!(
+        backend
+            .designate_payout_near_identity("tenant-a", account_a, "ed25519:a-payout")
+            .await
+            .expect("designate A payout"),
+        "designation must take effect"
+    );
+
+    let Json(finalized) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "finalize account-keyed settlement".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("admin can finalize settlement");
+    assert!(!finalized.dry_run);
+    assert_eq!(finalized.settled_source_event_count, 3);
+
+    let batches =
+        read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+    assert_eq!(batches.len(), 1, "one settlement batch finalized");
+    let line_items = &batches[0].line_items;
+
+    // Account A: ONE line item summing P1 (1.0) + P2 (0.5) = 1.5 -> 1_500_000 micros,
+    // hashed over `account:{A}`.
+    let account_hash = sha256_prefixed(&format!("account:{account_a}"));
+    let account_item = line_items
+        .iter()
+        .find(|item| item.credit_account_hash == account_hash)
+        .expect("account A line item present");
+    assert_eq!(
+        account_item.credit_account_ref,
+        format!("account:{account_a}"),
+        "account group is keyed by account:{{uuid}}"
+    );
+    assert_eq!(
+        account_item.settled_credit_delta_micros, 1_500_000,
+        "account line item sums both principals' micros"
+    );
+    let account_sources = account_item
+        .source_credit_event_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    assert!(
+        account_sources.contains(&p1_event) && account_sources.contains(&p2_event),
+        "account line item carries both principals' credit events"
+    );
+    assert!(
+        account_item.near_payout_hold_reason.is_none(),
+        "designated account is not held"
+    );
+
+    // Unlinked P3: its own principal hash, unchanged behavior.
+    let p3_hash = sha256_prefixed(&p3_principal);
+    let p3_item = line_items
+        .iter()
+        .find(|item| item.credit_account_hash == p3_hash)
+        .expect("unlinked P3 line item present");
+    assert_eq!(p3_item.settled_credit_delta_micros, 2_000_000);
+    assert_eq!(p3_item.source_credit_event_ids, vec![p3_event]);
+    assert!(p3_item.near_payout_hold_reason.is_none());
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    let account_outbox = outbox
+        .iter()
+        .find(|item| item.credit_account_hash == account_hash)
+        .expect("account A outbox row present");
+    assert_eq!(
+        account_outbox.payout_near_account_id,
+        Some("alice.near".to_string()),
+        "account outbox routes to the designated payout near account"
+    );
+    let p3_outbox = outbox
+        .iter()
+        .find(|item| item.credit_account_hash == p3_hash)
+        .expect("unlinked P3 outbox row present");
+    assert_eq!(
+        p3_outbox.payout_near_account_id, None,
+        "unlinked principal outbox carries no payout target"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// An account with ZERO active NEAR identities settles internally (line item
+/// present) but its on-chain payout is HELD with `none_enrolled` and NO outbox row
+/// is enqueued.
+#[tokio::test]
+async fn settlement_holds_account_payout_when_none_enrolled() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+    let (_, p1_event) = seed_settlement_credit(&state, "token-a", 1.0).await;
+    let p1_principal = principal_storage_ref("token-a");
+    let account_a = backend
+        .create_or_reuse_account("tenant-a", &p1_principal)
+        .await
+        .expect("mint account A");
+
+    let Json(finalized) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "finalize none-enrolled settlement".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("admin can finalize settlement");
+    assert_eq!(finalized.settled_source_event_count, 1);
+
+    let account_hash = sha256_prefixed(&format!("account:{account_a}"));
+    let batches =
+        read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+    let item = batches[0]
+        .line_items
+        .iter()
+        .find(|item| item.credit_account_hash == account_hash)
+        .expect("account line item present");
+    assert_eq!(item.source_credit_event_ids, vec![p1_event]);
+    assert_eq!(
+        item.near_payout_hold_reason.as_deref(),
+        Some("none_enrolled"),
+        "zero NEAR identities holds the payout as none_enrolled"
+    );
+    assert!(item.near_outbox_id.is_none(), "no outbox id on a held line item");
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert!(
+        outbox.iter().all(|i| i.credit_account_hash != account_hash),
+        "no on-chain outbox row is enqueued for a held account"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// An account with TWO active NEAR identities and NO designation settles internally
+/// but HOLDS its payout with `ambiguous_no_designation` and enqueues no outbox row.
+#[tokio::test]
+async fn settlement_holds_account_payout_when_ambiguous() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+    let (_, _) = seed_settlement_credit(&state, "token-a", 1.0).await;
+    let p1_principal = principal_storage_ref("token-a");
+    let account_a = backend
+        .create_or_reuse_account("tenant-a", &p1_principal)
+        .await
+        .expect("mint account A");
+    backend
+        .insert_near_identity("tenant-a", account_a, "ed25519:first", "alice.near", None)
+        .await
+        .expect("insert first identity");
+    backend
+        .insert_near_identity("tenant-a", account_a, "ed25519:second", "bob.near", None)
+        .await
+        .expect("insert second identity");
+
+    let Json(finalized) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "finalize ambiguous settlement".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("admin can finalize settlement");
+    assert_eq!(finalized.settled_source_event_count, 1);
+
+    let account_hash = sha256_prefixed(&format!("account:{account_a}"));
+    let batches =
+        read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+    let item = batches[0]
+        .line_items
+        .iter()
+        .find(|item| item.credit_account_hash == account_hash)
+        .expect("account line item present");
+    assert_eq!(
+        item.near_payout_hold_reason.as_deref(),
+        Some("ambiguous_no_designation"),
+        "two active identities, none designated, holds as ambiguous_no_designation"
+    );
+    assert!(item.near_outbox_id.is_none());
+
+    let outbox = read_all_near_credit_outbox_items(temp.path(), "tenant-a").expect("outbox reads");
+    assert!(
+        outbox.iter().all(|i| i.credit_account_hash != account_hash),
+        "no on-chain outbox row for an ambiguously-held account"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Seed a submission + accepted training-utility credit event owned by `token`,
+/// crediting `points`. Returns (submission_id, credit_event_id). The credit event's
+/// `auth_principal_ref` is the submitting device principal, so it groups under that
+/// principal's account once linked.
+async fn seed_settlement_credit(
+    state: &Arc<AppState>,
+    token: &str,
+    points: f32,
+) -> (Uuid, Uuid) {
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+    envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+    envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+    let submission_id = envelope.submission_id;
+    let _ = submit_trace_handler(State(state.clone()), auth_headers(token), Json(envelope))
+        .await
+        .expect("submission mirrors to DB");
+    let Json(event) = append_credit_event_handler(
+        State(state.clone()),
+        auth_headers("review-token-a"),
+        AxumPath(submission_id),
+        Json(TraceCreditLedgerAppendRequest {
+            event_type: TraceCreditLedgerEventType::TrainingUtility,
+            credit_points_delta: points,
+            reason: Some("training utility".to_string()),
+            external_ref: Some(format!("training-utility:{token}:{points}")),
+        }),
+    )
+    .await
+    .expect("credit event mirrors to DB");
+    (submission_id, event.event_id)
+}
+
+/// Add `principal_ref` as a second ACTIVE link to `account_id` under tenant RLS.
+async fn link_principal_to_account(
+    backend: &PgBackend,
+    tenant_id: &str,
+    account_id: Uuid,
+    principal_ref: &str,
+) {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("seed tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set seed tenant context");
+    tx.execute(
+        "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+         VALUES (trace_current_tenant_id(), $1, $2)",
+        &[&account_id, &principal_ref],
+    )
+    .await
+    .expect("link principal to account");
+    tx.commit().await.expect("commit seed");
+}
+
 /// The NEAR public_key -> tenant_id resolver must read across forced RLS under the
 /// restricted `trace_login_resolver` role with NO tenant context, exactly as the
 /// credential resolver does. This is the load-bearing security test for Slice 3a's
@@ -11988,6 +12347,7 @@ fn audit_mirror_normalization_derives_near_credit_outbox_status_metadata_from_re
         )
         .expect("freeze call builds"),
         status: StorageTraceCreditSettlementNearStatus::Failed,
+        payout_near_account_id: None,
         created_at: Utc::now(),
         submitted_at: Some(Utc::now()),
         near_transaction_hash: Some(TEST_NEAR_TX_HASH_5.to_string()),
@@ -12086,6 +12446,7 @@ fn db_audit_projection_preserves_near_credit_outbox_status_hash_only_metadata() 
         )
         .expect("freeze call builds"),
         status: StorageTraceCreditSettlementNearStatus::Submitted,
+        payout_near_account_id: None,
         created_at: Utc::now(),
         submitted_at: Some(Utc::now()),
         near_transaction_hash: Some(TEST_NEAR_TX_HASH_4.to_string()),
@@ -30909,6 +31270,7 @@ async fn maintenance_backfill_dry_run_counts_credit_settlement_control_plane_row
                 source_list_hash: "sha256:settlement-item-sources".to_string(),
                 near_status: StorageTraceCreditSettlementNearStatus::Pending,
                 near_outbox_id: Some(near_outbox_id),
+                near_payout_hold_reason: None,
             }],
             near_contract_id: Some("trace-credits.testnet".to_string()),
             ranking_model_version: None,
@@ -30944,6 +31306,7 @@ async fn maintenance_backfill_dry_run_counts_credit_settlement_control_plane_row
             near_call: NearCreditReceiptCall::settle("trace-credits.testnet", receipt)
                 .expect("NEAR call builds"),
             status: StorageTraceCreditSettlementNearStatus::Pending,
+            payout_near_account_id: None,
             created_at: Utc::now(),
             submitted_at: None,
             near_transaction_hash: None,
@@ -31216,6 +31579,7 @@ async fn maintenance_backfill_updates_existing_near_outbox_status_in_db() {
             source_list_hash: "sha256:settlement-item-sources".to_string(),
             near_status: StorageTraceCreditSettlementNearStatus::Pending,
             near_outbox_id: Some(near_outbox_id),
+            near_payout_hold_reason: None,
         }],
         near_contract_id: Some("trace-credits.testnet".to_string()),
         ranking_model_version: None,
@@ -31242,6 +31606,7 @@ async fn maintenance_backfill_updates_existing_near_outbox_status_in_db() {
         near_call: NearCreditReceiptCall::settle("trace-credits.testnet", receipt)
             .expect("NEAR call builds"),
         status: StorageTraceCreditSettlementNearStatus::Pending,
+        payout_near_account_id: None,
         created_at: Utc::now(),
         submitted_at: None,
         near_transaction_hash: None,
@@ -37214,6 +37579,7 @@ async fn credit_settlement_append_rejects_finalized_source_event_conflict() {
             source_list_hash: first_item_source_hash,
             near_status: StorageTraceCreditSettlementNearStatus::Disabled,
             near_outbox_id: None,
+            near_payout_hold_reason: None,
         }],
         near_contract_id: None,
         ranking_model_version: None,
@@ -37845,6 +38211,7 @@ fn submitted_near_credit_outbox_item(
         near_call: NearCreditReceiptCall::settle("trace-credits.testnet", receipt)
             .expect("NEAR call builds"),
         status: StorageTraceCreditSettlementNearStatus::Submitted,
+        payout_near_account_id: None,
         created_at: Utc::now(),
         submitted_at: Some(Utc::now()),
         near_transaction_hash: Some(near_transaction_hash.to_string()),
@@ -40612,6 +40979,7 @@ async fn near_credit_outbox_submit_worker_rejects_tampered_method_call_before_re
             credit_account_hash: receipt.credit_account_hash,
             near_call,
             status: StorageTraceCreditSettlementNearStatus::Pending,
+            payout_near_account_id: None,
             created_at: Utc::now(),
             submitted_at: None,
             near_transaction_hash: None,
@@ -40684,6 +41052,7 @@ async fn near_credit_outbox_submit_worker_keeps_failed_items_retryable() {
             near_call: NearCreditReceiptCall::settle("trace-credits.testnet", receipt)
                 .expect("NEAR call builds"),
             status: StorageTraceCreditSettlementNearStatus::Pending,
+            payout_near_account_id: None,
             created_at: Utc::now(),
             submitted_at: None,
             near_transaction_hash: None,
@@ -50691,6 +51060,7 @@ fn near_credit_reversal_outbox_uses_reverse_method_and_single_event_amount() {
         source_list_hash: line_source_hash,
         near_status: StorageTraceCreditSettlementNearStatus::Pending,
         near_outbox_id: Some(Uuid::new_v4()),
+        near_payout_hold_reason: None,
     };
     let source_event = StorageTraceCreditEventRecord {
         credit_event_id,

@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io::{BufRead, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -49,7 +49,9 @@ use trace_commons_server::account_passkey::{
 };
 use trace_commons_server::config::{DatabaseConfig, NearConfig, WebauthnConfig};
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
-use trace_commons_server::db::{Database, TraceCorpusRlsDiagnostics};
+use trace_commons_server::db::{
+    Database, PayoutHoldReason, PayoutResolution, TraceCorpusRlsDiagnostics,
+};
 use trace_commons_server::error::DatabaseError;
 use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
 use trace_commons_server::secrets::SecretsCrypto;
@@ -16487,6 +16489,11 @@ struct TraceNearCreditOutboxItem {
     credit_account_hash: String,
     near_call: NearCreditReceiptCall,
     status: StorageTraceCreditSettlementNearStatus,
+    /// Designated NEAR account id to pay for this settlement group (account groups
+    /// with an unambiguous payout target), else `None`. A public on-chain
+    /// identifier carried as operational routing state, never key material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    payout_near_account_id: Option<String>,
     created_at: DateTime<Utc>,
     submitted_at: Option<DateTime<Utc>>,
     near_transaction_hash: Option<String>,
@@ -20022,12 +20029,35 @@ async fn run_credit_settlement(
     let settlement_batch_id = Uuid::new_v4();
     let tenant_storage_ref = tenant_storage_ref(&tenant.tenant_id);
     let reason_hash = sha256_prefixed(&reason);
+    // Batch-resolve distinct contributing principals to their durable accounts in
+    // one RLS-scoped query, then re-key settlement groups by account so multiple
+    // principals belonging to the same account collapse into a single line item
+    // (and a single on-chain payout). Principals with no active account link keep
+    // their own key and settle exactly as before. The resolve only runs when a DB
+    // mirror is present; without one there is no account linkage to fold up and we
+    // preserve the legacy per-principal behavior.
+    let principal_to_account: HashMap<String, Uuid> = if let Some(db) = state.db_mirror.as_ref() {
+        let distinct_refs = selected_events
+            .iter()
+            .map(|event| event.auth_principal_ref.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        db.resolve_principals_to_accounts(&tenant.tenant_id, &distinct_refs)
+            .await
+            .context("failed to resolve contributor principals to accounts for settlement")
+            .map_err(internal_error)?
+    } else {
+        HashMap::new()
+    };
+
     let mut grouped = BTreeMap::<String, Vec<TraceCommonsCreditLedgerRecord>>::new();
     for event in selected_events {
-        grouped
-            .entry(event.auth_principal_ref.clone())
-            .or_default()
-            .push(event);
+        let resolved_key = principal_to_account
+            .get(&event.auth_principal_ref)
+            .map(|account_id| format!("account:{account_id}"))
+            .unwrap_or_else(|| event.auth_principal_ref.clone());
+        grouped.entry(resolved_key).or_default().push(event);
     }
 
     let mut line_items = Vec::with_capacity(grouped.len());
@@ -20053,7 +20083,45 @@ async fn run_credit_settlement(
         let item_source_list_hash =
             source_credit_event_ids_hash(&policy_version, &source_credit_event_ids);
         let credit_account_hash = sha256_prefixed(&credit_account_ref);
-        let near_outbox_id = if near_contract_id.is_some() && !body.dry_run {
+
+        // For account groups, resolve the on-chain payout target fail-closed. A
+        // `Hold` withholds the outbox row (the credit is still finalized
+        // internally) and records a coarse hold label on the line item. Unlinked
+        // principal groups settle as before with no payout lookup.
+        let account_id = credit_account_ref
+            .strip_prefix("account:")
+            .and_then(|raw| Uuid::parse_str(raw).ok());
+        let (payout_near_account_id, near_payout_hold_reason) = if let Some(account_id) = account_id
+        {
+            let db = state
+                .db_mirror
+                .as_ref()
+                .expect("account-keyed group implies a resolved DB mirror");
+            match db
+                .resolve_payout_near_account_id(&tenant.tenant_id, account_id)
+                .await
+                .context("failed to resolve account payout target for settlement")
+                .map_err(internal_error)?
+            {
+                PayoutResolution::Designated(near) | PayoutResolution::SoleActive(near) => {
+                    (Some(near), None)
+                }
+                PayoutResolution::Hold(reason) => {
+                    let label = match reason {
+                        PayoutHoldReason::NoneEnrolled => "none_enrolled",
+                        PayoutHoldReason::AmbiguousNoDesignation => "ambiguous_no_designation",
+                    };
+                    (None, Some(label.to_string()))
+                }
+            }
+        } else {
+            (None, None)
+        };
+
+        // Withhold the on-chain outbox row when the account's payout is held; the
+        // internal credit line item is still finalized.
+        let payout_held = near_payout_hold_reason.is_some();
+        let near_outbox_id = if near_contract_id.is_some() && !body.dry_run && !payout_held {
             Some(Uuid::new_v4())
         } else {
             None
@@ -20090,6 +20158,7 @@ async fn run_credit_settlement(
                 credit_account_hash: credit_account_hash.clone(),
                 near_call,
                 status: StorageTraceCreditSettlementNearStatus::Pending,
+                payout_near_account_id: payout_near_account_id.clone(),
                 created_at: Utc::now(),
                 submitted_at: None,
                 near_transaction_hash: None,
@@ -20106,6 +20175,7 @@ async fn run_credit_settlement(
             source_list_hash: item_source_list_hash,
             near_status,
             near_outbox_id,
+            near_payout_hold_reason,
         });
     }
 
@@ -20351,6 +20421,10 @@ fn near_credit_outbox_item_from_settlement_line_item(
         credit_account_hash: item.credit_account_hash.clone(),
         near_call,
         status: StorageTraceCreditSettlementNearStatus::Pending,
+        // Repair path rebuilds a missing outbox row from the persisted line item,
+        // which does not carry the resolved payout target. Leave unset rather than
+        // guess; the primary settle path is where designation is resolved.
+        payout_near_account_id: None,
         created_at: batch.created_at,
         submitted_at: None,
         near_transaction_hash: None,
@@ -21118,6 +21192,8 @@ fn near_credit_reversal_outbox_item_from_settled_credit_event(
         credit_account_hash: item.credit_account_hash.clone(),
         near_call,
         status: StorageTraceCreditSettlementNearStatus::Pending,
+        // Reversal flow; no forward payout designation applies.
+        payout_near_account_id: None,
         created_at: Utc::now(),
         submitted_at: None,
         near_transaction_hash: None,
@@ -21486,6 +21562,8 @@ async fn append_credit_hold_near_account_outbox_item(
         credit_account_hash: hold.credit_account_hash.clone(),
         near_call,
         status: StorageTraceCreditSettlementNearStatus::Pending,
+        // Account freeze/unfreeze flow; not a settlement payout.
+        payout_near_account_id: None,
         created_at: Utc::now(),
         submitted_at: None,
         near_transaction_hash: None,
@@ -24201,6 +24279,7 @@ fn near_credit_outbox_item_to_storage_write(
         near_call_json: serde_json::to_value(&item.near_call)
             .context("failed to serialize NEAR credit outbox call")?,
         status: item.status,
+        payout_near_account_id: item.payout_near_account_id.clone(),
     })
 }
 
@@ -24216,6 +24295,7 @@ fn near_credit_outbox_item_from_storage(
         near_call: serde_json::from_value(record.near_call_json)
             .context("failed to deserialize NEAR credit outbox call")?,
         status: record.status,
+        payout_near_account_id: record.payout_near_account_id,
         created_at: record.created_at,
         submitted_at: record.submitted_at,
         near_transaction_hash: record.near_transaction_hash,
