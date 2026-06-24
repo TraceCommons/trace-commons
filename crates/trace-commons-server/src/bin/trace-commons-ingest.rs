@@ -46453,10 +46453,10 @@ fn visible_submission_records(
     auth: &TenantAuth,
     records: Vec<TraceCommonsSubmissionRecord>,
 ) -> Vec<TraceCommonsSubmissionRecord> {
-    records
-        .into_iter()
-        .filter(|record| can_access_submission(auth, record))
-        .collect()
+    // Own-principal visibility is the `None`-scope case of the broadened filter,
+    // so delegate rather than duplicate the loop body — `None` is structurally
+    // identical to the legacy own-principal predicate.
+    visible_submission_records_scoped(auth, None, records)
 }
 
 /// Account-scope broadening for the contributor credit read surface (Slice 3b).
@@ -46467,6 +46467,15 @@ fn visible_submission_records(
 /// credit-handler sum-filter consume the SAME `scope`, so the visible record set
 /// and the scalar credit sums stay consistent. Only ever BROADENS; the caller
 /// fails closed before reaching here on any resolution error.
+fn can_access_submission_scoped(
+    auth: &TenantAuth,
+    account_scope: Option<&AccountPrincipalSet>,
+    record: &TraceCommonsSubmissionRecord,
+) -> bool {
+    can_access_submission(auth, record)
+        || account_scope.is_some_and(|scope| scope.contains(&record.auth_principal_ref))
+}
+
 fn visible_submission_records_scoped(
     auth: &TenantAuth,
     account_scope: Option<&AccountPrincipalSet>,
@@ -46474,10 +46483,7 @@ fn visible_submission_records_scoped(
 ) -> Vec<TraceCommonsSubmissionRecord> {
     records
         .into_iter()
-        .filter(|record| {
-            can_access_submission(auth, record)
-                || account_scope.is_some_and(|scope| scope.contains(&record.auth_principal_ref))
-        })
+        .filter(|record| can_access_submission_scoped(auth, account_scope, record))
         .collect()
 }
 
