@@ -760,6 +760,56 @@ pub trait Database: TraceCorpusStore + Send + Sync {
             "resolve_payout_near_account_id not implemented".to_string(),
         ))
     }
+
+    /// Stage a device-principal account merge by consuming device B's login-link
+    /// as proof-of-control, in ONE RLS-scoped transaction. The conditional consume
+    /// UPDATE on `trace_login_links` is ALWAYS executed (never a SELECT-then-branch):
+    /// an unknown / expired / already-consumed code affects zero rows -> `Ok(None)`,
+    /// committing the no-op tx so the link stays retryable. On a winning consume,
+    /// `account_id` is the absorbed account B. Fail-closed guards (each -> `Ok(None)`,
+    /// no proposal written): B equals `surviving_account_id` (cannot merge into self);
+    /// B already `closed_at`. Otherwise B's ACTIVE principal count is taken and a
+    /// single-use, 10-minute proposal row is inserted naming `surviving_account_id`
+    /// (A) as surviving and B as absorbed. Returns the staged proposal. The raw code
+    /// never reaches the database; `proposal_id` is server-assigned. Tenant-scoped
+    /// under forced RLS throughout.
+    async fn stage_merge_proposal(
+        &self,
+        _tenant_id: &str,
+        _surviving_account_id: uuid::Uuid,
+        _merge_code_hash: &str,
+    ) -> Result<Option<StagedMergeProposal>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "stage_merge_proposal not implemented".to_string(),
+        ))
+    }
+
+    /// Execute a previously-staged merge atomically, in ONE RLS-scoped transaction:
+    /// a partial merge is never observable. The proposal is loaded + consumed with a
+    /// single conditional UPDATE (`consumed_at = now()` WHERE not-yet-consumed AND
+    /// unexpired AND `surviving_account_id` matches the auth-derived A): an expired /
+    /// not-owned / already-consumed / unknown proposal affects zero rows -> `Ok(None)`.
+    /// The consume re-validates ownership (only A can execute its own proposal). B
+    /// (absorbed) is re-checked still-open; if B closed mid-flight, return `Ok(None)`
+    /// WITHOUT committing so the consume rolls back (the proposal stays usable). On the
+    /// happy path, in the SAME tx: active principal links move from B to A (collision-
+    /// free under `UNIQUE (tenant_id, principal_ref)`); active webauthn credentials and
+    /// NEAR identities re-key from B to A (NEAR rows have `payout_designated_at` cleared
+    /// so the per-account partial-unique payout index can never trip); ALL of B's live
+    /// sessions are revoked; B is closed; and a hash-only `account_merged` audit row
+    /// (counts only, no identifiers) is appended. The whole tx commits together; any
+    /// failure rolls everything back. Returns the move counts. Tenant-scoped under
+    /// forced RLS throughout.
+    async fn execute_merge(
+        &self,
+        _tenant_id: &str,
+        _surviving_account_id: uuid::Uuid,
+        _proposal_id: uuid::Uuid,
+    ) -> Result<Option<ExecutedMerge>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "execute_merge not implemented".to_string(),
+        ))
+    }
 }
 
 /// The session row to create on a winning redeem. `token_hash` is sha256-shaped;
@@ -911,6 +961,27 @@ pub enum PayoutResolution {
 pub struct RevokeNearResult {
     pub removed: bool,
     pub remaining_strong: i64,
+}
+
+/// Outcome of [`Database::stage_merge_proposal`]: device B's login-link was
+/// consumed as proof-of-control and a single-use, time-bounded merge proposal
+/// was staged. Carries only durable account/proposal ids and an attribution-only
+/// active-principal count for `absorbed_account_id`; never any code or secret.
+#[derive(Debug, Clone, Copy)]
+pub struct StagedMergeProposal {
+    pub proposal_id: uuid::Uuid,
+    pub absorbed_account_id: uuid::Uuid,
+    pub absorbed_principal_count: i64,
+}
+
+/// Outcome of a successful [`Database::execute_merge`]: how many active principal
+/// links and strong authenticators (webauthn credentials + NEAR identities) were
+/// re-keyed from the absorbed account onto the surviving account. Counts only;
+/// never identifiers.
+#[derive(Debug, Clone, Copy)]
+pub struct ExecutedMerge {
+    pub principals_moved: i64,
+    pub authenticators_moved: i64,
 }
 
 /// Per-contributor row returned by [`Database::compute_leaderboard_inputs`].

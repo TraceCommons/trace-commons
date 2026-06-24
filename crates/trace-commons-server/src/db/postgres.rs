@@ -2929,6 +2929,258 @@ impl Database for PgBackend {
             )),
         }
     }
+
+    async fn stage_merge_proposal(
+        &self,
+        tenant_id: &str,
+        surviving_account_id: Uuid,
+        merge_code_hash: &str,
+    ) -> Result<Option<crate::db::StagedMergeProposal>, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+
+        // Proof-of-control: consume device B's login-link with the SAME atomic
+        // conditional consume as redeem_login_link (ALWAYS executed, never a
+        // SELECT-then-branch). Unknown / expired / already-consumed / wrong-tenant
+        // codes all affect zero rows -> commit the no-op tx and deny. The
+        // `tenant_id = trace_current_tenant_id()` predicate is belt-and-suspenders
+        // on top of forced RLS; `code_hash` is globally UNIQUE.
+        let consumed = tx
+            .query_opt(
+                "UPDATE trace_login_links SET consumed_at = now()
+                  WHERE code_hash = $1
+                    AND tenant_id = trace_current_tenant_id()
+                    AND consumed_at IS NULL
+                    AND expires_at > now()
+                  RETURNING account_id",
+                &[&merge_code_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let Some(consumed) = consumed else {
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            return Ok(None);
+        };
+        let absorbed_account_id: Uuid = consumed.get("account_id");
+
+        // Guard: cannot merge an account into itself. The consume already fired,
+        // so commit it (the link is single-use spent) and deny.
+        if absorbed_account_id == surviving_account_id {
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            return Ok(None);
+        }
+
+        // Guard: the absorbed account B must still be open. A closed account has
+        // nothing live to fold in.
+        let closed_at: Option<chrono::DateTime<chrono::Utc>> = tx
+            .query_one(
+                "SELECT closed_at FROM trace_accounts
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1",
+                &[&absorbed_account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get("closed_at");
+        if closed_at.is_some() {
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            return Ok(None);
+        }
+
+        // Attribution-only count of B's ACTIVE principals for operator review.
+        let absorbed_principal_count: i64 = tx
+            .query_one(
+                "SELECT count(*) FROM trace_account_principals
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND unlinked_at IS NULL",
+                &[&absorbed_account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
+
+        // Stage the single-use, time-bounded proposal. proposal_id is
+        // server-assigned; expires in 10 minutes.
+        let proposal_id = Uuid::new_v4();
+        tx.execute(
+            "INSERT INTO trace_account_merge_proposals (
+                tenant_id, proposal_id, surviving_account_id, absorbed_account_id,
+                absorbed_principal_count, created_at, expires_at
+             ) VALUES (
+                trace_current_tenant_id(), $1, $2, $3, $4, now(),
+                now() + interval '10 minutes'
+             )",
+            &[
+                &proposal_id,
+                &surviving_account_id,
+                &absorbed_account_id,
+                &(absorbed_principal_count as i32),
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(Some(crate::db::StagedMergeProposal {
+            proposal_id,
+            absorbed_account_id,
+            absorbed_principal_count,
+        }))
+    }
+
+    async fn execute_merge(
+        &self,
+        tenant_id: &str,
+        surviving_account_id: Uuid,
+        proposal_id: Uuid,
+    ) -> Result<Option<crate::db::ExecutedMerge>, DatabaseError> {
+        self.ensure_trace_tenant(tenant_id).await?;
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+
+        // Load + consume the proposal atomically. The conditional UPDATE
+        // re-validates OWNERSHIP (surviving_account_id = A, the auth-derived
+        // caller), single-use (consumed_at IS NULL), and freshness (expires_at >
+        // now()) in one shot: an expired / not-owned / already-consumed / unknown
+        // proposal affects zero rows -> deny. Returning Ok(None) before any
+        // mutation drops the tx (no commit), so the consume itself rolls back and
+        // the proposal stays usable on the benign-not-found paths.
+        let consumed = tx
+            .query_opt(
+                "UPDATE trace_account_merge_proposals SET consumed_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND proposal_id = $1
+                    AND surviving_account_id = $2
+                    AND consumed_at IS NULL
+                    AND expires_at > now()
+                  RETURNING absorbed_account_id",
+                &[&proposal_id, &surviving_account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let Some(consumed) = consumed else {
+            return Ok(None);
+        };
+        let absorbed_account_id: Uuid = consumed.get("absorbed_account_id");
+
+        // Re-check B is still open. If B closed between stage and execute, abandon
+        // the whole merge: return Ok(None) WITHOUT committing so the consume above
+        // (and any reads) roll back and the proposal remains usable.
+        let closed_at: Option<chrono::DateTime<chrono::Utc>> = tx
+            .query_one(
+                "SELECT closed_at FROM trace_accounts
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1",
+                &[&absorbed_account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get("closed_at");
+        if closed_at.is_some() {
+            return Ok(None);
+        }
+
+        // Move B's ACTIVE principal links onto A. PK-column UPDATE; collision-free
+        // because (tenant_id, principal_ref) is UNIQUE and a principal has at most
+        // one active link.
+        let principals_moved = tx
+            .execute(
+                "UPDATE trace_account_principals
+                    SET account_id = $1
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $2
+                    AND unlinked_at IS NULL",
+                &[&surviving_account_id, &absorbed_account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)? as i64;
+
+        // Re-key B's ACTIVE webauthn credentials onto A (account_id is a non-key
+        // column, so a plain UPDATE is safe).
+        let webauthn_moved = tx
+            .execute(
+                "UPDATE trace_webauthn_credentials
+                    SET account_id = $1
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $2
+                    AND revoked_at IS NULL",
+                &[&surviving_account_id, &absorbed_account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)? as i64;
+
+        // Re-key B's ACTIVE NEAR identities onto A, CLEARING payout_designated_at:
+        // A may already have its own designated payout, and the partial-unique
+        // index forbids two active designations per account. The contributor can
+        // re-designate afterward.
+        let near_moved = tx
+            .execute(
+                "UPDATE trace_near_identities
+                    SET account_id = $1, payout_designated_at = NULL
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $2
+                    AND revoked_at IS NULL",
+                &[&surviving_account_id, &absorbed_account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)? as i64;
+        let authenticators_moved = webauthn_moved + near_moved;
+
+        // Revoke ALL of B's live sessions (mirror revoke_all_account_sessions):
+        // B's credentials now belong to A, so its old sessions must die.
+        tx.execute(
+            "UPDATE trace_sessions SET revoked_at = now()
+              WHERE tenant_id = trace_current_tenant_id()
+                AND account_id = $1
+                AND revoked_at IS NULL",
+            &[&absorbed_account_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        // Close B.
+        tx.execute(
+            "UPDATE trace_accounts SET closed_at = now()
+              WHERE tenant_id = trace_current_tenant_id()
+                AND account_id = $1
+                AND closed_at IS NULL",
+            &[&absorbed_account_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        // Hash-only / label-only audit. Actor is the surviving account A
+        // (reserved-prefix). Metadata is COUNTS ONLY: no principal_refs, public
+        // keys, or account uuids.
+        let actor_ref = crate::account_session::account_actor_ref(
+            &crate::account_session::AccountId::from_uuid(surviving_account_id),
+        );
+        let safe_metadata = serde_json::json!({
+            "principals_moved": principals_moved,
+            "authenticators_moved": authenticators_moved,
+        });
+        tx.execute(
+            "INSERT INTO trace_account_audit (
+                tenant_id, action, actor_ref, outcome, safe_metadata
+             ) VALUES (trace_current_tenant_id(), $1, $2, $3, $4)",
+            &[
+                &"account_merged",
+                &actor_ref,
+                &"success",
+                &safe_metadata,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(Some(crate::db::ExecutedMerge {
+            principals_moved,
+            authenticators_moved,
+        }))
+    }
 }
 
 fn device_key_record_from_row(row: Row) -> crate::db::DeviceKeyRecord {
