@@ -67830,10 +67830,11 @@ async fn gate_treats_device_bearer_as_weak() {
 // ============================================================================
 
 /// Decode the `near_identities` array from a `GET /v1/account/near-identities`
-/// response value into `(public_key, near_account_id, label, this_session)`.
+/// response value into `(public_key, near_account_id, label, this_session,
+/// is_payout)`.
 fn decode_near_identity_list(
     body: &serde_json::Value,
-) -> Vec<(String, String, Option<String>, bool)> {
+) -> Vec<(String, String, Option<String>, bool, bool)> {
     body.get("near_identities")
         .and_then(|v| v.as_array())
         .expect("near_identities array present")
@@ -67854,7 +67855,11 @@ fn decode_near_identity_list(
                 .get("this_session")
                 .and_then(|v| v.as_bool())
                 .expect("this_session present");
-            (public_key, near_account_id, label, this_session)
+            let is_payout = item
+                .get("is_payout")
+                .and_then(|v| v.as_bool())
+                .expect("is_payout present");
+            (public_key, near_account_id, label, this_session, is_payout)
         })
         .collect()
 }
@@ -67864,7 +67869,7 @@ fn decode_near_identity_list(
 async fn list_near_identities(
     state: &Arc<AppState>,
     headers: HeaderMap,
-) -> Vec<(String, String, Option<String>, bool)> {
+) -> Vec<(String, String, Option<String>, bool, bool)> {
     let ext = account_ctx_ext(state, &headers).await;
     let Json(body) = account_near_identities_list_handler(State(state.clone()), ext)
         .await
@@ -67938,11 +67943,11 @@ async fn near_identity_list_flags_this_session_only_for_authenticating_key() {
     let bearer = list_near_identities(&state, auth_headers("token-a")).await;
     assert_eq!(bearer.len(), 2, "both identities listed");
     assert!(
-        bearer.iter().all(|(_, _, _, this)| !*this),
+        bearer.iter().all(|(_, _, _, this, _)| !*this),
         "bearer session never flags this_session"
     );
     let keys: std::collections::BTreeSet<&str> =
-        bearer.iter().map(|(pk, _, _, _)| pk.as_str()).collect();
+        bearer.iter().map(|(pk, _, _, _, _)| pk.as_str()).collect();
     assert!(keys.contains(pk1.as_str()) && keys.contains(pk2));
 
     // (2) NEAR-login with identity #1 -> that exact key flags this_session=true.
@@ -67952,8 +67957,8 @@ async fn near_identity_list_flags_this_session_only_for_authenticating_key() {
     assert_eq!(near_listed.len(), 2);
     let flagged: Vec<&str> = near_listed
         .iter()
-        .filter(|(_, _, _, this)| *this)
-        .map(|(pk, _, _, _)| pk.as_str())
+        .filter(|(_, _, _, this, _)| *this)
+        .map(|(pk, _, _, _, _)| pk.as_str())
         .collect();
     assert_eq!(
         flagged,
@@ -67970,7 +67975,7 @@ async fn near_identity_list_flags_this_session_only_for_authenticating_key() {
     let passkey_headers = cookie_request_headers("tc_account_session", &passkey_cookie);
     let passkey_listed = list_near_identities(&state, passkey_headers).await;
     assert!(
-        passkey_listed.iter().all(|(_, _, _, this)| !*this),
+        passkey_listed.iter().all(|(_, _, _, this, _)| !*this),
         "a passkey session never flags a NEAR identity as this_session"
     );
 
@@ -68011,7 +68016,7 @@ async fn near_identity_rename_endpoint_updates_label_and_404s_unknown() {
     let listed = list_near_identities(&state, auth_headers("token-a")).await;
     let entry = listed
         .iter()
-        .find(|(p, _, _, _)| *p == pk)
+        .find(|(p, _, _, _, _)| *p == pk)
         .expect("renamed identity listed");
     assert_eq!(entry.2.as_deref(), Some("Ledger"), "label trimmed and stored");
 
@@ -68088,7 +68093,7 @@ async fn near_identity_remove_endpoint_gated_and_soft_deletes() {
     // Identity #2 excluded from the list; identity #1 still present.
     let listed = list_near_identities(&state, auth_headers("token-a")).await;
     let keys: std::collections::BTreeSet<&str> =
-        listed.iter().map(|(p, _, _, _)| p.as_str()).collect();
+        listed.iter().map(|(p, _, _, _, _)| p.as_str()).collect();
     assert!(!keys.contains(pk2), "removed identity excluded");
     assert!(keys.contains(pk1.as_str()), "remaining identity listed");
 
@@ -68180,7 +68185,7 @@ async fn near_identity_management_is_cross_account_isolated() {
     // B lists NONE of A's identities.
     let b_listed = list_near_identities(&state, auth_headers("token-a-2")).await;
     assert!(
-        b_listed.iter().all(|(pk, _, _, _)| *pk != pk_a),
+        b_listed.iter().all(|(pk, _, _, _, _)| *pk != pk_a),
         "account B never sees account A's NEAR identity"
     );
 
@@ -68212,12 +68217,213 @@ async fn near_identity_management_is_cross_account_isolated() {
     let a_listed = list_near_identities(&state, auth_headers("token-a")).await;
     let entry = a_listed
         .iter()
-        .find(|(pk, _, _, _)| *pk == pk_a)
+        .find(|(pk, _, _, _, _)| *pk == pk_a)
         .expect("A's identity still active");
     assert_eq!(
         entry.2.as_deref(),
         Some("login-seed"),
         "B's forged rename never touched A's label"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+// ============================================================================
+// Slice 3b Task 6: NEAR payout designation endpoint
+// (`PATCH /v1/account/near-identities/{public_key}/payout`).
+//
+// DB-backed (real PG): self-skip when no PG URL is set; distinct tenant; runs
+// under --test-threads=1 like the other account suites. The payout change is
+// money-sensitive, so it shares the Task 8 strong-authenticator gate: a STRONG
+// session may designate/clear; a WEAK session is 403'd while a strong
+// authenticator remains. Cross-account / unknown keys collapse to a uniform 404.
+// Audit is hash-only `account_payout_designated` with `{"payout": bool}` only.
+// ============================================================================
+
+/// Helper: drive the payout PATCH handler under a given header set, returning the
+/// `Result` so callers can assert success or the error status.
+async fn payout_patch(
+    state: &Arc<AppState>,
+    headers: HeaderMap,
+    public_key: &str,
+    payout: bool,
+) -> ApiResult<Json<serde_json::Value>> {
+    let ext = account_ctx_ext(state, &headers).await;
+    account_near_identity_payout_handler(
+        State(state.clone()),
+        ext,
+        AxumPath(public_key.to_string()),
+        Json(
+            serde_json::from_value(serde_json::json!({ "payout": payout }))
+                .expect("payout body"),
+        ),
+    )
+    .await
+}
+
+/// From a STRONG (NEAR-login) session: designate flips `is_payout` true in the
+/// list, designating a SECOND identity flips the first off (exactly one true),
+/// clearing returns the account to none, and each successful change writes a
+/// hash-only `account_payout_designated` audit row.
+#[tokio::test]
+async fn near_payout_endpoint_designates_clears_and_flips_prior() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Identity #1 (enrolled, gives the keypair for a STRONG NEAR-login session)
+    // plus a directly-inserted identity #2 for the same account.
+    let (account_id, kp1, pk1) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet").await;
+    let pk2 = "ed25519:second-wallet-for-a";
+    backend
+        .insert_near_identity(tenant, account_id, pk2, "bob.testnet", None)
+        .await
+        .expect("insert second identity");
+
+    let near_cookie = near_login_cookie_value(&state, &kp1, &pk1, "alice.testnet").await;
+    let strong_headers = || cookie_request_headers("tc_account_session", &near_cookie);
+
+    // Nothing designated initially.
+    let listed = list_near_identities(&state, auth_headers("token-a")).await;
+    assert!(
+        listed.iter().all(|(_, _, _, _, is_payout)| !*is_payout),
+        "no payout designated initially"
+    );
+
+    let audit_before = account_audit_count(backend.as_ref(), tenant, "account_payout_designated").await;
+
+    // Designate identity #1 -> 200 is_payout:true, list shows exactly #1 true.
+    let Json(body) = payout_patch(&state, strong_headers(), &pk1, true)
+        .await
+        .expect("designate pk1 succeeds");
+    assert_eq!(body.get("public_key").and_then(|v| v.as_str()), Some(pk1.as_str()));
+    assert_eq!(body.get("is_payout").and_then(|v| v.as_bool()), Some(true));
+
+    let listed = list_near_identities(&state, auth_headers("token-a")).await;
+    let designated: Vec<&str> = listed
+        .iter()
+        .filter(|(_, _, _, _, is_payout)| *is_payout)
+        .map(|(pk, _, _, _, _)| pk.as_str())
+        .collect();
+    assert_eq!(designated, vec![pk1.as_str()], "exactly pk1 designated");
+
+    // Designate identity #2 -> flips #1 off; list shows exactly #2 true.
+    let Json(body) = payout_patch(&state, strong_headers(), pk2, true)
+        .await
+        .expect("designate pk2 succeeds");
+    assert_eq!(body.get("is_payout").and_then(|v| v.as_bool()), Some(true));
+    let listed = list_near_identities(&state, auth_headers("token-a")).await;
+    let designated: Vec<&str> = listed
+        .iter()
+        .filter(|(_, _, _, _, is_payout)| *is_payout)
+        .map(|(pk, _, _, _, _)| pk.as_str())
+        .collect();
+    assert_eq!(designated, vec![pk2], "prior designation flipped off; only pk2 designated");
+
+    // Clear identity #2 -> 200 is_payout:false; list shows none.
+    let Json(body) = payout_patch(&state, strong_headers(), pk2, false)
+        .await
+        .expect("clear pk2 succeeds");
+    assert_eq!(body.get("is_payout").and_then(|v| v.as_bool()), Some(false));
+    let listed = list_near_identities(&state, auth_headers("token-a")).await;
+    assert!(
+        listed.iter().all(|(_, _, _, _, is_payout)| !*is_payout),
+        "no payout designated after clear"
+    );
+
+    // Three successful changes -> three hash-only audit rows.
+    assert_eq!(
+        account_audit_count(backend.as_ref(), tenant, "account_payout_designated").await,
+        audit_before + 3,
+        "each successful payout change wrote one audit row"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// A WEAK (bearer/device) session is 403'd from changing the payout while a
+/// strong authenticator remains (money-sensitive gate), and the refusal does not
+/// designate anything.
+#[tokio::test]
+async fn near_payout_endpoint_gated_for_weak_session() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+
+    // The account holds one strong authenticator (the enrolled NEAR identity).
+    let (_account_id, _kp1, pk1) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet").await;
+
+    // A WEAK (bearer) session attempting to designate is 403'd by the gate.
+    let err = payout_patch(&state, auth_headers("token-a"), &pk1, true)
+        .await
+        .expect_err("weak payout change is gated while a strong authenticator remains");
+    assert_eq!(err.0, StatusCode::FORBIDDEN);
+
+    // Nothing was designated.
+    let listed = list_near_identities(&state, auth_headers("token-a")).await;
+    assert!(
+        listed.iter().all(|(_, _, _, _, is_payout)| !*is_payout),
+        "gated weak request designated nothing"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// Unknown / not-owned keys collapse to a uniform 404: an unknown key from the
+/// owner's STRONG session, and account B targeting account A's key (B has zero
+/// strong of its own, so the gate permits the attempt; DB scoping yields the 404).
+#[tokio::test]
+async fn near_payout_endpoint_unknown_and_cross_account_404() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Account A enrolls a NEAR identity (strong session available).
+    let (_account_a, kp_a, pk_a) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet").await;
+    let near_cookie = near_login_cookie_value(&state, &kp_a, &pk_a, "alice.testnet").await;
+    let strong_headers = cookie_request_headers("tc_account_session", &near_cookie);
+
+    // Unknown key from A's strong session -> uniform 404.
+    let err = payout_patch(&state, strong_headers, "ed25519:does-not-exist", true)
+        .await
+        .expect_err("unknown key payout 404s");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+    // Account B (token-a-2, same tenant, zero strong of its own) targeting A's key
+    // passes the gate (carve-out) and 404s at the DB (account-scoped), never a 403.
+    let _b_cookie = mint_redeem_session_cookie_value(&state, "token-a-2").await;
+    let err = payout_patch(&state, auth_headers("token-a-2"), &pk_a, true)
+        .await
+        .expect_err("B cannot designate A's key");
+    assert_eq!(
+        err.0,
+        StatusCode::NOT_FOUND,
+        "cross-account payout 404s at the DB, not 403 at the gate"
+    );
+
+    // A's identity remains undesignated.
+    let a_listed = list_near_identities(&state, auth_headers("token-a")).await;
+    assert!(
+        a_listed.iter().all(|(_, _, _, _, is_payout)| !*is_payout),
+        "no spurious cross-account designation"
     );
 
     cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;

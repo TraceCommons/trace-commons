@@ -5941,6 +5941,12 @@ fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             patch(account_near_identity_rename_handler)
                 .delete(account_near_identity_remove_handler),
         )
+        // Payout designation (Slice 3b Task 6). Designate / clear where credit
+        // settles. Money-sensitive, so it shares the strong-authenticator gate.
+        .route(
+            "/v1/account/near-identities/{public_key}/payout",
+            patch(account_near_identity_payout_handler),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             account_auth_middleware,
@@ -13953,6 +13959,9 @@ struct AccountNearIdentityListItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     last_used_at: Option<DateTime<Utc>>,
     this_session: bool,
+    /// True for the at-most-one identity currently designated as this account's
+    /// payout target (Slice 3b). Surfaced so the UI can show where credit settles.
+    is_payout: bool,
 }
 
 /// `GET /v1/account/near-identities` — list the caller's ACTIVE NEAR identities.
@@ -13992,6 +14001,7 @@ async fn account_near_identities_list_handler(
                 created_at: i.created_at,
                 last_used_at: i.last_used_at,
                 this_session,
+                is_payout: i.is_payout,
             }
         })
         .collect();
@@ -14104,6 +14114,71 @@ async fn account_near_identity_remove_handler(
     Ok(Json(serde_json::json!({
         "removed": true,
         "remaining_strong_authenticators": result.remaining_strong,
+    })))
+}
+
+/// Request body for `PATCH /v1/account/near-identities/{public_key}/payout`.
+/// `payout: true` designates the named identity as the account's payout target;
+/// `false` clears the designation. Required field (no default): a malformed /
+/// absent body is a 4xx, not a silent no-op.
+#[derive(Debug, Deserialize)]
+struct AccountNearPayoutBody {
+    payout: bool,
+}
+
+/// `PATCH /v1/account/near-identities/{public_key}/payout` — designate or clear
+/// the named NEAR identity as the caller's payout target (Slice 3b Task 6).
+///
+/// Dual-auth via `resolve_account_ctx`. Changing where credit settles is money-
+/// sensitive, so this runs behind the SAME strong-authenticator gate as removal:
+/// a weak session may change the payout only while zero strong authenticators
+/// remain (bootstrapping); otherwise refused with 403. The DB op is tenant- +
+/// account-scoped, so an identity the caller does not own (or unknown / already
+/// revoked) affects zero rows and yields a UNIFORM 404 — no existence oracle.
+/// Designating an identity atomically clears any prior designation, so at most one
+/// holds. Audited hash-only as `account_payout_designated`, recording ONLY the
+/// boolean intent (never the public key or NEAR account id).
+async fn account_near_identity_payout_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+    AxumPath(public_key): AxumPath<String>,
+    Json(body): Json<AccountNearPayoutBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    // Strong-authenticator gate: a weak session may change the payout only while
+    // zero strong authenticators remain (bootstrapping); otherwise refused.
+    require_authenticator_change_allowed(state.as_ref(), &ctx).await?;
+
+    let db = account_db(state.as_ref())?;
+
+    let changed = if body.payout {
+        db.designate_payout_near_identity(&ctx.tenant_id, ctx.account_id.as_uuid(), &public_key)
+            .await
+            .map_err(internal_error)?
+    } else {
+        db.clear_payout_near_identity(&ctx.tenant_id, ctx.account_id.as_uuid(), &public_key)
+            .await
+            .map_err(internal_error)?
+    };
+
+    if !changed {
+        // Uniform 404: unknown / revoked / not-owned (and, on clear, not-currently-
+        // designated) are indistinguishable.
+        return Err(api_error(StatusCode::NOT_FOUND, "near identity not found"));
+    }
+
+    db.append_account_audit(
+        &ctx.tenant_id,
+        "account_payout_designated",
+        &ctx.actor_ref,
+        "success",
+        serde_json::json!({ "payout": body.payout }),
+    )
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(serde_json::json!({
+        "public_key": public_key,
+        "is_payout": body.payout,
     })))
 }
 
