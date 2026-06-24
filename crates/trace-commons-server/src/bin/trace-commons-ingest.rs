@@ -11647,7 +11647,10 @@ async fn credit_handler(
     headers: HeaderMap,
 ) -> ApiResult<Json<TraceCommonsTenantCreditResponse>> {
     let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    let credit_view = read_contributor_credit_view(state.as_ref(), tenant.auth())
+    let account_scope = caller_credit_account_scope(state.as_ref(), tenant.auth())
+        .await
+        .map_err(internal_error)?;
+    let credit_view = read_contributor_credit_view(state.as_ref(), tenant.auth(), account_scope.as_ref())
         .await
         .map_err(internal_error)?;
     let item_count = credit_view.records.len();
@@ -11667,6 +11670,7 @@ async fn credit_handler(
         TraceCommonsTenantCreditResponse::from_records_events_and_settlements(
             tenant.tenant_id().to_string(),
             tenant.auth(),
+            account_scope.as_ref(),
             credit_view.records,
             &credit_view.credit_events,
             &settlement_batches,
@@ -11680,7 +11684,10 @@ async fn credit_events_handler(
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<TraceCommonsCreditLedgerRecord>>> {
     let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    let credit_view = read_contributor_credit_view(state.as_ref(), tenant.auth())
+    let account_scope = caller_credit_account_scope(state.as_ref(), tenant.auth())
+        .await
+        .map_err(internal_error)?;
+    let credit_view = read_contributor_credit_view(state.as_ref(), tenant.auth(), account_scope.as_ref())
         .await
         .map_err(internal_error)?;
     append_control_plane_read_audit(
@@ -11707,18 +11714,26 @@ async fn submission_status_handler(
         ));
     }
 
-    let credit_view = read_contributor_credit_view(state.as_ref(), tenant.auth())
+    let account_scope = caller_credit_account_scope(state.as_ref(), tenant.auth())
         .await
         .map_err(internal_error)?;
+    let credit_view =
+        read_contributor_credit_view(state.as_ref(), tenant.auth(), account_scope.as_ref())
+            .await
+            .map_err(internal_error)?;
     let visible_by_submission = credit_view
         .records
         .iter()
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
-    let status_credit_events =
-        read_contributor_status_credit_events(state.as_ref(), tenant.auth(), &credit_view.records)
-            .await
-            .map_err(internal_error)?;
+    let status_credit_events = read_contributor_status_credit_events(
+        state.as_ref(),
+        tenant.auth(),
+        account_scope.as_ref(),
+        &credit_view.records,
+    )
+    .await
+    .map_err(internal_error)?;
     let mut statuses = Vec::new();
     for submission_id in body.submission_ids {
         if let Some(record) = visible_by_submission.get(&submission_id) {
@@ -36310,7 +36325,9 @@ async fn run_canary_read_drill(
     if let Some(record) = record.as_ref() {
         ensure_retention_metadata_within_server_policy(record)?;
         let contributor_auth = canary_contributor_auth_from_record(record);
-        let credit_view = read_contributor_credit_view(state, &contributor_auth).await?;
+        // Canary self-check exercises own-principal visibility; account-scope
+        // broadening (Slice 3b) does not apply to the synthetic drill principal.
+        let credit_view = read_contributor_credit_view(state, &contributor_auth, None).await?;
         let visible_status_record = credit_view
             .records
             .iter()
@@ -36319,6 +36336,7 @@ async fn run_canary_read_drill(
             let status_credit_events = read_contributor_status_credit_events(
                 state,
                 &contributor_auth,
+                None,
                 &credit_view.records,
             )
             .await?;
@@ -41141,13 +41159,14 @@ async fn read_operational_credit_events(
     records: &[TraceCommonsSubmissionRecord],
 ) -> anyhow::Result<Vec<TraceCommonsCreditLedgerRecord>> {
     if state.db_contributor_reads_for_tenant(&tenant.tenant_id) {
-        return read_contributor_credit_events_from_db(state, tenant, records).await;
+        return read_contributor_credit_events_from_db(state, tenant, None, records).await;
     }
 
     Ok(credit_events_for_records(
         records,
         visible_credit_events(
             tenant,
+            None,
             read_all_credit_events(&state.root, &tenant.tenant_id)?,
         ),
     ))
@@ -46440,6 +46459,28 @@ fn visible_submission_records(
         .collect()
 }
 
+/// Account-scope broadening for the contributor credit read surface (Slice 3b).
+/// A record is visible iff the legacy own-principal predicate admits it OR the
+/// caller's account-principal set contains the record's `auth_principal_ref`.
+/// `scope == None` reproduces the EXACT pre-3b own-principal behavior. The
+/// per-event credit filter (`can_access_credit_event_scoped`) and the
+/// credit-handler sum-filter consume the SAME `scope`, so the visible record set
+/// and the scalar credit sums stay consistent. Only ever BROADENS; the caller
+/// fails closed before reaching here on any resolution error.
+fn visible_submission_records_scoped(
+    auth: &TenantAuth,
+    account_scope: Option<&AccountPrincipalSet>,
+    records: Vec<TraceCommonsSubmissionRecord>,
+) -> Vec<TraceCommonsSubmissionRecord> {
+    records
+        .into_iter()
+        .filter(|record| {
+            can_access_submission(auth, record)
+                || account_scope.is_some_and(|scope| scope.contains(&record.auth_principal_ref))
+        })
+        .collect()
+}
+
 /// Account read-surface visibility. SET-membership ONLY. Deliberately has NO
 /// `can_review()` short-circuit and NO `legacy_principal_ref()` wildcard (unlike
 /// `visible_submission_records`): an account sees a submission iff its
@@ -46493,13 +46534,31 @@ fn can_access_credit_event(auth: &TenantAuth, event: &TraceCommonsCreditLedgerRe
         || event.auth_principal_ref == auth.principal_ref
 }
 
+/// Account-scope broadening for the contributor credit surface (Slice 3b). An
+/// event is visible iff the legacy own-principal predicate admits it OR the
+/// caller's account-principal set (active links only) contains the event's
+/// `auth_principal_ref`. `scope == None` is the EXACT pre-3b behavior: an
+/// unlinked caller (no account) sees only its own principal. This only ever
+/// BROADENS — `None` never widens, and a resolution error upstream denies the
+/// request before this is reached (fail-closed). The account-principal set is
+/// tenant-scoped under forced RLS at its mint site (`expand_account_principals`).
+fn can_access_credit_event_scoped(
+    auth: &TenantAuth,
+    account_scope: Option<&AccountPrincipalSet>,
+    event: &TraceCommonsCreditLedgerRecord,
+) -> bool {
+    can_access_credit_event(auth, event)
+        || account_scope.is_some_and(|scope| scope.contains(&event.auth_principal_ref))
+}
+
 fn visible_credit_events(
     auth: &TenantAuth,
+    account_scope: Option<&AccountPrincipalSet>,
     events: Vec<TraceCommonsCreditLedgerRecord>,
 ) -> Vec<TraceCommonsCreditLedgerRecord> {
     events
         .into_iter()
-        .filter(|event| can_access_credit_event(auth, event))
+        .filter(|event| can_access_credit_event_scoped(auth, account_scope, event))
         .collect()
 }
 
@@ -46787,22 +46846,64 @@ async fn read_reviewer_metadata_view_from_db(
     Ok(TraceCommonsMetadataView { records, derived })
 }
 
+/// Resolve the CALLER's contributor-credit visibility scope (Slice 3b). If the
+/// caller's own `principal_ref` has an ACTIVE link to a durable account, returns
+/// that account's active principal set (`Some`), broadening the credit surface to
+/// EVERY principal on the account. If the caller is unlinked (no account), returns
+/// `None`, leaving the EXACT pre-3b own-principal scope. Computed ONCE per request
+/// and shared by the per-event filter and the credit-handler sum-filter, so the
+/// record list and the scalar sums never disagree.
+///
+/// Fail-closed: a DB/resolution error PROPAGATES (the handler maps it to a 5xx and
+/// denies the request) rather than widening; account linkage requires a DB mirror,
+/// so the file-only path returns `None` (own-principal only). Both lookups run
+/// tenant-scoped under forced RLS.
+async fn caller_credit_account_scope(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Option<AccountPrincipalSet>> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        // No DB mirror => no account linkage to broaden from. Own-principal only.
+        return Ok(None);
+    };
+    let caller_principal = &tenant.principal_ref;
+    let resolved = db
+        .resolve_principals_to_accounts(
+            &tenant.tenant_id,
+            std::slice::from_ref(caller_principal),
+        )
+        .await
+        .context("failed to resolve contributor principal to account for credit visibility")?;
+    let Some(account_id) = resolved.get(caller_principal).copied() else {
+        // Caller has no active account link: unchanged own-principal scope.
+        return Ok(None);
+    };
+    let scope = db
+        .expand_account_principals(&tenant.tenant_id, account_id)
+        .await
+        .context("failed to expand account principals for credit visibility")?;
+    Ok(Some(scope))
+}
+
 async fn read_contributor_credit_view(
     state: &AppState,
     tenant: &TenantAuth,
+    account_scope: Option<&AccountPrincipalSet>,
 ) -> anyhow::Result<TraceContributorCreditView> {
     if state.db_contributor_reads_for_tenant(&tenant.tenant_id) {
-        return read_contributor_credit_view_from_db(state, tenant).await;
+        return read_contributor_credit_view_from_db(state, tenant, account_scope).await;
     }
 
-    let records = visible_submission_records(
+    let records = visible_submission_records_scoped(
         tenant,
+        account_scope,
         read_all_submission_records(&state.root, &tenant.tenant_id)?,
     );
     let credit_events = eligible_credit_events_for_records(
         &records,
         visible_credit_events(
             tenant,
+            account_scope,
             read_all_credit_events(&state.root, &tenant.tenant_id)?,
         ),
     );
@@ -46815,6 +46916,7 @@ async fn read_contributor_credit_view(
 async fn read_contributor_credit_view_from_db(
     state: &AppState,
     tenant: &TenantAuth,
+    account_scope: Option<&AccountPrincipalSet>,
 ) -> anyhow::Result<TraceContributorCreditView> {
     let db = state
         .db_mirror
@@ -46827,10 +46929,10 @@ async fn read_contributor_credit_view_from_db(
         .into_iter()
         .filter_map(trace_commons_record_from_storage_submission)
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let records = visible_submission_records(tenant, records);
+    let records = visible_submission_records_scoped(tenant, account_scope, records);
     let credit_events = eligible_credit_events_for_records(
         &records,
-        read_contributor_credit_events_from_db(state, tenant, &records).await?,
+        read_contributor_credit_events_from_db(state, tenant, account_scope, &records).await?,
     );
     Ok(TraceContributorCreditView {
         records,
@@ -46841,16 +46943,18 @@ async fn read_contributor_credit_view_from_db(
 async fn read_contributor_status_credit_events(
     state: &AppState,
     tenant: &TenantAuth,
+    account_scope: Option<&AccountPrincipalSet>,
     records: &[TraceCommonsSubmissionRecord],
 ) -> anyhow::Result<Vec<TraceCommonsCreditLedgerRecord>> {
     if records.is_empty() {
         return Ok(Vec::new());
     }
     let credit_events = if state.db_contributor_reads_for_tenant(&tenant.tenant_id) {
-        read_contributor_credit_events_from_db(state, tenant, records).await?
+        read_contributor_credit_events_from_db(state, tenant, account_scope, records).await?
     } else {
         visible_credit_events(
             tenant,
+            account_scope,
             read_all_credit_events(&state.root, &tenant.tenant_id)?,
         )
     };
@@ -46860,6 +46964,7 @@ async fn read_contributor_status_credit_events(
 async fn read_contributor_credit_events_from_db(
     state: &AppState,
     tenant: &TenantAuth,
+    account_scope: Option<&AccountPrincipalSet>,
     records: &[TraceCommonsSubmissionRecord],
 ) -> anyhow::Result<Vec<TraceCommonsCreditLedgerRecord>> {
     let db = state
@@ -46886,7 +46991,7 @@ async fn read_contributor_credit_events_from_db(
             credit_events.push(event);
         }
     }
-    Ok(visible_credit_events(tenant, credit_events))
+    Ok(visible_credit_events(tenant, account_scope, credit_events))
 }
 
 async fn read_recent_audit_events(
@@ -58227,7 +58332,7 @@ async fn reconcile_db_mirror(
 
     let file_credit_view =
         contributor_credit_view_from_file_records(tenant, file_records, &file_credit_events);
-    let db_credit_view = read_contributor_credit_view_from_db(state, tenant).await?;
+    let db_credit_view = read_contributor_credit_view_from_db(state, tenant, None).await?;
     let file_metadata_view = metadata_view_from_file_records(file_records, file_derived);
     let db_metadata_view = read_reviewer_metadata_view_from_db(state, tenant).await?;
     let file_analytics = TraceCommonsAnalyticsResponse::from_records(
@@ -61769,7 +61874,10 @@ fn contributor_credit_view_from_file_records(
     let records = visible_submission_records(tenant, records.to_vec());
     let credit_events = eligible_credit_events_for_records(
         &records,
-        visible_credit_events(tenant, credit_events.to_vec()),
+        // Reconciliation compares the file mirror against the DB mirror on the
+        // own-principal predicate; account-scope broadening (Slice 3b) is applied
+        // only on the live credit handlers, so both sides stay `None` here.
+        visible_credit_events(tenant, None, credit_events.to_vec()),
     );
     TraceContributorCreditView {
         records,
@@ -62766,6 +62874,7 @@ impl TraceCommonsTenantCreditResponse {
     fn from_records_events_and_settlements(
         tenant_id: String,
         auth: &TenantAuth,
+        account_scope: Option<&AccountPrincipalSet>,
         records: Vec<TraceCommonsSubmissionRecord>,
         credit_events: &[TraceCommonsCreditLedgerRecord],
         settlement_batches: &[TraceCreditSettlementBatchRecord],
@@ -62816,14 +62925,24 @@ impl TraceCommonsTenantCreditResponse {
         let tenant_wide_credit_view = auth.role.can_review();
         let legacy_principal_ref = legacy_principal_ref();
         let legacy_principal_ref = legacy_principal_ref.as_str();
+        // Slice 3b: a credit `account_ref` is visible to this caller iff it is the
+        // caller's own principal, the legacy wildcard, OR a principal on the
+        // caller's account (active links only). `account_scope == None` (unlinked
+        // caller / file-only path) reproduces the pre-3b own-principal predicate.
+        // The SAME `account_scope` drives the per-event credit filter, so the
+        // visible record list and these scalar sums stay consistent.
+        let account_ref_visible = |account_ref: &str| -> bool {
+            tenant_wide_credit_view
+                || account_ref == principal_ref
+                || account_ref == legacy_principal_ref
+                || account_scope.is_some_and(|scope| scope.contains(account_ref))
+        };
         let visible_settlements = settlement_batches
             .iter()
             .filter(|batch| batch.status == StorageTraceCreditSettlementBatchStatus::Finalized)
             .flat_map(|batch| {
-                batch.line_items.iter().filter_map(move |item| {
-                    (tenant_wide_credit_view
-                        || item.credit_account_ref == principal_ref
-                        || item.credit_account_ref == legacy_principal_ref)
+                batch.line_items.iter().filter_map(|item| {
+                    account_ref_visible(item.credit_account_ref.as_str())
                         .then_some((batch.settlement_batch_id, item))
                 })
             })
@@ -62838,11 +62957,7 @@ impl TraceCommonsTenantCreditResponse {
             .sum();
         response.credit_points_reversed = credit_events
             .iter()
-            .filter(|event| {
-                tenant_wide_credit_view
-                    || event.auth_principal_ref == principal_ref
-                    || event.auth_principal_ref == legacy_principal_ref
-            })
+            .filter(|event| account_ref_visible(event.auth_principal_ref.as_str()))
             .filter_map(|event| {
                 let source_credit_event_id =
                     parse_revocation_credit_reversal_external_ref(event.external_ref.as_deref())?;
@@ -62860,11 +62975,7 @@ impl TraceCommonsTenantCreditResponse {
         let held_account_refs = credit_holds
             .iter()
             .filter(|hold| hold.released_at.is_none())
-            .filter(|hold| {
-                tenant_wide_credit_view
-                    || hold.credit_account_ref == principal_ref
-                    || hold.credit_account_ref == legacy_principal_ref
-            })
+            .filter(|hold| account_ref_visible(hold.credit_account_ref.as_str()))
             .map(|hold| hold.credit_account_ref.as_str())
             .collect::<BTreeSet<_>>();
         response.credit_points_held = credit_events

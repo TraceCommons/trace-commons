@@ -430,6 +430,190 @@ async fn resolve_principals_to_accounts_maps_active_links_only() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-resolve-batch").await;
 }
 
+/// Slice 3b: the contributor credit surface is broadened from own-principal to
+/// ACCOUNT scope. A caller whose device principal is linked to an account sees
+/// credit for EVERY principal on that account (active links only); an UNLINKED
+/// caller still sees only its own principal.
+///
+/// Seeds account A linking P1 (token-a) and P2 (token-a-2). Each of P1, P2 owns a
+/// submission with a credit event. Authenticating the credit surface as P2 must
+/// now surface BOTH P1's and P2's credit events (P2 -> A admits all of A's
+/// principals' events), and the scalar credit sums must agree. An unlinked P3
+/// (token-a-3) with its own submission+credit must still see ONLY its own event.
+#[tokio::test]
+async fn contributor_credit_visibility_broadens_to_account_scope() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    // db_contributor_reads = true so the credit handlers read the credit view from
+    // the DB mirror (the account-linkage source of truth).
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+    // Seed a submission + credit event owned by `token`. Returns (submission_id,
+    // credit_event_id). The credit event's auth_principal_ref is the submission
+    // owner's device principal.
+    async fn seed_submission_with_credit(
+        state: &Arc<AppState>,
+        token: &str,
+    ) -> (Uuid, Uuid) {
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+        envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+        envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        let submission_id = envelope.submission_id;
+        let _ = submit_trace_handler(State(state.clone()), auth_headers(token), Json(envelope))
+            .await
+            .expect("submission mirrors to DB");
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::TrainingUtility,
+                credit_points_delta: 1.0,
+                reason: Some("training utility".to_string()),
+                external_ref: Some(format!("training-utility:{token}")),
+            }),
+        )
+        .await
+        .expect("credit event mirrors to DB");
+        (submission_id, event.event_id)
+    }
+
+    let (p1_submission, p1_event) = seed_submission_with_credit(&state, "token-a").await;
+    let (p2_submission, p2_event) = seed_submission_with_credit(&state, "token-a-2").await;
+    let (p3_submission, p3_event) = seed_submission_with_credit(&state, "token-a-3").await;
+
+    let p1_principal = principal_storage_ref("token-a");
+    let p2_principal = principal_storage_ref("token-a-2");
+    let p3_principal = principal_storage_ref("token-a-3");
+
+    // Mint account A linked to P1, then add P2 as a second ACTIVE link to A. P3 is
+    // left UNLINKED. Mirrors Task 2's seeding shape.
+    let account_a = backend
+        .create_or_reuse_account("tenant-a", &p1_principal)
+        .await
+        .expect("mint account A for P1");
+    {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("conn");
+        let tx = client.transaction().await.expect("seed tx");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&"tenant-a"],
+        )
+        .await
+        .expect("set seed tenant context");
+        tx.execute(
+            "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+             VALUES (trace_current_tenant_id(), $1, $2)",
+            &[&account_a, &p2_principal],
+        )
+        .await
+        .expect("link P2 to account A");
+        tx.commit().await.expect("commit seed");
+    }
+
+    // --- Linked caller P2 sees BOTH P1's and P2's credit events. ---
+    let Json(p2_events) =
+        credit_events_handler(State(state.clone()), auth_headers("token-a-2"))
+            .await
+            .expect("P2 credit events read succeeds");
+    let p2_visible_principals = p2_events
+        .iter()
+        .map(|event| event.auth_principal_ref.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(
+        p2_visible_principals.contains(p1_principal.as_str()),
+        "linked caller P2 must now see P1's credit events (account scope)"
+    );
+    assert!(
+        p2_visible_principals.contains(p2_principal.as_str()),
+        "linked caller P2 still sees its own credit events"
+    );
+    assert!(
+        !p2_visible_principals.contains(p3_principal.as_str()),
+        "P3 is unlinked and must NOT appear in P2's account-scoped view"
+    );
+    let p2_event_ids = p2_events
+        .iter()
+        .map(|event| event.event_id)
+        .collect::<BTreeSet<_>>();
+    assert!(p2_event_ids.contains(&p1_event), "P1's event id is visible to P2");
+    assert!(p2_event_ids.contains(&p2_event), "P2's event id is visible to P2");
+    assert!(
+        !p2_event_ids.contains(&p3_event),
+        "P3's event id must not leak to P2"
+    );
+
+    // The scalar credit response must agree with the per-event view: P2's
+    // account-scoped summary counts BOTH P1's and P2's accepted submissions.
+    let Json(p2_credit) = credit_handler(State(state.clone()), auth_headers("token-a-2"))
+        .await
+        .expect("P2 credit summary read succeeds");
+    assert_eq!(
+        p2_credit.accepted, 2,
+        "P2's account-scoped view counts BOTH P1's and P2's accepted submissions"
+    );
+
+    // --- Unlinked caller P3 sees ONLY its own credit event (unchanged). ---
+    let Json(p3_events) =
+        credit_events_handler(State(state.clone()), auth_headers("token-a-3"))
+            .await
+            .expect("P3 credit events read succeeds");
+    let p3_event_ids = p3_events
+        .iter()
+        .map(|event| event.event_id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(p3_event_ids.len(), 1, "unlinked P3 sees exactly its own event");
+    assert!(p3_event_ids.contains(&p3_event), "P3 sees its own event");
+    assert!(
+        !p3_event_ids.contains(&p1_event) && !p3_event_ids.contains(&p2_event),
+        "unlinked P3 must NOT see account A's events"
+    );
+
+    let Json(p3_credit) = credit_handler(State(state.clone()), auth_headers("token-a-3"))
+        .await
+        .expect("P3 credit summary read succeeds");
+    assert_eq!(p3_credit.accepted, 1, "unlinked P3 counts only its own submission");
+
+    // The scalar sums track the broadened record set: P2's account-scoped pending
+    // (2 accepted submissions across P1 + P2) is strictly greater than P3's
+    // own-principal pending (1 accepted submission), and strictly positive. The
+    // exact per-submission novelty credit is scoring-dependent, so we assert the
+    // ordering rather than a fixed value.
+    assert!(
+        p2_credit.credit_points_pending > p3_credit.credit_points_pending,
+        "P2 account-scoped pending ({}) must exceed P3 own-principal pending ({})",
+        p2_credit.credit_points_pending,
+        p3_credit.credit_points_pending,
+    );
+    assert!(
+        p2_credit.credit_points_pending > 0.0,
+        "P2 account-scoped pending must be strictly positive"
+    );
+
+    let _ = (p1_submission, p2_submission, p3_submission);
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 /// The NEAR public_key -> tenant_id resolver must read across forced RLS under the
 /// restricted `trace_login_resolver` role with NO tenant context, exactly as the
 /// credential resolver does. This is the load-bearing security test for Slice 3a's
@@ -3089,6 +3273,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
     let mut tokens = BTreeMap::new();
     insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
     insert_token(&mut tokens, "tenant-a", "token-a-2", TokenRole::Contributor);
+    insert_token(&mut tokens, "tenant-a", "token-a-3", TokenRole::Contributor);
     insert_token(
         &mut tokens,
         "tenant-a",
