@@ -81,12 +81,19 @@ raw, unmerged devices). A single-principal convenience wrapper may exist for the
 merge path, but the batch paths (settlement grouping, contributor view) MUST use the
 batched form to avoid N round-trips.
 
-### Aggregation change (contributor credit view)
-`read_contributor_credit_events_from_db` (`trace-commons-ingest.rs:46860`) currently
-groups by the submission's `auth_principal_ref`. Change: resolve each event's
-principal to its `account_id` (falling back to the principal string when unlinked)
-and group the contributor credit view by the resolved key. An account with two
-linked principals sums both.
+### Visibility change (contributor credit view)
+**Correction (post-implementation discovery):** the contributor credit view is NOT
+an owner-aggregate — it is a flat per-event list plus tenant-wide scalar sums, and
+the only per-principal logic is a **visibility filter** (`can_access_credit_event`,
+`trace-commons-ingest.rs:46490`, and the credit-handler filter ~62815-62889): a
+device-principal-authenticated caller sees an event only if `event.auth_principal_ref
+== auth.principal_ref`. The account-centric change is therefore a **visibility
+broadening**, not a re-grouping: a caller sees credit for every principal resolved to
+the caller's account (via `resolve_principals_to_accounts`); an unlinked caller still
+sees only its own principal. Fail-closed: a resolution error denies (visibility never
+widens on error). This realizes "your account aggregates credit across all your
+devices" on the existing device-authenticated surface. (Settlement grouping below is
+the true per-account aggregate.)
 
 ### Settlement grouping change
 Settlement currently does (`trace-commons-ingest.rs:20010`):

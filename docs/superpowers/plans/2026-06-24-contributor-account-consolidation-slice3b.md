@@ -69,18 +69,17 @@ Mirror `migrations/V33__near_identities.sql` exactly for the RLS/forced-RLS/poli
 
 > Ordering note (from plan review): the payout DB methods (Task 4) come **before** the settlement re-key (Task 5) so the settlement subagent has `resolve_payout_near_account_id` available and owns a single file-set. The payout *handler* is split out to Task 6.
 
-### Task 3: Re-key the contributor credit view
+### Task 3: Broaden contributor credit visibility to account scope
 
-**Files:** `trace-commons-ingest.rs` (~46860 `read_contributor_credit_events_from_db`), `tests.rs`.
+**Files:** `trace-commons-ingest.rs` (`can_access_credit_event` ~46490; the credit-handler visibility filter ~62815-62889; `read_contributor_credit_*` ~46815-46890), `tests.rs`.
 
-The current path builds `owner_by_submission: BTreeMap<submission_id, auth_principal_ref>` and groups events by principal. Change the grouping key to the resolved account (fall back to the principal string when unlinked).
+**Corrected understanding (from a NEEDS_CONTEXT pass + user decision):** the contributor credit view is NOT an owner-aggregate — it is a flat per-event list (`credit_events_handler`) + tenant-wide scalar sums (`credit_handler`), and the only per-principal logic is a **visibility filter** (`can_access_credit_event`: a caller sees an event only if `event.auth_principal_ref == auth.principal_ref`). The device-principal contributor API authenticates as a single principal. Slice 3b broadens this filter to **account scope**: a caller sees credit for EVERY principal resolved to the caller's account; an unlinked caller still sees only its own principal (unchanged). This realizes "your account aggregates credit across all your devices" on the existing surface. Do NOT change emitted identifiers (the per-event `auth_principal_ref` field already shipped raw for self-view; leave it — no new leak, no removal in scope).
 
-- [ ] **Step 0 — PRECONDITION (do not skip):** read the current `read_contributor_credit_events_from_db` response shape and record exactly what identifier it emits to the client today (raw principal_ref? a hash? nothing?). The re-key must NOT newly leak a raw principal_ref that wasn't exposed before — if the view emits a client-visible owner key, the account-keyed replacement must be `sha256("account:"+id)` (label-only), matching the prior leak posture.
-- [ ] **Step 1 — failing test:** seed an account A with two principals each owning a submission with credit events; assert the contributor credit view for A sums BOTH submissions' credit under one account-keyed group. Seed a third unlinked principal with credit; assert it still appears under its own principal key. (Use the existing credit-view test helpers; if none, read events via the DB methods.)
-- [ ] **Step 2 — FAIL.**
-- [ ] **Step 3 — implement:** after loading the owner principals, call `resolve_principals_to_accounts(tenant, &distinct_principal_refs)` ONCE; map each event's owner principal to `account:{uuid}` when present, else the raw principal_ref; group by that resolved key. Keep the response shape; only the grouping key changes (honor the Step 0 leak posture).
-- [ ] **Step 4 — PASS** (real PG).
-- [ ] **Step 5 — gates + commit** `Re-key contributor credit view by resolved account`.
+- [ ] **Step 1 — failing test (DB-backed, real PG):** seed account A linking principals P1 and P2, each owning a submission with credit events. Authenticate the contributor API as P2 (its principal bearer) and assert the caller now sees BOTH P1's and P2's credit events (the visibility filter resolves P2→A and admits all of A's principals' events). Seed an unlinked principal P3 with credit; authenticate as P3 and assert it sees ONLY its own (unlinked → own-principal scope unchanged). (Mirror the existing credit-view/`can_access_credit_event` tests for seeding + the auth shape.)
+- [ ] **Step 2 — FAIL** (today P2 sees only P2).
+- [ ] **Step 3 — implement:** resolve the CALLER's `auth.principal_ref` → account once (via `resolve_principals_to_accounts`, or a single-principal helper). Build the set of principal_refs that resolve to the caller's account (the caller's account's active principals). Change `can_access_credit_event` (and the credit-handler filter ~62815-62889) so an event is visible iff its `auth_principal_ref` is in that account-principal set; when the caller is unlinked (no account), fall back to the exact-principal match (unchanged behavior). Keep it fail-closed: a resolution error denies (visibility shrinks to own-principal, never widens on error). Resolve efficiently (batch / one lookup), not per-event.
+- [ ] **Step 4 — PASS** (real PG; confirm existing credit-view/access tests still green — unlinked principals unchanged).
+- [ ] **Step 5 — gates + commit** `Broaden contributor credit visibility to account scope`.
 
 ### Task 4: Payout designation DB ops + resolution
 
