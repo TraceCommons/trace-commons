@@ -515,6 +515,31 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// Issue a browser session for a NEAR wallet login that has ALREADY been
+    /// verified (Slice 3a Task 7). Mirrors [`Database::issue_passkey_session`]
+    /// exactly except `client_kind = 'near'` and `auth_credential_id` carries the
+    /// NEAR access key (`ed25519:...` public key) that authenticated the session.
+    /// Inserts a `trace_sessions` row (hash-only `token_hash`, `token_issued_at`
+    /// defaulted) plus a hash-only audit row in ONE RLS-scoped tx under the
+    /// already-resolved tenant. The caller MUST have verified the NEP-413 assertion
+    /// AND loaded the identity under that tenant before calling this; there is
+    /// therefore NO `ensure_trace_tenant` here — the tenant provably exists via the
+    /// identity row, and an UPSERT before verification would let a forged assertion
+    /// spray tenant rows. The raw session secret never reaches the database; only
+    /// its sha256 `token_hash` is stored, and the public key is never audited.
+    async fn issue_near_session(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _session: NewSession<'_>,
+        _auth_credential_id: &str,
+        _audit: RedeemAudit,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool(
+            "issue_near_session not implemented".to_string(),
+        ))
+    }
+
     /// List the ACTIVE (unrevoked) credentials for `account_id`, oldest first.
     /// Label- and timestamp-only; no key material. Tenant- + account-scoped
     /// under forced RLS so another account's credentials are never returned.

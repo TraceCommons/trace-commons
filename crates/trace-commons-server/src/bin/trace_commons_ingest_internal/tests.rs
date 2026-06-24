@@ -65946,3 +65946,488 @@ async fn near_enroll_finish_without_ceremony_is_400() {
 
     cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
 }
+
+// ============================================================================
+// Slice 3a Task 7: discoverable NEAR login + tenant bootstrap + session.
+//
+// These DB-backed tests drive the real PG backend (skipped when no PG is
+// available). They seed an account + NEAR identity through the Task 6 enroll
+// round-trip (mock RPC = FullAccess), then exercise `near/login/start` +
+// `near/login/finish`. The wallet is a `ring` Ed25519 keypair; the NEP-413
+// signature is reconstructed with the same `near_test_sign` byte layout the
+// enroll tests use. Per CRITICAL invariants we assert: a `client_kind='near'`
+// session with `auth_credential_id` = the public key; every failure collapses
+// to ONE byte-identical uniform deny behind the timing floor; NO `trace_tenants`
+// row is ever written for a forged/unknown key; a consumed (replayed) ceremony
+// is refused; and an ENROLL-message signature presented to login is refused
+// (distinct `NEAR_LOGIN_MESSAGE`).
+// ============================================================================
+
+/// Drive `near/login/start`. Returns `(message, nonce_bytes, recipient,
+/// ceremony_cookie_pair)`. UNAUTHENTICATED — no session cookie needed.
+async fn near_login_start(state: &Arc<AppState>) -> (String, [u8; 32], String, String) {
+    let response = account_near_login_start_handler(State(state.clone()), HeaderMap::new()).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "login/start returns the challenge"
+    );
+    let set_cookie = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .expect("ceremony cookie set")
+        .to_str()
+        .expect("ascii cookie")
+        .to_string();
+    assert!(set_cookie.starts_with("tc_near_ceremony="));
+    let ceremony_pair = set_cookie
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_string();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body bytes");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let message = json["message"].as_str().expect("message").to_string();
+    let recipient = json["recipient"].as_str().expect("recipient").to_string();
+    let nonce_hex = json["nonce"].as_str().expect("nonce hex");
+    let nonce_vec = hex::decode(nonce_hex).expect("nonce decodes from hex");
+    let nonce: [u8; 32] = nonce_vec.try_into().expect("32-byte nonce");
+    (message, nonce, recipient, ceremony_pair)
+}
+
+/// Seed an account + ACTIVE NEAR identity under `tenant` by driving the Task 6
+/// enroll round-trip (mock RPC = FullAccess) for `token`'s device principal.
+/// Returns `(account_id, keypair, public_key)`. The enroll path creates the
+/// `trace_accounts` row (via redeem) AND the `trace_near_identities` row, so the
+/// resolver + RLS loader the login path depends on have real rows to find.
+async fn seed_near_login_identity(
+    state: &Arc<AppState>,
+    backend: &PgBackend,
+    tenant: &str,
+    token: &str,
+    near_account_id: &str,
+) -> (Uuid, ring::signature::Ed25519KeyPair, String) {
+    let session_cookie = mint_redeem_session_cookie_value(state, token).await;
+    let account_id =
+        account_id_for_principal(backend, tenant, &principal_storage_ref(token)).await;
+
+    let (message, nonce, recipient, ceremony_pair) =
+        near_enroll_start(state, &session_cookie).await;
+    let kp = near_test_keypair();
+    let public_key = near_test_pubkey_string(&kp);
+    let signature = near_test_sign(&kp, &message, &nonce, &recipient);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&format!("tc_account_session={session_cookie}; {ceremony_pair}"))
+            .expect("combined cookie header"),
+    );
+    let ext = account_ctx_ext(state, &headers).await;
+    let body = AccountNearEnrollFinishBody {
+        account_id: near_account_id.to_string(),
+        public_key: public_key.clone(),
+        signature,
+        label: Some("login-seed".to_string()),
+    };
+    let Json(out) =
+        account_near_enroll_finish_handler(State(state.clone()), ext, headers, Json(body))
+            .await
+            .expect("enroll/finish seeds the identity");
+    assert_eq!(out["public_key"], public_key);
+
+    (account_id, kp, public_key)
+}
+
+/// Collect ALL `Set-Cookie` header values from a response as owned strings.
+fn all_set_cookies(response: &axum::response::Response) -> Vec<String> {
+    response
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().expect("ascii cookie").to_string())
+        .collect()
+}
+
+/// Snapshot `(status, body_bytes)` of a uniform-deny response so two denies can
+/// be compared byte-for-byte (non-enumeration invariant).
+async fn deny_status_and_body(response: axum::response::Response) -> (StatusCode, Vec<u8>) {
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body bytes")
+        .to_vec();
+    (status, body)
+}
+
+/// Round-trip: enroll a NEAR identity, then `login/start` -> sign -> `login/finish`
+/// mints a `tc_account_session` cookie with `client_kind='near'` and
+/// `auth_credential_id` = the public key, and 303s to the account view.
+#[tokio::test]
+async fn near_login_round_trip_mints_near_session() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let checker: Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker> =
+        Arc::new(StubNearAccessKeyChecker { result: Ok(true) });
+    let state = test_state_with_near(temp.path().to_path_buf(), Some(db_mirror), Some(checker));
+
+    let (account_id, kp, public_key) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet").await;
+
+    // login/start -> sign the LOGIN message over the fresh challenge -> login/finish.
+    let (message, nonce, recipient, ceremony_pair) = near_login_start(&state).await;
+    assert_eq!(message, "Trace Commons sign-in", "login uses the LOGIN message");
+    let signature = near_test_sign(&kp, &message, &nonce, &recipient);
+
+    let mut finish_headers = HeaderMap::new();
+    finish_headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
+    );
+    let response = account_near_login_finish_handler(
+        State(state.clone()),
+        finish_headers,
+        NearAssertionBody(NearLoginFinishBody {
+            account_id: "alice.testnet".to_string(),
+            public_key: public_key.clone(),
+            signature,
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::SEE_OTHER,
+        "login/finish 303s on success"
+    );
+    let set_cookies = all_set_cookies(&response);
+    let session_set = set_cookies
+        .iter()
+        .find(|c| c.starts_with("tc_account_session="))
+        .expect("session cookie set on login");
+    assert!(session_set.contains("HttpOnly"));
+    assert!(session_set.contains("Secure"));
+    assert!(session_set.contains("SameSite=Strict"));
+
+    let first = session_set.split(';').next().expect("cookie pair");
+    let (_name, value) = first.split_once('=').expect("name=value");
+    let secret = value.split_once('.').expect("tenant.secret").1;
+    let token_hash = hash_secret(secret);
+    let (kind, stored_cred) = session_kind_and_credential(backend.as_ref(), tenant, &token_hash)
+        .await
+        .expect("near session row exists");
+    assert_eq!(kind, "near", "session client_kind is near");
+    assert_eq!(
+        stored_cred.as_deref(),
+        Some(public_key.as_str()),
+        "auth_credential_id records the asserting NEAR public key"
+    );
+
+    // The minted cookie resolves to the SAME tenant + account.
+    let headers = cookie_request_headers("tc_account_session", value);
+    let ctx = resolve_account_ctx(state.as_ref(), &headers)
+        .await
+        .expect("near session cookie resolves");
+    assert_eq!(ctx.tenant_id, tenant);
+    assert_eq!(ctx.account_id.as_uuid(), account_id);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// Security: a forged/unknown public key (valid self-consistent signature, but no
+/// enrolled identity) -> uniform deny AND NO `trace_tenants` row is written. Also
+/// pins that the unknown-key deny is byte-identical to the malformed-body deny and
+/// the missing-ceremony deny (non-enumeration).
+#[tokio::test]
+async fn near_login_unknown_key_denies_without_tenant_write_and_is_uniform() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let checker: Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker> =
+        Arc::new(StubNearAccessKeyChecker { result: Ok(true) });
+    let state = test_state_with_near(temp.path().to_path_buf(), Some(db_mirror), Some(checker));
+
+    let tenants_before = trace_tenants_count(backend.as_ref()).await;
+
+    // A fresh, NEVER-enrolled wallet. Its signature verifies against its own key,
+    // but the resolver finds no tenant -> uniform deny, no tenant row.
+    let kp = near_test_keypair();
+    let public_key = near_test_pubkey_string(&kp);
+
+    let (message, nonce, recipient, ceremony_pair) = near_login_start(&state).await;
+    let signature = near_test_sign(&kp, &message, &nonce, &recipient);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
+    );
+    let unknown_resp = account_near_login_finish_handler(
+        State(state.clone()),
+        headers,
+        NearAssertionBody(NearLoginFinishBody {
+            account_id: "ghost.testnet".to_string(),
+            public_key: public_key.clone(),
+            signature,
+        }),
+    )
+    .await;
+    let unknown_deny = deny_status_and_body(unknown_resp).await;
+    assert_eq!(unknown_deny.0, StatusCode::BAD_REQUEST);
+
+    // CRUX: no trace_tenants row was created by a forged/unknown login attempt.
+    let tenants_after = trace_tenants_count(backend.as_ref()).await;
+    assert_eq!(
+        tenants_before, tenants_after,
+        "an unknown NEAR key must NOT create any trace_tenants row"
+    );
+
+    // Missing-ceremony deny: a fresh start but NO ceremony cookie sent.
+    let kp2 = near_test_keypair();
+    let pk2 = near_test_pubkey_string(&kp2);
+    let (msg2, nonce2, rec2, _pair2) = near_login_start(&state).await;
+    let sig2 = near_test_sign(&kp2, &msg2, &nonce2, &rec2);
+    let no_ceremony_resp = account_near_login_finish_handler(
+        State(state.clone()),
+        HeaderMap::new(),
+        NearAssertionBody(NearLoginFinishBody {
+            account_id: "ghost.testnet".to_string(),
+            public_key: pk2,
+            signature: sig2,
+        }),
+    )
+    .await;
+    let missing_deny = deny_status_and_body(no_ceremony_resp).await;
+
+    // Malformed-body deny: the custom extractor rejects non-JSON with the SAME deny.
+    let malformed_req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/account/near/login/finish")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from("{ not json"))
+        .expect("request builds");
+    let malformed_rej = match <NearAssertionBody as axum::extract::FromRequest<()>>::from_request(
+        malformed_req,
+        &(),
+    )
+    .await
+    {
+        Ok(_) => panic!("malformed body must be rejected by the extractor"),
+        Err(rejection) => rejection,
+    };
+    let malformed_deny = deny_status_and_body(malformed_rej).await;
+
+    assert_eq!(
+        unknown_deny, missing_deny,
+        "unknown-key and missing-ceremony denies must be byte-identical"
+    );
+    assert_eq!(
+        unknown_deny, malformed_deny,
+        "unknown-key and malformed-body denies must be byte-identical"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// A replayed (already-consumed) ceremony is refused: `login/finish` does a
+/// single-use `take`, so re-presenting the SAME ceremony cookie with a fresh
+/// signature over the SAME (now-stale) nonce yields the uniform deny.
+#[tokio::test]
+async fn near_login_rejects_replayed_ceremony() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let checker: Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker> =
+        Arc::new(StubNearAccessKeyChecker { result: Ok(true) });
+    let state = test_state_with_near(temp.path().to_path_buf(), Some(db_mirror), Some(checker));
+
+    let (_account_id, kp, public_key) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet").await;
+
+    let (message, nonce, recipient, ceremony_pair) = near_login_start(&state).await;
+    let signature = near_test_sign(&kp, &message, &nonce, &recipient);
+
+    // First finish consumes the ceremony and succeeds.
+    let mut headers1 = HeaderMap::new();
+    headers1.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
+    );
+    let ok = account_near_login_finish_handler(
+        State(state.clone()),
+        headers1,
+        NearAssertionBody(NearLoginFinishBody {
+            account_id: "alice.testnet".to_string(),
+            public_key: public_key.clone(),
+            signature: signature.clone(),
+        }),
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::SEE_OTHER, "first finish succeeds");
+
+    // Replaying the SAME ceremony cookie + signature is now refused (consumed).
+    let mut headers2 = HeaderMap::new();
+    headers2.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
+    );
+    let replay = account_near_login_finish_handler(
+        State(state.clone()),
+        headers2,
+        NearAssertionBody(NearLoginFinishBody {
+            account_id: "alice.testnet".to_string(),
+            public_key: public_key.clone(),
+            signature,
+        }),
+    )
+    .await;
+    assert_eq!(
+        replay.status(),
+        StatusCode::BAD_REQUEST,
+        "a replayed/consumed ceremony is refused"
+    );
+    let replay_set = all_set_cookies(&replay);
+    assert!(
+        !replay_set.iter().any(|c| c.starts_with("tc_account_session=")),
+        "a refused replay mints no session cookie"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// Distinct-message guarantee: a signature produced over the ENROLL message
+/// (`NEAR_ENROLL_MESSAGE`) presented to `login/finish` (which verifies against
+/// `NEAR_LOGIN_MESSAGE`) is refused — an enroll signature can never be replayed
+/// as a login, and no session is minted.
+#[tokio::test]
+async fn near_login_rejects_enroll_message_signature() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let checker: Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker> =
+        Arc::new(StubNearAccessKeyChecker { result: Ok(true) });
+    let state = test_state_with_near(temp.path().to_path_buf(), Some(db_mirror), Some(checker));
+
+    let (_account_id, kp, public_key) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet").await;
+
+    let (login_message, nonce, recipient, ceremony_pair) = near_login_start(&state).await;
+    // Sign the ENROLL message (NOT the login message) over the login challenge.
+    assert_ne!(
+        login_message, "Trace Commons account link",
+        "login and enroll messages are distinct"
+    );
+    let enroll_signature =
+        near_test_sign(&kp, "Trace Commons account link", &nonce, &recipient);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
+    );
+    let response = account_near_login_finish_handler(
+        State(state.clone()),
+        headers,
+        NearAssertionBody(NearLoginFinishBody {
+            account_id: "alice.testnet".to_string(),
+            public_key: public_key.clone(),
+            signature: enroll_signature,
+        }),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "an enroll-message signature is refused at login (distinct message)"
+    );
+    assert!(
+        !all_set_cookies(&response)
+            .iter()
+            .any(|c| c.starts_with("tc_account_session=")),
+        "the refused enroll-replay mints no session cookie"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// Cross-account isolation: an identity enrolled under tenant T mints ONLY T's
+/// session. A second tenant U with its own enrolled identity is unaffected — U's
+/// key cannot mint a session that resolves to T (and vice versa). This pins that
+/// the resolved tenant is the one bound to the asserting key.
+#[tokio::test]
+async fn near_login_binds_session_to_owning_tenant() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let checker: Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker> =
+        Arc::new(StubNearAccessKeyChecker { result: Ok(true) });
+    let state = test_state_with_near(temp.path().to_path_buf(), Some(db_mirror), Some(checker));
+
+    // token-a maps to tenant-a, token-b maps to tenant-b (distinct device tokens).
+    let (account_a, kp_a, pk_a) =
+        seed_near_login_identity(&state, backend.as_ref(), "tenant-a", "token-a", "alice.testnet").await;
+    let (_account_b, _kp_b, _pk_b) =
+        seed_near_login_identity(&state, backend.as_ref(), "tenant-b", "token-b", "bob.testnet").await;
+
+    // Log in with tenant-a's key. The minted session must resolve to tenant-a.
+    let (message, nonce, recipient, ceremony_pair) = near_login_start(&state).await;
+    let signature = near_test_sign(&kp_a, &message, &nonce, &recipient);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
+    );
+    let response = account_near_login_finish_handler(
+        State(state.clone()),
+        headers,
+        NearAssertionBody(NearLoginFinishBody {
+            account_id: "alice.testnet".to_string(),
+            public_key: pk_a.clone(),
+            signature,
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let cookie = all_set_cookies(&response)
+        .into_iter()
+        .find(|c| c.starts_with("tc_account_session="))
+        .expect("session cookie");
+    let value = cookie
+        .split(';')
+        .next()
+        .and_then(|p| p.split_once('='))
+        .expect("name=value")
+        .1
+        .to_string();
+    let resolve_headers = cookie_request_headers("tc_account_session", &value);
+    let ctx = resolve_account_ctx(state.as_ref(), &resolve_headers)
+        .await
+        .expect("session resolves");
+    assert_eq!(ctx.tenant_id, "tenant-a", "session binds to the owning tenant");
+    assert_eq!(ctx.account_id.as_uuid(), account_a);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+}

@@ -6013,6 +6013,17 @@ fn app(state: Arc<AppState>) -> Router {
             "/account/passkey/login/finish",
             post(account_passkey_login_finish_handler),
         )
+        // Discoverable NEAR wallet login (Slice 3a Task 7). Un-versioned and
+        // un-authed, beside the passkey login flow: the NEP-413 wallet assertion
+        // IS the credential. No RPC at login — the signature is verified offline.
+        .route(
+            "/account/near/login/start",
+            post(account_near_login_start_handler),
+        )
+        .route(
+            "/account/near/login/finish",
+            post(account_near_login_finish_handler),
+        )
         // AUTHENTICATED account surface (read-back, session, passkey enrollment +
         // management). Grouped behind `account_auth_middleware` so the resolved
         // `AccountCtx` is injected AND any rotated session cookie is attached on
@@ -12620,6 +12631,19 @@ const PASSKEY_LOGIN_GLOBAL_LIMIT: u32 = 600;
 /// that the credential collapses to the uniform deny (replay/brute ceiling). The
 /// credential id is a PUBLIC, globally-unique label (not a secret).
 const PASSKEY_LOGIN_PER_CRED_LIMIT: u32 = 5;
+/// Per-IP cap on `POST /account/near/login/start` + `/finish` attempts per
+/// window. Mirrors `PASSKEY_LOGIN_PER_IP_LIMIT`: a discoverable NEAR login is a
+/// couple of round-trips, comfortably covering a legitimate retry while bounding
+/// a guessing/replay flood from one IP.
+const NEAR_LOGIN_PER_IP_LIMIT: u32 = 30;
+/// Coarse global cap on NEAR-login attempts per window across ALL callers — a
+/// blast-radius ceiling mirroring `PASSKEY_LOGIN_GLOBAL_LIMIT`.
+const NEAR_LOGIN_GLOBAL_LIMIT: u32 = 600;
+/// Hard per-`publicKey` ceiling on `login/finish` attempts per window. A given
+/// NEAR access key should assert a handful of times at most in a minute; beyond
+/// that the key collapses to the uniform deny (replay/brute ceiling). The public
+/// key is a PUBLIC, globally-unique label (not a secret).
+const NEAR_LOGIN_PER_KEY_LIMIT: u32 = 5;
 /// Per-account cap on `GET /v1/account/traces/{id}/content` reads per window.
 const CONTENT_PER_ACCOUNT_LIMIT: u32 = 60;
 /// Concurrency cap on in-flight content reads per account (defense against a
@@ -13366,6 +13390,14 @@ async fn account_passkey_register_finish_handler(
 /// `message` and is pinned so start (which issues it) and finish (which verifies
 /// against it) agree byte-for-byte.
 const NEAR_ENROLL_MESSAGE: &str = "Trace Commons account link";
+
+/// The fixed human-readable message a wallet signs during NEAR LOGIN. It is
+/// DELIBERATELY DISTINCT from `NEAR_ENROLL_MESSAGE`: the message is part of the
+/// NEP-413 signed payload, so a signature captured during enroll cannot be
+/// replayed as a login (and vice-versa). The per-request `nonce` is the actual
+/// challenge; this constant is pinned so login/start (which issues it) and
+/// login/finish (which verifies against it) agree byte-for-byte.
+const NEAR_LOGIN_MESSAGE: &str = "Trace Commons sign-in";
 
 /// Ceremony cookie binding a NEAR enroll ceremony to this browser. Shares the
 /// shape (Secure + HttpOnly + SameSite=Strict + Path=/ + short Max-Age) of the
@@ -14128,6 +14160,364 @@ async fn account_passkey_login_finish_inner(
             resp_headers.append(axum::http::header::SET_COOKIE, value);
         }
         Err(_) => return passkey_login_generic_deny(),
+    }
+    if let Ok(value) = HeaderValue::from_str(&clear_ceremony.to_string()) {
+        resp_headers.append(axum::http::header::SET_COOKIE, value);
+    }
+    resp_headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    resp_headers.insert(
+        axum::http::header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
+}
+
+// ============================================================================
+// Slice 3a Task 7: discoverable NEAR wallet login (UNAUTHENTICATED surface).
+//
+// Two handlers, both un-versioned and un-authed, sitting beside the Slice 2
+// passkey login flow:
+//
+//   * `/account/near/login/start` mints a fresh 32-byte challenge nonce, stashes
+//     a `NearChallenge` ceremony in the in-process store, binds it to the browser
+//     via the short-lived `tc_near_ceremony` cookie, and returns
+//     `{ message: NEAR_LOGIN_MESSAGE, nonce, recipient }`.
+//   * `/account/near/login/finish` verifies the wallet's NEP-413 assertion
+//     OFFLINE (NO RPC at login), bootstraps the tenant from the asserted public
+//     key via the NARROW resolver pool (NO ensure_trace_tenant before the
+//     signature is verified), loads the stored identity under that tenant's RLS,
+//     and on success mints the IDENTICAL Slice 1 session cookie.
+//
+// SECURITY: EVERY failure mode — unknown/forged key, missing/expired/replayed
+// ceremony, malformed body, signature mismatch, an enroll-message signature
+// presented to login, rate-limit — collapses to ONE byte-identical uniform deny
+// (`near_login_generic_deny`) behind a fixed timing floor (`sleep_to_redeem_
+// floor`), so nothing about the attempt is enumerable by status, body, or
+// latency. NEAR_LOGIN_MESSAGE is distinct from NEAR_ENROLL_MESSAGE, so an enroll
+// signature can never be replayed as a login. No public key or raw session
+// secret is ever logged or audited.
+// ============================================================================
+
+/// The ONE uniform, non-enumerating deny for EVERY NEAR-login failure mode.
+/// Byte-identical status + body across unknown-key / missing-ceremony /
+/// replayed-nonce / malformed-body / bad-signature / wrong-message /
+/// rate-limited, with no-store + no-referrer. Shape mirrors
+/// `passkey_login_generic_deny`; kept distinct so the NEAR login surface has a
+/// single, self-contained deny site (intra-surface byte-identical).
+fn near_login_generic_deny() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let mut response = (StatusCode::BAD_REQUEST, "near login invalid or expired").into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    headers.insert(
+        axum::http::header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
+}
+
+/// Request body for `POST /account/near/login/finish`. `accountId` is the
+/// human-readable NEAR account (informational only — attribution); `publicKey`
+/// is the `ed25519:...` access key that IS the credential; `signature` is the
+/// base64 NEP-413 signature over the stashed challenge.
+#[derive(serde::Deserialize)]
+struct NearLoginFinishBody {
+    #[serde(rename = "accountId")]
+    #[allow(dead_code)]
+    account_id: String,
+    #[serde(rename = "publicKey")]
+    public_key: String,
+    signature: String,
+}
+
+/// Body extractor for `near/login/finish`: the wallet's NEP-413 assertion. On ANY
+/// extraction failure (malformed JSON, wrong shape, missing body) it rejects with
+/// the SAME uniform NEAR-login deny so a malformed body is indistinguishable from
+/// a bad/unknown key. Mirrors `PasskeyAssertionBody`.
+struct NearAssertionBody(NearLoginFinishBody);
+
+impl<S> axum::extract::FromRequest<S> for NearAssertionBody
+where
+    S: Send + Sync,
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request(
+        req: axum::extract::Request,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        match axum::Json::<NearLoginFinishBody>::from_request(req, state).await {
+            Ok(axum::Json(body)) => Ok(NearAssertionBody(body)),
+            Err(_) => Err(near_login_generic_deny()),
+        }
+    }
+}
+
+/// `POST /account/near/login/start` — begin a discoverable NEAR wallet login
+/// (Slice 3a Task 7). UNAUTHENTICATED. Fails closed (uniform deny) when NEAR
+/// sign-in is unconfigured. Rate-limited per-IP + global. Mints a fresh 32-byte
+/// challenge nonce, stashes a `NearChallenge` ceremony under a fresh ceremony id,
+/// binds it to this browser with the short-lived `tc_near_ceremony` cookie, and
+/// returns `{ message: NEAR_LOGIN_MESSAGE, nonce: hex, recipient }`. ANY failure
+/// collapses to the uniform deny.
+async fn account_near_login_start_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    use rand::RngCore as _;
+    // NOTE: unlike `login/finish`, this start surface is intentionally NOT wrapped
+    // in the timing floor. It performs NO key or tenant lookup — it only mints a
+    // fresh challenge — so there is no found-vs-not-found oracle to erase. Mirrors
+    // the passkey login/start rationale.
+    let client_ip = client_ip_for_rate_limit(&headers);
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("near-login-ip:{client_ip}"),
+        NEAR_LOGIN_PER_IP_LIMIT,
+    ) {
+        return near_login_generic_deny();
+    }
+    if !ACCOUNT_RATE_LIMITER.check("near-login-global", NEAR_LOGIN_GLOBAL_LIMIT) {
+        return near_login_generic_deny();
+    }
+
+    // Fail-closed: an unconfigured NEAR sign-in yields the uniform deny (NOT a
+    // 503), so the login surface does not enumerate configuration state.
+    let cfg = match account_near_config(state.as_ref()) {
+        Ok(cfg) => cfg,
+        Err(_) => return near_login_generic_deny(),
+    };
+
+    // Fresh 32-byte challenge from the OS CSPRNG (same source as session secrets).
+    let mut nonce = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let recipient = cfg.recipient.clone();
+
+    let ceremony_id = trace_commons_server::account_passkey::new_ceremony_id();
+    account_ceremony_store(state.as_ref()).put(
+        ceremony_id.clone(),
+        CeremonyState::NearChallenge {
+            nonce,
+            recipient: recipient.clone(),
+        },
+    );
+
+    // Same short-lived ceremony cookie shape as enrollment: opaque id only,
+    // Secure + HttpOnly + SameSite=Strict + Path=/, short Max-Age.
+    let cookie = cookie::Cookie::build((ACCOUNT_NEAR_CEREMONY_COOKIE, ceremony_id))
+        .secure(true)
+        .http_only(true)
+        .same_site(cookie::SameSite::Strict)
+        .path("/")
+        .max_age(cookie::time::Duration::seconds(
+            ACCOUNT_PASSKEY_CEREMONY_COOKIE_MAX_AGE_SECS,
+        ))
+        .build();
+
+    let payload = serde_json::json!({
+        "message": NEAR_LOGIN_MESSAGE,
+        "nonce": near_nonce_to_wire(&nonce),
+        "recipient": recipient,
+    });
+
+    use axum::response::IntoResponse;
+    let mut response = Json(payload).into_response();
+    match HeaderValue::from_str(&cookie.to_string()) {
+        Ok(value) => {
+            response
+                .headers_mut()
+                .insert(axum::http::header::SET_COOKIE, value);
+        }
+        // A cookie that cannot be serialized would leave the ceremony unbindable;
+        // collapse to the uniform deny rather than returning an unusable challenge.
+        Err(_) => return near_login_generic_deny(),
+    }
+    response
+}
+
+/// `POST /account/near/login/finish` — complete a discoverable NEAR wallet login
+/// and issue a session (Slice 3a Task 7). UNAUTHENTICATED, with full redeem-style
+/// hardening: a fixed timing floor wraps the WHOLE handler so success and every
+/// uniform deny take at least the redeem floor, erasing the found-vs-not-found
+/// (and rate-limited-vs-not) timing oracle.
+async fn account_near_login_finish_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: NearAssertionBody,
+) -> axum::response::Response {
+    let start = std::time::Instant::now();
+    let response = account_near_login_finish_inner(state, headers, body).await;
+    sleep_to_redeem_floor(start).await;
+    response
+}
+
+/// Inner body of the NEAR `login/finish` handler. Returns on every branch with
+/// the final response; the outer wrapper pads each path to the redeem floor.
+async fn account_near_login_finish_inner(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: NearAssertionBody,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let NearAssertionBody(body) = body;
+
+    // 1. Per-IP + coarse global rate limit. Same uniform deny; floor still applies.
+    let client_ip = client_ip_for_rate_limit(&headers);
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("near-login-ip:{client_ip}"),
+        NEAR_LOGIN_PER_IP_LIMIT,
+    ) {
+        return near_login_generic_deny();
+    }
+    if !ACCOUNT_RATE_LIMITER.check("near-login-global", NEAR_LOGIN_GLOBAL_LIMIT) {
+        return near_login_generic_deny();
+    }
+
+    // Fail-closed: an unconfigured NEAR sign-in collapses to the uniform deny, so
+    // login is refused on a deployment without NEAR sign-in. The recipient used for
+    // verification comes from the STASHED ceremony (bound at start), not from cfg.
+    let _cfg = match account_near_config(state.as_ref()) {
+        Ok(cfg) => cfg,
+        Err(_) => return near_login_generic_deny(),
+    };
+    let db = match account_db(state.as_ref()) {
+        Ok(db) => db,
+        Err(_) => return near_login_generic_deny(),
+    };
+
+    // 3. Per-publicKey hard ceiling (replay/brute bound on one specific key,
+    //    IP-independent). The public key is a PUBLIC, globally-unique label. Same
+    //    uniform deny.
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("near-login-key:{}", body.public_key),
+        NEAR_LOGIN_PER_KEY_LIMIT,
+    ) {
+        return near_login_generic_deny();
+    }
+
+    // 4. Recover and CONSUME (single-use `take`) the pending challenge via the
+    //    ceremony cookie. Missing / expired / already-consumed (replayed nonce) /
+    //    wrong-variant all collapse to the uniform deny.
+    let (nonce, recipient) = match cookie_value_from_headers(&headers, ACCOUNT_NEAR_CEREMONY_COOKIE)
+    {
+        Some(ceremony_id) => match account_ceremony_store(state.as_ref()).take(ceremony_id) {
+            Some(CeremonyState::NearChallenge { nonce, recipient }) => (nonce, recipient),
+            Some(_) | None => return near_login_generic_deny(),
+        },
+        None => return near_login_generic_deny(),
+    };
+
+    // 5. Verify the NEP-413 signature OFFLINE over the stashed challenge using the
+    //    LOGIN message (distinct from enroll, so an enroll signature cannot be
+    //    replayed here). `callback_url` is `None`. NO RPC at login. Any Err ->
+    //    uniform deny.
+    if trace_commons_server::account_near::verify_nep413(
+        &body.public_key,
+        NEAR_LOGIN_MESSAGE,
+        &nonce,
+        &recipient,
+        None,
+        &body.signature,
+    )
+    .is_err()
+    {
+        return near_login_generic_deny();
+    }
+
+    // 6. Tenant bootstrap via the NARROW resolver pool. Returns tenant ONLY; NO
+    //    ensure_trace_tenant. None / Err (incl. fail-closed unconfigured resolver)
+    //    -> uniform deny, and critically NO tenant row is written for a forged key.
+    let tenant = match db.resolve_near_public_key_tenant(&body.public_key).await {
+        Ok(Some(tenant)) => tenant,
+        Ok(None) | Err(_) => return near_login_generic_deny(),
+    };
+
+    // 7. Under the resolved tenant's RLS, load the ACTIVE identity. None (unknown /
+    //    revoked) -> uniform deny. Then stamp last_used_at; a touch failure is not
+    //    fatal to the verified login, but we fail closed to the uniform deny.
+    let identity = match db.load_near_identity_for_login(&tenant, &body.public_key).await {
+        Ok(Some(identity)) => identity,
+        Ok(None) | Err(_) => return near_login_generic_deny(),
+    };
+    let account_id = identity.account_id;
+    if db
+        .touch_near_identity_last_used(&tenant, &body.public_key)
+        .await
+        .is_err()
+    {
+        return near_login_generic_deny();
+    }
+
+    // 8. Mint the session secret (>=128-bit CSPRNG); store ONLY its hash. Insert
+    //    the session (client_kind='near', auth_credential_id=public_key) + hash-only
+    //    audit in one RLS-scoped tx under the resolved tenant. NO ensure_trace_
+    //    tenant: the identity is verified, so the tenant provably exists via its FK.
+    let secret = generate_session_secret();
+    let token_hash = hash_secret(&secret);
+    let expires_at = Utc::now() + Duration::days(ACCOUNT_SESSION_TTL_DAYS);
+    if db
+        .issue_near_session(
+            &tenant,
+            account_id,
+            trace_commons_server::db::NewSession {
+                token_hash: &token_hash,
+                client_kind: "near",
+                expires_at,
+            },
+            &body.public_key,
+            trace_commons_server::db::RedeemAudit {
+                action: "account_near_login".to_string(),
+                outcome: "success".to_string(),
+                // Hash-only / label-only: never the public key or NEAR account id.
+                metadata: serde_json::json!({ "client_kind": "near" }),
+            },
+        )
+        .await
+        .is_err()
+    {
+        return near_login_generic_deny();
+    }
+
+    // 9. Build the IDENTICAL Slice 1 session cookie (`{b64url(tenant)}.{secret}`),
+    //    303 to the account view, no-store + no-referrer, and clear the ceremony
+    //    cookie. See `confirm_login_inner` for the cookie-value rationale.
+    let cookie_value = format!(
+        "{}.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tenant.as_bytes()),
+        secret,
+    );
+    let session_cookie = cookie::Cookie::build((ACCOUNT_SESSION_COOKIE, cookie_value))
+        .secure(true)
+        .http_only(true)
+        .same_site(cookie::SameSite::Strict)
+        .path("/")
+        .max_age(cookie::time::Duration::days(ACCOUNT_SESSION_TTL_DAYS))
+        .build();
+    // Expire the ceremony cookie (Max-Age=0) now that it has been consumed.
+    let clear_ceremony = cookie::Cookie::build((ACCOUNT_NEAR_CEREMONY_COOKIE, ""))
+        .secure(true)
+        .http_only(true)
+        .same_site(cookie::SameSite::Strict)
+        .path("/")
+        .max_age(cookie::time::Duration::seconds(0))
+        .build();
+
+    let mut response = StatusCode::SEE_OTHER.into_response();
+    let resp_headers = response.headers_mut();
+    resp_headers.insert(
+        axum::http::header::LOCATION,
+        HeaderValue::from_static(ACCOUNT_VIEW_PATH),
+    );
+    match HeaderValue::from_str(&session_cookie.to_string()) {
+        Ok(value) => {
+            resp_headers.append(axum::http::header::SET_COOKIE, value);
+        }
+        Err(_) => return near_login_generic_deny(),
     }
     if let Ok(value) = HeaderValue::from_str(&clear_ceremony.to_string()) {
         resp_headers.append(axum::http::header::SET_COOKIE, value);
