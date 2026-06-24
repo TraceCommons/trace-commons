@@ -8127,9 +8127,19 @@ async fn validate_trace_near_credit_outbox_scheduler_config(
     require_near_credit_outbox_principal_if_configured(state, &auth, config.dry_run)
         .map_err(trace_near_credit_outbox_scheduler_config_error)?;
     if !config.dry_run {
+        // The submitter is withheld both when its URL env var is unset AND when
+        // the resolved settlement mode is not `http` (Disabled/DryRun supply no
+        // live submitter). Name the resolved mode (label-only) so an operator is
+        // pointed at the right knob: under a non-`http` mode the fix is
+        // TRACE_COMMONS_NEAR_SETTLEMENT_MODE, not the submitter URL.
         anyhow::ensure!(
             state.near_credit_submitter.is_some(),
-            "invalid Trace Commons NEAR credit outbox scheduler configuration: {TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL} is required for live submit passes"
+            "invalid Trace Commons NEAR credit outbox scheduler configuration: \
+             a live NEAR credit submitter is required for live submit passes \
+             (resolved settlement mode={mode}); set TRACE_COMMONS_NEAR_SETTLEMENT_MODE=http \
+             and provide {TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL} \
+             (modes disabled/dry_run withhold the submitter)",
+            mode = state.near_settlement_mode.as_label()
         );
         anyhow::ensure!(
             state.near_credit_confirmer.is_some(),

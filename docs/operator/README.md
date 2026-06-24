@@ -33,6 +33,8 @@ the link.
 | Running the pilot bootstrap harness | [`./pilot-bootstrap.md`](./pilot-bootstrap.md) (see also [`./pilot-bootstrap-dryrun-notes.md`](./pilot-bootstrap-dryrun-notes.md) — known real-data defects) |
 | Running the pilot-bootstrap first-100-traces dry run | [`./pilot-bootstrap-first-100-traces.md`](./pilot-bootstrap-first-100-traces.md) |
 | Provisioning the contributor-account login-resolver DB role | [`./login-resolver-role.md`](./login-resolver-role.md) |
+| Consolidating two contributor devices into one account | [`./account-merge.md`](./account-merge.md) |
+| Setting the NEAR settlement mode or designating payout | [`./settlement-mode.md`](./settlement-mode.md) |
 | Gating the pilot to invited contributors only | [`./pilot-allowlist.md`](./pilot-allowlist.md) |
 | Onboarding an internal pilot contributor | [`./pilot-contributor-onboarding.md`](./pilot-contributor-onboarding.md) |
 | Managing the HuggingFace dataset / model cache | [`./hf-dataset-cache-hygiene.md`](./hf-dataset-cache-hygiene.md) |
@@ -54,6 +56,14 @@ the link.
 
 Every runbook in this directory, with a one-line description.
 
+- [`./account-merge.md`](./account-merge.md) — device-account consolidation:
+  the strong-auth-gated stage-then-execute merge flow, its irreversibility, the
+  single-use-link burn gotcha, and the hash-only `account_merge_started` /
+  `account_merged` audit surface. Includes the V34 edited-migration note.
+- [`./settlement-mode.md`](./settlement-mode.md) — `TRACE_COMMONS_NEAR_SETTLEMENT_MODE`
+  (`disabled` / `dry_run` / `http`), the per-request `dry_run` preview flag,
+  payout designation, fail-closed holds (NoneEnrolled / AmbiguousNoDesignation),
+  and idempotent hold recovery.
 - [`./a26-bakeoff-result-handler.md`](./a26-bakeoff-result-handler.md) — post-run
   handler for the A2.6 bake-off: pull the report, fill the skeleton, route to
   the A2.7 / A2.7-partial / Phase A.5 outcome branch, tear down.
