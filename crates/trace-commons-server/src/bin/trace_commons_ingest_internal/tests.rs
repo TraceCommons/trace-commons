@@ -66803,3 +66803,408 @@ async fn gate_treats_device_bearer_as_weak() {
     cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
 }
 
+// ============================================================================
+// Slice 3a Task 9: NEAR identity management endpoints (list / rename / remove).
+//
+// DB-backed (real PG): self-skip when no PG URL is set; each test uses a DISTINCT
+// tenant and cleans it first. Exercises the three authenticated handlers directly
+// (the auth middleware is mirrored by `account_ctx_ext`). `this_session` is true
+// ONLY on a NEAR-login cookie session whose `auth_credential_id` is the asserting
+// public key; removal shares the Task 8 strong-authenticator gate; rename/list
+// are not gated.
+// ============================================================================
+
+/// Decode the `near_identities` array from a `GET /v1/account/near-identities`
+/// response value into `(public_key, near_account_id, label, this_session)`.
+fn decode_near_identity_list(
+    body: &serde_json::Value,
+) -> Vec<(String, String, Option<String>, bool)> {
+    body.get("near_identities")
+        .and_then(|v| v.as_array())
+        .expect("near_identities array present")
+        .iter()
+        .map(|item| {
+            let public_key = item
+                .get("public_key")
+                .and_then(|v| v.as_str())
+                .expect("public_key present")
+                .to_string();
+            let near_account_id = item
+                .get("near_account_id")
+                .and_then(|v| v.as_str())
+                .expect("near_account_id present")
+                .to_string();
+            let label = item.get("label").and_then(|v| v.as_str()).map(String::from);
+            let this_session = item
+                .get("this_session")
+                .and_then(|v| v.as_bool())
+                .expect("this_session present");
+            (public_key, near_account_id, label, this_session)
+        })
+        .collect()
+}
+
+/// List the caller's NEAR identities via the GET handler under a given header
+/// set, returning the decoded tuples.
+async fn list_near_identities(
+    state: &Arc<AppState>,
+    headers: HeaderMap,
+) -> Vec<(String, String, Option<String>, bool)> {
+    let ext = account_ctx_ext(state, &headers).await;
+    let Json(body) = account_near_identities_list_handler(State(state.clone()), ext)
+        .await
+        .expect("near-identities list succeeds");
+    decode_near_identity_list(&body)
+}
+
+/// Drive `near/login/start` -> sign -> `near/login/finish` for an already-enrolled
+/// `(kp, public_key)` under `near_account_id`, returning the minted
+/// `tc_account_session` cookie VALUE (a `client_kind='near'` strong session whose
+/// `auth_credential_id` is `public_key`).
+async fn near_login_cookie_value(
+    state: &Arc<AppState>,
+    kp: &ring::signature::Ed25519KeyPair,
+    public_key: &str,
+    near_account_id: &str,
+) -> String {
+    let (message, nonce, recipient, ceremony_pair) = near_login_start(state).await;
+    let signature = near_test_sign(kp, &message, &nonce, &recipient);
+    let mut finish_headers = HeaderMap::new();
+    finish_headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
+    );
+    let response = account_near_login_finish_handler(
+        State(state.clone()),
+        finish_headers,
+        NearAssertionBody(NearLoginFinishBody {
+            account_id: near_account_id.to_string(),
+            public_key: public_key.to_string(),
+            signature,
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER, "near login 303s");
+    all_set_cookies(&response)
+        .iter()
+        .find(|c| c.starts_with("tc_account_session="))
+        .and_then(|c| c.split(';').next())
+        .and_then(|p| p.split_once('='))
+        .map(|(_, v)| v.to_string())
+        .expect("near session cookie value")
+}
+
+/// List flags `this_session` ONLY for the NEAR identity that authenticated the
+/// current session: bearer/device sessions see all false; a NEAR-login cookie
+/// session flags exactly the asserting identity; a passkey session sees all
+/// false.
+#[tokio::test]
+async fn near_identity_list_flags_this_session_only_for_authenticating_key() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Identity #1 is enrolled via the real Task 6 path (returns a usable keypair).
+    let (account_id, kp1, pk1) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet").await;
+    // Identity #2 inserted directly for the SAME account (a second wallet).
+    let pk2 = "ed25519:second-wallet-for-a";
+    backend
+        .insert_near_identity(tenant, account_id, pk2, "bob.testnet", Some("second"))
+        .await
+        .expect("insert second identity");
+
+    // (1) Bearer session: BOTH listed, all this_session=false.
+    let bearer = list_near_identities(&state, auth_headers("token-a")).await;
+    assert_eq!(bearer.len(), 2, "both identities listed");
+    assert!(
+        bearer.iter().all(|(_, _, _, this)| !*this),
+        "bearer session never flags this_session"
+    );
+    let keys: std::collections::BTreeSet<&str> =
+        bearer.iter().map(|(pk, _, _, _)| pk.as_str()).collect();
+    assert!(keys.contains(pk1.as_str()) && keys.contains(pk2));
+
+    // (2) NEAR-login with identity #1 -> that exact key flags this_session=true.
+    let near_cookie = near_login_cookie_value(&state, &kp1, &pk1, "alice.testnet").await;
+    let near_headers = cookie_request_headers("tc_account_session", &near_cookie);
+    let near_listed = list_near_identities(&state, near_headers).await;
+    assert_eq!(near_listed.len(), 2);
+    let flagged: Vec<&str> = near_listed
+        .iter()
+        .filter(|(_, _, _, this)| *this)
+        .map(|(pk, _, _, _)| pk.as_str())
+        .collect();
+    assert_eq!(
+        flagged,
+        vec![pk1.as_str()],
+        "only the authenticating NEAR identity flags this_session"
+    );
+
+    // (3) A passkey session sees all false (its auth_credential_id is a credential
+    // id, never a NEAR public key). Enroll a passkey from the NEAR (strong) session,
+    // then log in via passkey.
+    let (mut auth, cred) = enroll_passkey_for_token(&state, &near_cookie).await;
+    let passkey_cookie =
+        passkey_login_cookie_value(&state, &mut auth, &cred, account_id).await;
+    let passkey_headers = cookie_request_headers("tc_account_session", &passkey_cookie);
+    let passkey_listed = list_near_identities(&state, passkey_headers).await;
+    assert!(
+        passkey_listed.iter().all(|(_, _, _, this)| !*this),
+        "a passkey session never flags a NEAR identity as this_session"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// Rename updates the label (reflected in the list); rename of an unknown key is
+/// a uniform 404.
+#[tokio::test]
+async fn near_identity_rename_endpoint_updates_label_and_404s_unknown() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+
+    let (_account_id, _kp, pk) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet").await;
+
+    // Rename (not gated): a blank-padded label is trimmed and stored.
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let status = account_near_identity_rename_handler(
+        State(state.clone()),
+        ext,
+        AxumPath(pk.clone()),
+        Json(
+            serde_json::from_value(serde_json::json!({ "label": "  Ledger  " }))
+                .expect("rename body"),
+        ),
+    )
+    .await
+    .expect("rename succeeds");
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let listed = list_near_identities(&state, auth_headers("token-a")).await;
+    let entry = listed
+        .iter()
+        .find(|(p, _, _, _)| *p == pk)
+        .expect("renamed identity listed");
+    assert_eq!(entry.2.as_deref(), Some("Ledger"), "label trimmed and stored");
+
+    // Rename of an unknown key -> uniform 404.
+    let ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let err = account_near_identity_rename_handler(
+        State(state.clone()),
+        ext,
+        AxumPath("ed25519:does-not-exist".to_string()),
+        Json(serde_json::from_value(serde_json::json!({ "label": "x" })).expect("body")),
+    )
+    .await
+    .expect_err("unknown key rename 404s");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// Remove from a STRONG session soft-deletes (excluded from the list) and reports
+/// the correct remaining-strong count; remove of an unknown key -> 404; a WEAK
+/// session is gated (403) while a strong authenticator remains, but allowed once
+/// the account is back to zero strong (the bootstrapping carve-out).
+#[tokio::test]
+async fn near_identity_remove_endpoint_gated_and_soft_deletes() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Identity #1 (enrolled, gives a keypair for the NEAR-login session) plus a
+    // directly-inserted identity #2 -> the account holds 2 strong authenticators.
+    let (account_id, kp1, pk1) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet").await;
+    let pk2 = "ed25519:second-wallet-for-a";
+    backend
+        .insert_near_identity(tenant, account_id, pk2, "bob.testnet", None)
+        .await
+        .expect("insert second identity");
+
+    // A WEAK (bearer) session is BLOCKED (403) from removing while >=1 strong remains.
+    let weak_ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let err = account_near_identity_remove_handler(
+        State(state.clone()),
+        weak_ext,
+        AxumPath(pk2.to_string()),
+    )
+    .await
+    .expect_err("weak remove is gated while a strong authenticator remains");
+    assert_eq!(err.0, StatusCode::FORBIDDEN);
+
+    // From a STRONG (NEAR-login) session: remove identity #2 -> removed, one strong
+    // (identity #1) remains.
+    let near_cookie = near_login_cookie_value(&state, &kp1, &pk1, "alice.testnet").await;
+    let strong_headers = cookie_request_headers("tc_account_session", &near_cookie);
+    let strong_ext = account_ctx_ext(&state, &strong_headers).await;
+    let Json(body) = account_near_identity_remove_handler(
+        State(state.clone()),
+        strong_ext,
+        AxumPath(pk2.to_string()),
+    )
+    .await
+    .expect("strong-session remove succeeds");
+    assert_eq!(body.get("removed").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        body.get("remaining_strong_authenticators").and_then(|v| v.as_i64()),
+        Some(1),
+        "one strong authenticator (identity #1) remains"
+    );
+
+    // Identity #2 excluded from the list; identity #1 still present.
+    let listed = list_near_identities(&state, auth_headers("token-a")).await;
+    let keys: std::collections::BTreeSet<&str> =
+        listed.iter().map(|(p, _, _, _)| p.as_str()).collect();
+    assert!(!keys.contains(pk2), "removed identity excluded");
+    assert!(keys.contains(pk1.as_str()), "remaining identity listed");
+
+    // Remove of an unknown key from the strong session -> uniform 404.
+    let strong_ext = account_ctx_ext(&state, &strong_headers).await;
+    let err = account_near_identity_remove_handler(
+        State(state.clone()),
+        strong_ext,
+        AxumPath("ed25519:does-not-exist".to_string()),
+    )
+    .await
+    .expect_err("unknown key remove 404s");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+    // Bootstrapping carve-out: remove the LAST strong authenticator (identity #1)
+    // from the NEAR (strong) session, dropping the account to zero strong.
+    let strong_ext = account_ctx_ext(&state, &strong_headers).await;
+    let Json(last) = account_near_identity_remove_handler(
+        State(state.clone()),
+        strong_ext,
+        AxumPath(pk1.clone()),
+    )
+    .await
+    .expect("remove last strong from strong session");
+    assert_eq!(
+        last.get("remaining_strong_authenticators").and_then(|v| v.as_i64()),
+        Some(0),
+        "account is now at zero strong authenticators"
+    );
+    assert_eq!(
+        backend
+            .count_active_strong_authenticators(tenant, account_id)
+            .await
+            .expect("count"),
+        0,
+        "account is back at bootstrap (zero strong authenticators)"
+    );
+
+    // With zero strong authenticators the carve-out applies: a WEAK (bearer)
+    // DELETE is no longer gated (it would have 403'd a moment ago) and instead
+    // PASSES the gate to reach the DB op, which yields a uniform 404 since pk1 is
+    // already revoked. The 404 (not 403) is the observable proof the carve-out let
+    // the weak request through.
+    let denied_before = gate_denied_audit_count(backend.as_ref(), tenant).await;
+    let weak_ext = account_ctx_ext(&state, &auth_headers("token-a")).await;
+    let err = account_near_identity_remove_handler(
+        State(state.clone()),
+        weak_ext,
+        AxumPath(pk1.clone()),
+    )
+    .await
+    .expect_err("already-revoked key 404s even under the carve-out");
+    assert_eq!(
+        err.0,
+        StatusCode::NOT_FOUND,
+        "weak remove passes the gate (carve-out) and 404s at the DB, not 403 at the gate"
+    );
+    assert_eq!(
+        gate_denied_audit_count(backend.as_ref(), tenant).await,
+        denied_before,
+        "the carve-out wrote NO new gate-denied audit row"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+
+/// Cross-account isolation: account B never lists A's NEAR identity; PATCH/DELETE
+/// of A's identity by B is a uniform 404; A's identity is unaffected. Account B is
+/// `token-a-2`, a SECOND contributor in the SAME tenant, exercising the account_id
+/// predicate (not merely tenant RLS).
+#[tokio::test]
+async fn near_identity_management_is_cross_account_isolated() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+
+    // Account A enrolls a NEAR identity.
+    let (_account_a, _kp_a, pk_a) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet").await;
+
+    // Account B (token-a-2, same tenant) gets an account but no NEAR identities.
+    let _b_cookie = mint_redeem_session_cookie_value(&state, "token-a-2").await;
+
+    // B lists NONE of A's identities.
+    let b_listed = list_near_identities(&state, auth_headers("token-a-2")).await;
+    assert!(
+        b_listed.iter().all(|(pk, _, _, _)| *pk != pk_a),
+        "account B never sees account A's NEAR identity"
+    );
+
+    // B's PATCH of A's identity -> 404.
+    let b_ext = account_ctx_ext(&state, &auth_headers("token-a-2")).await;
+    let err = account_near_identity_rename_handler(
+        State(state.clone()),
+        b_ext,
+        AxumPath(pk_a.clone()),
+        Json(serde_json::from_value(serde_json::json!({ "label": "stolen" })).expect("body")),
+    )
+    .await
+    .expect_err("B cannot rename A's identity");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+    // B's DELETE of A's identity -> 404. (B has zero strong of its own, so the gate
+    // permits the attempt; the DB scoping yields the 404.)
+    let b_ext = account_ctx_ext(&state, &auth_headers("token-a-2")).await;
+    let err = account_near_identity_remove_handler(
+        State(state.clone()),
+        b_ext,
+        AxumPath(pk_a.clone()),
+    )
+    .await
+    .expect_err("B cannot remove A's identity");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+    // A's identity is unaffected: still listed, with no label set by B.
+    let a_listed = list_near_identities(&state, auth_headers("token-a")).await;
+    let entry = a_listed
+        .iter()
+        .find(|(pk, _, _, _)| *pk == pk_a)
+        .expect("A's identity still active");
+    assert_eq!(
+        entry.2.as_deref(),
+        Some("login-seed"),
+        "B's forged rename never touched A's label"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+}
+

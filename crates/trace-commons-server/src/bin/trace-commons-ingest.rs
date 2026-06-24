@@ -5926,6 +5926,19 @@ fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/v1/account/near/enroll/finish",
             post(account_near_enroll_finish_handler),
         )
+        // NEAR identity management (Slice 3a Task 9). list / rename / remove the
+        // caller's OWN NEAR identities. `{public_key}` is the public NEAR access
+        // key. Removal shares the Task 8 strong-authenticator gate; list/rename
+        // are not gated.
+        .route(
+            "/v1/account/near-identities",
+            get(account_near_identities_list_handler),
+        )
+        .route(
+            "/v1/account/near-identities/{public_key}",
+            patch(account_near_identity_rename_handler)
+                .delete(account_near_identity_remove_handler),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             account_auth_middleware,
@@ -13879,6 +13892,195 @@ async fn account_passkey_remove_handler(
     Ok(Json(serde_json::json!({
         "removed": true,
         "remaining_credentials": result.remaining,
+    })))
+}
+
+// ============================================================================
+// Slice 3a Task 9: NEAR identity management (authenticated).
+//
+// Three dual-auth handlers behind `account_auth_middleware`, scoped to the
+// caller's OWN account by the DB ops (forced RLS + account_id predicate):
+//
+//   * GET    /v1/account/near-identities              — list active identities.
+//   * PATCH  /v1/account/near-identities/{public_key} — rename one identity.
+//   * DELETE /v1/account/near-identities/{public_key} — soft-revoke one identity.
+//
+// An identity not owned by the caller (or unknown / already-revoked) is a
+// UNIFORM 404 on rename/remove — no oracle distinguishing not-found from
+// not-owned. `public_key` and `near_account_id` are PUBLIC identifiers (not
+// secrets); they are safe to return in list responses but are NEVER recorded in
+// hash-only audit metadata. Removal is an authenticator change, so it shares the
+// Task 8 strong-authenticator gate with passkey removal; rename and list are
+// not gated.
+// ============================================================================
+
+/// One NEAR identity as surfaced by `GET /v1/account/near-identities`.
+/// `this_session` is `true` only when THIS exact identity (its public key)
+/// authenticated the current (NEAR-login) session — always `false` for passkey
+/// and device-link cookie sessions and for the bearer path, whose
+/// `auth_credential_id` is a credential id or `None` and never equals a NEAR
+/// public key.
+#[derive(Debug, Serialize)]
+struct AccountNearIdentityListItem {
+    near_account_id: String,
+    public_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_used_at: Option<DateTime<Utc>>,
+    this_session: bool,
+}
+
+/// `GET /v1/account/near-identities` — list the caller's ACTIVE NEAR identities.
+///
+/// Dual-auth via `resolve_account_ctx`. The DB op is tenant- + account-scoped
+/// under forced RLS, so another account's identities are never listed.
+/// `this_session` flags the identity that authenticated the current session
+/// (NEAR-login cookie path only). No audit row is written: this is a read of the
+/// caller's own label/timestamp metadata (no key material, no other account's
+/// data), consistent with the passkey list read which also does not audit.
+async fn account_near_identities_list_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let db = account_db(state.as_ref())?;
+
+    let ids = db
+        .list_account_near_identities(&ctx.tenant_id, ctx.account_id.as_uuid())
+        .await
+        .map_err(internal_error)?;
+
+    let near_identities: Vec<AccountNearIdentityListItem> = ids
+        .into_iter()
+        .map(|i| {
+            // True only when THIS NEAR identity authenticated the current session.
+            // NEAR login set `auth_credential_id` to the public key; passkey login
+            // set it to a credential id; device-link is None — none of which can
+            // false-positive against a NEAR public key.
+            let this_session = ctx
+                .auth_credential_id
+                .as_deref()
+                .is_some_and(|active| active == i.public_key);
+            AccountNearIdentityListItem {
+                near_account_id: i.near_account_id,
+                public_key: i.public_key,
+                label: i.label,
+                created_at: i.created_at,
+                last_used_at: i.last_used_at,
+                this_session,
+            }
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({ "near_identities": near_identities })))
+}
+
+/// Request body for `PATCH /v1/account/near-identities/{public_key}`. A blank /
+/// whitespace-only `label` clears the identity's label (stored as NULL).
+#[derive(Debug, Deserialize)]
+struct AccountNearRenameBody {
+    #[serde(default)]
+    label: Option<String>,
+}
+
+/// `PATCH /v1/account/near-identities/{public_key}` — rename one of the caller's
+/// NEAR identities.
+///
+/// Dual-auth via `resolve_account_ctx`. The DB op is tenant- + account-scoped, so
+/// an identity the caller does not own (or one that is unknown / already revoked)
+/// affects zero rows and yields a UNIFORM 404 — no existence oracle. NOT gated:
+/// a rename does not change the authenticator set. Audited hash-only as
+/// `account_near_renamed`, recording ONLY whether a label was set (never the
+/// public key or NEAR account id).
+async fn account_near_identity_rename_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+    AxumPath(public_key): AxumPath<String>,
+    Json(body): Json<AccountNearRenameBody>,
+) -> ApiResult<StatusCode> {
+    let db = account_db(state.as_ref())?;
+
+    // Treat a blank/whitespace label as absent (clears the label).
+    let label = body
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let renamed = db
+        .rename_account_near_identity(
+            &ctx.tenant_id,
+            ctx.account_id.as_uuid(),
+            &public_key,
+            label,
+        )
+        .await
+        .map_err(internal_error)?;
+
+    if !renamed {
+        // Uniform 404: unknown / revoked / not-owned are indistinguishable.
+        return Err(api_error(StatusCode::NOT_FOUND, "near identity not found"));
+    }
+
+    db.append_account_audit(
+        &ctx.tenant_id,
+        "account_near_renamed",
+        &ctx.actor_ref,
+        "success",
+        serde_json::json!({ "labeled": label.is_some() }),
+    )
+    .await
+    .map_err(internal_error)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /v1/account/near-identities/{public_key}` — soft-revoke one of the
+/// caller's NEAR identities.
+///
+/// Dual-auth via `resolve_account_ctx`. Removal is an authenticator change, so it
+/// runs behind the SAME Task 8 strong-authenticator gate as passkey removal: a
+/// weak session may remove only while zero strong authenticators remain
+/// (bootstrapping); otherwise refused with 403. The DB op is tenant- +
+/// account-scoped, so an identity the caller does not own (or unknown / already
+/// revoked) yields a UNIFORM 404. On success returns the count of the account's
+/// remaining strong authenticators. Audited hash-only as `account_near_removed`,
+/// recording ONLY the remaining-strong count (never the public key).
+async fn account_near_identity_remove_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+    AxumPath(public_key): AxumPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    // Strong-authenticator gate (Slice 3a Task 8): a weak session may remove only
+    // while zero strong authenticators remain (bootstrapping); otherwise refused.
+    require_authenticator_change_allowed(state.as_ref(), &ctx).await?;
+
+    let db = account_db(state.as_ref())?;
+
+    let result = db
+        .revoke_account_near_identity(&ctx.tenant_id, ctx.account_id.as_uuid(), &public_key)
+        .await
+        .map_err(internal_error)?;
+
+    if !result.removed {
+        // Uniform 404: unknown / revoked / not-owned are indistinguishable.
+        return Err(api_error(StatusCode::NOT_FOUND, "near identity not found"));
+    }
+
+    db.append_account_audit(
+        &ctx.tenant_id,
+        "account_near_removed",
+        &ctx.actor_ref,
+        "success",
+        serde_json::json!({ "remaining_strong": result.remaining_strong }),
+    )
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(serde_json::json!({
+        "removed": true,
+        "remaining_strong_authenticators": result.remaining_strong,
     })))
 }
 
