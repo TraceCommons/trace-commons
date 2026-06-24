@@ -70,11 +70,16 @@ makes credit **account-centric**:
 ## Component 1 — Credit re-keying (dynamic principal → account)
 
 ### Resolution helper
-Add `resolve_principal_to_account(tenant_id, principal_ref) -> Option<Uuid>` (DB
-method, RLS-scoped): the active link in `trace_account_principals`
-(`unlinked_at IS NULL`) for that principal, else `None`. A principal with no active
-account link resolves to `None` and continues to settle under its own
-principal-derived key (no regression for raw, unmerged devices).
+Add `resolve_principals_to_accounts(tenant_id, principal_refs: &[String]) ->
+HashMap<String, Uuid>` (DB method, RLS-scoped): one **batched** query
+(`SELECT principal_ref, account_id FROM trace_account_principals WHERE tenant_id =
+trace_current_tenant_id() AND unlinked_at IS NULL AND principal_ref = ANY($1)`)
+returning the resolution map for a whole settlement run / credit-view read in a
+single round-trip — **not** a per-event lookup. A principal absent from the map (no
+active account link) settles under its own principal-derived key (no regression for
+raw, unmerged devices). A single-principal convenience wrapper may exist for the
+merge path, but the batch paths (settlement grouping, contributor view) MUST use the
+batched form to avoid N round-trips.
 
 ### Aggregation change (contributor credit view)
 `read_contributor_credit_events_from_db` (`trace-commons-ingest.rs:46860`) currently
@@ -120,10 +125,24 @@ gated below.
    `surviving_account_id == ctx.account_id`. Re-check B is still open. Any failure →
    reject.
 3. Execute atomically in **one tenant tx** (RLS-scoped to A's tenant):
-   - **Move principals**: B's active `trace_account_principals` rows → `account_id = A`.
-   - **Move authenticators**: B's active `trace_webauthn_credentials` and
-     `trace_near_identities` → `account_id = A`. **Clear `payout_designated_at`** on
-     moved NEAR identities (a merge must not create two payout destinations).
+   - **Move principals**: `UPDATE trace_account_principals SET account_id = $A
+     WHERE tenant_id = trace_current_tenant_id() AND account_id = $B AND
+     unlinked_at IS NULL`. Note `account_id` is part of this table's PK
+     `(tenant_id, account_id, principal_ref)`, so this is a **primary-key-column
+     update** (legal in Postgres). It is **collision-free** because the separate
+     `UNIQUE (tenant_id, principal_ref)` guarantees each principal_ref appears once
+     per tenant — so A cannot already hold a row for any of B's principals, and the
+     moved row's new `(tenant_id, A, principal_ref)` cannot duplicate an existing A
+     row. (Do **not** delete+reinsert; a plain UPDATE is correct.)
+   - **Move authenticators**: `UPDATE trace_webauthn_credentials SET account_id = $A
+     …` and `UPDATE trace_near_identities SET account_id = $A …` for B's active rows.
+     Here `account_id` is a **non-key column** (the PKs are `(tenant_id,
+     credential_id)` / `(tenant_id, public_key)`, and credential_id / public_key are
+     globally UNIQUE), so the move changes only `account_id` and **cannot** collide —
+     A can never already hold the same credential. **Clear `payout_designated_at`** on
+     moved NEAR identities in the same UPDATE (a merge must not create two payout
+     destinations; leaving B's payout flag set would create two designated rows under
+     A and violate the partial-unique payout index, aborting the tx).
    - **Revoke B's sessions**; set `B.closed_at = now()`.
    - Mark the proposal `consumed_at`.
    - Credit: nothing to do (dynamic resolution re-attributes B's history to A).
@@ -136,7 +155,32 @@ B==A → friendly no-op/reject; B already closed → reject; proposal expired / 
 owned by A / already consumed → reject. The attacker bar: both a device-B-minted
 link **and** a strong session on A. Irreversible by design (no undo endpoint).
 
+**Accepted behaviors (conscious, not oversights):** (1) Expired-unconsumed merge
+proposals are **not reaped** — they are tenant-scoped, single-use, and harmless;
+confirm rejects on `expires_at`. (2) `merge/start` **consumes device B's single-use
+link even if the user never confirms** — an abandoned merge burns that link with no
+rollback (the proven authority lives in the proposal capability). This is acceptable:
+device B simply mints another link. Both are documented so they are not mistaken for
+gaps.
+
 ## Component 3 — Payout designation & the mockable settlement worker
+
+**Which outbox.** This component drives the **settlement outbox `trace_near_credit_outbox`**
+(migration V2: keyed by `(tenant_id, near_outbox_id)`, FK to
+`trace_credit_settlement_batches`, rows built during settlement via
+`NearCreditReceiptCall::settle`, driven by the `/v1/workers/near-credit-outbox/{submit,confirm}`
+routes). It is **distinct** from `trace_near_credit_account_outbox` (V21, the
+freeze/unfreeze account outbox keyed by `credit_hold_id`), which this slice does not
+touch.
+
+**Where the payout destination lives.** Routing a settlement to a designated
+`near_account_id` requires that id on the row the worker submits. The settle receipt
+is built from attestation hashes (not a NEAR account id), so this slice **adds a
+`payout_near_account_id TEXT` column to `trace_near_credit_outbox`** (a public
+on-chain identifier, consistent with how Slice 3a stores `near_account_id`; NOT an
+audit field), set when the outbox row is created. The submitter reads it to target
+the payout. (This corrects the earlier "no outbox schema change" intent — it is a
+single additive column.)
 
 ### Payout designation
 - `trace_near_identities` gains `payout_designated_at TIMESTAMPTZ` (NULL = not the
@@ -150,12 +194,21 @@ link **and** a strong session on A. Irreversible by design (no undo endpoint).
   - else exactly one active identity → `SoleActive(near_account_id)`;
   - else → `Hold(NoneEnrolled)` (0 active) or `Hold(AmbiguousNoDesignation)` (>1, none designated).
 
-### Settlement holds
-A `Hold` outcome means the credit batch still finalizes internally, but **no NEAR
-outbox row is created** for that account; the per-account `line_items_json` records
-the account-keyed hash + a coarse hold reason, surfaced in the account's credit
+### Settlement holds (and their recovery)
+A `Hold` outcome means the credit batch still finalizes internally, but **no
+`trace_near_credit_outbox` row is created** for that account; the per-account
+`line_items_json` records the account-keyed hash + a coarse hold reason
+(`none_enrolled` / `ambiguous_no_designation`), surfaced in the account's credit
 view so the user can enroll/designate a payout. Money never targets a guessed
 destination.
+
+**Holds are recoverable, not lost.** The repo already has a "repair missing NEAR
+credit outbox items for finalized settlement batches" path (`trace-commons-ingest.rs:19878`).
+This slice extends that repair/sweep so that, once an account designates a payout,
+its previously-held finalized line items get their `trace_near_credit_outbox` rows
+created (status `pending`) on the next worker/repair run — no re-settlement needed.
+A held line item is thus a deferred outbox row keyed off the same finalized batch,
+recovered idempotently (the batch + account-hash UNIQUE prevents duplicates).
 
 ### The submitter trait
 `NearSettlementSubmitter`:
@@ -176,6 +229,19 @@ Three explicit modes via `TRACE_COMMONS_NEAR_SETTLEMENT_MODE`, **default `disabl
   NEAR tx-signing (issuer key custody, nonce, borsh tx, broadcast) is **deferred to
   a future 3b-2**.
 
+**Reconciling with the existing per-request `dry_run` flag.** The submit/confirm
+worker request bodies already carry a per-request `dry_run: bool`
+(`trace-commons-ingest.rs:16830/16855`). The env mode is the **master switch that
+selects the submitter implementation** (`disabled` → no submitter / worker no-ops;
+`dry_run` → `DryRunSubmitter`; `http` → the http adapter). The request-level
+`dry_run` remains a **preview**: it reports what *would* be submitted and **never
+mutates outbox state** (never advances to submitted/confirmed), regardless of mode.
+Precedence: env mode decides whether real submission is even possible; request
+`dry_run=true` is always a non-mutating preview on top. This closes the
+prod-safety gap — in a production `disabled`/`http` deployment, a request
+`dry_run=true` cannot synthesize a confirmation, and `dry_run` *mode* must be set
+deliberately (it is never the default).
+
 ### Worker behaviour
 The existing worker routes (`/v1/workers/near-credit-outbox/{submit,confirm}`,
 utility-operator gated) drive the trait. Idempotency / no double-submit: the worker
@@ -191,12 +257,18 @@ outbox call targets the resolved payout `near_account_id`.
   ON DELETE CASCADE, proposal_id UUID, surviving_account_id UUID, absorbed_account_id
   UUID, absorbed_principal_count INT NOT NULL DEFAULT 0, created_at, expires_at,
   consumed_at; PK (tenant_id, proposal_id); FKs to trace_accounts for both account
-  ids; forced RLS + `trace_corpus_tenant_isolation`; registered in
-  `TRACE_COMMONS_RLS_TABLES` + coverage arrays). **No** resolver grant.
+  ids; forced RLS + `trace_corpus_tenant_isolation`; registered in the RLS table
+  registry + the migration-policy coverage arrays — **confirm the exact registry
+  symbol against the codebase** (Slice 3a registered `trace_near_identities` the same
+  way; the constant name in this spec may be approximate)). **No** resolver grant.
 - **Alter** `trace_near_identities`: add `payout_designated_at TIMESTAMPTZ` + the
-  partial-unique payout index.
-- **No** `trace_credit_ledger` change; **no** settlement-batch/outbox schema change
-  (account-keying is a value change; holds live in `line_items_json`).
+  partial-unique payout index `(tenant_id, account_id) WHERE payout_designated_at IS
+  NOT NULL AND revoked_at IS NULL`.
+- **Alter** `trace_near_credit_outbox` (V2, the settlement outbox): add a single
+  additive `payout_near_account_id TEXT` column (see Component 3).
+- **No** `trace_credit_ledger` change (dynamic resolution); **no**
+  settlement-batch schema change (account-keying is a value change; holds live in
+  `line_items_json`).
 
 ## Error handling & security
 
