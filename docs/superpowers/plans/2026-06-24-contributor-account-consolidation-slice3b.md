@@ -65,7 +65,9 @@ Mirror `migrations/V33__near_identities.sql` exactly for the RLS/forced-RLS/poli
 
 ---
 
-## Phase 2 — Credit re-keying
+## Phase 2 — Credit re-keying & payout resolution
+
+> Ordering note (from plan review): the payout DB methods (Task 4) come **before** the settlement re-key (Task 5) so the settlement subagent has `resolve_payout_near_account_id` available and owns a single file-set. The payout *handler* is split out to Task 6.
 
 ### Task 3: Re-key the contributor credit view
 
@@ -73,16 +75,28 @@ Mirror `migrations/V33__near_identities.sql` exactly for the RLS/forced-RLS/poli
 
 The current path builds `owner_by_submission: BTreeMap<submission_id, auth_principal_ref>` and groups events by principal. Change the grouping key to the resolved account (fall back to the principal string when unlinked).
 
+- [ ] **Step 0 — PRECONDITION (do not skip):** read the current `read_contributor_credit_events_from_db` response shape and record exactly what identifier it emits to the client today (raw principal_ref? a hash? nothing?). The re-key must NOT newly leak a raw principal_ref that wasn't exposed before — if the view emits a client-visible owner key, the account-keyed replacement must be `sha256("account:"+id)` (label-only), matching the prior leak posture.
 - [ ] **Step 1 — failing test:** seed an account A with two principals each owning a submission with credit events; assert the contributor credit view for A sums BOTH submissions' credit under one account-keyed group. Seed a third unlinked principal with credit; assert it still appears under its own principal key. (Use the existing credit-view test helpers; if none, read events via the DB methods.)
 - [ ] **Step 2 — FAIL.**
-- [ ] **Step 3 — implement:** after loading the owner principals, call `resolve_principals_to_accounts(tenant, &distinct_principal_refs)` ONCE; map each event's owner principal to `account:{uuid}` when present, else the raw principal_ref; group by that resolved key. Keep the response shape; only the grouping key changes. (If the view currently exposes a principal-shaped identifier to the client, expose the account-keyed identifier as a hash `sha256("account:"+id)` to stay label-only — match whatever the current view emits; do NOT leak raw principal_refs that weren't leaked before.)
+- [ ] **Step 3 — implement:** after loading the owner principals, call `resolve_principals_to_accounts(tenant, &distinct_principal_refs)` ONCE; map each event's owner principal to `account:{uuid}` when present, else the raw principal_ref; group by that resolved key. Keep the response shape; only the grouping key changes (honor the Step 0 leak posture).
 - [ ] **Step 4 — PASS** (real PG).
 - [ ] **Step 5 — gates + commit** `Re-key contributor credit view by resolved account`.
 
-### Task 4: Re-key settlement grouping + account-keyed outbox + payout/hold
+### Task 4: Payout designation DB ops + resolution
 
-**Files:** `trace-commons-ingest.rs` (~20010 settlement grouping; ~20051-20084 outbox build), `tests.rs`. Depends on Task 5's `resolve_payout_near_account_id` — implement that DB method first (it has no handler dependency), or stub the payout resolution here and wire it in Task 5. **Recommended:** do Task 5's DB method (`resolve_payout_near_account_id`) before this task; reorder if needed.
+**Files:** `db/postgres.rs`, `db/mod.rs`, `tests.rs`. (DB layer only — the HTTP handler is Task 6.)
 
+- [ ] **Step 1 — failing tests** (DB-backed): `designate_payout_near_identity(tenant, account_id, public_key)` sets `payout_designated_at` and clears any other active designation for the account (so ≤1 holds); `clear_payout_near_identity` unsets it; `resolve_payout_near_account_id` returns `Designated` when set, `SoleActive` when exactly one active identity and none designated, `Hold(NoneEnrolled)` at zero, `Hold(AmbiguousNoDesignation)` at >1 none-designated.
+- [ ] **Step 2 — FAIL.**
+- [ ] **Step 3 — implement** on `PgBackend` + `Database` trait: `designate_payout_near_identity` in one tenant tx (`UPDATE trace_near_identities SET payout_designated_at = NULL WHERE tenant_id = trace_current_tenant_id() AND account_id = $1 AND payout_designated_at IS NOT NULL` then `UPDATE ... SET payout_designated_at = now() WHERE ... AND public_key = $2 AND revoked_at IS NULL`; return `bool` affected → caller 404s if not owned/active). `clear_payout_near_identity`. `resolve_payout_near_account_id(tenant, account_id) -> PayoutResolution` (new enum in `db/mod.rs`: `Designated(String)|SoleActive(String)|Hold(PayoutHoldReason)` where `PayoutHoldReason = NoneEnrolled|AmbiguousNoDesignation`). Add an `is_payout` field (from `payout_designated_at IS NOT NULL`) to `NearIdentitySummary` (used by Task 6's list).
+- [ ] **Step 4 — PASS** (real PG).
+- [ ] **Step 5 — gates + commit** `Add NEAR payout designation DB ops with fail-closed resolution`.
+
+### Task 5: Re-key settlement grouping + account-keyed outbox + payout/hold
+
+**Files:** `trace-commons-ingest.rs` (~20010 settlement grouping; ~20051-20084 outbox build), `tests.rs`. Uses Task 4's `resolve_payout_near_account_id`.
+
+- [ ] **Step 0 — PRECONDITION:** read the current outbox-build + `line_items_json` shape (~20051-20084) and confirm where `credit_account_hash` and the new `payout_near_account_id` land on the `TraceNearCreditOutboxItem` (Task 1 added the column; confirm the Rust struct + insert are updated to carry it).
 - [ ] **Step 1 — failing test:** finalize a settlement for an account with 2 principals; assert ONE account-keyed line item summing both principals' micros, `credit_account_hash = sha256_prefixed("account:"+account_id)`, and (with a designated payout NEAR identity) an outbox row whose `payout_near_account_id` is the designated `near_account_id`. Assert an account with 0 NEAR identities → line item marked held (`none_enrolled`), NO outbox row. Assert an unlinked principal still settles under its own `sha256_prefixed(principal_ref)` key.
 - [ ] **Step 2 — FAIL.**
 - [ ] **Step 3 — implement:** before the grouping loop, batch-resolve all `selected_events` principals to accounts. Group by resolved key (`account:{uuid}` or raw principal). For each group: `credit_account_hash = sha256_prefixed(resolved_key)`. For account groups, call `resolve_payout_near_account_id(tenant, account_id)`:
@@ -95,23 +109,23 @@ The current path builds `owner_by_submission: BTreeMap<submission_id, auth_princ
 
 ---
 
-## Phase 3 — Payout designation
+## Phase 3 — Payout management surface
 
-### Task 5: Payout designation DB ops + management endpoint
+### Task 6: Payout designation handler + is_payout in list
 
-**Files:** `db/postgres.rs`, `db/mod.rs`, `trace-commons-ingest.rs` (near-identity management ~13949-14091, routes ~5888-5946), `tests.rs`.
+**Files:** `trace-commons-ingest.rs` (near-identity management ~13949-14091, routes ~5888-5946), `tests.rs`. Uses Task 4's DB methods.
 
-- [ ] **Step 1 — failing tests** (DB-backed): `designate_payout_near_identity(tenant, account_id, public_key)` sets `payout_designated_at` and clears any other active designation for the account (so ≤1 holds); `clear_payout` unsets it; `resolve_payout_near_account_id` returns `Designated` when set, `SoleActive` when exactly one active identity and none designated, `Hold(NoneEnrolled)` at zero, `Hold(AmbiguousNoDesignation)` at >1 none-designated. HTTP: `PATCH /v1/account/near-identities/{public_key}/payout` (strong-auth-gated) designates; the list (`GET /v1/account/near-identities`) now returns `is_payout`. Cross-account: B can't designate A's identity (404).
+- [ ] **Step 1 — failing tests** (DB-backed, HTTP): `PATCH /v1/account/near-identities/{public_key}/payout` (strong-auth-gated) designates payout; `GET /v1/account/near-identities` now returns `is_payout` per identity; clearing works. Cross-account: B can't designate A's identity (404). Weak session → 403.
 - [ ] **Step 2 — FAIL.**
-- [ ] **Step 3 — implement:** DB method `designate_payout_near_identity` in one tenant tx: `UPDATE trace_near_identities SET payout_designated_at = NULL WHERE tenant_id = trace_current_tenant_id() AND account_id = $1 AND payout_designated_at IS NOT NULL` then `UPDATE ... SET payout_designated_at = now() WHERE ... AND public_key = $2 AND revoked_at IS NULL` (return `bool` removed/affected → 404 if not owned/active). `clear_payout_near_identity`. `resolve_payout_near_account_id(tenant, account_id) -> PayoutResolution` (new enum in `db/mod.rs`: `Designated(String)|SoleActive(String)|Hold(PayoutHoldReason)`). Add `is_payout` (derived from `payout_designated_at IS NOT NULL`) to `NearIdentitySummary` + the list handler JSON. New handler `account_near_identity_designate_payout_handler` mirroring `account_near_identity_rename_handler`, **gated** with `require_authenticator_change_allowed` (changing where money goes is at least authenticator-sensitive). Audit `account_payout_designated` (hash-only, `{}`). Route under `authenticated_account_routes`.
+- [ ] **Step 3 — implement:** new handler `account_near_identity_designate_payout_handler` mirroring `account_near_identity_rename_handler`, **gated** with `require_authenticator_change_allowed` (changing where money goes is at least authenticator-sensitive); calls `designate_payout_near_identity`/`clear_payout_near_identity`; audit `account_payout_designated` (hash-only, `{}`). Surface `is_payout` in the list handler JSON. Route under `authenticated_account_routes`.
 - [ ] **Step 4 — PASS** (real PG).
-- [ ] **Step 5 — gates + commit** `Add NEAR payout designation with fail-closed resolution`.
+- [ ] **Step 5 — gates + commit** `Add NEAR payout designation endpoint`.
 
 ---
 
 ## Phase 4 — Device-principal merge
 
-### Task 6: Merge DB operations (stage + execute, atomic)
+### Task 7: Merge DB operations (stage + execute, atomic)
 
 **Files:** `db/postgres.rs`, `db/mod.rs`, `tests.rs`.
 
@@ -121,7 +135,7 @@ The current path builds `owner_by_submission: BTreeMap<submission_id, auth_princ
 - [ ] **Step 4 — PASS** (real PG, `--test-threads=1`).
 - [ ] **Step 5 — gates + commit** `Add device-principal merge DB operations`.
 
-### Task 7: Merge handlers (start + strong-auth-gated confirm)
+### Task 8: Merge handlers (start + strong-auth-gated confirm)
 
 **Files:** `trace-commons-ingest.rs` (handlers + routes ~5888-5946), `tests.rs`.
 
@@ -131,7 +145,7 @@ The current path builds `owner_by_submission: BTreeMap<submission_id, auth_princ
 - [ ] **Step 4 — PASS** (real PG).
 - [ ] **Step 5 — gates + commit** `Add merge start and strong-auth-gated confirm handlers`.
 
-### Task 8: Defensive closed-account gating
+### Task 9: Defensive closed-account gating
 
 **Files:** `db/postgres.rs` (`validate_session` SELECT ~1983 and/or `create_or_reuse_account` ~1719; `resolve_account_ctx` paths in ingest.rs), `tests.rs`.
 
@@ -147,11 +161,11 @@ Session validation does NOT currently exclude closed accounts. After merge, B's 
 
 ## Phase 5 — Mockable settlement worker
 
-### Task 9: Submitter trait + modes + worker wiring + hold recovery
+### Task 10: Submitter trait + modes + worker wiring + hold recovery
 
 **Files:** Create `crates/trace-commons-server/src/account_settlement.rs` (+ `pub mod account_settlement;` in `lib.rs`); modify `config.rs` (or the env-parse area in ingest.rs), `trace-commons-ingest.rs` (worker handlers ~21615-21681, the repair path ~20256), AppState + test constructors, `tests.rs`.
 
-- [ ] **Step 1 — failing tests:** `NearSettlementMode::from_env` parses `disabled`(default)/`dry_run`/`http`. With mode `disabled`: the submit worker no-ops (rows stay `pending`/`disabled`, none → `submitted`). With mode `dry_run`: a `DryRunSubmitter.submit` returns a deterministic synthetic `near_transaction_hash` (e.g. `sha256_prefixed("dryrun:"+idempotency_key)` shaped to the hash column), the worker flips `pending → submitted`, and confirm flips `submitted → confirmed`; a re-run does NOT re-submit an already-`submitted` row (idempotency). A per-request `dry_run=true` under any mode is a non-mutating preview (no status change). Hold-recovery: a finalized batch with a held line item (no outbox row) gets its outbox row created (status `pending`) by the repair path once the account has a designated payout — idempotent (the `UNIQUE(tenant, settlement_batch_id, credit_account_hash)` prevents dupes).
+- [ ] **Step 1 — failing tests:** `NearSettlementMode::from_env` parses `disabled`(default)/`dry_run`/`http`. With mode `disabled`: the submit worker no-ops (rows stay `pending`/`disabled`, none → `submitted`). With mode `dry_run`: a `DryRunSubmitter.submit` returns a deterministic synthetic `near_transaction_hash` (e.g. `sha256_prefixed("dryrun:"+idempotency_key)` shaped to the hash column), the worker flips `pending → submitted`, and confirm flips `submitted → confirmed`; a re-run does NOT re-submit an already-`submitted` row (idempotency). A per-request `dry_run=true` under any mode is a non-mutating preview (no status change). **A submitter error → the row transitions to `failed` with `last_error_hash` set (hash-only, no raw error)** — assert this failure path explicitly. Hold-recovery: a finalized batch with a held line item (no outbox row) gets its outbox row created (status `pending`) by the repair path once the account has a designated payout — idempotent (the `UNIQUE(tenant, settlement_batch_id, credit_account_hash)` prevents dupes).
 - [ ] **Step 2 — FAIL.**
 - [ ] **Step 3 — implement:**
   - `account_settlement.rs`: `pub trait NearSettlementSubmitter { async fn submit(&self, call: &serde_json::Value, idempotency_key: &str) -> anyhow::Result<String /* near_tx_hash */>; }` (+ a confirm trait or reuse the existing `TraceNearCreditConfirmer`); `pub struct DryRunSubmitter;` impl returning the deterministic hash; `pub enum NearSettlementMode { Disabled, DryRun, Http }` + `from_env()` reading `TRACE_COMMONS_NEAR_SETTLEMENT_MODE` (default `Disabled`).
@@ -164,7 +178,7 @@ Session validation does NOT currently exclude closed accounts. After merge, B's 
 
 ## Phase 6 — Sweep
 
-### Task 10: Regression suite, operator docs, full gates
+### Task 11: Regression suite, operator docs, full gates
 
 **Files:** `tests.rs` (consolidation), `docs/operator/*`, residual-risk notes.
 
