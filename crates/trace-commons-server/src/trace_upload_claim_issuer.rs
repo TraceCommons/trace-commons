@@ -563,6 +563,9 @@ struct TraceUploadClaimRequest {
     consent_scopes: Vec<ConsentScope>,
     #[serde(default)]
     allowed_uses: Vec<TraceAllowedUse>,
+    #[serde(default)]
+    #[allow(dead_code)] // consumed by Task 2 (principal derivation)
+    subject: Option<String>,
     requested_at: DateTime<Utc>,
 }
 
@@ -2448,6 +2451,30 @@ fn principal_storage_ref(value: &str) -> String {
     format!("principal_sha256:{}", hex::encode(digest))
 }
 
+/// Maximum accepted byte length for a client-supplied subject.
+#[allow(dead_code)] // consumed by Task 2 (principal derivation)
+const MAX_SUBJECT_LEN: usize = 128;
+
+/// Validate and normalize an opaque per-user subject. The subject is a
+/// pseudonymous token minted by the client; we only enforce a conservative
+/// shape so it is safe to embed in a derived principal string. We never trust a
+/// client-supplied principal prefix — the namespaced principal is built in
+/// `issue_claim_for_device_key`.
+#[allow(dead_code)] // consumed by Task 2 (principal derivation)
+fn normalize_subject(raw: &str) -> Result<String, IssuerError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > MAX_SUBJECT_LEN {
+        return Err(IssuerError::bad_request("invalid subject"));
+    }
+    if !trimmed
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'-'))
+    {
+        return Err(IssuerError::bad_request("invalid subject"));
+    }
+    Ok(trimmed.to_string())
+}
+
 fn validate_eddsa_private_key_pem(pem: &str) -> anyhow::Result<String> {
     let pem = pem.trim();
     anyhow::ensure!(!pem.contains("RSA"), "RSA keys are not supported");
@@ -2552,6 +2579,20 @@ mod tests {
     };
     use trace_commons_protocol::onboarding::TRACE_ONBOARD_REQUEST_SCHEMA_VERSION;
     use trace_commons_protocol::trace_contribution::{ConsentScope, TraceAllowedUse};
+
+    #[test]
+    fn normalize_subject_accepts_pseudonymous_token() {
+        let s = normalize_subject("  tenant_sha256:ab12CD_-  ").expect("valid");
+        assert_eq!(s, "tenant_sha256:ab12CD_-");
+    }
+
+    #[test]
+    fn normalize_subject_rejects_empty_and_oversized_and_bad_chars() {
+        assert!(normalize_subject("   ").is_err());
+        assert!(normalize_subject(&"a".repeat(129)).is_err());
+        assert!(normalize_subject("has space").is_err());
+        assert!(normalize_subject("bad/slash").is_err());
+    }
 
     const TEST_EDDSA_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIAGfN68ko7YyCGJMb3lHVwTn5aiUtbIsAclIx/lX0p2R\n-----END PRIVATE KEY-----\n";
     const TEST_EDDSA_PUBLIC_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAMnniSMeHZrdoe3gkL7ZeHmG7vAg65c5TqaBd71B2qDw=\n-----END PUBLIC KEY-----\n";
@@ -2883,6 +2924,7 @@ mod tests {
             submission_id: None,
             consent_scopes: vec![ConsentScope::PublicAttribution],
             allowed_uses: Vec::new(),
+            subject: None,
             requested_at: Utc::now(),
         };
         let response = state
@@ -2921,6 +2963,7 @@ mod tests {
             submission_id: None,
             consent_scopes: vec![ConsentScope::PublicAttribution],
             allowed_uses: Vec::new(),
+            subject: None,
             requested_at: Utc::now(),
         };
         assert!(
@@ -2964,6 +3007,7 @@ mod tests {
                 ConsentScope::PublicAttribution,
             ],
             allowed_uses: vec![TraceAllowedUse::Debugging],
+            subject: None,
             requested_at: Utc::now(),
         };
         let response = state
@@ -3007,6 +3051,7 @@ mod tests {
             submission_id: None,
             consent_scopes: vec![ConsentScope::ModelTraining],
             allowed_uses: vec![TraceAllowedUse::ModelTraining],
+            subject: None,
             requested_at: Utc::now(),
         };
         assert!(state.issue_claim(&workload, request).await.is_err());
