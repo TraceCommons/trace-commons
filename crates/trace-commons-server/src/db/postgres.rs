@@ -1856,22 +1856,61 @@ impl Database for PgBackend {
         .await
         .map_err(DatabaseError::Postgres)?;
 
-        // Register the device key (the principal). Idempotent on device_key_id.
-        tx.execute(
-            "INSERT INTO device_keys
-                 (device_key_id, tenant_id, public_key, invite_subject_hash, client_info)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (device_key_id) DO NOTHING",
-            &[
-                &p.device_key_id,
-                &p.tenant_id,
-                &p.public_key,
-                &p.instance_subject_hash,
-                &p.client_info,
-            ],
-        )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        // Register the device key (the principal). `device_key_id` is a GLOBAL
+        // primary key, so an `ON CONFLICT DO NOTHING` no-op can mean the key
+        // already exists under a DIFFERENT tenant or is revoked here — in which
+        // case the device's bearer would not authenticate to the derived tenant.
+        // Mirror `onboard_device_key`: insert-or-reselect and accept only an
+        // identical, non-revoked row under THIS tenant; otherwise fail closed so
+        // enrollment never reports success for an unusable device key.
+        let inserted = tx
+            .query_opt(
+                "INSERT INTO device_keys
+                     (device_key_id, tenant_id, public_key, invite_subject_hash, client_info)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (device_key_id) DO NOTHING
+                 RETURNING device_key_id",
+                &[
+                    &p.device_key_id,
+                    &p.tenant_id,
+                    &p.public_key,
+                    &p.instance_subject_hash,
+                    &p.client_info,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+
+        if inserted.is_none() {
+            let existing = tx
+                .query_opt(
+                    "SELECT public_key, revoked_at
+                       FROM device_keys
+                      WHERE tenant_id = $1 AND device_key_id = $2",
+                    &[&p.tenant_id, &p.device_key_id],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            let usable = match existing {
+                Some(row) => {
+                    let public_key: String = row.get("public_key");
+                    let revoked_at: Option<chrono::DateTime<chrono::Utc>> = row.get("revoked_at");
+                    public_key == p.public_key && revoked_at.is_none()
+                }
+                None => false,
+            };
+            if !usable {
+                return Err(DatabaseError::Pool(
+                    "instance enroll device key conflict: not usable under derived tenant"
+                        .to_string(),
+                ));
+            }
+        }
+
+        // Grant the default contributor tenant-access grant so the device can mint
+        // upload claims under the `require_tenant_access_grants` gate, exactly like
+        // an invite-onboarded device. Same helper, same principal_ref derivation.
+        upsert_onboarding_device_tenant_access_grant(&tx, &p.tenant_id, &p.device_key_id).await?;
 
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(())
@@ -1945,6 +1984,36 @@ impl Database for PgBackend {
         } else {
             crate::db::InstanceEnrollmentOutcome::ExistingUser
         })
+    }
+
+    async fn instance_ledger_rls_ready(&self) -> Result<bool, DatabaseError> {
+        let client = self.trace_pool().get().await?;
+        let row = client
+            .query_one(
+                "SELECT
+                    EXISTS (
+                        SELECT 1
+                          FROM pg_class c
+                          JOIN pg_namespace n ON n.oid = c.relnamespace
+                         WHERE n.nspname = current_schema()
+                           AND c.relname = 'trace_instance_enrollments'
+                           AND c.relrowsecurity
+                           AND c.relforcerowsecurity
+                    ) AS rls_forced,
+                    EXISTS (
+                        SELECT 1
+                          FROM pg_policies
+                         WHERE schemaname = current_schema()
+                           AND tablename = 'trace_instance_enrollments'
+                           AND policyname = 'trace_instance_isolation'
+                    ) AS policy_present",
+                &[],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let rls_forced: bool = row.get("rls_forced");
+        let policy_present: bool = row.get("policy_present");
+        Ok(rls_forced && policy_present)
     }
 
     async fn create_or_reuse_account(

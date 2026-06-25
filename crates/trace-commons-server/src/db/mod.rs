@@ -318,6 +318,14 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         max_enrollments: i64,
     ) -> Result<InstanceEnrollmentOutcome, DatabaseError>;
 
+    /// Verify the V35 instance-enrollment ledger has forced row-level security
+    /// and its `trace_instance_isolation` policy installed. The ledger isolates
+    /// on the INSTANCE predicate (`trace_current_instance_subject()`), not the
+    /// tenant predicate, so it is intentionally absent from the tenant RLS
+    /// diagnostics; this check lets the production-readiness gate catch RLS drift
+    /// on the ledger. Returns `false` (fail-closed) if either control is missing.
+    async fn instance_ledger_rls_ready(&self) -> Result<bool, DatabaseError>;
+
     /// Create-or-reuse the durable account for `principal_ref` within `tenant_id`.
     /// Returns the stable `account_id`. Idempotent: repeated calls for the same
     /// active principal return the same account. Tolerates a concurrent racing

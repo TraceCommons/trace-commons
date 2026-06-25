@@ -1762,8 +1762,7 @@ impl TraceUploadClaimIssuerState {
         // Derive the device key id from the device public key.
         let device_key_id = device_key_id_from_public_key_bytes(&device_pk_bytes);
 
-        // Verify attestation signature FIRST (before any DB call).
-        let signing_bytes = instance_enroll_attestation_signing_bytes(&request.attestation);
+        // Decode the attestation signature.
         let sig_bytes = base64::engine::general_purpose::STANDARD
             .decode(request.attestation_sig.trim())
             .map_err(|_| {
@@ -1772,37 +1771,10 @@ impl TraceUploadClaimIssuerState {
                     TraceOnboardErrorCode::EnrollNotAuthorized,
                 )
             })?;
-        verify_instance_attestation_signature(&instance_pk_bytes, &signing_bytes, &sig_bytes)?;
 
-        // Validate attestation fields.
-        let att = &request.attestation;
-        if att.aud != self.audience {
-            return Err(IssuerError::onboard_error(
-                StatusCode::FORBIDDEN,
-                TraceOnboardErrorCode::EnrollNotAuthorized,
-            ));
-        }
-        // Fix 2: device_key_id mismatch is a signed-field verification failure;
-        // return the same uniform 403 as bad sig / wrong aud / wrong instance_id
-        // so it does not act as a distinguishable enumeration oracle.
-        if att.device_key_id != device_key_id {
-            return Err(IssuerError::onboard_error(
-                StatusCode::FORBIDDEN,
-                TraceOnboardErrorCode::EnrollNotAuthorized,
-            ));
-        }
-        let now_ts = chrono::Utc::now().timestamp();
-        // Fix 1: bound exp both ways — reject if expired (lower) OR more than
-        // 5 minutes in the future (upper).  The upper bound also caps replay-cache
-        // TTL, preventing unbounded memory growth from far-future exp values.
-        if att.exp <= now_ts || att.exp > now_ts + 300 {
-            return Err(IssuerError::onboard_error(
-                StatusCode::FORBIDDEN,
-                TraceOnboardErrorCode::EnrollNotAuthorized,
-            ));
-        }
-
-        // Look up instance in the allowlist.
+        // Look up the instance in the allowlist BEFORE verifying, so the
+        // signature is checked against the REGISTERED key bytes rather than the
+        // request's copy. An unknown instance returns the same uniform 403.
         let snapshot = self.onboard_allowlist_snapshot()?;
         let instance_subject_hash = hash_instance_subject(&instance_pk_bytes);
         let Some(entry) = snapshot.instance_entry(&instance_subject_hash) else {
@@ -1813,7 +1785,24 @@ impl TraceUploadClaimIssuerState {
             ));
         };
 
-        // Validate that the attestation instance_id matches the allowlist.
+        // Verify the attestation signature against the registered instance key
+        // (before any DB call).
+        let signing_bytes = instance_enroll_attestation_signing_bytes(&request.attestation);
+        verify_instance_attestation_signature(
+            &entry.instance_public_key,
+            &signing_bytes,
+            &sig_bytes,
+        )?;
+
+        // Validate attestation fields. All verification failures collapse to the
+        // same uniform 403 so the endpoint is not an enumeration oracle.
+        let att = &request.attestation;
+        if att.aud != self.audience {
+            return Err(IssuerError::onboard_error(
+                StatusCode::FORBIDDEN,
+                TraceOnboardErrorCode::EnrollNotAuthorized,
+            ));
+        }
         if att.instance_id != entry.instance_id {
             self.denial_counter.record();
             return Err(IssuerError::onboard_error(
@@ -1821,8 +1810,45 @@ impl TraceUploadClaimIssuerState {
                 TraceOnboardErrorCode::EnrollNotAuthorized,
             ));
         }
+        // device_key_id mismatch is a signed-field verification failure; same
+        // uniform 403 as bad sig / wrong aud / wrong instance_id.
+        if att.device_key_id != device_key_id {
+            return Err(IssuerError::onboard_error(
+                StatusCode::FORBIDDEN,
+                TraceOnboardErrorCode::EnrollNotAuthorized,
+            ));
+        }
+        let now_ts = chrono::Utc::now().timestamp();
+        // Bound exp both ways: reject if expired (lower) OR more than 5 minutes
+        // in the future (upper). The upper bound also caps the replay-cache TTL,
+        // preventing unbounded memory growth from far-future exp values.
+        if att.exp <= now_ts || att.exp > now_ts + 300 {
+            return Err(IssuerError::onboard_error(
+                StatusCode::FORBIDDEN,
+                TraceOnboardErrorCode::EnrollNotAuthorized,
+            ));
+        }
 
-        // Rate-limit: use entry's rate_per_min or fall back to the default.
+        // Replay guard BEFORE rate limiting, so a replayed nonce cannot burn the
+        // instance's rate budget. The key is a domain-separated hash — the raw
+        // nonce never enters the in-memory cache. `is_seen` does not record;
+        // `record` runs only after provisioning succeeds (a transient DB failure
+        // must not permanently burn the nonce). Concurrent same-nonce requests
+        // that slip past the pre-check are handled by `reserve_instance_enrollment`
+        // idempotency (ON CONFLICT DO NOTHING + cap enforcement).
+        let ttl_secs = (att.exp - now_ts).max(60) as u64;
+        let replay_key = instance_enroll_replay_key(&instance_subject_hash, &att.nonce);
+        if self
+            .instance_replay_cache
+            .is_seen(&replay_key, std::time::Instant::now())
+        {
+            return Err(IssuerError::onboard_error(
+                StatusCode::FORBIDDEN,
+                TraceOnboardErrorCode::EnrollNotAuthorized,
+            ));
+        }
+
+        // Rate-limit: entry's rate_per_min or the configured default.
         let rate_per_min = entry
             .rate_per_min
             .unwrap_or(self.instance_enroll_default_rate_per_min);
@@ -1834,24 +1860,6 @@ impl TraceUploadClaimIssuerState {
             return Err(IssuerError::onboard_error(
                 StatusCode::TOO_MANY_REQUESTS,
                 TraceOnboardErrorCode::EnrollRateLimited,
-            ));
-        }
-
-        // Fix 3: Split replay guard into check-before / record-after so that a
-        // transient DB failure (→ 500) does not permanently burn the nonce.
-        // `is_seen` checks without recording; `record` is called only after
-        // `enroll_instance_user` succeeds.  Concurrent same-nonce requests that
-        // slip through the pre-check are handled by `reserve_instance_enrollment`
-        // idempotency (ON CONFLICT DO NOTHING + cap enforcement).
-        let ttl_secs = (att.exp - now_ts).max(60) as u64;
-        let replay_key = format!("{}|{}", instance_subject_hash, att.nonce);
-        if self.instance_replay_cache.is_seen(
-            &replay_key,
-            std::time::Instant::now(),
-        ) {
-            return Err(IssuerError::onboard_error(
-                StatusCode::FORBIDDEN,
-                TraceOnboardErrorCode::EnrollNotAuthorized,
             ));
         }
 
@@ -2228,6 +2236,18 @@ fn verify_instance_attestation_signature(
                 TraceOnboardErrorCode::EnrollNotAuthorized,
             )
         })
+}
+
+/// Domain-separated, hash-only replay-cache key. The raw nonce never enters the
+/// in-memory replay cache; only this digest of `(instance_subject_hash, nonce)`
+/// does, keeping the cache consistent with the hash-only convention.
+fn instance_enroll_replay_key(instance_subject_hash: &str, nonce: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"instance_enroll_replay:");
+    hasher.update(instance_subject_hash.as_bytes());
+    hasher.update(b"|");
+    hasher.update(nonce.as_bytes());
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 fn verify_device_workload_jwt(

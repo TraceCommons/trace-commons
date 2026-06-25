@@ -281,19 +281,32 @@ impl AllowlistSnapshot {
                     .map(str::trim)
                     .filter(|l| !l.is_empty())
                     .map(ToString::to_string);
-                instances_by_hash.entry(subject.clone()).or_insert(InstanceSnapshotEntry {
-                    instance_subject_hash: subject,
-                    instance_id: instance_id.to_string(),
-                    instance_public_key: pk,
-                    max_enrollments,
-                    rate_per_min: entry.rate_per_min,
-                    policy_template: InstancePolicyTemplateSnapshot {
-                        policy_version: tmpl.policy_version.trim().to_string(),
-                        allowed_consent_scopes: tmpl.allowed_consent_scopes.clone(),
-                        allowed_uses: tmpl.allowed_uses.clone(),
+                // Reject duplicate instance public keys outright (unlike invites,
+                // which dedupe silently). Two instance entries for the same key
+                // with diverging instance_id / cap / rate / policy_template is an
+                // operator mistake we must surface, not silently resolve to the
+                // first-seen entry.
+                if instances_by_hash.contains_key(&subject) {
+                    return Err(AllowlistError::Malformed(format!(
+                        "duplicate instance entry for subject {subject}"
+                    )));
+                }
+                instances_by_hash.insert(
+                    subject.clone(),
+                    InstanceSnapshotEntry {
+                        instance_subject_hash: subject,
+                        instance_id: instance_id.to_string(),
+                        instance_public_key: pk,
+                        max_enrollments,
+                        rate_per_min: entry.rate_per_min,
+                        policy_template: InstancePolicyTemplateSnapshot {
+                            policy_version: tmpl.policy_version.trim().to_string(),
+                            allowed_consent_scopes: tmpl.allowed_consent_scopes.clone(),
+                            allowed_uses: tmpl.allowed_uses.clone(),
+                        },
+                        contributor_label,
                     },
-                    contributor_label,
-                });
+                );
             } else {
                 // --- Invite entry (default kind) ---
                 // Strict: the file's hashes must already be canonical
@@ -929,6 +942,33 @@ mod tests {
                     "max_enrollments": 1,
                     "policy_template": {{"policy_version": "v", "allowed_consent_scopes": [], "allowed_uses": []}}
                 }}]
+            }}"#
+        ))
+        .unwrap();
+        assert!(matches!(
+            AllowlistSnapshot::from_file(file, "test".into(), Instant::now()),
+            Err(AllowlistError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn snapshot_rejects_duplicate_instance_entries() {
+        use base64::Engine as _;
+        // Same public key in two instance entries with diverging config is an
+        // operator mistake; reject the whole snapshot rather than silently
+        // keeping the first (unlike invite entries, which dedupe).
+        let pk = base64::engine::general_purpose::STANDARD.encode([5u8; 32]);
+        let file: AllowlistFile = serde_json::from_str(&format!(
+            r#"{{
+                "version": 1, "generated_at": "2026-06-24T00:00:00Z", "policy_label": "p",
+                "entries": [
+                    {{"kind": "instance", "instance_id": "i-one", "instance_public_key": "{pk}",
+                      "max_enrollments": 10,
+                      "policy_template": {{"policy_version": "v1", "allowed_consent_scopes": [], "allowed_uses": []}}}},
+                    {{"kind": "instance", "instance_id": "i-two", "instance_public_key": "{pk}",
+                      "max_enrollments": 999,
+                      "policy_template": {{"policy_version": "v2", "allowed_consent_scopes": [], "allowed_uses": []}}}}
+                ]
             }}"#
         ))
         .unwrap();

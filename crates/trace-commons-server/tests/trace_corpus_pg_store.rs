@@ -3795,8 +3795,90 @@ async fn enroll_instance_user_provisions_tenant_and_device_key() {
         .get(0);
     assert_eq!(device_count, 1, "exactly one device key row must exist");
 
+    // The device must receive the default contributor tenant-access grant, or it
+    // cannot mint upload claims when require_tenant_access_grants is enabled.
+    let grant_count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_tenant_access_grants
+              WHERE tenant_id = $1 AND role = 'contributor' AND status = 'active'",
+            &[&tenant_id],
+        )
+        .await
+        .expect("count tenant access grants")
+        .get(0);
+    assert_eq!(
+        grant_count, 1,
+        "instance-enrolled device must have an active contributor grant"
+    );
+
     tx.commit().await.expect("commit verification transaction");
 
     // Clean up: cascade-delete via trace_tenants to avoid FK violations.
     cleanup_tenant(&backend, tenant_id).await;
+}
+
+#[tokio::test]
+async fn enroll_instance_user_fails_closed_on_cross_tenant_device_key_conflict() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    // device_key_id is a GLOBAL primary key. Pre-register it under tenant A, then
+    // attempt to enroll the same device key id under a DIFFERENT derived tenant.
+    // The provisioning op must fail closed rather than report success with a
+    // device key that actually lives under tenant A.
+    let device_key_id = format!("sha256:{}", "c".repeat(64));
+    let tenant_a = "enroll-collision-tenant-a";
+    let tenant_b = "enroll-collision-tenant-b";
+    let instance_subject_hash = format!("sha256:{}", "f".repeat(64));
+
+    let first = InstanceUserProvision {
+        device_key_id: device_key_id.clone(),
+        tenant_id: tenant_a.to_string(),
+        public_key: "ZGV2a2V5LWE=".to_string(),
+        instance_subject_hash: instance_subject_hash.clone(),
+        client_info: serde_json::json!({"agent": "ironclaw", "version": "0.x"}),
+        policy_version: "v".to_string(),
+        allowed_consent_scopes: serde_json::json!([]),
+        allowed_uses: serde_json::json!([]),
+    };
+    backend
+        .enroll_instance_user(first)
+        .await
+        .expect("first enrollment under tenant A succeeds");
+
+    let colliding = InstanceUserProvision {
+        device_key_id: device_key_id.clone(),
+        tenant_id: tenant_b.to_string(),
+        public_key: "ZGV2a2V5LWI=".to_string(),
+        instance_subject_hash: instance_subject_hash.clone(),
+        client_info: serde_json::json!({"agent": "ironclaw", "version": "0.x"}),
+        policy_version: "v".to_string(),
+        allowed_consent_scopes: serde_json::json!([]),
+        allowed_uses: serde_json::json!([]),
+    };
+    let result = backend.enroll_instance_user(colliding).await;
+    assert!(
+        result.is_err(),
+        "enrolling a device key id that already exists under another tenant must fail closed"
+    );
+
+    cleanup_tenant(&backend, tenant_a).await;
+    cleanup_tenant(&backend, tenant_b).await;
+}
+
+#[tokio::test]
+async fn instance_ledger_rls_ready_true_on_migrated_db() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+    assert!(
+        backend
+            .instance_ledger_rls_ready()
+            .await
+            .expect("query instance ledger RLS readiness"),
+        "trace_instance_enrollments must have forced RLS + trace_instance_isolation policy"
+    );
 }
