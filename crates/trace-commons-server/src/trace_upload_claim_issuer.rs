@@ -3990,4 +3990,357 @@ mod tests {
             "device_key_id mismatch must return uniform 403 FORBIDDEN, not 400 EnrollMalformed"
         );
     }
+
+    // ── Task-8 shared helpers ────────────────────────────────────────────────
+
+    /// Build a DB-backed issuer state for a fresh instance entry.
+    ///
+    /// Returns `(state, instance_kp, instance_pk_bytes, instance_subject_hash, pool)`
+    /// on success, or `None` when the DB is not available (caller must skip).
+    ///
+    /// `tag` is embedded in the `instance_id` so each test uses a unique entry.
+    /// `max_enrollments` caps how many distinct users may enroll against this entry.
+    async fn build_pg_state_for_enroll_test(
+        tag: &str,
+        max_enrollments: u32,
+    ) -> Option<(
+        std::sync::Arc<TraceUploadClaimIssuerState>,
+        ring::signature::Ed25519KeyPair,
+        Vec<u8>,
+        String,
+        deadpool_postgres::Pool,
+    )> {
+        use crate::trace_upload_claim_allowlist::hash_instance_subject;
+        use ring::signature::KeyPair;
+        use secrecy::SecretString;
+        use crate::config::SslMode;
+
+        let pg_url = match std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+        {
+            Ok(u) => u,
+            Err(_) => return None,
+        };
+        let db_config = crate::config::DatabaseConfig {
+            url: SecretString::from(pg_url),
+            pool_size: 4,
+            ssl_mode: SslMode::Prefer,
+        };
+        let pg = match crate::db::postgres::PgBackend::new(&db_config).await {
+            Ok(b) => b,
+            Err(_) => return None,
+        };
+        let pool = pg.raw_pool_for_tests_and_diagnostics();
+        let db: std::sync::Arc<dyn crate::db::Database> = std::sync::Arc::new(pg);
+
+        let rng = ring::rand::SystemRandom::new();
+        let instance_pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("instance keypair");
+        let instance_kp =
+            ring::signature::Ed25519KeyPair::from_pkcs8(instance_pkcs8.as_ref()).expect("parse");
+        let instance_pk = instance_kp.public_key().as_ref().to_vec();
+        let instance_pk_b64 = base64::engine::general_purpose::STANDARD.encode(&instance_pk);
+        let instance_id = format!("test-enroll-{tag}-{}", uuid::Uuid::new_v4());
+        let instance_subject_hash = hash_instance_subject(&instance_pk);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("allowlist.json");
+        {
+            use std::io::Write;
+            let body = format!(
+                r#"{{"version":1,"generated_at":"2026-01-01T00:00:00Z","policy_label":"test","entries":[{{"kind":"instance","instance_id":"{instance_id}","instance_public_key":"{instance_pk_b64}","max_enrollments":{max_enrollments},"policy_template":{{"policy_version":"v1","allowed_consent_scopes":["debugging_evaluation"],"allowed_uses":["debugging"]}}}}]}}"#
+            );
+            let mut f = std::fs::File::create(&path).expect("create allowlist");
+            f.write_all(body.as_bytes()).expect("write allowlist");
+        }
+        // Keep `dir` alive by leaking it — the state needs the file to exist
+        // for the duration of the test.  `tempdir` cleans up on drop; Box::leak
+        // prevents that so the path remains valid.
+        std::mem::forget(dir);
+
+        let config = TraceUploadClaimIssuerConfig {
+            allowlist_source: Some(AllowlistSourceSpec::File(path)),
+            onboarding_device_key_db: Some(db),
+            ..test_config()
+        };
+        let state = config.build_state().expect("state builds");
+        Some((state, instance_kp, instance_pk, instance_subject_hash, pool))
+    }
+
+    /// Build a `TraceInstanceEnrollRequest` for the given parameters.
+    ///
+    /// `instance_kp` is the instance signing keypair whose public key is in
+    /// the allowlist.  `device_pk_bytes` must be exactly 32 bytes (Ed25519).
+    /// `nonce` is used verbatim so callers can control replay.
+    fn make_enroll_request(
+        instance_kp: &ring::signature::Ed25519KeyPair,
+        instance_pk: &[u8],
+        device_pk_bytes: &[u8],
+        audience: &str,
+        instance_id: &str,
+        user_subject: &str,
+        nonce: &str,
+    ) -> trace_commons_protocol::onboarding::TraceInstanceEnrollRequest {
+        use trace_commons_protocol::onboarding::{
+            TRACE_INSTANCE_ENROLL_REQUEST_SCHEMA_VERSION, TraceInstanceEnrollAttestation,
+            TraceInstanceEnrollRequest, TraceOnboardClientInfo,
+            device_key_id_from_public_key_bytes, instance_enroll_attestation_signing_bytes,
+        };
+
+        let device_pk_b64 = base64::engine::general_purpose::STANDARD.encode(device_pk_bytes);
+        let device_key_id = device_key_id_from_public_key_bytes(device_pk_bytes);
+        let instance_pk_b64 = base64::engine::general_purpose::STANDARD.encode(instance_pk);
+        let now_ts = chrono::Utc::now().timestamp();
+        let attestation = TraceInstanceEnrollAttestation {
+            device_key_id,
+            aud: audience.to_string(),
+            instance_id: instance_id.to_string(),
+            user_subject: user_subject.to_string(),
+            nonce: nonce.to_string(),
+            exp: now_ts + 240,
+        };
+        let signing_bytes = instance_enroll_attestation_signing_bytes(&attestation);
+        let sig = instance_kp.sign(&signing_bytes);
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.as_ref());
+        TraceInstanceEnrollRequest {
+            schema_version: TRACE_INSTANCE_ENROLL_REQUEST_SCHEMA_VERSION.to_string(),
+            instance_public_key: instance_pk_b64,
+            device_public_key: device_pk_b64,
+            attestation,
+            attestation_sig: sig_b64,
+            client_info: TraceOnboardClientInfo {
+                agent: "ironclaw".to_string(),
+                version: "0.x.y".to_string(),
+            },
+        }
+    }
+
+    // ── Task-8 tests ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn enroll_second_device_same_user_reuses_tenant_and_does_not_consume_cap() {
+        use trace_commons_protocol::onboarding::derive_user_tenant_id;
+
+        let Some((state, instance_kp, instance_pk, instance_subject_hash, pool)) =
+            build_pg_state_for_enroll_test(
+                "multi-device",
+                1, // cap = 1 user slot
+            )
+            .await
+        else {
+            eprintln!(
+                "skipping enroll_second_device_same_user_reuses_tenant_and_does_not_consume_cap: \
+                 no DB configured"
+            );
+            return;
+        };
+
+        // Extract the instance_id from state's allowlist snapshot so we can
+        // use it when building requests.
+        let snapshot = state.onboard_allowlist_snapshot().expect("snapshot");
+        use crate::trace_upload_claim_allowlist::hash_instance_subject;
+        let hash = hash_instance_subject(&instance_pk);
+        let entry = snapshot.instance_entry(&hash).expect("entry in snapshot");
+        let instance_id = entry.instance_id.clone();
+        let audience = state.audience.clone();
+
+        let user1 = format!("multi-device-user-1-{}", uuid::Uuid::new_v4());
+        let user2 = format!("multi-device-user-2-{}", uuid::Uuid::new_v4());
+
+        // Device A bytes (32 bytes).
+        let rng = ring::rand::SystemRandom::new();
+        let dev_a_pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("dev A keypair");
+        let dev_a = ring::signature::Ed25519KeyPair::from_pkcs8(dev_a_pkcs8.as_ref())
+            .expect("parse dev A");
+        use ring::signature::KeyPair;
+        let dev_a_pk = dev_a.public_key().as_ref().to_vec();
+
+        let dev_b_pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("dev B keypair");
+        let dev_b = ring::signature::Ed25519KeyPair::from_pkcs8(dev_b_pkcs8.as_ref())
+            .expect("parse dev B");
+        let dev_b_pk = dev_b.public_key().as_ref().to_vec();
+
+        let dev_c_pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("dev C keypair");
+        let dev_c = ring::signature::Ed25519KeyPair::from_pkcs8(dev_c_pkcs8.as_ref())
+            .expect("parse dev C");
+        let dev_c_pk = dev_c.public_key().as_ref().to_vec();
+
+        // Enroll user-1 with device A.
+        let req_a = make_enroll_request(
+            &instance_kp,
+            &instance_pk,
+            &dev_a_pk,
+            &audience,
+            &instance_id,
+            &user1,
+            &uuid::Uuid::new_v4().to_string(),
+        );
+        let resp_a = state.enroll(req_a).await.expect("user-1 device-A enrolls");
+
+        // Enroll user-1 with device B (same user, different device).
+        let req_b = make_enroll_request(
+            &instance_kp,
+            &instance_pk,
+            &dev_b_pk,
+            &audience,
+            &instance_id,
+            &user1,
+            &uuid::Uuid::new_v4().to_string(),
+        );
+        let resp_b = state.enroll(req_b).await.expect("user-1 device-B enrolls");
+
+        assert_eq!(
+            resp_a.tenant_id, resp_b.tenant_id,
+            "same user-subject must yield same tenant_id regardless of device"
+        );
+
+        // Enroll user-2 with device C — must be refused: cap is 1 user and
+        // user-1 already consumed it.
+        let req_c = make_enroll_request(
+            &instance_kp,
+            &instance_pk,
+            &dev_c_pk,
+            &audience,
+            &instance_id,
+            &user2,
+            &uuid::Uuid::new_v4().to_string(),
+        );
+        let err_c = state
+            .enroll(req_c)
+            .await
+            .expect_err("user-2 must be refused when cap = 1 is consumed");
+        assert_eq!(
+            err_c.status,
+            StatusCode::FORBIDDEN,
+            "cap exceeded must return 403 FORBIDDEN"
+        );
+
+        // Cleanup.
+        let tenant1 = derive_user_tenant_id(&instance_id, &user1);
+        let tenant2 = derive_user_tenant_id(&instance_id, &user2);
+        let client = pool.get().await.expect("pool get for cleanup");
+        client
+            .execute(
+                "DELETE FROM trace_instance_enrollments WHERE instance_subject_hash = $1",
+                &[&instance_subject_hash],
+            )
+            .await
+            .ok();
+        for tid in [&tenant1, &tenant2] {
+            client
+                .execute(
+                    "DELETE FROM trace_tenants WHERE tenant_id = $1",
+                    &[tid],
+                )
+                .await
+                .ok();
+        }
+    }
+
+    #[tokio::test]
+    async fn enroll_replayed_nonce_is_refused() {
+        let Some((state, instance_kp, instance_pk, instance_subject_hash, pool)) =
+            build_pg_state_for_enroll_test("replay", 100).await
+        else {
+            eprintln!("skipping enroll_replayed_nonce_is_refused: no DB configured");
+            return;
+        };
+
+        let snapshot = state.onboard_allowlist_snapshot().expect("snapshot");
+        use crate::trace_upload_claim_allowlist::hash_instance_subject;
+        let hash = hash_instance_subject(&instance_pk);
+        let entry = snapshot.instance_entry(&hash).expect("entry in snapshot");
+        let instance_id = entry.instance_id.clone();
+        let audience = state.audience.clone();
+
+        let rng = ring::rand::SystemRandom::new();
+        let dev_pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("device keypair");
+        let dev_kp =
+            ring::signature::Ed25519KeyPair::from_pkcs8(dev_pkcs8.as_ref()).expect("parse");
+        use ring::signature::KeyPair;
+        let dev_pk = dev_kp.public_key().as_ref().to_vec();
+
+        let user = format!("replay-user-{}", uuid::Uuid::new_v4());
+        let nonce = format!("dup-nonce-{}", uuid::Uuid::new_v4());
+
+        let req1 = make_enroll_request(
+            &instance_kp,
+            &instance_pk,
+            &dev_pk,
+            &audience,
+            &instance_id,
+            &user,
+            &nonce,
+        );
+        // First use must succeed and record the nonce.
+        state.enroll(req1).await.expect("first enroll succeeds");
+
+        // Second request with the SAME nonce — the replay cache recorded it
+        // after the first success, so the pre-check must now reject it.
+        let req2 = make_enroll_request(
+            &instance_kp,
+            &instance_pk,
+            &dev_pk,
+            &audience,
+            &instance_id,
+            &user,
+            &nonce,
+        );
+        let err = state
+            .enroll(req2)
+            .await
+            .expect_err("replayed nonce must be refused");
+        assert_eq!(
+            err.status,
+            StatusCode::FORBIDDEN,
+            "replay must return 403 FORBIDDEN"
+        );
+
+        // Cleanup.
+        use trace_commons_protocol::onboarding::derive_user_tenant_id;
+        let tenant_id = derive_user_tenant_id(&instance_id, &user);
+        let client = pool.get().await.expect("pool get for cleanup");
+        client
+            .execute(
+                "DELETE FROM trace_instance_enrollments WHERE instance_subject_hash = $1",
+                &[&instance_subject_hash],
+            )
+            .await
+            .ok();
+        client
+            .execute(
+                "DELETE FROM trace_tenants WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
+            .await
+            .ok();
+    }
+
+    #[tokio::test]
+    async fn onboard_invite_path_unaffected_by_enroll() {
+        // Regression guard: the enroll path shares no mutable state that
+        // breaks the existing invite onboard flow. Verify the invite-not-valid
+        // error still surfaces correctly after the enroll wiring.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("allowlist.json");
+        write_allowlist_file(&path, "pilot-2026-05", &["INVOK001INVOK001"]);
+        let config = config_with_file_allowlist(path);
+        // An invite that is NOT in the allowlist must still return InviteNotValid.
+        let (status, body) =
+            post_onboard(config, onboard_request("MISS0001MISS0001")).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "unlisted invite must still return 403 after enroll wiring"
+        );
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("InviteNotValid"),
+            "error code must be InviteNotValid"
+        );
+    }
 }
