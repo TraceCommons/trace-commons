@@ -222,6 +222,32 @@ pub trait Database: TraceCorpusStore + Send + Sync {
             "onboard_device_key not implemented".to_string(),
         )))
     }
+
+    /// Atomically deduplicate a user enrollment against `trace_instance_enrollments`
+    /// and enforce a per-instance cap.
+    ///
+    /// The op runs in one instance-scoped transaction (setting
+    /// `trace_commons.instance_subject` transaction-locally). It first checks
+    /// for an existing `(instance_subject_hash, user_subject_hash)` row — if
+    /// found, it returns `ExistingUser` without consuming cap. Otherwise it
+    /// count-checks the cap before inserting with `ON CONFLICT DO NOTHING`.
+    ///
+    /// **Race note:** a concurrent burst of DISTINCT new users could each read
+    /// `count < cap` and all insert, overshooting the cap by the concurrency
+    /// width. For the pilot's per-instance rate limit this is acceptable. If
+    /// strict capping is later required, take an advisory lock on
+    /// `hashtext(instance_subject_hash)` at the top of the transaction.
+    ///
+    /// TODO(Task 8): strengthen the mock impl when the mock needs richer behavior.
+    async fn reserve_instance_enrollment(
+        &self,
+        _instance_subject_hash: &str,
+        _user_subject_hash: &str,
+        _tenant_id: &str,
+        _max_enrollments: i64,
+    ) -> Result<InstanceEnrollmentOutcome, DatabaseError> {
+        Ok(InstanceEnrollmentOutcome::NewlyEnrolled)
+    }
 }
 
 /// Per-contributor row returned by [`Database::compute_leaderboard_inputs`].
@@ -351,4 +377,15 @@ pub async fn connect_from_config(
     let backend = postgres::PgBackend::new(config).await?;
     backend.run_migrations().await?;
     Ok(Arc::new(backend) as Arc<dyn Database>)
+}
+
+/// Outcome of [`Database::reserve_instance_enrollment`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstanceEnrollmentOutcome {
+    /// The user was not previously enrolled and has been added to the ledger.
+    NewlyEnrolled,
+    /// The user was already enrolled; no cap was consumed.
+    ExistingUser,
+    /// The per-instance cap is reached; the user was NOT enrolled.
+    CapExceeded,
 }

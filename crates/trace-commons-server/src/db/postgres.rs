@@ -1493,6 +1493,76 @@ impl Database for PgBackend {
             status: crate::db::OnboardDeviceKeyStatus::Registered,
         })
     }
+
+    async fn reserve_instance_enrollment(
+        &self,
+        instance_subject_hash: &str,
+        user_subject_hash: &str,
+        tenant_id: &str,
+        max_enrollments: i64,
+    ) -> Result<crate::db::InstanceEnrollmentOutcome, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = client.transaction().await.map_err(DatabaseError::Postgres)?;
+        tx.execute(
+            "SELECT set_config('trace_commons.instance_subject', $1, true)",
+            &[&instance_subject_hash],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        // Already enrolled? Idempotent — no cap consumption.
+        let existing = tx
+            .query_opt(
+                "SELECT 1 FROM trace_instance_enrollments
+                  WHERE instance_subject_hash = $1 AND user_subject_hash = $2",
+                &[&instance_subject_hash, &user_subject_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        if existing.is_some() {
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            return Ok(crate::db::InstanceEnrollmentOutcome::ExistingUser);
+        }
+
+        // Lock-free cap check: count, then insert ON CONFLICT DO NOTHING.
+        // A concurrent burst of DISTINCT new users could each read count < cap
+        // and all insert, overshooting the cap by the concurrency width. For
+        // the pilot's per-instance rate limit this is acceptable; if strict
+        // capping is later required, take an advisory lock on
+        // hashtext(instance_subject_hash) at the top of the tx.
+        let count: i64 = tx
+            .query_one(
+                "SELECT COUNT(*)::BIGINT FROM trace_instance_enrollments
+                  WHERE instance_subject_hash = $1",
+                &[&instance_subject_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
+        if count >= max_enrollments {
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            return Ok(crate::db::InstanceEnrollmentOutcome::CapExceeded);
+        }
+
+        let inserted = tx
+            .execute(
+                "INSERT INTO trace_instance_enrollments
+                     (instance_subject_hash, user_subject_hash, tenant_id)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (instance_subject_hash, user_subject_hash) DO NOTHING",
+                &[&instance_subject_hash, &user_subject_hash, &tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+
+        // A racing insert of the SAME user resolves to ExistingUser.
+        Ok(if inserted == 1 {
+            crate::db::InstanceEnrollmentOutcome::NewlyEnrolled
+        } else {
+            crate::db::InstanceEnrollmentOutcome::ExistingUser
+        })
+    }
 }
 
 fn device_key_record_from_row(row: Row) -> crate::db::DeviceKeyRecord {

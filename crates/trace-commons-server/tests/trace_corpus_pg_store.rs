@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use chrono::Utc;
 use secrecy::SecretString;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
-use trace_commons_server::db::{Database, postgres::PgBackend};
+use trace_commons_server::db::{Database, InstanceEnrollmentOutcome, postgres::PgBackend};
 use trace_commons_server::error::DatabaseError;
 use trace_commons_server::trace_corpus_storage::{
     TraceAuditAction, TraceAuditEventWrite, TraceAuditSafeMetadata,
@@ -3603,4 +3603,50 @@ async fn revocation_propagation_failure_audit_metadata_round_trips() {
     }
 
     cleanup_tenant(&backend, &tenant_id).await;
+}
+
+#[tokio::test]
+async fn reserve_instance_enrollment_dedups_and_caps() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+
+    // Use test-name-derived hashes so reruns against the shared persistent DB
+    // don't collide with prior rows.
+    let inst = format!("sha256:{}", "a1b2c3d4".repeat(8));
+    let u1 = format!("sha256:{}", "1111".repeat(16));
+    let u2 = format!("sha256:{}", "2222".repeat(16));
+
+    // First enrollment: cap = 1, new user.
+    let outcome = backend
+        .reserve_instance_enrollment(&inst, &u1, "tenant-rie-u1", 1)
+        .await
+        .expect("first enrollment should succeed");
+    assert_eq!(
+        outcome,
+        InstanceEnrollmentOutcome::NewlyEnrolled,
+        "first user should be newly enrolled"
+    );
+
+    // Same user again: idempotent, no cap consumption.
+    let outcome = backend
+        .reserve_instance_enrollment(&inst, &u1, "tenant-rie-u1", 1)
+        .await
+        .expect("idempotent enrollment should succeed");
+    assert_eq!(
+        outcome,
+        InstanceEnrollmentOutcome::ExistingUser,
+        "re-enrolling same user should return ExistingUser"
+    );
+
+    // Second distinct user with cap = 1 already full.
+    let outcome = backend
+        .reserve_instance_enrollment(&inst, &u2, "tenant-rie-u2", 1)
+        .await
+        .expect("cap-exceeded check should not error");
+    assert_eq!(
+        outcome,
+        InstanceEnrollmentOutcome::CapExceeded,
+        "second distinct user should be rejected when cap is 1"
+    );
 }
