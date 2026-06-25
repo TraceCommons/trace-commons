@@ -5011,3 +5011,123 @@ async fn store_facade_rejects_vector_entry_mismatched_submission_derived_id() {
         .await;
     tx.commit().await.expect("commit cleanup transaction");
 }
+
+#[tokio::test]
+async fn instance_enrollment_ledger_is_instance_scoped() {
+    let database_url = match std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+    {
+        Ok(url) => url,
+        Err(_) => {
+            eprintln!(
+                "skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured"
+            );
+            return;
+        }
+    };
+
+    // Apply migrations (including V35) before the raw connection test.
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend
+        .run_migrations()
+        .await
+        .expect("run migrations for instance enrollment test");
+
+    let (mut client, connection) = match tokio_postgres::connect(&database_url, NoTls).await {
+        Ok(parts) => parts,
+        Err(e) => {
+            eprintln!("skipping instance enrollment RLS test: database unavailable ({e})");
+            return;
+        }
+    };
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    match current_role_bypasses_trace_rls(&mut client).await {
+        Ok(true) => {
+            eprintln!(
+                "skipping instance enrollment RLS test: current role bypasses RLS (superuser or bypass-rls role)"
+            );
+            return;
+        }
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("skipping instance enrollment RLS test: could not inspect role ({e})");
+            return;
+        }
+    }
+
+    let instance_a = format!("sha256:{}", "a".repeat(64));
+    let instance_b = format!("sha256:{}", "c".repeat(64));
+    let user_hash = format!("sha256:{}", "b".repeat(64));
+    let tenant_id = "tenant-deadbeef";
+
+    // Insert a row under instance A's context.
+    let tx = client
+        .transaction()
+        .await
+        .expect("start instance A insert transaction");
+    tx.execute(
+        "SELECT set_config('trace_commons.instance_subject', $1, true)",
+        &[&instance_a],
+    )
+    .await
+    .expect("set instance A context");
+    tx.execute(
+        "INSERT INTO trace_instance_enrollments \
+         (instance_subject_hash, user_subject_hash, tenant_id) VALUES ($1, $2, $3) \
+         ON CONFLICT DO NOTHING",
+        &[&instance_a, &user_hash, &tenant_id],
+    )
+    .await
+    .expect("insert instance A enrollment row");
+    tx.commit()
+        .await
+        .expect("commit instance A insert transaction");
+
+    // Under instance B's context the row must be invisible.
+    let tx = client
+        .transaction()
+        .await
+        .expect("start instance B read transaction");
+    tx.execute(
+        "SELECT set_config('trace_commons.instance_subject', $1, true)",
+        &[&instance_b],
+    )
+    .await
+    .expect("set instance B context");
+    let rows = tx
+        .query("SELECT 1 FROM trace_instance_enrollments", &[])
+        .await
+        .expect("query enrollments under instance B context");
+    assert!(
+        rows.is_empty(),
+        "instance B must not see instance A rows; got {} row(s)",
+        rows.len()
+    );
+    tx.commit()
+        .await
+        .expect("commit instance B read transaction");
+
+    // Cleanup: re-set instance A context to delete inserted row.
+    let tx = client
+        .transaction()
+        .await
+        .expect("start cleanup transaction");
+    tx.execute(
+        "SELECT set_config('trace_commons.instance_subject', $1, true)",
+        &[&instance_a],
+    )
+    .await
+    .expect("set instance A context for cleanup");
+    let _ = tx
+        .execute(
+            "DELETE FROM trace_instance_enrollments WHERE instance_subject_hash = $1",
+            &[&instance_a],
+        )
+        .await;
+    tx.commit().await.expect("commit cleanup transaction");
+}
