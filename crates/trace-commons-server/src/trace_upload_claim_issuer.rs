@@ -1782,14 +1782,20 @@ impl TraceUploadClaimIssuerState {
                 TraceOnboardErrorCode::EnrollNotAuthorized,
             ));
         }
+        // Fix 2: device_key_id mismatch is a signed-field verification failure;
+        // return the same uniform 403 as bad sig / wrong aud / wrong instance_id
+        // so it does not act as a distinguishable enumeration oracle.
         if att.device_key_id != device_key_id {
             return Err(IssuerError::onboard_error(
-                StatusCode::BAD_REQUEST,
-                TraceOnboardErrorCode::EnrollMalformed,
+                StatusCode::FORBIDDEN,
+                TraceOnboardErrorCode::EnrollNotAuthorized,
             ));
         }
         let now_ts = chrono::Utc::now().timestamp();
-        if att.exp <= now_ts {
+        // Fix 1: bound exp both ways — reject if expired (lower) OR more than
+        // 5 minutes in the future (upper).  The upper bound also caps replay-cache
+        // TTL, preventing unbounded memory growth from far-future exp values.
+        if att.exp <= now_ts || att.exp > now_ts + 300 {
             return Err(IssuerError::onboard_error(
                 StatusCode::FORBIDDEN,
                 TraceOnboardErrorCode::EnrollNotAuthorized,
@@ -1831,12 +1837,16 @@ impl TraceUploadClaimIssuerState {
             ));
         }
 
-        // Replay-check the nonce (TTL = remaining attestation lifetime, min 60s).
+        // Fix 3: Split replay guard into check-before / record-after so that a
+        // transient DB failure (→ 500) does not permanently burn the nonce.
+        // `is_seen` checks without recording; `record` is called only after
+        // `enroll_instance_user` succeeds.  Concurrent same-nonce requests that
+        // slip through the pre-check are handled by `reserve_instance_enrollment`
+        // idempotency (ON CONFLICT DO NOTHING + cap enforcement).
         let ttl_secs = (att.exp - now_ts).max(60) as u64;
         let replay_key = format!("{}|{}", instance_subject_hash, att.nonce);
-        if !self.instance_replay_cache.consume(
+        if self.instance_replay_cache.is_seen(
             &replay_key,
-            std::time::Duration::from_secs(ttl_secs),
             std::time::Instant::now(),
         ) {
             return Err(IssuerError::onboard_error(
@@ -1896,6 +1906,15 @@ impl TraceUploadClaimIssuerState {
         })
         .await
         .map_err(|_| IssuerError::internal())?;
+
+        // Fix 3 (continued): Record the nonce only after provisioning succeeds.
+        // If the DB call above failed with IssuerError::internal the `?` already
+        // returned early, so this line is only reached on the happy path.
+        self.instance_replay_cache.record(
+            &replay_key,
+            std::time::Duration::from_secs(ttl_secs),
+            std::time::Instant::now(),
+        );
 
         Ok(TraceOnboardResponse {
             schema_version:
@@ -3796,5 +3815,179 @@ mod tests {
             )
             .await
             .ok();
+    }
+
+    #[tokio::test]
+    async fn enroll_rejects_future_exp_uniformly() {
+        use crate::trace_upload_claim_allowlist::hash_instance_subject;
+        use ring::signature::KeyPair;
+        use trace_commons_protocol::onboarding::{
+            TRACE_INSTANCE_ENROLL_REQUEST_SCHEMA_VERSION, TraceInstanceEnrollAttestation,
+            TraceInstanceEnrollRequest, TraceOnboardClientInfo,
+            device_key_id_from_public_key_bytes, instance_enroll_attestation_signing_bytes,
+        };
+
+        let rng = ring::rand::SystemRandom::new();
+        let instance_pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("instance keypair");
+        let instance_kp =
+            ring::signature::Ed25519KeyPair::from_pkcs8(instance_pkcs8.as_ref()).expect("parse");
+        let instance_pk = instance_kp.public_key().as_ref().to_vec();
+        let instance_pk_b64 = base64::engine::general_purpose::STANDARD.encode(&instance_pk);
+
+        let device_pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("device keypair");
+        let device_kp =
+            ring::signature::Ed25519KeyPair::from_pkcs8(device_pkcs8.as_ref()).expect("parse");
+        let device_pk = device_kp.public_key().as_ref().to_vec();
+        let device_pk_b64 = base64::engine::general_purpose::STANDARD.encode(&device_pk);
+        let device_key_id = device_key_id_from_public_key_bytes(&device_pk);
+
+        let instance_subject_hash = hash_instance_subject(&instance_pk);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("allowlist.json");
+        {
+            use std::io::Write;
+            let body = format!(
+                r#"{{"version":1,"generated_at":"2026-01-01T00:00:00Z","policy_label":"test","entries":[{{"kind":"instance","instance_id":"ironclaw-test","instance_public_key":"{instance_pk_b64}","max_enrollments":100,"policy_template":{{"policy_version":"v1","allowed_consent_scopes":["debugging_evaluation"],"allowed_uses":["debugging"]}}}}]}}"#
+            );
+            let mut f = std::fs::File::create(&path).expect("create allowlist");
+            f.write_all(body.as_bytes()).expect("write allowlist");
+        }
+        let _ = &instance_subject_hash;
+
+        let config = TraceUploadClaimIssuerConfig {
+            allowlist_source: Some(AllowlistSourceSpec::File(path)),
+            onboarding_device_key_db: None,
+            ..test_config()
+        };
+        let state = config.build_state().expect("state builds");
+
+        let now_ts = chrono::Utc::now().timestamp();
+        // exp is 1 hour in the future — well beyond the 5-minute (300s) upper bound.
+        let attestation = TraceInstanceEnrollAttestation {
+            device_key_id: device_key_id.clone(),
+            aud: "trace-commons-upload".to_string(),
+            instance_id: "ironclaw-test".to_string(),
+            user_subject: "user-future-exp-test".to_string(),
+            nonce: uuid::Uuid::new_v4().to_string(),
+            exp: now_ts + 3600,
+        };
+        let signing_bytes = instance_enroll_attestation_signing_bytes(&attestation);
+        let sig = instance_kp.sign(&signing_bytes);
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.as_ref());
+
+        let request = TraceInstanceEnrollRequest {
+            schema_version: TRACE_INSTANCE_ENROLL_REQUEST_SCHEMA_VERSION.to_string(),
+            instance_public_key: instance_pk_b64.clone(),
+            device_public_key: device_pk_b64.clone(),
+            attestation,
+            attestation_sig: sig_b64,
+            client_info: TraceOnboardClientInfo {
+                agent: "ironclaw".to_string(),
+                version: "0.x.y".to_string(),
+            },
+        };
+
+        let err = state
+            .enroll(request)
+            .await
+            .expect_err("far-future exp must be rejected");
+        assert_eq!(
+            err.status,
+            StatusCode::FORBIDDEN,
+            "future exp must map to uniform 403 FORBIDDEN, not 400"
+        );
+    }
+
+    #[tokio::test]
+    async fn enroll_device_key_mismatch_is_uniform_403() {
+        use crate::trace_upload_claim_allowlist::hash_instance_subject;
+        use ring::signature::KeyPair;
+        use trace_commons_protocol::onboarding::{
+            TRACE_INSTANCE_ENROLL_REQUEST_SCHEMA_VERSION, TraceInstanceEnrollAttestation,
+            TraceInstanceEnrollRequest, TraceOnboardClientInfo,
+            device_key_id_from_public_key_bytes, instance_enroll_attestation_signing_bytes,
+        };
+
+        let rng = ring::rand::SystemRandom::new();
+        let instance_pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("instance keypair");
+        let instance_kp =
+            ring::signature::Ed25519KeyPair::from_pkcs8(instance_pkcs8.as_ref()).expect("parse");
+        let instance_pk = instance_kp.public_key().as_ref().to_vec();
+        let instance_pk_b64 = base64::engine::general_purpose::STANDARD.encode(&instance_pk);
+
+        // Real device key used in the request.
+        let device_pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("device keypair");
+        let device_kp =
+            ring::signature::Ed25519KeyPair::from_pkcs8(device_pkcs8.as_ref()).expect("parse");
+        let device_pk = device_kp.public_key().as_ref().to_vec();
+        let device_pk_b64 = base64::engine::general_purpose::STANDARD.encode(&device_pk);
+
+        // A *different* device key whose id we put in the attestation — mismatch.
+        let other_pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("other keypair");
+        let other_kp =
+            ring::signature::Ed25519KeyPair::from_pkcs8(other_pkcs8.as_ref()).expect("parse");
+        let other_pk = other_kp.public_key().as_ref().to_vec();
+        let mismatched_device_key_id = device_key_id_from_public_key_bytes(&other_pk);
+
+        let instance_subject_hash = hash_instance_subject(&instance_pk);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("allowlist.json");
+        {
+            use std::io::Write;
+            let body = format!(
+                r#"{{"version":1,"generated_at":"2026-01-01T00:00:00Z","policy_label":"test","entries":[{{"kind":"instance","instance_id":"ironclaw-test","instance_public_key":"{instance_pk_b64}","max_enrollments":100,"policy_template":{{"policy_version":"v1","allowed_consent_scopes":["debugging_evaluation"],"allowed_uses":["debugging"]}}}}]}}"#
+            );
+            let mut f = std::fs::File::create(&path).expect("create allowlist");
+            f.write_all(body.as_bytes()).expect("write allowlist");
+        }
+        let _ = &instance_subject_hash;
+
+        let config = TraceUploadClaimIssuerConfig {
+            allowlist_source: Some(AllowlistSourceSpec::File(path)),
+            onboarding_device_key_db: None,
+            ..test_config()
+        };
+        let state = config.build_state().expect("state builds");
+
+        let now_ts = chrono::Utc::now().timestamp();
+        // Attestation claims the *other* device_key_id (mismatch with device_pk_b64).
+        let attestation = TraceInstanceEnrollAttestation {
+            device_key_id: mismatched_device_key_id.clone(),
+            aud: "trace-commons-upload".to_string(),
+            instance_id: "ironclaw-test".to_string(),
+            user_subject: "user-device-mismatch-test".to_string(),
+            nonce: uuid::Uuid::new_v4().to_string(),
+            exp: now_ts + 240,
+        };
+        let signing_bytes = instance_enroll_attestation_signing_bytes(&attestation);
+        let sig = instance_kp.sign(&signing_bytes);
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.as_ref());
+
+        let request = TraceInstanceEnrollRequest {
+            schema_version: TRACE_INSTANCE_ENROLL_REQUEST_SCHEMA_VERSION.to_string(),
+            instance_public_key: instance_pk_b64.clone(),
+            device_public_key: device_pk_b64.clone(), // real device key
+            attestation,
+            attestation_sig: sig_b64,
+            client_info: TraceOnboardClientInfo {
+                agent: "ironclaw".to_string(),
+                version: "0.x.y".to_string(),
+            },
+        };
+
+        let err = state
+            .enroll(request)
+            .await
+            .expect_err("device_key_id mismatch must be rejected");
+        assert_eq!(
+            err.status,
+            StatusCode::FORBIDDEN,
+            "device_key_id mismatch must return uniform 403 FORBIDDEN, not 400 EnrollMalformed"
+        );
     }
 }

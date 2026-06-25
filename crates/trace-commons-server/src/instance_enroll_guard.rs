@@ -26,6 +26,24 @@ impl ReplayCache {
         seen.insert(key.to_string(), now + ttl);
         true
     }
+
+    /// Returns true if `key` was already recorded and its TTL has not expired
+    /// (i.e. this would be a replay). Does NOT record or modify state. Evicts
+    /// expired keys as a side effect.
+    pub fn is_seen(&self, key: &str, now: Instant) -> bool {
+        let mut seen = self.seen.lock().expect("ReplayCache poisoned");
+        seen.retain(|_, &mut expiry| expiry > now);
+        seen.contains_key(key)
+    }
+
+    /// Records `key` with expiry `now + ttl`. If `key` is already present its
+    /// expiry is left unchanged (idempotent). Call this only after the
+    /// operation that the nonce guards has succeeded.
+    pub fn record(&self, key: &str, ttl: Duration, now: Instant) {
+        let mut seen = self.seen.lock().expect("ReplayCache poisoned");
+        seen.retain(|_, &mut expiry| expiry > now);
+        seen.entry(key.to_string()).or_insert(now + ttl);
+    }
 }
 
 impl Default for ReplayCache {
