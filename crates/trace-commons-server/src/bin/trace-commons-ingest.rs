@@ -5679,7 +5679,20 @@ async fn validate_required_postgres_trace_rls_ready(
                 "{TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY} requires a PostgreSQL trace DB mirror"
             )
         })?;
-    validate_required_postgres_trace_rls_diagnostics(&diagnostics, expected_runtime_role_hash)
+    validate_required_postgres_trace_rls_diagnostics(&diagnostics, expected_runtime_role_hash)?;
+    // The V35 instance-enrollment ledger isolates on the INSTANCE predicate, not
+    // the tenant predicate, so it is outside the tenant RLS diagnostics. Verify
+    // its forced RLS + policy separately so readiness fails closed on drift.
+    if !db
+        .instance_ledger_rls_ready()
+        .await
+        .context("failed to inspect instance-enrollment ledger RLS")?
+    {
+        anyhow::bail!(
+            "{TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY} requires forced ROW LEVEL SECURITY and the trace_instance_isolation policy on trace_instance_enrollments"
+        );
+    }
+    Ok(())
 }
 
 fn validate_required_postgres_trace_rls_diagnostics(

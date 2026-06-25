@@ -127,10 +127,16 @@ mod tests {
         let entries: Vec<AllowlistEntry> = codes
             .iter()
             .map(|c| AllowlistEntry {
-                subject_hash: hash_invite_code(c),
-                tenant_id: "tenant-a".into(),
+                kind: "invite".into(),
+                subject_hash: Some(hash_invite_code(c)),
+                tenant_id: Some("tenant-a".into()),
                 note_label: None,
                 max_uses: 1,
+                instance_id: None,
+                instance_public_key: None,
+                max_enrollments: None,
+                rate_per_min: None,
+                policy_template: None,
             })
             .collect();
         let file = AllowlistFile {

@@ -1066,6 +1066,26 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&35_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V35__trace_instance_enrollments.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&35_i32, &"trace_instance_enrollments"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -1806,6 +1826,208 @@ impl Database for PgBackend {
             device_key: device_key_record_from_row(inserted),
             status: crate::db::OnboardDeviceKeyStatus::Registered,
         })
+    }
+
+    async fn enroll_instance_user(
+        &self,
+        p: crate::db::InstanceUserProvision,
+    ) -> Result<(), DatabaseError> {
+        // ensure_trace_tenant runs in its own transaction and is idempotent.
+        self.ensure_trace_tenant(&p.tenant_id).await?;
+
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &p.tenant_id).await?;
+
+        // Stamp the contribution policy once; never overwrite an existing row.
+        tx.execute(
+            "INSERT INTO trace_tenant_policies
+                 (tenant_id, policy_version, allowed_consent_scopes, allowed_uses,
+                  updated_by_principal_ref)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (tenant_id) DO NOTHING",
+            &[
+                &p.tenant_id,
+                &p.policy_version,
+                &p.allowed_consent_scopes,
+                &p.allowed_uses,
+                &format!("instance-enroll:{}", p.instance_subject_hash),
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        // Register the device key (the principal). `device_key_id` is a GLOBAL
+        // primary key, so an `ON CONFLICT DO NOTHING` no-op can mean the key
+        // already exists under a DIFFERENT tenant or is revoked here — in which
+        // case the device's bearer would not authenticate to the derived tenant.
+        // Mirror `onboard_device_key`: insert-or-reselect and accept only an
+        // identical, non-revoked row under THIS tenant; otherwise fail closed so
+        // enrollment never reports success for an unusable device key.
+        let inserted = tx
+            .query_opt(
+                "INSERT INTO device_keys
+                     (device_key_id, tenant_id, public_key, invite_subject_hash, client_info)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (device_key_id) DO NOTHING
+                 RETURNING device_key_id",
+                &[
+                    &p.device_key_id,
+                    &p.tenant_id,
+                    &p.public_key,
+                    &p.instance_subject_hash,
+                    &p.client_info,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+
+        if inserted.is_none() {
+            let existing = tx
+                .query_opt(
+                    "SELECT public_key, revoked_at
+                       FROM device_keys
+                      WHERE tenant_id = $1 AND device_key_id = $2",
+                    &[&p.tenant_id, &p.device_key_id],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            let usable = match existing {
+                Some(row) => {
+                    let public_key: String = row.get("public_key");
+                    let revoked_at: Option<chrono::DateTime<chrono::Utc>> = row.get("revoked_at");
+                    public_key == p.public_key && revoked_at.is_none()
+                }
+                None => false,
+            };
+            if !usable {
+                return Err(DatabaseError::Pool(
+                    "instance enroll device key conflict: not usable under derived tenant"
+                        .to_string(),
+                ));
+            }
+        }
+
+        // Grant the default contributor tenant-access grant so the device can mint
+        // upload claims under the `require_tenant_access_grants` gate, exactly like
+        // an invite-onboarded device. Same helper, same principal_ref derivation.
+        upsert_onboarding_device_tenant_access_grant(&tx, &p.tenant_id, &p.device_key_id).await?;
+
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+
+        // Create-or-reuse the contributor account and bind the device principal so
+        // instance-enrolled users get account-scoped trace read-back immediately,
+        // without waiting for a first login-link mint. The principal_ref is the one
+        // the device authenticates as (and the login-link mint path passes), so
+        // this converges idempotently with that path. `create_or_reuse_account`
+        // runs its own self-contained tenant transaction.
+        let principal_ref = onboarding_device_principal_ref(&p.tenant_id, &p.device_key_id);
+        self.create_or_reuse_account(&p.tenant_id, &principal_ref)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn reserve_instance_enrollment(
+        &self,
+        instance_subject_hash: &str,
+        user_subject_hash: &str,
+        tenant_id: &str,
+        max_enrollments: i64,
+    ) -> Result<crate::db::InstanceEnrollmentOutcome, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.execute(
+            "SELECT set_config('trace_commons.instance_subject', $1, true)",
+            &[&instance_subject_hash],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+        // Already enrolled? Idempotent — no cap consumption.
+        let existing = tx
+            .query_opt(
+                "SELECT 1 FROM trace_instance_enrollments
+                  WHERE instance_subject_hash = $1 AND user_subject_hash = $2",
+                &[&instance_subject_hash, &user_subject_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        if existing.is_some() {
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            return Ok(crate::db::InstanceEnrollmentOutcome::ExistingUser);
+        }
+
+        // Lock-free cap check: count, then insert ON CONFLICT DO NOTHING.
+        // A concurrent burst of DISTINCT new users could each read count < cap
+        // and all insert, overshooting the cap by the concurrency width. For
+        // the pilot's per-instance rate limit this is acceptable; if strict
+        // capping is later required, take an advisory lock on
+        // hashtext(instance_subject_hash) at the top of the tx.
+        let count: i64 = tx
+            .query_one(
+                "SELECT COUNT(*)::BIGINT FROM trace_instance_enrollments
+                  WHERE instance_subject_hash = $1",
+                &[&instance_subject_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
+        if count >= max_enrollments {
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            return Ok(crate::db::InstanceEnrollmentOutcome::CapExceeded);
+        }
+
+        let inserted = tx
+            .execute(
+                "INSERT INTO trace_instance_enrollments
+                     (instance_subject_hash, user_subject_hash, tenant_id)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (instance_subject_hash, user_subject_hash) DO NOTHING",
+                &[&instance_subject_hash, &user_subject_hash, &tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+
+        // A racing insert of the SAME user resolves to ExistingUser.
+        Ok(if inserted == 1 {
+            crate::db::InstanceEnrollmentOutcome::NewlyEnrolled
+        } else {
+            crate::db::InstanceEnrollmentOutcome::ExistingUser
+        })
+    }
+
+    async fn instance_ledger_rls_ready(&self) -> Result<bool, DatabaseError> {
+        let client = self.trace_pool().get().await?;
+        let row = client
+            .query_one(
+                "SELECT
+                    EXISTS (
+                        SELECT 1
+                          FROM pg_class c
+                          JOIN pg_namespace n ON n.oid = c.relnamespace
+                         WHERE n.nspname = current_schema()
+                           AND c.relname = 'trace_instance_enrollments'
+                           AND c.relrowsecurity
+                           AND c.relforcerowsecurity
+                    ) AS rls_forced,
+                    EXISTS (
+                        SELECT 1
+                          FROM pg_policies
+                         WHERE schemaname = current_schema()
+                           AND tablename = 'trace_instance_enrollments'
+                           AND policyname = 'trace_instance_isolation'
+                    ) AS policy_present",
+                &[],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let rls_forced: bool = row.get("rls_forced");
+        let policy_present: bool = row.get("policy_present");
+        Ok(rls_forced && policy_present)
     }
 
     async fn create_or_reuse_account(

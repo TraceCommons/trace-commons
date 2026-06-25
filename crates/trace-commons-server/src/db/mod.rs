@@ -281,6 +281,48 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         )))
     }
 
+    /// Provision a tenant for an instance user (no-account fallback path).
+    ///
+    /// In a single tenant-scoped transaction, this op:
+    /// 1. Ensures the `trace_tenants` row exists.
+    /// 2. Stamps the contribution policy from the supplied template
+    ///    (`ON CONFLICT (tenant_id) DO NOTHING` — never overwrites an existing policy).
+    /// 3. Registers the device key (`ON CONFLICT (device_key_id) DO NOTHING`).
+    ///
+    /// The operation is fully idempotent: re-running with the same inputs is safe.
+    async fn enroll_instance_user(&self, p: InstanceUserProvision) -> Result<(), DatabaseError>;
+
+    /// Atomically deduplicate a user enrollment against `trace_instance_enrollments`
+    /// and enforce a per-instance cap.
+    ///
+    /// The op runs in one instance-scoped transaction (setting
+    /// `trace_commons.instance_subject` transaction-locally). It first checks
+    /// for an existing `(instance_subject_hash, user_subject_hash)` row — if
+    /// found, it returns `ExistingUser` without consuming cap. Otherwise it
+    /// count-checks the cap before inserting with `ON CONFLICT DO NOTHING`.
+    ///
+    /// **Race note:** a concurrent burst of DISTINCT new users could each read
+    /// `count < cap` and all insert, overshooting the cap by the concurrency
+    /// width. For the pilot's per-instance rate limit this is acceptable. If
+    /// strict capping is later required, take an advisory lock on
+    /// `hashtext(instance_subject_hash)` at the top of the transaction.
+    ///
+    async fn reserve_instance_enrollment(
+        &self,
+        instance_subject_hash: &str,
+        user_subject_hash: &str,
+        tenant_id: &str,
+        max_enrollments: i64,
+    ) -> Result<InstanceEnrollmentOutcome, DatabaseError>;
+
+    /// Verify the V35 instance-enrollment ledger has forced row-level security
+    /// and its `trace_instance_isolation` policy installed. The ledger isolates
+    /// on the INSTANCE predicate (`trace_current_instance_subject()`), not the
+    /// tenant predicate, so it is intentionally absent from the tenant RLS
+    /// diagnostics; this check lets the production-readiness gate catch RLS drift
+    /// on the ledger. Returns `false` (fail-closed) if either control is missing.
+    async fn instance_ledger_rls_ready(&self) -> Result<bool, DatabaseError>;
+
     /// Create-or-reuse the durable account for `principal_ref` within `tenant_id`.
     /// Returns the stable `account_id`. Idempotent: repeated calls for the same
     /// active principal return the same account. Tolerates a concurrent racing
@@ -1163,10 +1205,37 @@ pub enum OnboardDeviceKeyError {
     Database(#[from] DatabaseError),
 }
 
+/// Input to [`Database::enroll_instance_user`].
+#[derive(Debug, Clone)]
+pub struct InstanceUserProvision {
+    pub device_key_id: String,
+    pub tenant_id: String,
+    pub public_key: String,
+    /// The `sha256:…` hash identifying the instance subject; used as
+    /// `invite_subject_hash` on the device key row and embedded in the
+    /// `updated_by_principal_ref` audit column of the policy row.
+    pub instance_subject_hash: String,
+    pub client_info: serde_json::Value,
+    pub policy_version: String,
+    pub allowed_consent_scopes: serde_json::Value,
+    pub allowed_uses: serde_json::Value,
+}
+
 pub async fn connect_from_config(
     config: &DatabaseConfig,
 ) -> Result<Arc<dyn Database>, DatabaseError> {
     let backend = postgres::PgBackend::new(config).await?;
     backend.run_migrations().await?;
     Ok(Arc::new(backend) as Arc<dyn Database>)
+}
+
+/// Outcome of [`Database::reserve_instance_enrollment`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstanceEnrollmentOutcome {
+    /// The user was not previously enrolled and has been added to the ledger.
+    NewlyEnrolled,
+    /// The user was already enrolled; no cap was consumed.
+    ExistingUser,
+    /// The per-instance cap is reached; the user was NOT enrolled.
+    CapExceeded,
 }
