@@ -70424,10 +70424,7 @@ async fn settlement_submit_worker_fails_closed_without_required_db_mirror_writes
 // panics if reached.
 struct PerUserTestDeviceKeyDb {
     device_keys: std::sync::RwLock<
-        std::collections::HashMap<
-            (String, String),
-            trace_commons_server::db::DeviceKeyRecord,
-        >,
+        std::collections::HashMap<(String, String), trace_commons_server::db::DeviceKeyRecord>,
     >,
 }
 
@@ -70455,93 +70452,595 @@ impl PerUserTestDeviceKeyDb {
 // never calls any of them.
 #[async_trait::async_trait]
 impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PerUserTestDeviceKeyDb {
-    async fn upsert_trace_submission(&self, _: StorageTraceSubmissionWrite) -> Result<StorageTraceSubmissionRecord, DatabaseError> { todo!("stub") }
-    async fn get_trace_submission(&self, _: &str, _: Uuid) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> { todo!("stub") }
-    async fn list_trace_submissions(&self, _: &str) -> Result<Vec<StorageTraceSubmissionRecord>, DatabaseError> { todo!("stub") }
-    async fn list_account_trace_submissions_keyset(&self, _: &str, _: &[String], _: Option<TraceSubmissionKeysetCursor>, _: i64) -> Result<Vec<StorageTraceSubmissionRecord>, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_tenant_policy(&self, _: StorageTraceTenantPolicyWrite) -> Result<StorageTraceTenantPolicyRecord, DatabaseError> { todo!("stub") }
-    async fn get_trace_tenant_policy(&self, _: &str) -> Result<Option<StorageTraceTenantPolicyRecord>, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_tenant_access_grant(&self, _: StorageTraceTenantAccessGrantWrite) -> Result<StorageTraceTenantAccessGrantRecord, DatabaseError> { todo!("stub") }
-    async fn list_trace_tenant_access_grants(&self, _: &str) -> Result<Vec<StorageTraceTenantAccessGrantRecord>, DatabaseError> { todo!("stub") }
-    async fn list_active_trace_tenant_access_grants_for_principal(&self, _: &str, _: &str, _: DateTime<Utc>) -> Result<Vec<StorageTraceTenantAccessGrantRecord>, DatabaseError> { todo!("stub") }
-    async fn list_trace_credit_events(&self, _: &str) -> Result<Vec<StorageTraceCreditEventRecord>, DatabaseError> { todo!("stub") }
-    async fn update_trace_submission_status(&self, _: &str, _: Uuid, _: StorageTraceCorpusStatus, _: &str, _: Option<&str>) -> Result<(), DatabaseError> { todo!("stub") }
-    async fn claim_trace_review_lease(&self, _: &str, _: Uuid, _: &str, _: DateTime<Utc>, _: Option<DateTime<Utc>>, _: DateTime<Utc>) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> { todo!("stub") }
-    async fn release_trace_review_lease(&self, _: &str, _: Uuid, _: &str) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> { todo!("stub") }
-    async fn append_trace_object_ref(&self, _: StorageTraceObjectRefWrite) -> Result<(), DatabaseError> { todo!("stub") }
-    async fn list_trace_object_refs(&self, _: &str, _: Uuid) -> Result<Vec<StorageTraceObjectRefRecord>, DatabaseError> { todo!("stub") }
-    async fn get_latest_active_trace_object_ref(&self, _: &str, _: Uuid, _: StorageTraceObjectArtifactKind) -> Result<Option<StorageTraceObjectRefRecord>, DatabaseError> { todo!("stub") }
-    async fn append_trace_derived_record(&self, _: StorageTraceDerivedRecordWrite) -> Result<(), DatabaseError> { todo!("stub") }
-    async fn list_trace_derived_records(&self, _: &str) -> Result<Vec<StorageTraceDerivedRecord>, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_vector_entry(&self, _: StorageTraceVectorEntryWrite) -> Result<StorageTraceVectorEntryRecord, DatabaseError> { todo!("stub") }
-    async fn list_trace_vector_entries(&self, _: &str) -> Result<Vec<StorageTraceVectorEntryRecord>, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_ranking_model_version(&self, _: StorageTraceRankingModelVersionWrite) -> Result<StorageTraceRankingModelVersionRecord, DatabaseError> { todo!("stub") }
-    async fn list_trace_ranking_model_versions(&self, _: &str) -> Result<Vec<StorageTraceRankingModelVersionRecord>, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_ranking_calibration_dataset(&self, _: StorageTraceRankingCalibrationDatasetWrite) -> Result<StorageTraceRankingCalibrationDatasetRecord, DatabaseError> { todo!("stub") }
-    async fn update_trace_ranking_calibration_dataset_status(&self, _: StorageTraceRankingCalibrationDatasetStatusUpdate) -> Result<StorageTraceRankingCalibrationDatasetRecord, DatabaseError> { todo!("stub") }
-    async fn list_trace_ranking_calibration_datasets(&self, _: &str) -> Result<Vec<StorageTraceRankingCalibrationDatasetRecord>, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_ranking_feature(&self, _: StorageTraceRankingFeatureWrite) -> Result<StorageTraceRankingFeatureRecord, DatabaseError> { todo!("stub") }
-    async fn list_trace_ranking_features(&self, _: &str) -> Result<Vec<StorageTraceRankingFeatureRecord>, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_ranking_prediction(&self, _: StorageTraceRankingPredictionWrite) -> Result<StorageTraceRankingPredictionRecord, DatabaseError> { todo!("stub") }
-    async fn list_trace_ranking_predictions(&self, _: &str) -> Result<Vec<StorageTraceRankingPredictionRecord>, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_ranking_label(&self, _: StorageTraceRankingLabelWrite) -> Result<StorageTraceRankingLabelRecord, DatabaseError> { todo!("stub") }
-    async fn list_trace_ranking_labels(&self, _: &str) -> Result<Vec<StorageTraceRankingLabelRecord>, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_ranking_preference_label(&self, _: StorageTraceRankingPreferenceLabelWrite) -> Result<StorageTraceRankingPreferenceLabelRecord, DatabaseError> { todo!("stub") }
-    async fn list_trace_ranking_preference_labels(&self, _: &str) -> Result<Vec<StorageTraceRankingPreferenceLabelRecord>, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_ranking_calibration_run(&self, _: StorageTraceRankingCalibrationRunWrite) -> Result<StorageTraceRankingCalibrationRunRecord, DatabaseError> { todo!("stub") }
-    async fn list_trace_ranking_calibration_runs(&self, _: &str) -> Result<Vec<StorageTraceRankingCalibrationRunRecord>, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_ranking_worker_run(&self, _: StorageTraceRankingWorkerRunWrite) -> Result<StorageTraceRankingWorkerRunRecord, DatabaseError> { todo!("stub") }
-    async fn list_trace_ranking_worker_runs(&self, _: &str) -> Result<Vec<StorageTraceRankingWorkerRunRecord>, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_export_manifest(&self, _: StorageTraceExportManifestWrite) -> Result<StorageTraceExportManifestRecord, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_export_manifest_mirror(&self, _: StorageTraceExportManifestMirrorWrite) -> Result<StorageTraceExportManifestRecord, DatabaseError> { todo!("stub") }
-    async fn delete_trace_export_manifest_mirror(&self, _: &str, _: Uuid) -> Result<(), DatabaseError> { todo!("stub") }
-    async fn list_trace_export_manifests(&self, _: &str) -> Result<Vec<StorageTraceExportManifestRecord>, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_export_manifest_item(&self, _: StorageTraceExportManifestItemWrite) -> Result<trace_commons_server::trace_corpus_storage::TraceExportManifestItemRecord, DatabaseError> { todo!("stub") }
-    async fn list_trace_export_manifest_items(&self, _: &str, _: Uuid) -> Result<Vec<trace_commons_server::trace_corpus_storage::TraceExportManifestItemRecord>, DatabaseError> { todo!("stub") }
-    async fn invalidate_trace_export_manifests_for_submission(&self, _: &str, _: Uuid) -> Result<u64, DatabaseError> { todo!("stub") }
-    async fn invalidate_trace_export_manifest_items_for_submission(&self, _: &str, _: Uuid, _: StorageTraceExportManifestItemInvalidationReason) -> Result<u64, DatabaseError> { todo!("stub") }
-    async fn invalidate_trace_vector_entries_for_submission(&self, _: &str, _: Uuid) -> Result<u64, DatabaseError> { todo!("stub") }
-    async fn invalidate_trace_vector_entry_for_submission(&self, _: &str, _: Uuid, _: Uuid) -> Result<u64, DatabaseError> { todo!("stub") }
-    async fn append_trace_audit_event(&self, _: StorageTraceAuditEventWrite) -> Result<(), DatabaseError> { todo!("stub") }
-    async fn list_trace_audit_events(&self, _: &str) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> { todo!("stub") }
-    async fn list_recent_trace_audit_events(&self, _: &str, _: usize) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> { todo!("stub") }
-    async fn get_trace_audit_event_by_id(&self, _: &str, _: Uuid) -> Result<Option<StorageTraceAuditEventRecord>, DatabaseError> { todo!("stub") }
-    async fn append_trace_credit_event(&self, _: StorageTraceCreditEventWrite) -> Result<(), DatabaseError> { todo!("stub") }
-    async fn upsert_trace_utility_attestation(&self, _: StorageTraceUtilityAttestationWrite) -> Result<StorageTraceUtilityAttestationRecord, DatabaseError> { todo!("stub") }
-    async fn list_trace_utility_attestations(&self, _: &str) -> Result<Vec<StorageTraceUtilityAttestationRecord>, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_credit_settlement_batch(&self, _: StorageTraceCreditSettlementBatchWrite) -> Result<StorageTraceCreditSettlementBatchRecord, DatabaseError> { todo!("stub") }
-    async fn list_trace_credit_settlement_batches(&self, _: &str) -> Result<Vec<StorageTraceCreditSettlementBatchRecord>, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_credit_hold(&self, _: StorageTraceCreditHoldWrite) -> Result<StorageTraceCreditHoldRecord, DatabaseError> { todo!("stub") }
-    async fn list_trace_credit_holds(&self, _: &str) -> Result<Vec<StorageTraceCreditHoldRecord>, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_near_credit_outbox_item(&self, _: StorageTraceNearCreditOutboxItemWrite) -> Result<StorageTraceNearCreditOutboxItemRecord, DatabaseError> { todo!("stub") }
-    async fn list_trace_near_credit_outbox_items(&self, _: &str) -> Result<Vec<StorageTraceNearCreditOutboxItemRecord>, DatabaseError> { todo!("stub") }
-    async fn update_trace_near_credit_outbox_status(&self, _: &str, _: Uuid, _: StorageTraceCreditSettlementNearStatus, _: Option<String>, _: Option<String>, _: Option<Vec<StorageTraceCreditSettlementNearStatus>>) -> Result<Option<StorageTraceNearCreditOutboxItemRecord>, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_benchmark_registry_outbox_item(&self, _: StorageTraceBenchmarkRegistryOutboxItemWrite) -> Result<StorageTraceBenchmarkRegistryOutboxItemRecord, DatabaseError> { todo!("stub") }
-    async fn list_trace_benchmark_registry_outbox_items(&self, _: &str) -> Result<Vec<StorageTraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> { todo!("stub") }
-    async fn update_trace_benchmark_registry_outbox_status(&self, _: &str, _: Uuid, _: StorageTraceBenchmarkRegistryOutboxStatus, _: Option<String>, _: Option<String>) -> Result<Option<StorageTraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> { todo!("stub") }
-    async fn write_trace_tombstone(&self, _: StorageTraceTombstoneWrite) -> Result<(), DatabaseError> { todo!("stub") }
-    async fn list_trace_tombstones(&self, _: &str) -> Result<Vec<StorageTraceTombstoneRecord>, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_retention_job(&self, _: StorageTraceRetentionJobWrite) -> Result<StorageTraceRetentionJobRecord, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_retention_job_item(&self, _: StorageTraceRetentionJobItemWrite) -> Result<StorageTraceRetentionJobItemRecord, DatabaseError> { todo!("stub") }
-    async fn list_trace_retention_jobs(&self, _: &str) -> Result<Vec<StorageTraceRetentionJobRecord>, DatabaseError> { todo!("stub") }
-    async fn list_trace_retention_job_items(&self, _: &str, _: Uuid) -> Result<Vec<StorageTraceRetentionJobItemRecord>, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_export_access_grant(&self, _: StorageTraceExportAccessGrantWrite) -> Result<StorageTraceExportAccessGrantRecord, DatabaseError> { todo!("stub") }
-    async fn list_trace_export_access_grants(&self, _: &str) -> Result<Vec<StorageTraceExportAccessGrantRecord>, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_export_job(&self, _: StorageTraceExportJobWrite) -> Result<StorageTraceExportJobRecord, DatabaseError> { todo!("stub") }
-    async fn list_trace_export_jobs(&self, _: &str) -> Result<Vec<StorageTraceExportJobRecord>, DatabaseError> { todo!("stub") }
-    async fn update_trace_export_job_status(&self, _: &str, _: Uuid, _: StorageTraceExportJobStatusUpdate) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> { todo!("stub") }
-    async fn claim_next_trace_export_job(&self, _: &str, _: Option<&str>, _: DateTime<Utc>, _: &str) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> { todo!("stub") }
-    async fn recover_stale_trace_export_job(&self, _: &str, _: Uuid, _: DateTime<Utc>, _: StorageTraceExportJobStatusUpdate) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> { todo!("stub") }
-    async fn retry_failed_trace_export_job(&self, _: &str, _: Uuid, _: DateTime<Utc>, _: StorageTraceExportJobStatusUpdate) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> { todo!("stub") }
-    async fn upsert_trace_revocation_propagation_item(&self, _: StorageTraceRevocationPropagationItemWrite) -> Result<StorageTraceRevocationPropagationItemRecord, DatabaseError> { todo!("stub") }
-    async fn list_trace_revocation_propagation_items(&self, _: &str, _: Uuid) -> Result<Vec<StorageTraceRevocationPropagationItemRecord>, DatabaseError> { todo!("stub") }
-    async fn list_due_trace_revocation_propagation_items(&self, _: &str, _: DateTime<Utc>, _: u32) -> Result<Vec<StorageTraceRevocationPropagationItemRecord>, DatabaseError> { todo!("stub") }
-    async fn update_trace_revocation_propagation_item_status(&self, _: &str, _: Uuid, _: StorageTraceRevocationPropagationItemStatusUpdate) -> Result<Option<StorageTraceRevocationPropagationItemRecord>, DatabaseError> { todo!("stub") }
-    async fn invalidate_trace_submission_artifacts(&self, _: &str, _: Uuid, _: StorageTraceDerivedStatus) -> Result<StorageTraceArtifactInvalidationCounts, DatabaseError> { todo!("stub") }
-    async fn mark_trace_object_ref_deleted(&self, _: &str, _: Uuid, _: &str, _: &str) -> Result<u64, DatabaseError> { todo!("stub") }
-    async fn insert_trace_gate_decision(&self, _: &str, _: StorageTraceGateDecisionRow) -> Result<(), DatabaseError> { todo!("stub") }
-    async fn stream_trace_gate_decisions_for_replay(&self, _: &str, _: u32, _: Option<(DateTime<Utc>, Uuid)>) -> Result<Vec<StorageTraceGateDecisionRow>, DatabaseError> { todo!("stub") }
-    async fn is_vector_entry_revoked(&self, _: &str, _: Uuid) -> Result<bool, DatabaseError> { todo!("stub") }
+    async fn upsert_trace_submission(
+        &self,
+        _: StorageTraceSubmissionWrite,
+    ) -> Result<StorageTraceSubmissionRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_trace_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_submissions(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_account_trace_submissions_keyset(
+        &self,
+        _: &str,
+        _: &[String],
+        _: Option<TraceSubmissionKeysetCursor>,
+        _: i64,
+    ) -> Result<Vec<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_tenant_policy(
+        &self,
+        _: StorageTraceTenantPolicyWrite,
+    ) -> Result<StorageTraceTenantPolicyRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_trace_tenant_policy(
+        &self,
+        _: &str,
+    ) -> Result<Option<StorageTraceTenantPolicyRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_tenant_access_grant(
+        &self,
+        _: StorageTraceTenantAccessGrantWrite,
+    ) -> Result<StorageTraceTenantAccessGrantRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_tenant_access_grants(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceTenantAccessGrantRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_active_trace_tenant_access_grants_for_principal(
+        &self,
+        _: &str,
+        _: &str,
+        _: DateTime<Utc>,
+    ) -> Result<Vec<StorageTraceTenantAccessGrantRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_credit_events(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceCreditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_submission_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceCorpusStatus,
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn claim_trace_review_lease(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: &str,
+        _: DateTime<Utc>,
+        _: Option<DateTime<Utc>>,
+        _: DateTime<Utc>,
+    ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn release_trace_review_lease(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: &str,
+    ) -> Result<Option<StorageTraceSubmissionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_object_ref(
+        &self,
+        _: StorageTraceObjectRefWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_object_refs(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Vec<StorageTraceObjectRefRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_latest_active_trace_object_ref(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceObjectArtifactKind,
+    ) -> Result<Option<StorageTraceObjectRefRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_derived_record(
+        &self,
+        _: StorageTraceDerivedRecordWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_derived_records(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceDerivedRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_vector_entry(
+        &self,
+        _: StorageTraceVectorEntryWrite,
+    ) -> Result<StorageTraceVectorEntryRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_vector_entries(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceVectorEntryRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_model_version(
+        &self,
+        _: StorageTraceRankingModelVersionWrite,
+    ) -> Result<StorageTraceRankingModelVersionRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_model_versions(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingModelVersionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_calibration_dataset(
+        &self,
+        _: StorageTraceRankingCalibrationDatasetWrite,
+    ) -> Result<StorageTraceRankingCalibrationDatasetRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_ranking_calibration_dataset_status(
+        &self,
+        _: StorageTraceRankingCalibrationDatasetStatusUpdate,
+    ) -> Result<StorageTraceRankingCalibrationDatasetRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_calibration_datasets(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingCalibrationDatasetRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_feature(
+        &self,
+        _: StorageTraceRankingFeatureWrite,
+    ) -> Result<StorageTraceRankingFeatureRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_features(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingFeatureRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_prediction(
+        &self,
+        _: StorageTraceRankingPredictionWrite,
+    ) -> Result<StorageTraceRankingPredictionRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_predictions(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingPredictionRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_label(
+        &self,
+        _: StorageTraceRankingLabelWrite,
+    ) -> Result<StorageTraceRankingLabelRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_labels(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingLabelRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_preference_label(
+        &self,
+        _: StorageTraceRankingPreferenceLabelWrite,
+    ) -> Result<StorageTraceRankingPreferenceLabelRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_preference_labels(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingPreferenceLabelRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_calibration_run(
+        &self,
+        _: StorageTraceRankingCalibrationRunWrite,
+    ) -> Result<StorageTraceRankingCalibrationRunRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_calibration_runs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingCalibrationRunRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_ranking_worker_run(
+        &self,
+        _: StorageTraceRankingWorkerRunWrite,
+    ) -> Result<StorageTraceRankingWorkerRunRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_ranking_worker_runs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRankingWorkerRunRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_manifest(
+        &self,
+        _: StorageTraceExportManifestWrite,
+    ) -> Result<StorageTraceExportManifestRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_manifest_mirror(
+        &self,
+        _: StorageTraceExportManifestMirrorWrite,
+    ) -> Result<StorageTraceExportManifestRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn delete_trace_export_manifest_mirror(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_export_manifests(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceExportManifestRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_manifest_item(
+        &self,
+        _: StorageTraceExportManifestItemWrite,
+    ) -> Result<
+        trace_commons_server::trace_corpus_storage::TraceExportManifestItemRecord,
+        DatabaseError,
+    > {
+        todo!("stub")
+    }
+    async fn list_trace_export_manifest_items(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<
+        Vec<trace_commons_server::trace_corpus_storage::TraceExportManifestItemRecord>,
+        DatabaseError,
+    > {
+        todo!("stub")
+    }
+    async fn invalidate_trace_export_manifests_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_export_manifest_items_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceExportManifestItemInvalidationReason,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_vector_entries_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_vector_entry_for_submission(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_audit_event(
+        &self,
+        _: StorageTraceAuditEventWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_audit_events(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_recent_trace_audit_events(
+        &self,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn get_trace_audit_event_by_id(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Option<StorageTraceAuditEventRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn append_trace_credit_event(
+        &self,
+        _: StorageTraceCreditEventWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_utility_attestation(
+        &self,
+        _: StorageTraceUtilityAttestationWrite,
+    ) -> Result<StorageTraceUtilityAttestationRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_utility_attestations(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceUtilityAttestationRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_credit_settlement_batch(
+        &self,
+        _: StorageTraceCreditSettlementBatchWrite,
+    ) -> Result<StorageTraceCreditSettlementBatchRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_credit_settlement_batches(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceCreditSettlementBatchRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_credit_hold(
+        &self,
+        _: StorageTraceCreditHoldWrite,
+    ) -> Result<StorageTraceCreditHoldRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_credit_holds(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceCreditHoldRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_near_credit_outbox_item(
+        &self,
+        _: StorageTraceNearCreditOutboxItemWrite,
+    ) -> Result<StorageTraceNearCreditOutboxItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_near_credit_outbox_items(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceNearCreditOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_near_credit_outbox_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceCreditSettlementNearStatus,
+        _: Option<String>,
+        _: Option<String>,
+        _: Option<Vec<StorageTraceCreditSettlementNearStatus>>,
+    ) -> Result<Option<StorageTraceNearCreditOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_benchmark_registry_outbox_item(
+        &self,
+        _: StorageTraceBenchmarkRegistryOutboxItemWrite,
+    ) -> Result<StorageTraceBenchmarkRegistryOutboxItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_benchmark_registry_outbox_items(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_benchmark_registry_outbox_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceBenchmarkRegistryOutboxStatus,
+        _: Option<String>,
+        _: Option<String>,
+    ) -> Result<Option<StorageTraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn write_trace_tombstone(
+        &self,
+        _: StorageTraceTombstoneWrite,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_tombstones(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceTombstoneRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_retention_job(
+        &self,
+        _: StorageTraceRetentionJobWrite,
+    ) -> Result<StorageTraceRetentionJobRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_retention_job_item(
+        &self,
+        _: StorageTraceRetentionJobItemWrite,
+    ) -> Result<StorageTraceRetentionJobItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_retention_jobs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceRetentionJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_retention_job_items(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Vec<StorageTraceRetentionJobItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_access_grant(
+        &self,
+        _: StorageTraceExportAccessGrantWrite,
+    ) -> Result<StorageTraceExportAccessGrantRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_export_access_grants(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceExportAccessGrantRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_export_job(
+        &self,
+        _: StorageTraceExportJobWrite,
+    ) -> Result<StorageTraceExportJobRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_export_jobs(
+        &self,
+        _: &str,
+    ) -> Result<Vec<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_export_job_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceExportJobStatusUpdate,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn claim_next_trace_export_job(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: DateTime<Utc>,
+        _: &str,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn recover_stale_trace_export_job(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: DateTime<Utc>,
+        _: StorageTraceExportJobStatusUpdate,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn retry_failed_trace_export_job(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: DateTime<Utc>,
+        _: StorageTraceExportJobStatusUpdate,
+    ) -> Result<Option<StorageTraceExportJobRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn upsert_trace_revocation_propagation_item(
+        &self,
+        _: StorageTraceRevocationPropagationItemWrite,
+    ) -> Result<StorageTraceRevocationPropagationItemRecord, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_trace_revocation_propagation_items(
+        &self,
+        _: &str,
+        _: Uuid,
+    ) -> Result<Vec<StorageTraceRevocationPropagationItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn list_due_trace_revocation_propagation_items(
+        &self,
+        _: &str,
+        _: DateTime<Utc>,
+        _: u32,
+    ) -> Result<Vec<StorageTraceRevocationPropagationItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn update_trace_revocation_propagation_item_status(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceRevocationPropagationItemStatusUpdate,
+    ) -> Result<Option<StorageTraceRevocationPropagationItemRecord>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn invalidate_trace_submission_artifacts(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: StorageTraceDerivedStatus,
+    ) -> Result<StorageTraceArtifactInvalidationCounts, DatabaseError> {
+        todo!("stub")
+    }
+    async fn mark_trace_object_ref_deleted(
+        &self,
+        _: &str,
+        _: Uuid,
+        _: &str,
+        _: &str,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+    async fn insert_trace_gate_decision(
+        &self,
+        _: &str,
+        _: StorageTraceGateDecisionRow,
+    ) -> Result<(), DatabaseError> {
+        todo!("stub")
+    }
+    async fn stream_trace_gate_decisions_for_replay(
+        &self,
+        _: &str,
+        _: u32,
+        _: Option<(DateTime<Utc>, Uuid)>,
+    ) -> Result<Vec<StorageTraceGateDecisionRow>, DatabaseError> {
+        todo!("stub")
+    }
+    async fn is_vector_entry_revoked(&self, _: &str, _: Uuid) -> Result<bool, DatabaseError> {
+        todo!("stub")
+    }
 }
 
 #[async_trait::async_trait]
@@ -70683,8 +71182,8 @@ async fn mint_login_link_account_for_subject(
     let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.as_ref());
 
     // Drive the real issuer handler via its axum router.
-    let router = trace_upload_claim_issuer_router(config)
-        .expect("per-user test issuer router must build");
+    let router =
+        trace_upload_claim_issuer_router(config).expect("per-user test issuer router must build");
     let issuer_response = router
         .oneshot(
             axum::http::Request::builder()
@@ -70773,12 +71272,33 @@ async fn per_user_subjects_resolve_to_distinct_accounts() {
     let device_key_id =
         trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(&device_pk);
 
-    let alice_account =
-        mint_login_link_account_for_subject(&state, &tenant, &device_kp, &device_key_id, &pk_b64, Some("alice")).await;
-    let bob_account =
-        mint_login_link_account_for_subject(&state, &tenant, &device_kp, &device_key_id, &pk_b64, Some("bob")).await;
-    let device_account =
-        mint_login_link_account_for_subject(&state, &tenant, &device_kp, &device_key_id, &pk_b64, None).await;
+    let alice_account = mint_login_link_account_for_subject(
+        &state,
+        &tenant,
+        &device_kp,
+        &device_key_id,
+        &pk_b64,
+        Some("alice"),
+    )
+    .await;
+    let bob_account = mint_login_link_account_for_subject(
+        &state,
+        &tenant,
+        &device_kp,
+        &device_key_id,
+        &pk_b64,
+        Some("bob"),
+    )
+    .await;
+    let device_account = mint_login_link_account_for_subject(
+        &state,
+        &tenant,
+        &device_kp,
+        &device_key_id,
+        &pk_b64,
+        None,
+    )
+    .await;
 
     assert_ne!(
         alice_account, bob_account,
@@ -70794,8 +71314,15 @@ async fn per_user_subjects_resolve_to_distinct_accounts() {
     );
 
     // Idempotent reuse: same subject → same account.
-    let alice_again =
-        mint_login_link_account_for_subject(&state, &tenant, &device_kp, &device_key_id, &pk_b64, Some("alice")).await;
+    let alice_again = mint_login_link_account_for_subject(
+        &state,
+        &tenant,
+        &device_kp,
+        &device_key_id,
+        &pk_b64,
+        Some("alice"),
+    )
+    .await;
     assert_eq!(
         alice_account, alice_again,
         "same subject under same device key must reuse the same account"
